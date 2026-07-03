@@ -1,0 +1,78 @@
+{% extends "base.html.j2" %}
+{% block title %}Scanning {{ scan.brand_name }} — B3S{% endblock %}
+{% block content %}
+<h1>Scanning {{ scan.brand_name }} <span class="muted mono">{{ scan.url }}</span></h1>
+
+<div class="panel">
+  <ul class="plain phases" id="phases" aria-live="polite">
+    {% for phase in scan.phases %}
+    <li data-key="{{ phase.key }}">
+      <span class="chip" data-state>{{ phase.state }}</span>
+      <span>{{ phase.label }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="muted" id="hint">A live scan takes one to three minutes: crawling strategic pages, external proof searches, then gated LLM interpretation.</p>
+  <p class="error" id="error" role="alert" hidden></p>
+</div>
+
+<h2>Acquisition steps</h2>
+<div class="overflow panel" style="padding:0">
+<table>
+  <thead><tr><th>Source</th><th>Status</th><th>Detail</th></tr></thead>
+  <tbody id="acquisition">
+    <tr><td colspan="3" class="muted">Waiting for capture…</td></tr>
+  </tbody>
+</table>
+</div>
+
+<script>
+const scanId = {{ scan.id | tojson }};
+const stateClass = { done: "ok", running: "info", pending: "", error: "bad" };
+
+function esc(value) {
+  const div = document.createElement("div");
+  div.textContent = value == null ? "" : String(value);
+  return div.innerHTML;
+}
+
+async function poll() {
+  let payload;
+  try {
+    const response = await fetch(`/api/scan/${scanId}`);
+    payload = await response.json();
+  } catch {
+    setTimeout(poll, 3000);
+    return;
+  }
+  for (const phase of payload.phases || []) {
+    const row = document.querySelector(`#phases li[data-key="${phase.key}"] [data-state]`);
+    if (row) {
+      row.textContent = phase.state;
+      row.className = `chip ${stateClass[phase.state] || ""}`;
+    }
+  }
+  const acquisition = payload.acquisition || [];
+  if (acquisition.length) {
+    document.getElementById("acquisition").innerHTML = acquisition
+      .map(row => `<tr><td class="mono">${esc(row.source)}</td>` +
+        `<td><span class="chip ${row.status === "ok" || row.status === "fetched" ? "ok" : "warn"}">${esc(row.status)}</span></td>` +
+        `<td class="muted">${esc(row.detail)}</td></tr>`)
+      .join("");
+  }
+  if (payload.state === "done") {
+    window.location.href = `/report/${scanId}`;
+    return;
+  }
+  if (payload.state === "error") {
+    const box = document.getElementById("error");
+    box.textContent = `Scan failed: ${payload.error || "unknown error"}. Check provider keys in .env and retry from the home page.`;
+    box.hidden = false;
+    document.getElementById("hint").hidden = true;
+    return;
+  }
+  setTimeout(poll, 1500);
+}
+poll();
+</script>
+{% endblock %}

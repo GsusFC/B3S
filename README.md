@@ -40,6 +40,14 @@ PYTHONPATH=. .venv/bin/python scripts/sv9_flow_snapshot_eval.py \
   fixtures/vercel/vercel_fresh_capture_envelope.json --repeat 1 --output /tmp/vercel_eval.json
 ```
 
+## Web lab
+
+```bash
+.venv/bin/python -m uvicorn web.app:app --port 8035
+```
+
+`http://127.0.0.1:8035` — submit a brand URL, watch the run (phases plus per-source acquisition steps), then read the evidence-first report: score, components, per-block coverage (`evidence / implied / verified absent / insufficient`), cited snippets, absence records, and acquisition attempts. Every stored report lands in the home list. Reports persist as JSON files under `data/reports/` (`B3S_REPORTS_DIR` overrides); the store moves to Postgres with the port milestone.
+
 ## Database
 
 Storage today is SQLite (embedded, zero setup) inherited from the shared ancestry. B3S targets **Postgres** as its system of record; a local instance ships with:
