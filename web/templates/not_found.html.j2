@@ -1,8 +1,0 @@
-{% extends "base.html.j2" %}
-{% block title %}brand3 :: 404{% endblock %}
-{% block content %}
-<section>
-  <pre class="term-head"><span class="hl-alert">[404]</span>  <span class="dim">not found — {{ resource }}</span></pre>
-  <p><a href="/{{ lang_suffix }}">{{ '← volver al formulario' if current_lang == 'es' else '← back to form' }}</a></p>
-</section>
-{% endblock %}
