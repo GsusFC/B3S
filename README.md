@@ -53,3 +53,5 @@ Porting the store is the first infrastructure milestone. The inherited analysis 
 ## Status
 
 Experimental. Scoring runs shadow-only. Contracts and policies are expected to change; policy changes must carry a changelog entry justified by a real captured case.
+
+Known failures, kept visible on purpose: the inherited Visual Signature review/calibration tooling broke upstream during a module split (a syntax error and a lost re-export hid 14 tests behind collection errors; this fork surfaced them — `thresholds_for_scope()` call sites drifted and need repair, or the tooling gets removed). One legacy magnetism extractor test and one order-dependent worker test also fail.

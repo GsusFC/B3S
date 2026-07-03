@@ -9,8 +9,6 @@ from typing import Any
 
 from src.visual_signature._internal.utils import unique as _unique
 from src.visual_signature.calibration.calibration_export import validate_calibration_output_root
-from src.visual_signature.calibration.calibration_models import (
-)
 from src.visual_signature.calibration.calibration_readiness_render import calibration_readiness_markdown
 from src.visual_signature.calibration.calibration_readiness_support import (
     category_coverage as _category_coverage,
