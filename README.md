@@ -1,304 +1,55 @@
-# Brand3
+# B3S — Brand Evidence Lab
 
-Brand3 is a local-first brand audit workspace. It combines the original Initial Scoring / Brand Audit pipeline with a newer Visual Signature evidence layer, while keeping those two layers technically and conceptually separate.
+B3S explores one thesis: a brand scanner should be an **evidence lab**, not a scorer with a crawler. Acquisition observes, proves, and records absence; interpretation only speaks with citations; every number must survive the question *"show me the evidence"*.
 
-Current status: internal development. The repository is being prepared for GitHub/team review. Generated artifacts and local runtime data may be intentionally excluded from Git.
+B3S shares ancestry with the Brand3 codebase but is a different product idea, developed independently. Occasional fixes can still be transplanted between the two with `git cherry-pick` thanks to the common history.
 
-## What Brand3 Does
-
-Brand3 accepts a brand URL, collects evidence, extracts features, computes dimension scores, and renders a local report.
-
-Input:
+## The evidence-first flow
 
 ```text
-brand URL
+capture (web / Exa / GitHub proof / SearchAPI fallback)
+  → BrandEvidencePack (citable records + attempt/absence diagnostics)
+  → deterministic block shortlists
+  → gated LLM interpretation (detected requires refs; structural gate is veto-only)
+  → tile signals → SV9 score
+  → evidence coverage (positive / implied_not_explicit / verified_absent / insufficient_acquisition)
 ```
 
-Primary scoring output:
+Key properties, all enforced by contract or policy data:
 
-```text
-composite score + dimension_scores + evidence-backed report
-```
+- A block is only `detected` with content **and** evidence refs; ungrounded detections are demoted at the SV9 boundary.
+- Absence is evidence: crawled strategic pages without values/vision terms emit `acquisition.absence.*` records, and failed external acquisition leaves `acquisition.attempt.*` records.
+- `verified_absent` is derived deterministically — the LLM cannot self-certify an absence.
+- Keyword policies are versioned data with a justified changelog (`src/sv9_flow/policy_data/calibration_terms.json`), not code drift.
 
-The five Initial Scoring dimensions are defined in `src/dimensions.py`:
+## Layout
 
-- `coherencia`
-- `presencia`
-- `percepcion`
-- `diferenciacion`
-- `vitalidad`
+- `src/sv9_flow/` — the evidence-first flow (stdlib-only, versioned contracts)
+- `src/sv9/` — SV9 evaluator: tiles, components, score
+- `src/collectors/` + `src/services/` — capture: web crawl, Exa, GitHub org/repo proof, SearchAPI vertical fallback
+- `scripts/sv9_flow_snapshot_eval.py` — run the flow over a frozen envelope (no DB, no crawling, no credits)
+- `fixtures/` — real captured envelopes and shadow outputs (Vercel, Mercury) for deterministic runs
 
-## Initial Scoring / Brand Audit
-
-Initial Scoring is the executable brand-audit pipeline.
-
-Main flow:
-
-```text
-URL input -> collectors -> feature extraction -> scoring -> SQLite/output JSON -> rendered report
-```
-
-Important files:
-
-- `main.py`: CLI entry point.
-- `src/services/brand_service.py`: scoring orchestration.
-- `src/services/input_collection.py`: collector inputs.
-- `src/services/feature_pipeline.py`: feature extraction.
-- `src/services/scoring_pipeline.py`: scoring handoff.
-- `src/scoring/engine.py`: scoring engine.
-- `src/dimensions.py`: rubric dimensions and weights.
-- `src/storage/sqlite_store.py`: SQLite persistence.
-- `src/reports/**`: report derivation and rendering.
-
-Dimension scores are stored in:
-
-- SQLite table `scores` in `data/brand3.sqlite3`.
-- Per-run JSON under `output/<brand-slug>-<timestamp>.json`, field `dimensions`.
-
-Report prose is render-time derived from SQLite snapshots and report modules. Do not invent or persist a separate `generated_texts_per_dimension` artifact unless that is explicitly designed and approved.
-
-## Visual Signature
-
-Visual Signature is an evidence-only layer for visual observation, capture governance, calibration, corpus expansion, and reviewer workflows.
-
-Important files:
-
-- `src/visual_signature/**`: Python Visual Signature modules.
-- `src/brand3/visual-signature/**`: TypeScript prototype/reference code.
-- `scripts/visual_signature_*.py`: generation, validation, calibration, reviewer, and governance scripts.
-- `examples/visual_signature/**`: manifests, fixtures, review packets, screenshots, calibration/corpus artifacts.
-- `web/visual_signature_data.py`: read-only local UI adapter.
-- `web/routes/visual_signature.py`: read-only FastAPI routes.
-
-Visual Signature is not scoring. It must not change dimension scores, rubric dimensions, production report semantics, or capture behavior from platform views.
-
-## Separation Rules
-
-These guardrails apply to all team work:
-
-- Initial Scoring remains the source of `dimension_scores`.
-- Visual Signature remains evidence-only unless a future integration is explicitly designed.
-- Do not modify `src/dimensions.py` without explicit scoring/rubric approval.
-- Do not modify `src/scoring/engine.py` inside UI/docs/Visual Signature work.
-- Do not use Visual Signature review outputs to mutate scores.
-- Do not add provider calls or runtime mutation to read-only platform views.
-- Do not change report prose semantics as a side effect of platform navigation work.
-
-## Local Setup
-
-Official repository runtime: Python 3.11+.
-Use the project virtual environment for all local work and tests.
-System Python 3.9 is not supported for this repository.
+## Quickstart
 
 ```bash
-python -m venv .venv
-./.venv/bin/python -m pip install -e .
+python3.11 -m venv .venv && .venv/bin/pip install -e .
+cp .env.example .env   # add provider keys for live capture (not needed for fixtures)
+PYTHONPATH=. .venv/bin/python -m pytest tests/ -q
+PYTHONPATH=. .venv/bin/python scripts/sv9_flow_snapshot_eval.py \
+  fixtures/vercel/vercel_fresh_capture_envelope.json --repeat 1 --output /tmp/vercel_eval.json
 ```
 
-Create a local environment file:
+## Database
+
+Storage today is SQLite (embedded, zero setup) inherited from the shared ancestry. B3S targets **Postgres** as its system of record; a local instance ships with:
 
 ```bash
-cp .env.example .env
+docker compose up -d db   # postgres 16 on localhost:5433 (b3s/b3s)
 ```
 
-Provider keys are only required for provider-backed collection, scoring, LLM narrative, or capture work. Local UI and many tests can run without real keys.
+Porting the store is the first infrastructure milestone. The inherited analysis lives in `docs/database_read_model_and_postgres_plan.md` (read models first, migrate what earns it).
 
-## Environment
+## Status
 
-Do not commit `.env` or `.env.local`.
-
-Common variables:
-
-- `FIRECRAWL_API_KEY`
-- `EXA_API_KEY`
-- `BRAND3_LLM_API_KEY`
-- `GEMINI_API_KEY`
-- `GOOGLE_API_KEY`
-- `OPENROUTER_API_KEY`
-- `BRAND3_LLM_BASE_URL`
-- `BRAND3_LLM_MODEL`
-- `BRAND3_LLM_CHEAP_MODEL`
-- `BRAND3_LLM_PREMIUM_MODEL`
-- `BRAND3_AUDIT_ANALYST_MODEL`
-- `BRAND3_CLIENT_TLDR_V2_MODEL`
-- `BRAND3_MAGNETISM_EXTRACTOR_MODEL`
-- `BRAND3_MAGNETISM_ANALYST_MODEL`
-- `BRAND3_MAGNETISM_SYSTEM_READING_MODEL`
-- `BRAND3_SV9_BASE_MODEL`
-- `BRAND3_SV9_REASONING_MODEL`
-- `BRAND3_SV9_EDITORIAL_MODEL`
-- `BRAND3_VISION_MODEL`
-- `SCREENSHOT_PROVIDER`
-- `BRAND3_DB_PATH`
-- `BRAND3_TEAM_TOKEN`
-- `BRAND3_COOKIE_SECRET`
-- `BRAND3_VISUAL_SIGNATURE_ROOT`
-
-Use `.env.example` as the source for local setup placeholders.
-
-## Run The FastAPI/Jinja App
-
-Recommended local macOS command:
-
-```bash
-make web
-```
-
-Generic command:
-
-```bash
-PYTHONPATH=. ./.venv/bin/python -m uvicorn web.app:app --host 127.0.0.1 --port 8000
-```
-
-Open:
-
-- `http://127.0.0.1:8000/`
-- `http://127.0.0.1:8000/reports`
-- `http://127.0.0.1:8000/visual-signature`
-- `http://127.0.0.1:8000/visual-signature/governance`
-- `http://127.0.0.1:8000/visual-signature/calibration`
-- `http://127.0.0.1:8000/visual-signature/corpus`
-- `http://127.0.0.1:8000/visual-signature/reviewer`
-
-The `/` and `/analyze` routes are the existing Initial Scoring flow. The `/visual-signature` routes are read-only evidence navigation.
-
-## Run A Brand Audit
-
-```bash
-./.venv/bin/python main.py analyze https://stripe.com Stripe
-```
-
-Useful variants:
-
-```bash
-./.venv/bin/python main.py analyze https://stripe.com Stripe --no-llm
-./.venv/bin/python main.py analyze https://stripe.com Stripe --no-social
-```
-
-Visual Signature scan evidence runs with scanner executions by default. It is
-persisted as evidence and does not modify Brand3 scores. Disable it only when
-debugging scanner runtime or isolating provider/capture issues:
-
-```bash
-./.venv/bin/python main.py analyze https://stripe.com Stripe --no-visual-signature-scan
-```
-
-Inspect scoring runs:
-
-```bash
-./.venv/bin/python main.py runs --limit 20
-./.venv/bin/python main.py brands --limit 50
-./.venv/bin/python main.py show-run --run-id <id>
-```
-
-Render a report:
-
-```bash
-./.venv/bin/python main.py render-report --latest --theme light
-./.venv/bin/python main.py render-report --run-id <id> --theme light
-```
-
-## Run Tests
-
-Run tests with the project virtual environment:
-
-```bash
-make test
-```
-
-Local CI gate:
-
-```bash
-make ci
-```
-
-Focused checks:
-
-```bash
-make test-scoring
-make test-web
-make test-visual
-```
-
-## Visual Signature Scripts
-
-Governance:
-
-```bash
-./.venv/bin/python scripts/visual_signature_capability_registry.py
-./.venv/bin/python scripts/visual_signature_runtime_policy_matrix.py
-./.venv/bin/python scripts/visual_signature_governance_integrity.py
-./.venv/bin/python scripts/visual_signature_three_track_validation_plan.py
-```
-
-Calibration:
-
-```bash
-./.venv/bin/python scripts/visual_signature_calibrate.py
-./.venv/bin/python scripts/visual_signature_calibration.py
-./.venv/bin/python scripts/visual_signature_calibration_validate.py
-./.venv/bin/python scripts/visual_signature_calibration_readiness.py
-./.venv/bin/python scripts/visual_signature_calibration_reliability_report.py
-```
-
-Capture, corpus, reviewer:
-
-```bash
-./.venv/bin/python scripts/visual_signature_scanner_validation_batch.py --limit 10
-./.venv/bin/python scripts/visual_signature_capture_screenshots.py
-./.venv/bin/python scripts/visual_signature_corpus_pass.py
-./.venv/bin/python scripts/visual_signature_corpus_expansion.py
-./.venv/bin/python scripts/visual_signature_reviewer_workflow_pilot.py
-./.venv/bin/python scripts/visual_signature_reviewer_viewer.py
-```
-
-## Prompt Locations
-
-Prompts are source code and should be reviewed like code.
-
-Current prompt locations:
-
-- `src/features/llm_analyzer.py`: brand positioning, differentiation, sentiment, consistency, tone, momentum JSON prompts.
-- `src/reports/narrative.py`: report synthesis, dimension findings, and cross-dimension tension prompts.
-- `src/features/visual_analyzer.py`: initial scoring screenshot/vision prompt.
-- `src/visual_signature/annotations/prompts.py`: Visual Signature annotation prompt.
-
-Prompt changes should be isolated, versioned when they change behavior/cache keys, and reviewed separately from rubric/scoring changes unless explicitly approved.
-
-## Outputs And Local Data
-
-Local/runtime outputs:
-
-- `data/brand3.sqlite3`: local SQLite database.
-- `output/**`: per-run JSON and rendered report outputs.
-- `validation-*/`: local validation batches.
-- `*.log`: local logs.
-
-These are ignored and should not be committed by default.
-
-Visual Signature artifacts under `examples/visual_signature/**` are mixed:
-
-- Some are source fixtures, schemas, manifests, governance docs, or small review artifacts.
-- Some are generated screenshots, calibration corpora, static platform bundles, or review bundles.
-
-If unsure whether a Visual Signature artifact should be committed, document the ambiguity in the PR instead of deleting or bulk-ignoring it.
-
-## Repository Preparation Docs
-
-Planning and audit files:
-
-- `examples/brand3_platform/github_readiness_audit.md`
-- `examples/brand3_platform/github_readiness_audit.json`
-- `examples/brand3_platform/github_repository_preparation_plan.md`
-- `examples/brand3_platform/github_repository_preparation_plan.json`
-
-## Development Status
-
-Brand3 is in active internal development. The current goal is to make the repository safe and understandable for team review before broader GitHub publication.
-
-Known preparation work:
-
-- Keep secrets and local runtime state out of Git.
-- Clarify generated artifact policy for Visual Signature screenshots/corpora.
-- Keep Initial Scoring and Visual Signature separated.
-- Add focused docs for environment, artifact policy, prompt workflow, and local review as follow-up work.
+Experimental. Scoring runs shadow-only. Contracts and policies are expected to change; policy changes must carry a changelog entry justified by a real captured case.
