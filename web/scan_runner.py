@@ -181,6 +181,20 @@ def _to_payload(data: Any) -> dict[str, Any]:
     return dict(vars(data))
 
 
+_COMPONENT_ORDER = (
+    "core_purpose",
+    "magnetism",
+    "value_proposition",
+    "personality",
+    "brand_idea",
+    "attributes",
+    "values",
+    "mission",
+    "vision",
+    "coherencia",
+)
+
+
 def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, Any]) -> dict[str, Any]:
     flow = payload.get("flow") or {}
     candidate = flow.get("candidate") or {}
@@ -243,18 +257,54 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
                 }
             )
 
-    components = {}
-    for name, component in sorted((sv9.get("components") or {}).items()):
+    blocks_by_name = {block["name"]: block for block in blocks}
+    result = sv9.get("result") if isinstance(sv9.get("result"), dict) else {}
+    result_components = result.get("components") if isinstance(result.get("components"), dict) else {}
+    from src.sv9.rubric import COMPONENTS as RUBRIC_COMPONENTS
+
+    components = []
+    known = tuple(dict.fromkeys(_COMPONENT_ORDER + tuple((sv9.get("components") or {}).keys())))
+    for name in known:
+        component = (sv9.get("components") or {}).get(name)
         if not isinstance(component, dict):
             continue
-        components[name] = {
-            "score": component.get("score"),
-            "status": str(component.get("status") or ""),
-            "lit": len(component.get("lit_tiles") or []),
-            "off": len(component.get("off_tiles") or []),
-            "blind": len(component.get("blind_spot_tiles") or []),
-        }
+        detail = result_components.get(name) if isinstance(result_components.get(name), dict) else {}
+        meta = RUBRIC_COMPONENTS.get(name) or {}
+        tile_names = {tile.get("id"): tile.get("name") for tile in meta.get("tiles") or []}
+        failing_tiles = []
+        for tile in detail.get("tile_profile") or []:
+            if not isinstance(tile, dict) or tile.get("estado") == "ok":
+                continue
+            failing_tiles.append(
+                {
+                    "id": str(tile.get("id") or ""),
+                    "name": str(tile_names.get(tile.get("id")) or ""),
+                    "estado": str(tile.get("estado") or ""),
+                    "motivo": str(tile.get("motivo") or ""),
+                    "evidencia": str(tile.get("evidencia") or ""),
+                }
+            )
+        components.append(
+            {
+                "key": name,
+                "label": str(meta.get("label") or name),
+                "question": str(meta.get("question") or ""),
+                "level_zero": str(meta.get("level_zero") or ""),
+                "score": component.get("score"),
+                "scale": detail.get("scale") or meta.get("scale"),
+                "status": str(component.get("status") or ""),
+                "confidence": str(detail.get("confidence") or ""),
+                "resumen": str(detail.get("detected_content") or ""),
+                "veredicto": str(detail.get("veredicto") or ""),
+                "lit": len(component.get("lit_tiles") or []),
+                "off": len(component.get("off_tiles") or []),
+                "blind": len(component.get("blind_spot_tiles") or []),
+                "tiles": failing_tiles,
+                "block": blocks_by_name.get(name),
+            }
+        )
 
+    gap_key = str(result.get("most_painful_gap") or "")
     detected_count = sum(1 for block in blocks if block["detected"])
     return {
         "id": scan_id,
@@ -265,6 +315,10 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
         "base_average": sv9.get("base_average"),
         "reliability_status": str(sv9.get("reliability_status") or "shadow"),
         "not_detected": [str(item) for item in sv9.get("not_detected") or []],
+        "most_painful_gap": gap_key,
+        "most_painful_gap_label": str((RUBRIC_COMPONENTS.get(gap_key) or {}).get("label") or gap_key),
+        "immediate_margin": result.get("immediate_margin"),
+        "total_blind_spots": result.get("total_blind_spots"),
         "detected_count": detected_count,
         "block_count": len(blocks),
         "components": components,

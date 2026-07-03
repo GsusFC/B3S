@@ -1,84 +1,119 @@
 {% extends "base.html.j2" %}
 {% block title %}{{ report.brand_name }} · {{ report.score }} — B3S{% endblock %}
 {% set coverage_chip = {
-  "positive_evidence": ("ok", "evidence"),
-  "implied_not_explicit": ("info", "implied, not explicit"),
-  "verified_absent": ("warn", "verified absent"),
-  "insufficient_acquisition": ("bad", "insufficient acquisition"),
+  "positive_evidence": ("ok", "con evidencia"),
+  "implied_not_explicit": ("info", "implícito, no explícito"),
+  "verified_absent": ("warn", "ausencia verificada"),
+  "insufficient_acquisition": ("bad", "adquisición insuficiente"),
 } %}
 {% block content %}
-<p><a href="/">← All reports</a></p>
+<p><a href="/">← Todos los informes</a></p>
+
 <div class="panel scorebox">
   <div>
-    <div class="muted">{{ report.url }}</div>
+    <div class="muted mono">{{ report.url }}</div>
     <h1 style="margin:4px 0">{{ report.brand_name }}</h1>
     <div class="muted mono">{{ (report.created_at or "")[:16].replace("T", " ") }} · {{ report.reliability_status }} run</div>
   </div>
   <div>
     <span class="score">{{ report.score if report.score is not none else "—" }}</span>
-    <span class="muted">/ brand3 score</span>
-    <div class="muted mono">base average {{ report.base_average }}</div>
+    <span class="muted">brand3 score</span>
+    <div class="muted mono">media base {{ report.base_average }}</div>
+  </div>
+  <div>
+    {% if report.most_painful_gap %}
+    <div class="muted" style="font-size:13px">Hueco más doloroso</div>
+    <div><span class="chip bad">{{ report.most_painful_gap_label }}</span></div>
+    {% endif %}
+    {% if report.immediate_margin %}
+    <div class="muted" style="font-size:13px; margin-top:6px">Margen inmediato: <strong>+{{ report.immediate_margin }}</strong> puntos</div>
+    {% endif %}
+    {% if report.not_detected %}
+    <div style="margin-top:6px">{% for name in report.not_detected %}<span class="chip warn">{{ name }}</span> {% endfor %}</div>
+    {% endif %}
   </div>
 </div>
 
-<h2>Components</h2>
-<div class="grid">
-  {% for name, component in report.components.items() %}
-  <div class="cell">
-    <div class="k">{{ name }}</div>
-    <div class="v">{{ component.score }}</div>
-    <div class="k">
-      {% if component.status == "scored" %}{{ component.lit }} lit · {{ component.off }} off · {{ component.blind }} blind
-      {% else %}{{ component.status.replace("_", " ") }}{% endif %}
+{% for component in report.components %}
+<section class="panel" style="margin-top:16px" id="{{ component.key }}">
+  <header style="display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap">
+    <div>
+      <h2 style="margin:0">{{ component.label }}</h2>
+      {% if component.question %}<div class="muted" style="font-size:13px">{{ component.question }}</div>{% endif %}
     </div>
+    <div style="text-align:right">
+      <span class="mono" style="font-size:22px; font-weight:700">{{ component.score }}</span><span class="muted">/{{ component.scale or 10 }}</span>
+      {% if component.status == "scored" %}
+        <span class="chip ok">evaluado</span>
+      {% else %}
+        <span class="chip warn">{{ component.status.replace("_", " ") }}</span>
+      {% endif %}
+      {% if component.block and component.block.coverage_status %}
+        {% set chip = coverage_chip.get(component.block.coverage_status, ("", component.block.coverage_status)) %}
+        <span class="chip {{ chip[0] }}">{{ chip[1] }}</span>
+      {% endif %}
+    </div>
+  </header>
+
+  {% if component.resumen %}
+  <h3 class="muted" style="font-size:12px; text-transform:uppercase; letter-spacing:.05em; margin:16px 0 4px">Resumen</h3>
+  <p style="margin:4px 0">{{ component.resumen }}</p>
+  {% elif component.status == "not_detected" and component.level_zero %}
+  <p class="muted" style="margin:12px 0 4px">{{ component.level_zero }}</p>
+  {% endif %}
+
+  {% if component.veredicto %}
+  <h3 class="muted" style="font-size:12px; text-transform:uppercase; letter-spacing:.05em; margin:16px 0 4px">Veredicto</h3>
+  <p style="margin:4px 0">{{ component.veredicto }}</p>
+  {% endif %}
+
+  {% if component.status == "scored" %}
+  <h3 class="muted" style="font-size:12px; text-transform:uppercase; letter-spacing:.05em; margin:16px 0 4px">Baldosas</h3>
+  <p class="muted" style="font-size:13px; margin:4px 0">{{ component.lit }} encendidas de {{ component.lit + component.off + component.blind }}; se muestran solo fallos y puntos ciegos.</p>
+  {% for tile in component.tiles %}
+  <div class="evidence">
+    <div><span class="mono" style="font-weight:700">{{ tile.id }}</span> <strong>{{ tile.name }}</strong>
+      <span class="chip {{ 'bad' if tile.estado == 'no' else 'warn' }}">{{ "apagada" if tile.estado == "no" else "punto ciego" }}</span>
+    </div>
+    {% if tile.motivo %}<div style="font-size:14px; margin-top:2px">{{ tile.motivo }}</div>{% endif %}
+    {% if tile.evidencia %}<div class="muted" style="font-size:13px; margin-top:2px">“{{ tile.evidencia }}”</div>{% endif %}
   </div>
   {% endfor %}
-</div>
+  {% endif %}
 
-<h2>Blocks — what the evidence supports</h2>
-<div class="overflow panel" style="padding:0">
-<table>
-  <thead><tr><th>Block</th><th>Detected</th><th>Coverage</th><th>Reading</th></tr></thead>
-  <tbody>
-  {% for block in report.blocks %}
-    <tr>
-      <td class="mono">{{ block.name }}<div class="muted" style="font-size:11px">{{ block.provenance_source.replace("_", " ") }}</div></td>
-      <td>
-        {% if block.detected %}<span class="chip ok">detected · {{ block.confidence }}</span>
-        {% else %}<span class="chip">not detected</span>{% endif %}
-      </td>
-      <td>
-        {% set chip = coverage_chip.get(block.coverage_status, ("", block.coverage_status)) %}
-        {% if block.coverage_status %}<span class="chip {{ chip[0] }}">{{ chip[1] }}</span>{% endif %}
-      </td>
-      <td>
-        {% if block.content %}{{ block.content }}
-        {% elif block.rejected_content %}<span class="muted">(gate-vetoed reading) {{ block.rejected_content }}</span>
-        {% else %}<span class="muted">—</span>{% endif %}
-        {% for item in block.refs %}
-        <div class="evidence">
-          <div class="ref">{{ item.ref }}{% if item.url %} · <a href="{{ item.url }}" rel="noopener noreferrer">{{ item.url }}</a>{% endif %}</div>
-          <div class="muted" style="font-size:13px">{{ item.snippet }}</div>
-        </div>
-        {% endfor %}
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-</div>
+  {% if component.block %}
+  {% set block = component.block %}
+  {% if block.refs or block.rejected_content %}
+  <details style="margin-top:12px">
+    <summary class="muted" style="cursor:pointer; font-size:13px">Evidencia citada ({{ block.refs | length }})
+      {% if block.provenance_source %}· {{ block.provenance_source.replace("_", " ") }}{% endif %}
+    </summary>
+    {% if block.rejected_content and not block.detected %}
+    <p class="muted" style="font-size:13px">(lectura vetada por el gate) {{ block.rejected_content }}</p>
+    {% endif %}
+    {% for item in block.refs %}
+    <div class="evidence">
+      <div class="ref">{{ item.ref }}{% if item.url %} · <a href="{{ item.url }}" rel="noopener noreferrer">{{ item.url }}</a>{% endif %}</div>
+      <div class="muted" style="font-size:13px">{{ item.snippet }}</div>
+    </div>
+    {% endfor %}
+  </details>
+  {% endif %}
+  {% endif %}
+</section>
+{% endfor %}
 
-<h2>Acquisition accountability</h2>
+<h2>Trazabilidad de adquisición</h2>
 <div class="grid">
-  <div class="cell"><div class="k">owned pages</div><div class="v">{{ report.coverage_acquisition.owned_url_count }}</div></div>
-  <div class="cell"><div class="k">external proofs</div><div class="v">{{ report.coverage_acquisition.external_proof_count }}</div></div>
-  <div class="cell"><div class="k">external attempts</div><div class="v">{{ report.coverage_acquisition.external_attempt_count }}</div></div>
-  <div class="cell"><div class="k">absence records</div><div class="v">{{ report.coverage_acquisition.absence_ref_count }}</div></div>
-  <div class="cell"><div class="k">evidence records</div><div class="v">{{ report.coverage_acquisition.evidence_record_count }}</div></div>
+  <div class="cell"><div class="k">páginas propias</div><div class="v">{{ report.coverage_acquisition.owned_url_count }}</div></div>
+  <div class="cell"><div class="k">pruebas externas</div><div class="v">{{ report.coverage_acquisition.external_proof_count }}</div></div>
+  <div class="cell"><div class="k">intentos externos</div><div class="v">{{ report.coverage_acquisition.external_attempt_count }}</div></div>
+  <div class="cell"><div class="k">registros de ausencia</div><div class="v">{{ report.coverage_acquisition.absence_ref_count }}</div></div>
+  <div class="cell"><div class="k">registros de evidencia</div><div class="v">{{ report.coverage_acquisition.evidence_record_count }}</div></div>
 </div>
 
 {% if report.absences %}
-<h3 style="font-size:14px">We looked and it was not there</h3>
+<h3 style="font-size:14px">Miramos y no estaba</h3>
 <ul class="plain">
   {% for absence in report.absences %}
   <li><span class="chip warn">{{ absence.block }}</span> <span class="muted">{{ absence.content }}</span></li>
@@ -87,7 +122,7 @@
 {% endif %}
 
 {% if report.attempts %}
-<h3 style="font-size:14px">External acquisition attempts</h3>
+<h3 style="font-size:14px">Intentos de adquisición externa</h3>
 <ul class="plain">
   {% for attempt in report.attempts %}
   <li><span class="mono">{{ attempt.provider }}</span> <span class="chip">{{ attempt.status }}</span> <span class="muted">{{ attempt.detail }}</span></li>
@@ -96,9 +131,11 @@
 {% endif %}
 
 {% if report.limitations %}
-<h2>Limitations</h2>
-<ul class="plain mono" style="font-size:13px">
-  {% for limitation in report.limitations %}<li>{{ limitation }}</li>{% endfor %}
-</ul>
+<details style="margin-top:16px">
+  <summary class="muted" style="cursor:pointer">Limitations ({{ report.limitations | length }})</summary>
+  <ul class="plain mono" style="font-size:13px">
+    {% for limitation in report.limitations %}<li>{{ limitation }}</li>{% endfor %}
+  </ul>
+</details>
 {% endif %}
 {% endblock %}
