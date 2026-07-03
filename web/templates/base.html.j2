@@ -74,6 +74,23 @@
   .phases li { display: flex; gap: 10px; align-items: baseline; padding: 8px 0; }
   .error { border: 1px solid var(--bad); color: var(--bad); border-radius: 6px; padding: 10px 12px; margin: 12px 0; }
   .overflow { overflow-x: auto; }
+  main.wide { max-width: 1320px; }
+  .canvas { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; margin-top: 16px; }
+  .card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .card-head h2 { margin: 0; font-size: 15px; }
+  .badge { font-family: var(--mono); font-size: 13px; font-weight: 700; border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; }
+  .card-result { margin: 8px 0 0; font-size: 14px; }
+  .card-verdict { margin: 8px 0 0; font-family: var(--mono); font-size: 12px; line-height: 1.55; color: var(--muted); }
+  .tiles { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 0; }
+  .tile {
+    min-width: 36px; min-height: 30px; padding: 3px 7px; display: flex; align-items: center; justify-content: center;
+    border: 1px solid var(--line); border-radius: 4px; font-family: var(--mono); font-size: 11px; font-weight: 600;
+  }
+  .tile.is-on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .tile.is-off { background: color-mix(in srgb, var(--bad) 14%, transparent); border-color: var(--bad); color: var(--bad); }
+  .tile.is-blind { background: transparent; border-style: dashed; color: var(--muted); opacity: .7; }
+  details.drawer summary { cursor: pointer; color: var(--accent); font-size: 13px; margin-top: 12px; }
+  details.drawer summary:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -81,7 +98,7 @@
   <a class="brand" href="/">B3S</a>
   <span class="tagline">brand evidence lab — every number must survive “show me the evidence”</span>
 </header>
-<main>
+<main class="{% block main_class %}{% endblock %}">
 {% block content %}{% endblock %}
 </main>
 </body>

@@ -271,6 +271,21 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
         detail = result_components.get(name) if isinstance(result_components.get(name), dict) else {}
         meta = RUBRIC_COMPONENTS.get(name) or {}
         tile_names = {tile.get("id"): tile.get("name") for tile in meta.get("tiles") or []}
+        lit = set(component.get("lit_tiles") or [])
+        off = set(component.get("off_tiles") or [])
+        blind = set(component.get("blind_spot_tiles") or [])
+        tile_states = []
+        for tile in meta.get("tiles") or []:
+            tile_id = str(tile.get("id") or "")
+            if tile_id in lit:
+                state = "on"
+            elif tile_id in off:
+                state = "off"
+            elif tile_id in blind:
+                state = "blind"
+            else:
+                continue
+            tile_states.append({"id": tile_id, "name": str(tile.get("name") or ""), "state": state})
         failing_tiles = []
         for tile in detail.get("tile_profile") or []:
             if not isinstance(tile, dict) or tile.get("estado") == "ok":
@@ -299,6 +314,7 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
                 "lit": len(component.get("lit_tiles") or []),
                 "off": len(component.get("off_tiles") or []),
                 "blind": len(component.get("blind_spot_tiles") or []),
+                "tile_states": tile_states,
                 "tiles": failing_tiles,
                 "block": blocks_by_name.get(name),
             }

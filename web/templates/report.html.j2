@@ -6,6 +6,7 @@
   "verified_absent": ("warn", "ausencia verificada"),
   "insufficient_acquisition": ("bad", "adquisición insuficiente"),
 } %}
+{% block main_class %}wide{% endblock %}
 {% block content %}
 <p><a href="/">← Todos los informes</a></p>
 
@@ -34,60 +35,62 @@
   </div>
 </div>
 
+<p class="muted" style="margin:16px 0 0; font-size:13px">
+  <span class="tile is-on" style="display:inline-flex">A1</span> encendida ·
+  <span class="tile is-off" style="display:inline-flex">A2</span> apagada ·
+  <span class="tile is-blind" style="display:inline-flex">A3</span> punto ciego
+</p>
+
+<div class="canvas">
 {% for component in report.components %}
-<section class="panel" style="margin-top:16px" id="{{ component.key }}">
-  <header style="display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap">
-    <div>
-      <h2 style="margin:0">{{ component.label }}</h2>
-      {% if component.question %}<div class="muted" style="font-size:13px">{{ component.question }}</div>{% endif %}
-    </div>
-    <div style="text-align:right">
-      <span class="mono" style="font-size:22px; font-weight:700">{{ component.score }}</span><span class="muted">/{{ component.scale or 10 }}</span>
-      {% if component.status == "scored" %}
-        <span class="chip ok">evaluado</span>
-      {% else %}
-        <span class="chip warn">{{ component.status.replace("_", " ") }}</span>
-      {% endif %}
+<section class="panel" id="{{ component.key }}">
+  <div class="card-head">
+    <h2>{{ component.label }}</h2>
+    <span>
+      <span class="badge">{{ component.score }}/{{ component.scale or 10 }}</span>
       {% if component.block and component.block.coverage_status %}
         {% set chip = coverage_chip.get(component.block.coverage_status, ("", component.block.coverage_status)) %}
         <span class="chip {{ chip[0] }}">{{ chip[1] }}</span>
+      {% elif component.status != "scored" %}
+        <span class="chip warn">{{ component.status.replace("_", " ") }}</span>
       {% endif %}
-    </div>
-  </header>
+    </span>
+  </div>
 
   {% if component.resumen %}
-  <h3 class="muted" style="font-size:12px; text-transform:uppercase; letter-spacing:.05em; margin:16px 0 4px">Resumen</h3>
-  <p style="margin:4px 0">{{ component.resumen }}</p>
+  <p class="card-result">{{ component.resumen }}</p>
   {% elif component.status == "not_detected" and component.level_zero %}
-  <p class="muted" style="margin:12px 0 4px">{{ component.level_zero }}</p>
+  <p class="card-result muted">{{ component.level_zero }}</p>
+  {% endif %}
+
+  {% if component.tile_states %}
+  <div class="tiles">
+    {% for tile in component.tile_states %}
+    <span class="tile is-{{ tile.state }}" title="{{ tile.id }} {{ tile.name }} — {{ 'encendida' if tile.state == 'on' else ('apagada' if tile.state == 'off' else 'punto ciego') }}">{{ tile.id }}</span>
+    {% endfor %}
+  </div>
   {% endif %}
 
   {% if component.veredicto %}
-  <h3 class="muted" style="font-size:12px; text-transform:uppercase; letter-spacing:.05em; margin:16px 0 4px">Veredicto</h3>
-  <p style="margin:4px 0">{{ component.veredicto }}</p>
+  <p class="card-verdict">{{ component.veredicto }}</p>
   {% endif %}
 
-  {% if component.status == "scored" %}
-  <h3 class="muted" style="font-size:12px; text-transform:uppercase; letter-spacing:.05em; margin:16px 0 4px">Baldosas</h3>
-  <p class="muted" style="font-size:13px; margin:4px 0">{{ component.lit }} encendidas de {{ component.lit + component.off + component.blind }}; se muestran solo fallos y puntos ciegos.</p>
-  {% for tile in component.tiles %}
-  <div class="evidence">
-    <div><span class="mono" style="font-weight:700">{{ tile.id }}</span> <strong>{{ tile.name }}</strong>
-      <span class="chip {{ 'bad' if tile.estado == 'no' else 'warn' }}">{{ "apagada" if tile.estado == "no" else "punto ciego" }}</span>
+  {% if component.tiles or (component.block and (component.block.refs or component.block.rejected_content)) %}
+  <details class="drawer">
+    <summary>Lectura completa{% if component.block and component.block.refs %} · {{ component.block.refs | length }} evidencias{% endif %}</summary>
+
+    {% for tile in component.tiles %}
+    <div class="evidence">
+      <div><span class="mono" style="font-weight:700">{{ tile.id }}</span> <strong>{{ tile.name }}</strong>
+        <span class="chip {{ 'bad' if tile.estado == 'no' else 'warn' }}">{{ "apagada" if tile.estado == "no" else "punto ciego" }}</span>
+      </div>
+      {% if tile.motivo %}<div style="font-size:14px; margin-top:2px">{{ tile.motivo }}</div>{% endif %}
+      {% if tile.evidencia %}<div class="muted" style="font-size:13px; margin-top:2px">“{{ tile.evidencia }}”</div>{% endif %}
     </div>
-    {% if tile.motivo %}<div style="font-size:14px; margin-top:2px">{{ tile.motivo }}</div>{% endif %}
-    {% if tile.evidencia %}<div class="muted" style="font-size:13px; margin-top:2px">“{{ tile.evidencia }}”</div>{% endif %}
-  </div>
-  {% endfor %}
-  {% endif %}
+    {% endfor %}
 
-  {% if component.block %}
-  {% set block = component.block %}
-  {% if block.refs or block.rejected_content %}
-  <details style="margin-top:12px">
-    <summary class="muted" style="cursor:pointer; font-size:13px">Evidencia citada ({{ block.refs | length }})
-      {% if block.provenance_source %}· {{ block.provenance_source.replace("_", " ") }}{% endif %}
-    </summary>
+    {% if component.block %}
+    {% set block = component.block %}
     {% if block.rejected_content and not block.detected %}
     <p class="muted" style="font-size:13px">(lectura vetada por el gate) {{ block.rejected_content }}</p>
     {% endif %}
@@ -97,11 +100,12 @@
       <div class="muted" style="font-size:13px">{{ item.snippet }}</div>
     </div>
     {% endfor %}
+    {% endif %}
   </details>
-  {% endif %}
   {% endif %}
 </section>
 {% endfor %}
+</div>
 
 <h2>Trazabilidad de adquisición</h2>
 <div class="grid">
