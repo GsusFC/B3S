@@ -205,6 +205,10 @@ def test_report_view_renders_report(monkeypatch):
     assert response.status_code == 200
     assert "Mercury" in response.text
     assert "https://mercury.com" in response.text
+    assert "report-hero" in response.text
+    assert "Brand3 Score" in response.text
+    assert "--score-width: 81%;" in response.text
+    assert "shadow run" not in response.text
     assert 'id="core_purpose"' in response.text
     assert "component-card--half" in response.text
     assert 'aria-label="Abrir lectura de Propósito"' in response.text

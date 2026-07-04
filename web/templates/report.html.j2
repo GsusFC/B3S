@@ -22,27 +22,37 @@
 {% block content %}
 <p><a href="/">← Todos los informes</a></p>
 
-<div class="panel scorebox">
-  <div>
-    <div class="muted mono">{{ report.url }}</div>
-    <h1 style="margin:4px 0">{{ report.brand_name }}</h1>
-    <div class="muted mono">{{ (report.created_at or "")[:16].replace("T", " ") }} · {{ report.reliability_status }} run</div>
+{% set score_width = report.score if report.score is not none else 0 %}
+<div class="report-hero">
+  <div class="report-hero-main">
+    <h1 class="report-hero-title">{{ report.brand_name }}</h1>
+    <a class="report-hero-url" href="{{ report.url }}" target="_blank" rel="noopener noreferrer">{{ report.url }}</a>
   </div>
-  <div>
-    <span class="score">{{ report.score if report.score is not none else "—" }}</span>
-    <span class="muted">brand3 score</span>
-    <div class="muted mono">media base {{ report.base_average }}</div>
+  <div class="report-hero-metric">
+    <div class="report-hero-label">Brand3 Score</div>
+    <div class="report-hero-score">
+      {{ report.score if report.score is not none else "—" }}<span>/100</span>
+    </div>
+    <div class="report-score-bar" aria-hidden="true">
+      <span style="--score-width: {{ score_width }}%;"></span>
+    </div>
+    {% if report.most_painful_gap_label %}
+    <div class="report-hero-note">hueco: {{ report.most_painful_gap_label }}</div>
+    {% elif report.base_average is not none %}
+    <div class="report-hero-note">media base {{ report.base_average }}</div>
+    {% endif %}
   </div>
-  <div>
-    {% if report.most_painful_gap %}
-    <div class="muted" style="font-size:13px">Hueco más doloroso</div>
-    <div><span class="chip bad">{{ report.most_painful_gap_label }}</span></div>
-    {% endif %}
-    {% if report.immediate_margin %}
-    <div class="muted" style="font-size:13px; margin-top:6px">Margen inmediato: <strong>+{{ report.immediate_margin }}</strong> puntos</div>
-    {% endif %}
+  <div class="report-hero-metric">
+    <div class="report-hero-label">Margen inmediato</div>
+    <div class="report-hero-score report-hero-score--gain">
+      {% if report.immediate_margin %}+{{ report.immediate_margin }}{% else %}0{% endif %}<span> pts</span>
+    </div>
     {% if report.not_detected %}
-    <div style="margin-top:6px">{% for name in report.not_detected %}<span class="chip warn">{{ name }}</span> {% endfor %}</div>
+    <div class="report-hero-note">faltan: {{ report.not_detected | join(", ") }}</div>
+    {% elif report.most_painful_gap_label %}
+    <div class="report-hero-note">siguiente foco: {{ report.most_painful_gap_label }}</div>
+    {% else %}
+    <div class="report-hero-note">sin hueco inmediato</div>
     {% endif %}
   </div>
 </div>

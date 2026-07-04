@@ -63,6 +63,87 @@
   .form-row .grow { flex: 1 1 320px; }
   .scorebox { display: flex; gap: 24px; align-items: baseline; flex-wrap: wrap; }
   .scorebox .score { font-family: var(--mono); font-size: 44px; font-weight: 700; }
+  .report-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1.7fr) minmax(170px, .72fr) minmax(170px, .72fr);
+    margin-top: 14px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .report-hero-main,
+  .report-hero-metric {
+    min-width: 0;
+    padding: 18px;
+  }
+  .report-hero-main,
+  .report-hero-metric:not(:last-child) {
+    border-right: 1px solid var(--line);
+  }
+  .report-hero-title {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: clamp(34px, 5vw, 58px);
+    line-height: .95;
+  }
+  .report-hero-url {
+    display: inline-block;
+    max-width: 100%;
+    margin-top: 12px;
+    overflow-wrap: anywhere;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.4;
+    text-decoration: none;
+  }
+  .report-hero-url:hover,
+  .report-hero-url:focus-visible { color: var(--accent); }
+  .report-hero-metric {
+    display: grid;
+    align-content: space-between;
+    min-height: 134px;
+    gap: 10px;
+  }
+  .report-hero-label,
+  .report-hero-note {
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--muted);
+  }
+  .report-hero-label { text-transform: uppercase; }
+  .report-hero-score {
+    font-family: var(--mono);
+    font-size: clamp(40px, 5.4vw, 70px);
+    font-weight: 700;
+    line-height: .9;
+    color: var(--accent);
+  }
+  .report-hero-score--gain { color: var(--ok); }
+  .report-hero-score span {
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 400;
+  }
+  .report-score-bar {
+    width: 100%;
+    height: 5px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    background: var(--bg);
+  }
+  .report-score-bar span {
+    display: block;
+    width: var(--score-width);
+    height: 100%;
+    background: var(--accent);
+    transform-origin: left center;
+    animation: report-score-load 900ms steps(14, end) both;
+  }
+  @keyframes report-score-load {
+    from { transform: scaleX(0); }
+    to { transform: scaleX(1); }
+  }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
   .cell { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; background: var(--panel); }
   .cell .k { font-size: 12px; color: var(--muted); }
@@ -163,13 +244,21 @@
   }
   .drawer-meta { margin-bottom: 10px; }
   @media (max-width: 980px) {
+    .report-hero { grid-template-columns: 1fr 1fr; }
+    .report-hero-main { grid-column: 1 / -1; border-right: 0; border-bottom: 1px solid var(--line); }
     .canvas { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .component-card--third, .component-card--half { grid-column: span 1; }
     .component-card--full { grid-column: 1 / -1; }
   }
   @media (max-width: 680px) {
+    .report-hero { grid-template-columns: 1fr; }
+    .report-hero-main,
+    .report-hero-metric:not(:last-child) { border-right: 0; border-bottom: 1px solid var(--line); }
     .canvas { grid-template-columns: 1fr; }
     .component-card--third, .component-card--half, .component-card--full { grid-column: 1 / -1; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .report-score-bar span { animation: none; }
   }
 </style>
 </head>
