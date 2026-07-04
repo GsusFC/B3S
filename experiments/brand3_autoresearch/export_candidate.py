@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,15 +16,27 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from web.storage import get_magnetism_scan
-
-
 EXPERIMENT_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = EXPERIMENT_ROOT / "candidate"
 
 
 def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def get_magnetism_scan(scan_id: int) -> dict[str, Any] | None:
+    """Load a legacy magnetism scan without depending on the removed web app."""
+
+    db_path = Path(os.environ.get("BRAND3_DB_PATH", "brand3.sqlite3"))
+    if not db_path.is_file():
+        return None
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute("SELECT * FROM magnetism_scans WHERE id = ?", (scan_id,)).fetchone()
+        except sqlite3.Error:
+            return None
+    return dict(row) if row is not None else None
 
 
 def load_scan_source(scan_id: int | None = None, scan_file: Path | None = None) -> dict[str, Any]:

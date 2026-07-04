@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
+from src.url_validator import validate_url
 from web.report_store import new_scan_id, save_report
 
 _SCANS: dict[str, dict[str, Any]] = {}
@@ -28,15 +29,10 @@ _PHASES = (
 
 
 def normalize_url(raw: str) -> str:
-    value = (raw or "").strip()
-    if not value:
-        raise ValueError("URL is required")
-    if not value.startswith(("http://", "https://")):
-        value = f"https://{value}"
-    parsed = urlparse(value)
-    if not parsed.netloc or "." not in parsed.netloc:
-        raise ValueError(f"'{raw}' does not look like a brand URL")
-    return value
+    valid, normalized_or_error = validate_url(raw)
+    if not valid:
+        raise ValueError(normalized_or_error)
+    return normalized_or_error
 
 
 def default_brand_name(url: str) -> str:

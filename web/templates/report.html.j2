@@ -6,6 +6,18 @@
   "verified_absent": ("warn", "ausencia verificada"),
   "insufficient_acquisition": ("bad", "adquisición insuficiente"),
 } %}
+{% set component_card_layout = {
+  "core_purpose": "component-card--half",
+  "magnetism": "component-card--half",
+  "value_proposition": "component-card--third",
+  "personality": "component-card--third",
+  "brand_idea": "component-card--third",
+  "attributes": "component-card--half",
+  "values": "component-card--half",
+  "mission": "component-card--half",
+  "vision": "component-card--half",
+  "coherencia": "component-card--full",
+} %}
 {% block main_class %}wide{% endblock %}
 {% block content %}
 <p><a href="/">← Todos los informes</a></p>
@@ -43,7 +55,7 @@
 
 <div class="canvas">
 {% for component in report.components %}
-<section class="panel" id="{{ component.key }}">
+<section class="panel component-card {{ component_card_layout.get(component.key, 'component-card--third') }}" id="{{ component.key }}">
   <div class="card-head">
     <h2>{{ component.label }}</h2>
     <span>

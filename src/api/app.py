@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from src.services import brand_service
 from src.storage.sqlite_store import SQLiteStore
 from src.config import BRAND3_DB_PATH
-from web.workers.url_validator import validate_url
+from src.url_validator import validate_url
 
 
 class AnalyzeRequest(BaseModel):

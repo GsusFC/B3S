@@ -75,7 +75,11 @@
   .error { border: 1px solid var(--bad); color: var(--bad); border-radius: 6px; padding: 10px 12px; margin: 12px 0; }
   .overflow { overflow-x: auto; }
   main.wide { max-width: 1320px; }
-  .canvas { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; margin-top: 16px; }
+  .canvas { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 14px; margin-top: 16px; align-items: stretch; }
+  .component-card { min-width: 0; }
+  .component-card--third { grid-column: span 2; }
+  .component-card--half { grid-column: span 3; }
+  .component-card--full { grid-column: 1 / -1; }
   .card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
   .card-head h2 { margin: 0; font-size: 15px; }
   .badge { font-family: var(--mono); font-size: 13px; font-weight: 700; border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; }
@@ -91,6 +95,15 @@
   .tile.is-blind { background: transparent; border-style: dashed; color: var(--muted); opacity: .7; }
   details.drawer summary { cursor: pointer; color: var(--accent); font-size: 13px; margin-top: 12px; }
   details.drawer summary:hover { text-decoration: underline; }
+  @media (max-width: 980px) {
+    .canvas { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .component-card--third, .component-card--half { grid-column: span 1; }
+    .component-card--full { grid-column: 1 / -1; }
+  }
+  @media (max-width: 680px) {
+    .canvas { grid-template-columns: 1fr; }
+    .component-card--third, .component-card--half, .component-card--full { grid-column: 1 / -1; }
+  }
 </style>
 </head>
 <body>
