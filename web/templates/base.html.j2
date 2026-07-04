@@ -6,30 +6,67 @@
 <title>{% block title %}B3S — Brand Evidence Lab{% endblock %}</title>
 <style>
   :root {
+    color-scheme: light;
     --bg: #fafaf8; --panel: #ffffff; --ink: #1a1a1a; --muted: #6b6b66;
     --line: #e3e3de; --accent: #1a56db; --ok: #1a7f37; --warn: #9a6700; --bad: #b42318;
+    --shadow: rgb(0 0 0 / 18%);
+    --ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     --mono: ui-monospace, "SF Mono", Menlo, monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root {
+      color-scheme: dark;
       --bg: #131311; --panel: #1c1c19; --ink: #ecece8; --muted: #9c9c94;
       --line: #32322d; --accent: #7ba3f7; --ok: #57ab5a; --warn: #d4a72c; --bad: #f47067;
+      --shadow: rgb(0 0 0 / 48%);
     }
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #fafaf8; --panel: #ffffff; --ink: #1a1a1a; --muted: #6b6b66;
+    --line: #e3e3de; --accent: #1a56db; --ok: #1a7f37; --warn: #9a6700; --bad: #b42318;
+    --shadow: rgb(0 0 0 / 18%);
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #131311; --panel: #1c1c19; --ink: #ecece8; --muted: #9c9c94;
+    --line: #32322d; --accent: #7ba3f7; --ok: #57ab5a; --warn: #d4a72c; --bad: #f47067;
+    --shadow: rgb(0 0 0 / 48%);
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
-    font: 15px/1.55 system-ui, -apple-system, sans-serif;
+    font: 15px/1.55 var(--ui);
   }
   a { color: var(--accent); }
   a:hover, a:focus-visible { text-decoration-thickness: 2px; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   header.site {
     border-bottom: 1px solid var(--line); padding: 16px 24px;
-    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   }
   header.site .brand { font-family: var(--mono); font-weight: 700; font-size: 16px; color: var(--ink); text-decoration: none; }
   header.site .tagline { color: var(--muted); font-size: 13px; }
+  .theme-switch { display: inline-flex; gap: 0; margin-left: auto; border: 1px solid var(--line); }
+  .theme-choice {
+    min-height: 28px;
+    padding: 0 10px;
+    border: 0;
+    border-right: 1px solid var(--line);
+    border-radius: 0;
+    background: var(--panel);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .theme-choice:last-child { border-right: 0; }
+  .theme-choice:hover,
+  .theme-choice:focus-visible,
+  .theme-choice[aria-pressed="true"] {
+    color: var(--accent);
+    filter: none;
+  }
   main { max-width: 920px; margin: 0 auto; padding: 24px 16px 64px; }
   h1 { font-size: 22px; margin: 8px 0 16px; }
   h2 { font-size: 16px; margin: 32px 0 8px; }
@@ -209,9 +246,6 @@
   .tile.is-on { background: var(--accent); border-color: var(--accent); color: #fff; }
   .tile.is-off { background: color-mix(in srgb, var(--bad) 14%, transparent); border-color: var(--bad); color: var(--bad); }
   .tile.is-blind { background: transparent; border-style: dashed; color: var(--muted); opacity: .7; }
-  details.drawer summary { list-style: none; }
-  details.drawer summary::-webkit-details-marker { display: none; }
-  .card-inspector { position: relative; }
   .icon-button {
     width: 28px;
     height: 28px;
@@ -220,6 +254,7 @@
     justify-content: center;
     border: 1px solid var(--line);
     border-radius: 2px;
+    padding: 0;
     color: var(--muted);
     background: var(--panel);
     cursor: pointer;
@@ -227,22 +262,128 @@
   .icon-button:hover,
   .icon-button:focus-visible { color: var(--accent); border-color: var(--accent); }
   .icon-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; }
-  .card-inspector[open] .icon-button { color: var(--accent); border-color: var(--accent); }
-  .drawer-body {
-    position: absolute;
-    top: 34px;
-    right: 0;
-    z-index: 10;
-    width: min(520px, calc(100vw - 48px));
-    max-height: 56vh;
-    overflow: auto;
-    padding: 12px;
+  .report-drawer {
+    width: min(620px, calc(100dvw - 24px));
+    max-width: calc(100dvw - 24px);
+    height: calc(100dvh - 24px);
+    max-height: calc(100dvh - 24px);
+    margin: 12px 12px 12px auto;
+    padding: 0;
     border: 1px solid var(--line);
-    border-radius: 4px;
+    border-radius: 0;
     background: var(--panel);
-    box-shadow: 0 16px 40px rgb(0 0 0 / 18%);
+    color: var(--ink);
+    box-shadow: -18px 0 42px var(--shadow);
+    overflow: auto;
+    scrollbar-width: none;
   }
-  .drawer-meta { margin-bottom: 10px; }
+  .report-drawer::-webkit-scrollbar { display: none; }
+  .report-drawer::backdrop { background: rgb(0 0 0 / 42%); }
+  .report-drawer-head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 16px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .report-drawer-head h3 {
+    margin: 4px 0 0;
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 28px;
+    line-height: 1.2;
+  }
+  .report-drawer-kicker {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .report-drawer-stack {
+    display: grid;
+    gap: 14px;
+    padding: 14px;
+  }
+  .drawer-section {
+    border: 1px solid var(--line);
+    padding: 16px 18px;
+    background: var(--panel);
+    font-family: var(--mono);
+  }
+  .drawer-section h4 {
+    margin: 0 0 14px;
+    color: var(--bad);
+    font-size: 13px;
+    line-height: 1.2;
+    text-transform: uppercase;
+  }
+  .drawer-section p {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.62;
+  }
+  .drawer-section p + p { margin-top: 8px; }
+  .drawer-section-note {
+    margin-bottom: 14px !important;
+    color: var(--muted);
+    font-size: 12px !important;
+  }
+  .drawer-summary-line {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .drawer-tiles {
+    display: grid;
+    gap: 10px;
+  }
+  .drawer-tile {
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr);
+    gap: 12px;
+    border: 1px solid var(--line);
+    padding: 12px 14px;
+    background: color-mix(in srgb, var(--bad) 8%, var(--panel));
+  }
+  .drawer-tile.is-off { border-color: color-mix(in srgb, var(--bad) 65%, var(--line)); }
+  .drawer-tile.is-blind {
+    border-style: dashed;
+    background: var(--panel);
+  }
+  .drawer-tile-id {
+    min-height: 70px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--line);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .drawer-tile-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 6px;
+  }
+  .drawer-tile-head strong {
+    font-size: 12px;
+    line-height: 1.35;
+    text-transform: uppercase;
+  }
+  .drawer-tile-body p {
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .drawer-meta { margin: 0 0 4px; }
   @media (max-width: 980px) {
     .report-hero { grid-template-columns: 1fr 1fr; }
     .report-hero-main { grid-column: 1 / -1; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -256,6 +397,9 @@
     .report-hero-metric:not(:last-child) { border-right: 0; border-bottom: 1px solid var(--line); }
     .canvas { grid-template-columns: 1fr; }
     .component-card--third, .component-card--half, .component-card--full { grid-column: 1 / -1; }
+    .drawer-tile { grid-template-columns: 50px minmax(0, 1fr); padding: 10px; }
+    .drawer-tile-id { min-height: 54px; }
+    .report-drawer-head h3 { font-size: 24px; }
   }
   @media (prefers-reduced-motion: reduce) {
     .report-score-bar span { animation: none; }
@@ -266,9 +410,53 @@
 <header class="site">
   <a class="brand" href="/">B3S</a>
   <span class="tagline">brand evidence lab — every number must survive “show me the evidence”</span>
+  <div class="theme-switch" aria-label="Tema">
+    <button type="button" class="theme-choice" data-theme-choice="light" aria-pressed="false">Day</button>
+    <button type="button" class="theme-choice" data-theme-choice="dark" aria-pressed="false">Night</button>
+  </div>
 </header>
 <main class="{% block main_class %}{% endblock %}">
 {% block content %}{% endblock %}
 </main>
+<script>
+(() => {
+  const root = document.documentElement;
+  const themeButtons = [...document.querySelectorAll("[data-theme-choice]")];
+  const storedTheme = window.localStorage.getItem("b3s-theme");
+
+  function setTheme(theme) {
+    if (theme === "light" || theme === "dark") {
+      root.dataset.theme = theme;
+      window.localStorage.setItem("b3s-theme", theme);
+    }
+    themeButtons.forEach((button) => {
+      button.setAttribute("aria-pressed", String(button.dataset.themeChoice === root.dataset.theme));
+    });
+  }
+
+  if (storedTheme === "light" || storedTheme === "dark") {
+    setTheme(storedTheme);
+  }
+
+  themeButtons.forEach((button) => {
+    button.addEventListener("click", () => setTheme(button.dataset.themeChoice));
+  });
+
+  document.querySelectorAll("[data-dialog-target]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const dialog = document.getElementById(button.dataset.dialogTarget);
+      if (!dialog) return;
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+    });
+  });
+
+  document.querySelectorAll("dialog.report-drawer").forEach((dialog) => {
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog) dialog.close();
+    });
+  });
+})();
+</script>
 </body>
 </html>

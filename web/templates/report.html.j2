@@ -66,43 +66,12 @@
     <div class="card-actions">
       <span class="badge">{{ component.score }}/{{ component.scale or 10 }}</span>
       {% if has_component_details %}
-      <details class="drawer card-inspector">
-        <summary class="icon-button" aria-label="Abrir lectura de {{ component.label }}" title="Abrir lectura de {{ component.label }}">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
-            <circle cx="12" cy="12" r="3"></circle>
-          </svg>
-        </summary>
-        <div class="drawer-body">
-          {% if component.block and component.block.coverage_status %}
-          {% set chip = coverage_chip.get(component.block.coverage_status, ("", component.block.coverage_status)) %}
-          <div class="drawer-meta"><span class="chip {{ chip[0] }}">{{ chip[1] }}</span></div>
-          {% endif %}
-
-          {% for tile in component.tiles %}
-          <div class="evidence">
-            <div><span class="mono" style="font-weight:700">{{ tile.id }}</span> <strong>{{ tile.name }}</strong>
-              <span class="chip {{ 'bad' if tile.estado == 'no' else 'warn' }}">{{ "apagada" if tile.estado == "no" else "punto ciego" }}</span>
-            </div>
-            {% if tile.motivo %}<div style="font-size:14px; margin-top:2px">{{ tile.motivo }}</div>{% endif %}
-            {% if tile.evidencia %}<div class="muted" style="font-size:13px; margin-top:2px">“{{ tile.evidencia }}”</div>{% endif %}
-          </div>
-          {% endfor %}
-
-          {% if component.block %}
-          {% set block = component.block %}
-          {% if block.rejected_content and not block.detected %}
-          <p class="muted" style="font-size:13px">(lectura vetada por el gate) {{ block.rejected_content }}</p>
-          {% endif %}
-          {% for item in block.refs %}
-          <div class="evidence">
-            <div class="ref">{{ item.ref }}{% if item.url %} · <a href="{{ item.url }}" rel="noopener noreferrer">{{ item.url }}</a>{% endif %}</div>
-            <div class="muted" style="font-size:13px">{{ item.snippet }}</div>
-          </div>
-          {% endfor %}
-          {% endif %}
-        </div>
-      </details>
+      <button type="button" class="icon-button" data-dialog-target="drawer-{{ component.key }}" aria-label="Abrir lectura de {{ component.label }}" title="Abrir lectura de {{ component.label }}">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
+          <circle cx="12" cy="12" r="3"></circle>
+        </svg>
+      </button>
       {% endif %}
     </div>
   </div>
@@ -115,6 +84,96 @@
 
   {% if component.veredicto %}
   <p class="card-verdict">{{ component.veredicto }}</p>
+  {% endif %}
+
+  {% if has_component_details %}
+  <dialog class="report-drawer" id="drawer-{{ component.key }}" aria-labelledby="drawer-title-{{ component.key }}">
+    <div class="report-drawer-head">
+      <div>
+        <div class="report-drawer-kicker">{{ component.score }}/{{ component.scale or 10 }}</div>
+        <h3 id="drawer-title-{{ component.key }}">{{ component.label }}</h3>
+      </div>
+      <form method="dialog">
+        <button type="submit" class="icon-button" aria-label="Cerrar lectura">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18"></path>
+          </svg>
+        </button>
+      </form>
+    </div>
+
+    <div class="report-drawer-stack">
+      <section class="drawer-section">
+        <h4>Resumen</h4>
+        <div class="drawer-summary-line">
+          <span class="badge">{{ component.score }}/{{ component.scale or 10 }}</span>
+          <span class="muted">evaluado</span>
+        </div>
+        {% if component.resumen %}
+        <p>{{ component.resumen }}</p>
+        {% elif component.status == "not_detected" and component.level_zero %}
+        <p>{{ component.level_zero }}</p>
+        {% else %}
+        <p class="muted">(no detectado)</p>
+        {% endif %}
+      </section>
+
+      {% if component.tiles %}
+      <section class="drawer-section">
+        <h4>Baldosas</h4>
+        <p class="drawer-section-note">{{ component.tiles | length }} fallos o puntos ciegos detectados.</p>
+        <div class="drawer-tiles">
+          {% for tile in component.tiles %}
+          <article class="drawer-tile {{ 'is-off' if tile.estado == 'no' else 'is-blind' }}">
+            <div class="drawer-tile-id">{{ tile.id }}</div>
+            <div class="drawer-tile-body">
+              <div class="drawer-tile-head">
+                <strong>{{ tile.name }}</strong>
+                <span class="chip {{ 'bad' if tile.estado == 'no' else 'warn' }}">{{ "apagada" if tile.estado == "no" else "punto ciego" }}</span>
+              </div>
+              {% if tile.motivo %}<p>{{ tile.motivo }}</p>{% endif %}
+              {% if tile.evidencia %}<p class="muted">“{{ tile.evidencia }}”</p>{% endif %}
+            </div>
+          </article>
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
+
+      {% if component.veredicto %}
+      <section class="drawer-section">
+        <h4>V9</h4>
+        <p>{{ component.veredicto }}</p>
+      </section>
+      {% endif %}
+
+      {% if component.block and component.block.coverage_status %}
+      {% set chip = coverage_chip.get(component.block.coverage_status, ("", component.block.coverage_status)) %}
+      <div class="drawer-meta"><span class="chip {{ chip[0] }}">{{ chip[1] }}</span></div>
+      {% endif %}
+
+      {% if component.block %}
+      {% set block = component.block %}
+      {% if block.rejected_content and not block.detected %}
+      <section class="drawer-section">
+        <h4>Filtro</h4>
+        <p class="muted">{{ block.rejected_content }}</p>
+      </section>
+      {% endif %}
+      {% if block.refs %}
+      <section class="drawer-section">
+        <h4>Evidencia</h4>
+      {% for item in block.refs %}
+      <div class="evidence">
+        <div class="ref">{{ item.ref }}{% if item.url %} · <a href="{{ item.url }}" rel="noopener noreferrer">{{ item.url }}</a>{% endif %}</div>
+        <div class="muted" style="font-size:13px">{{ item.snippet }}</div>
+      </div>
+      {% endfor %}
+      </section>
+      {% endif %}
+      {% endif %}
+    </div>
+  </dialog>
   {% endif %}
 </section>
 {% endfor %}

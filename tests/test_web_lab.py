@@ -212,6 +212,8 @@ def test_report_view_renders_report(monkeypatch):
     assert 'id="core_purpose"' in response.text
     assert "component-card--half" in response.text
     assert 'aria-label="Abrir lectura de Propósito"' in response.text
+    assert 'data-dialog-target="drawer-core_purpose"' in response.text
+    assert 'class="report-drawer" id="drawer-core_purpose"' in response.text
     assert 'class="tiles"' not in response.text
     assert "PX9" not in response.text
     assert "P2" in response.text
