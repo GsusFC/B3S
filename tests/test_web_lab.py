@@ -155,8 +155,16 @@ def test_report_view_renders_report(monkeypatch):
                     "status": "scored",
                     "resumen": "Purpose text.",
                     "veredicto": "",
-                    "tile_states": [],
-                    "tiles": [],
+                    "tile_states": [{"id": "PX9", "name": "Hidden tile", "state": "off"}],
+                    "tiles": [
+                        {
+                            "id": "P2",
+                            "name": "Tensión explícita",
+                            "estado": "no",
+                            "motivo": "No aparece una tensión propia.",
+                            "evidencia": "Texto de apoyo.",
+                        }
+                    ],
                     "block": None,
                 },
                 {
@@ -199,6 +207,10 @@ def test_report_view_renders_report(monkeypatch):
     assert "https://mercury.com" in response.text
     assert 'id="core_purpose"' in response.text
     assert "component-card--half" in response.text
+    assert 'aria-label="Abrir lectura de Propósito"' in response.text
+    assert 'class="tiles"' not in response.text
+    assert "PX9" not in response.text
+    assert "P2" in response.text
     assert 'id="brand_idea"' in response.text
     assert "component-card--third" in response.text
     assert 'id="coherencia"' in response.text
