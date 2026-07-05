@@ -1,4 +1,5 @@
 from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
+from src.sv9_flow.evidence_coverage import block_coverage
 from src.sv9_flow.interpretation_llm_worker import (
     FLOW_INTERPRETATION_PROMPT_VERSION,
     block_interpretation_response_schema,
@@ -83,6 +84,52 @@ def test_normalize_llm_interpretation_rejects_refs_outside_block_shortlist() -> 
 
     assert interpretation.blocks["mission"]["detected"] is False
     assert "mission_dropped_missing_evidence_refs" in interpretation.limitations
+
+
+def test_normalize_llm_interpretation_can_accept_classified_evidence_without_gates() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content="Acme is decentralized, independent, stable, and private.",
+                metadata={"source_class": "owned_copy"},
+            )
+        ],
+    )
+    raw = {
+        "blocks": {
+            "values": {
+                "detected": True,
+                "content": "Decentralization, independence, stability, and privacy.",
+                "confidence": "medium",
+                "evidence_refs": ["raw_inputs.0"],
+                "rationale": "The listed principles are stated in owned copy.",
+            }
+        },
+        "limitations": [],
+    }
+
+    gated = normalize_llm_interpretation_response(
+        raw,
+        pack,
+        block_evidence_shortlists={"values": ["raw_inputs.0"]},
+    )
+    ungated = normalize_llm_interpretation_response(
+        raw,
+        pack,
+        block_evidence_shortlists={"values": ["raw_inputs.0"]},
+        gate_authority="disabled",
+    )
+
+    assert gated.blocks["values"]["detected"] is False
+    assert gated.blocks["values"]["detection_provenance"]["final_source"] == "gate_rejected"
+    assert ungated.blocks["values"]["detected"] is True
+    assert ungated.evidence_refs["values"] == ["raw_inputs.0"]
+    assert ungated.blocks["values"]["detection_provenance"]["final_source"] == "llm_classified_evidence"
 
 
 def test_values_detection_requires_explicit_values_evidence() -> None:
@@ -291,6 +338,43 @@ def test_mission_gate_positive_llm_negative_stays_undetected() -> None:
     provenance = interpretation.blocks["mission"]["detection_provenance"]
     assert provenance["final_source"] == "llm_rejected_gate_candidate"
     assert provenance["review_queue_reason"] == "gate_positive_llm_negative"
+
+
+def test_mission_detection_accepts_product_embodied_strategy_evidence() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Toteemi",
+        url="https://toteemi.com",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="web",
+                evidence_type="raw_input",
+                content="Convierte tu esfuerzo en descuentos. Una app que te paga por entrenar y una tienda donde puedes pagar con tu entrenamiento.",
+            )
+        ],
+    )
+    raw = {
+        "blocks": {
+            "mission": {
+                "detected": True,
+                "content": "Convert athletic effort into rewards users can spend.",
+                "confidence": "high",
+                "evidence_refs": ["raw_inputs.0"],
+                "rationale": "The copy states that training effort is converted into discounts and payment power.",
+            }
+        },
+        "limitations": [],
+    }
+
+    interpretation = normalize_llm_interpretation_response(
+        raw,
+        pack,
+        block_evidence_shortlists={"mission": ["raw_inputs.0"]},
+    )
+
+    assert interpretation.blocks["mission"]["detected"] is True
+    assert interpretation.evidence_refs["mission"] == ["raw_inputs.0"]
+    assert interpretation.blocks["mission"]["detection_provenance"]["final_source"] == "llm_confirmed_by_gate"
 
 
 def test_sensitive_detection_requires_llm_cited_refs_even_when_gate_supports() -> None:
@@ -641,6 +725,312 @@ def test_magnetism_detection_requires_structural_momentum_evidence() -> None:
     assert "magnetism_structural_gate_rejected" in interpretation.limitations
 
 
+def test_adjudicator_can_rescue_sensitive_gate_false_negative_with_literal_quote() -> None:
+    class AdjudicatorLLM:
+        api_key = "test"
+
+        def _call_json(self, *args, **kwargs):
+            return {
+                "state": "ok",
+                "quote": "Una app que te paga por entrenar",
+                "ref": "raw_inputs.0",
+                "reason": "The reward mechanism creates repeat motivation and preference.",
+                "confidence": "high",
+                "inference_type": "product_embodied_strategy",
+            }
+
+    pack = BrandEvidencePack(
+        brand_name="Toteemi",
+        url="https://toteemi.com",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content="Convierte tu esfuerzo en descuentos. Una app que te paga por entrenar.",
+            )
+        ],
+    )
+    raw = {
+        "blocks": {
+            "magnetism": {
+                "detected": True,
+                "content": "Toteemi uses rewards to make training repeatable and desirable.",
+                "confidence": "high",
+                "evidence_refs": ["raw_inputs.0"],
+                "rationale": "The page frames training as paid/rewarded behavior.",
+            }
+        },
+        "limitations": [],
+    }
+
+    interpretation = normalize_llm_interpretation_response(
+        raw,
+        pack,
+        adjudicator_llm=AdjudicatorLLM(),
+        block_evidence_shortlists={"magnetism": ["raw_inputs.0"]},
+    )
+
+    assert interpretation.blocks["magnetism"]["detected"] is True
+    assert interpretation.evidence_refs["magnetism"] == ["raw_inputs.0"]
+    assert "magnetism_adjudicator_rescued_gate_rejection" in interpretation.limitations
+    provenance = interpretation.blocks["magnetism"]["detection_provenance"]
+    assert provenance["final_source"] == "adjudicator_rescued_gate_rejection"
+    assert provenance["adjudicator"]["inference_type"] == "product_embodied_strategy"
+
+
+def test_adjudicator_rejects_rescue_when_quote_is_not_literal() -> None:
+    class AdjudicatorLLM:
+        api_key = "test"
+
+        def _call_json(self, *args, **kwargs):
+            return {
+                "state": "ok",
+                "quote": "a global movement that rewards athletes",
+                "ref": "raw_inputs.0",
+                "reason": "The candidate sounds like magnetism.",
+                "confidence": "high",
+                "inference_type": "product_embodied_strategy",
+            }
+
+    pack = BrandEvidencePack(
+        brand_name="Toteemi",
+        url="https://toteemi.com",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content="Convierte tu esfuerzo en descuentos. Una app que te paga por entrenar.",
+            )
+        ],
+    )
+    raw = {
+        "blocks": {
+            "magnetism": {
+                "detected": True,
+                "content": "Toteemi uses rewards to make training repeatable and desirable.",
+                "confidence": "high",
+                "evidence_refs": ["raw_inputs.0"],
+                "rationale": "The page frames training as paid/rewarded behavior.",
+            }
+        },
+        "limitations": [],
+    }
+
+    interpretation = normalize_llm_interpretation_response(
+        raw,
+        pack,
+        adjudicator_llm=AdjudicatorLLM(),
+        block_evidence_shortlists={"magnetism": ["raw_inputs.0"]},
+    )
+
+    assert interpretation.blocks["magnetism"]["detected"] is False
+    assert "magnetism_structural_gate_rejected" in interpretation.limitations
+    assert "magnetism_adjudicator_rejected_gate_rejection" in interpretation.limitations
+    adjudicator = interpretation.blocks["magnetism"]["detection_provenance"]["adjudicator"]
+    assert adjudicator["validation_error"] == "quote_not_literal_substring"
+
+
+def test_warn_gate_disagreement_detects_when_adjudicator_verifies_literal_quote() -> None:
+    class AdjudicatorLLM:
+        api_key = "test"
+
+        def _call_json(self, *args, **kwargs):
+            return {
+                "state": "ok",
+                "quote": "turns effort into credit",
+                "ref": "raw_inputs.0",
+                "reason": "The quote supports product-embodied mission.",
+                "confidence": "high",
+                "inference_type": "product_embodied_strategy",
+            }
+
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content="Acme turns effort into credit for neighborhood athletes.",
+            ),
+            EvidenceRecord(
+                ref="raw_inputs.0.subpage.1.absence.values",
+                source="acquisition",
+                evidence_type="acquisition.absence.values",
+                content="Checked a strategic surface and found no explicit values.",
+            ),
+        ],
+    )
+    raw = {
+        "blocks": {
+            "mission": {
+                "detected": True,
+                "content": "Turn effort into credit for athletes.",
+                "confidence": "high",
+                "evidence_refs": ["raw_inputs.0"],
+                "rationale": "The product repeatedly converts effort into credit.",
+            }
+        },
+        "limitations": [],
+    }
+
+    interpretation = normalize_llm_interpretation_response(
+        raw,
+        pack,
+        adjudicator_llm=AdjudicatorLLM(),
+        block_evidence_shortlists={"mission": ["raw_inputs.0"]},
+        gate_authority="warn",
+    )
+
+    provenance = interpretation.blocks["mission"]["detection_provenance"]
+    assert interpretation.blocks["mission"]["detected"] is True
+    assert provenance["final_source"] == "adjudicator_rescued_gate_rejection"
+    assert "mission_adjudicator_rescued_gate_rejection" in interpretation.limitations
+
+
+def test_warn_gate_disagreement_rejects_when_adjudicator_quote_is_invalid() -> None:
+    class AdjudicatorLLM:
+        api_key = "test"
+
+        def _call_json(self, *args, **kwargs):
+            return {
+                "state": "ok",
+                "quote": "a movement to transform every athlete",
+                "ref": "raw_inputs.0",
+                "reason": "The candidate sounds like a mission.",
+                "confidence": "high",
+                "inference_type": "product_embodied_strategy",
+            }
+
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content="Acme turns effort into credit for neighborhood athletes.",
+            ),
+            EvidenceRecord(
+                ref="raw_inputs.0.subpage.1.absence.values",
+                source="acquisition",
+                evidence_type="acquisition.absence.values",
+                content="Checked a strategic surface and found no explicit values.",
+            ),
+        ],
+    )
+    raw = {
+        "blocks": {
+            "mission": {
+                "detected": True,
+                "content": "Turn effort into credit for athletes.",
+                "confidence": "high",
+                "evidence_refs": ["raw_inputs.0"],
+                "rationale": "The product repeatedly converts effort into credit.",
+            }
+        },
+        "limitations": [],
+    }
+
+    interpretation = normalize_llm_interpretation_response(
+        raw,
+        pack,
+        adjudicator_llm=AdjudicatorLLM(),
+        block_evidence_shortlists={"mission": ["raw_inputs.0"]},
+        gate_authority="warn",
+    )
+
+    provenance = interpretation.blocks["mission"]["detection_provenance"]
+    assert interpretation.blocks["mission"]["detected"] is False
+    assert provenance["final_source"] == "gate_rejected"
+    assert provenance["adjudicator"]["validation_error"] == "quote_not_literal_substring"
+    assert "mission_adjudicator_rejected_gate_rejection" in interpretation.limitations
+    assert "mission_structural_gate_rejected" in interpretation.limitations
+    coverage = block_coverage(pack, interpretation)
+    assert coverage["mission"]["status"] in {"implied_not_explicit", "verified_absent"}
+
+
+def test_warn_gate_disagreement_without_adjudicator_fails_open_and_flags_limitation() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content="Acme turns effort into credit for neighborhood athletes.",
+            )
+        ],
+    )
+    raw = {
+        "blocks": {
+            "mission": {
+                "detected": True,
+                "content": "Turn effort into credit for athletes.",
+                "confidence": "high",
+                "evidence_refs": ["raw_inputs.0"],
+                "rationale": "The product repeatedly converts effort into credit.",
+            }
+        },
+        "limitations": [],
+    }
+
+    interpretation = normalize_llm_interpretation_response(
+        raw,
+        pack,
+        adjudicator_llm=None,
+        block_evidence_shortlists={"mission": ["raw_inputs.0"]},
+        gate_authority="warn",
+    )
+
+    provenance = interpretation.blocks["mission"]["detection_provenance"]
+    assert interpretation.blocks["mission"]["detected"] is True
+    assert provenance["final_source"] == "llm_unadjudicated_gate_disagreement"
+    assert "mission_gate_disagreement_unadjudicated" in interpretation.limitations
+
+
+def test_warn_gate_agreement_uses_confirmed_by_gate_source() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content="Our mission is to help support teams automate high-stakes calls.",
+            )
+        ],
+    )
+    raw = {
+        "blocks": {
+            "mission": {
+                "detected": True,
+                "content": "Help support teams automate high-stakes calls.",
+                "confidence": "high",
+                "evidence_refs": ["raw_inputs.0"],
+                "rationale": "The page states a mission.",
+            }
+        },
+        "limitations": [],
+    }
+
+    interpretation = normalize_llm_interpretation_response(
+        raw,
+        pack,
+        block_evidence_shortlists={"mission": ["raw_inputs.0"]},
+        gate_authority="warn",
+    )
+
+    assert interpretation.blocks["mission"]["detected"] is True
+    assert interpretation.blocks["mission"]["detection_provenance"]["final_source"] == "llm_confirmed_by_gate"
+
+
 def test_magnetism_detection_accepts_negative_engagement_evidence_for_tile_evaluation() -> None:
     pack = BrandEvidencePack(
         brand_name="Acme",
@@ -917,6 +1307,79 @@ def test_llm_worker_reports_block_detection_from_shortlists_not_llm_refs() -> No
         "weaken_terms": ["lack of active engagement", "stagnation"],
         "limitation_code": "",
     }
+
+
+def test_llm_worker_warn_mode_reports_gate_disagreements() -> None:
+    class PerBlockLLM:
+        api_key = "test"
+        last_failure_reason = None
+        call_failures = []
+
+        def _call_json(self, system, user, **kwargs):
+            if '"block": "mission"' in user:
+                return {
+                    "detected": True,
+                    "content": "Turn effort into credit for athletes.",
+                    "confidence": "high",
+                    "evidence_refs": ["raw_inputs.0"],
+                    "rationale": "The product repeatedly converts effort into credit.",
+                    "limitations": [],
+                }
+            return {
+                "detected": False,
+                "content": "",
+                "confidence": "low",
+                "evidence_refs": [],
+                "rationale": "Not enough evidence.",
+                "limitations": [],
+            }
+
+    class AdjudicatorLLM:
+        api_key = "test"
+
+        def _call_json(self, *args, **kwargs):
+            return {
+                "state": "ok",
+                "quote": "turns effort into credit",
+                "ref": "raw_inputs.0",
+                "reason": "The quote supports product-embodied mission.",
+                "confidence": "high",
+                "inference_type": "product_embodied_strategy",
+            }
+
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content="Acme turns effort into credit for neighborhood athletes.",
+            )
+        ],
+    )
+
+    interpretation, debug = build_brand_interpretation_with_llm(
+        pack,
+        llm=PerBlockLLM(),
+        adjudicator_llm=AdjudicatorLLM(),
+        block_evidence_shortlists={"mission": ["raw_inputs.0"]},
+        gate_authority="warn",
+    )
+
+    assert interpretation.blocks["mission"]["detected"] is True
+    assert debug["gate_authority"] == "warn"
+    assert debug["gate_disagreements"] == [
+        {
+            "block": "mission",
+            "gate_reason": "mission_structural_gate_rejected",
+            "adjudicator_state": "ok",
+            "adjudicator_validation_error": "",
+            "final_detected": True,
+            "final_source": "adjudicator_rescued_gate_rejection",
+        }
+    ]
 
 
 def test_llm_worker_falls_back_to_text_call_when_json_mode_is_empty() -> None:

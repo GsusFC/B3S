@@ -12,6 +12,7 @@ import os
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 
 def reports_dir() -> Path:
@@ -30,6 +31,12 @@ def save_report(report: dict[str, Any]) -> None:
     path = report_path(str(report["id"]))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+    try:
+        from web.scoring_store import record_report
+
+        record_report(report)
+    except Exception:
+        pass
 
 
 def load_report(scan_id: str) -> dict[str, Any] | None:
@@ -68,3 +75,36 @@ def list_reports() -> list[dict[str, Any]]:
         )
     rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
     return rows
+
+
+def domain_key(value: str) -> str:
+    """Normalize a URL/domain for brand-level grouping."""
+
+    candidate = (value or "").strip().lower()
+    if not candidate:
+        return ""
+    parsed = urlparse(candidate if "://" in candidate else f"https://{candidate}")
+    host = (parsed.hostname or candidate).strip(".")
+    return host.removeprefix("www.")
+
+
+def list_reports_for_domain(domain: str) -> list[dict[str, Any]]:
+    """Return full reports matching a normalized domain, newest first."""
+
+    target = domain_key(domain)
+    if not target:
+        return []
+
+    matches: list[dict[str, Any]] = []
+    directory = reports_dir()
+    if not directory.is_dir():
+        return matches
+    for path in directory.glob("*.json"):
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if domain_key(str(report.get("url") or "")) == target:
+            matches.append(report)
+    matches.sort(key=lambda report: str(report.get("created_at") or ""), reverse=True)
+    return matches

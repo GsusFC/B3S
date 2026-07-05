@@ -186,13 +186,18 @@ BRAND3_VISUAL_SIGNATURE_TIMEOUT_SECONDS = int(
     os.environ.get("BRAND3_VISUAL_SIGNATURE_TIMEOUT_SECONDS", "0")
 )
 
-# SV9 baldosas v3.1 model routing (deploy brief section 2.6): the 8 base
-# components run on the Flash tier; Magnetism and Coherencia run on the
-# reasoning tier. Parameterized per tier so the routing is measurable in
-# regression and adjustable via secrets without a code change.
+# SV9 baldosas v3.1 model routing. Keep all text roles on the cheap Flash-Lite
+# tier by default; specific roles remain overrideable for controlled bakeoffs.
+SV9_FLOW_MODEL = os.environ.get("BRAND3_SV9_FLOW_MODEL", LLM_CHEAP_MODEL)
 SV9_BASE_MODEL = os.environ.get("BRAND3_SV9_BASE_MODEL", LLM_CHEAP_MODEL)
-SV9_REASONING_MODEL = os.environ.get("BRAND3_SV9_REASONING_MODEL", LLM_PREMIUM_MODEL)
-SV9_EDITORIAL_MODEL = os.environ.get("BRAND3_SV9_EDITORIAL_MODEL", LLM_MODEL)
+SV9_REASONING_MODEL = os.environ.get("BRAND3_SV9_REASONING_MODEL", SV9_FLOW_MODEL)
+SV9_EDITORIAL_MODEL = os.environ.get("BRAND3_SV9_EDITORIAL_MODEL", SV9_FLOW_MODEL)
+SV9_ADJUDICATOR_MODEL = os.environ.get("BRAND3_SV9_ADJUDICATOR_MODEL", LLM_CHEAP_MODEL)
+SV9_ADJUDICATOR_ESCALATION_MODEL = os.environ.get(
+    "BRAND3_SV9_ADJUDICATOR_ESCALATION_MODEL",
+    SV9_FLOW_MODEL,
+)
+SV9_FLOW_GATE_AUTHORITY = os.environ.get("BRAND3_SV9_FLOW_GATE_AUTHORITY", "veto_only")
 AUDIT_ANALYST_MODEL = os.environ.get("BRAND3_AUDIT_ANALYST_MODEL", LLM_CHEAP_MODEL)
 CLIENT_TLDR_V2_MODEL = os.environ.get("BRAND3_CLIENT_TLDR_V2_MODEL", LLM_MODEL)
 MAGNETISM_EXTRACTOR_MODEL = os.environ.get("BRAND3_MAGNETISM_EXTRACTOR_MODEL", LLM_PREMIUM_MODEL)
@@ -207,7 +212,7 @@ BRAND3_EVIDENCE_LLM_CLASSIFIER_ENABLED = os.environ.get(
     "yes",
     "on",
 }
-BRAND3_EVIDENCE_LLM_MODEL = os.environ.get("BRAND3_EVIDENCE_LLM_MODEL", "gemini-3.5-flash")
+BRAND3_EVIDENCE_LLM_MODEL = os.environ.get("BRAND3_EVIDENCE_LLM_MODEL", LLM_CHEAP_MODEL)
 BRAND3_EVIDENCE_LLM_BATCH_SIZE = int(os.environ.get("BRAND3_EVIDENCE_LLM_BATCH_SIZE", "4"))
 BRAND3_EVIDENCE_LLM_TIMEOUT_SECONDS = int(os.environ.get("BRAND3_EVIDENCE_LLM_TIMEOUT_SECONDS", "20"))
 BRAND3_EVIDENCE_LLM_MAX_ATTEMPTS = int(os.environ.get("BRAND3_EVIDENCE_LLM_MAX_ATTEMPTS", "2"))

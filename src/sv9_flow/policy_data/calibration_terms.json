@@ -2,7 +2,8 @@
   "block_detection": {
     "changelog": {
       "v3": "2026-07-02: generalize overfit 'transform the experience' to transform/transformation. Justified by Nium run 361: owned copy 'leading a transformation in payments' was LLM-detected with cited refs and wrongly vetoed by the gate.",
-      "v4": "2026-07-03: add repository-proof terms (github repository, stars, forks, open source) to magnetism support terms, gravity family, and block-evidence magnetism terms. Justified by Vercel live capture 900400: vercel/next.js (140k stars) reached the pack via the org-level GitHub fallback but scored too low for the magnetism shortlist, so magnetism_no_gravity_evidence persisted despite direct ecosystem-gravity proof."
+      "v4": "2026-07-03: add repository-proof terms (github repository, stars, forks, open source) to magnetism support terms, gravity family, and block-evidence magnetism terms. Justified by Vercel live capture 900400: vercel/next.js (140k stars) reached the pack via the org-level GitHub fallback but scored too low for the magnetism shortlist, so magnetism_no_gravity_evidence persisted despite direct ecosystem-gravity proof.",
+      "v5": "2026-07-04: add product-embodied mission terms for reward/conversion mechanics. Justified by Toteemi local report 74a65fe08ae9: evidence such as 'Convierte tu esfuerzo en descuentos' and 'Una app que te paga por entrenar' existed in the pack but mission shortlisting selected generic product/navigation text and the sensitive gate rejected product-embodied strategy."
     },
     "support_terms": {
       "magnetism": [
@@ -64,6 +65,17 @@
         "especialistas en",
         "decidimos crear",
         "convertimos",
+        "convierte",
+        "convert your",
+        "turns your",
+        "te paga",
+        "paga por",
+        "pagar con",
+        "esfuerzo en",
+        "esfuerzo merece recompensa",
+        "rewards users",
+        "rewarding experience",
+        "transforming physical activity",
         "diseñado para",
         "diseñados para",
         "para que",
@@ -192,12 +204,24 @@
       ],
       "mission": [
         "mission",
+        "purpose",
+        "propósito",
         "helps",
         "provide",
         "enable",
         "specializes",
         "serves",
-        "build"
+        "build",
+        "convierte",
+        "convert",
+        "te paga",
+        "paga por",
+        "pagar con",
+        "esfuerzo",
+        "recompensa",
+        "rewards users",
+        "rewarding experience",
+        "transforming physical activity"
       ],
       "personality": [
         "personality",

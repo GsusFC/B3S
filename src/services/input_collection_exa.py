@@ -7,6 +7,7 @@ import logging
 from src.collectors.exa_collector import ExaCollector, ExaData
 from src.config import BRAND3_CACHE_TTL_HOURS, EXA_API_KEY
 from src.services.legal_identity import derive_legal_name
+from src.services.exa_diagnostics import exa_external_proof_empty
 from src.services.input_collection_payloads import from_exa_payload
 from src.services.input_collection_state import (
     AcquisitionResult,
@@ -49,6 +50,27 @@ def _collect_exa_input(
             message=f"  Exa: cache hit ({len(exa_data.mentions)} mentions, {len(exa_data.news)} news)",
         )
         return exa_data, exa_collector
+    if not EXA_API_KEY:
+        exa_data = ExaData(
+            brand_name=brand_name,
+            diagnostics={
+                "failed_intents": ["mentions", "news", "competitors"],
+                "error": "EXA_API_KEY not set",
+            },
+        )
+        _set_acquisition_state(
+            raw_input_cache,
+            acquisition_steps,
+            source="exa",
+            raw_cache_status="missing_key",
+            status="missing_key",
+            cache_status="missing",
+            eligible=True,
+            error="EXA_API_KEY not set",
+            details={"reason": "EXA_API_KEY not set"},
+        )
+        logger.warning("exa input skipped: EXA_API_KEY not set", extra={"source": "exa"})
+        return exa_data, exa_collector
 
     _set_acquisition_state(
         raw_input_cache,
@@ -89,12 +111,13 @@ def _collect_exa_input(
             },
         )
     elif no_result_intents:
+        status = "empty" if exa_external_proof_empty(diagnostics) else "ok"
         _set_acquisition_state(
             raw_input_cache,
             acquisition_steps,
             source="exa",
             raw_cache_status="miss",
-            status="empty",
+            status=status,
             cache_status="miss",
             eligible=True,
             details={"no_result_intents": list(no_result_intents)},

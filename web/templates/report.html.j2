@@ -180,6 +180,26 @@
 </div>
 
 <h2>Trazabilidad de adquisición</h2>
+{% if report.acquisition_gate %}
+<div class="panel" style="margin-bottom:12px">
+  <div class="ref">acquisition_gate · <span class="chip {% if report.acquisition_gate.state in ['blocked', 'cancelled'] %}bad{% elif report.acquisition_gate.state in ['warning', 'degraded_approved'] %}warn{% else %}ok{% endif %}">{{ report.acquisition_gate.state }}</span></div>
+  {% if report.acquisition_gate.user_decision %}
+  <p class="muted">decision: <span class="mono">{{ report.acquisition_gate.user_decision }}</span>{% if report.acquisition_gate.decision_source %} · source: <span class="mono">{{ report.acquisition_gate.decision_source }}</span>{% endif %}</p>
+  {% endif %}
+  {% for issue in report.acquisition_gate.issues or [] %}
+  <div class="evidence">
+    <div class="ref"><span class="chip bad">{{ issue.source }}</span> {{ issue.code }} · {{ issue.status }}</div>
+    <div class="muted" style="font-size:13px">{{ issue.message }}{% if issue.detail %} · {{ issue.detail }}{% endif %}</div>
+  </div>
+  {% endfor %}
+  {% for warning in report.acquisition_gate.warnings or [] %}
+  <div class="evidence">
+    <div class="ref"><span class="chip warn">{{ warning.source }}</span> {{ warning.code }} · {{ warning.status }}</div>
+    <div class="muted" style="font-size:13px">{{ warning.message }}{% if warning.detail %} · {{ warning.detail }}{% endif %}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
 <div class="grid">
   <div class="cell"><div class="k">páginas propias</div><div class="v">{{ report.coverage_acquisition.owned_url_count }}</div></div>
   <div class="cell"><div class="k">pruebas externas</div><div class="v">{{ report.coverage_acquisition.external_proof_count }}</div></div>

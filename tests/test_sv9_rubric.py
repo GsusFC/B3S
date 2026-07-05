@@ -6,6 +6,7 @@ from src.sv9.rubric import (
     PRESENTATION_ORDER,
     REASONING_COMPONENTS,
     RUBRIC_VERSION,
+    TILE_EVIDENCE_CONTRACT_VERSION,
     component_max_points,
     component_points,
     confidence_from_blind_spots,
@@ -102,6 +103,17 @@ class Sv9RubricTests(unittest.TestCase):
 
     def test_rubric_version_is_pinned(self):
         self.assertEqual(RUBRIC_VERSION, "baldosas-v3-1")
+
+    def test_tile_evidence_contract_version_is_pinned(self):
+        self.assertEqual(TILE_EVIDENCE_CONTRACT_VERSION, "tile-evidence-contract-v0-1")
+
+    def test_all_tiles_have_evidence_contracts(self):
+        for key in COMPONENTS:
+            for tile in COMPONENTS[key]["tiles"]:
+                contract = tile.get("evidence_contract")
+                self.assertIsInstance(contract, dict, tile["id"])
+                for field in ("ok", "no", "sin_evidencia", "strong_sources", "reject"):
+                    self.assertTrue(str(contract.get(field) or "").strip(), f"{tile['id']} {field}")
 
     def test_reasoning_components_are_the_two_heavy_judgments(self):
         self.assertEqual(set(REASONING_COMPONENTS), {"magnetism", "coherencia"})

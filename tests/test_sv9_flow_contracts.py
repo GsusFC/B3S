@@ -120,6 +120,50 @@ def test_flow_candidate_keeps_medium_negative_visual_signature_as_evidence_only(
     assert candidate.evidence_pack.evidence[1].ref == "visual_signature.tile_signals.0"
 
 
+def test_flow_candidate_does_not_turn_visual_capture_payloads_into_text_evidence() -> None:
+    snapshot = {
+        "run": {"brand_name": "Acme", "url": "https://acme.example"},
+        "raw_inputs": [
+            {
+                "source": "screenshot_capture",
+                "payload": {
+                    "capture": {
+                        "success": False,
+                        "error_message": "Payment Required: screenshot provider has no credits",
+                    }
+                },
+            },
+            {
+                "source": "visual_acquisition",
+                "payload": {
+                    "visual_evidence_packet": {
+                        "schema_version": "visual-signature-evidence-v1",
+                        "capture": {"status": "missing", "first_fold_evaluable": False},
+                        "tile_signals": [],
+                    }
+                },
+            },
+            {
+                "source": "web",
+                "payload": {
+                    "url": "https://acme.example",
+                    "markdown_content": "Acme helps finance teams close books faster.",
+                },
+            },
+        ],
+    }
+
+    candidate = build_flow_candidate_from_current_outputs(
+        snapshot=snapshot,
+        tldr_payload={"tldr_brand3": {}},
+    )
+    evidence_refs = [record.ref for record in candidate.evidence_pack.evidence]
+
+    assert all("screenshot_capture" not in ref for ref in evidence_refs)
+    assert all("visual_acquisition" not in ref for ref in evidence_refs)
+    assert any(ref.startswith("raw_inputs.2") for ref in evidence_refs)
+
+
 def test_flow_candidate_keeps_high_confidence_negative_visual_signature_tile_signal() -> None:
     visual_signature = {
         "schema_version": "visual-signature-evidence-v1",
@@ -169,17 +213,11 @@ def test_flow_candidate_blocks_positive_visual_signal_when_capture_is_unusable()
     )
     signals = candidate.to_dict()["tile_signals"]
 
-    assert signals == [
-        {
-            "schema_version": SV9_TILE_SIGNALS_VERSION,
-            "component": "visual_signature",
-            "tile": "visual_signature.capture",
-            "effect": "capture_unreliable",
-            "confidence": "medium",
-            "source": "visual_signature",
-            "evidence_refs": ["visual_signature.capture"],
-            "rationale": "Visual Signature capture is not usable.",
-        }
+    assert signals == []
+    assert not [
+        record
+        for record in candidate.evidence_pack.evidence
+        if record.ref.startswith("visual_signature.")
     ]
 
 

@@ -74,6 +74,32 @@ def test_repository_proof_ranks_into_magnetism_shortlist() -> None:
     assert "raw_inputs.3.github.repos.0" in shortlists["magnetism"]
 
 
+def test_product_embodied_mission_evidence_ranks_above_product_navigation() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Toteemi",
+        url="https://toteemi.com",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="web",
+                evidence_type="raw_input",
+                content="Shop Ciclismo Equipamiento Zapatillas Maillots Chaquetas Mochilas.",
+            ),
+            EvidenceRecord(
+                ref="raw_inputs.1",
+                source="exa",
+                evidence_type="external_proof.owned_confirmation",
+                content="Convierte tu esfuerzo en descuentos. Una app que te paga por entrenar y una tienda donde puedes pagar con tu entrenamiento.",
+                confidence="high",
+            ),
+        ],
+    )
+
+    shortlists = build_block_evidence_shortlists(pack, blocks=("mission",), limit=2)
+
+    assert shortlists["mission"][0] == "raw_inputs.1"
+
+
 def test_block_evidence_shortlist_serializes_version() -> None:
     item = BlockEvidenceShortlist(block="vision", evidence_refs=["raw_inputs.0"])
 

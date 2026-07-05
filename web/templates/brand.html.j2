@@ -1,0 +1,108 @@
+{% extends "base.html.j2" %}
+{% block title %}{{ brand.display_name }} — B3S{% endblock %}
+{% block content %}
+<p><a href="/">← Todos los informes</a></p>
+
+<section class="brand-profile-hero">
+  <div class="brand-profile-identity">
+    <div class="brand-profile-logo" aria-hidden="true">
+      <span>{{ brand.display_name[:1] }}</span>
+    </div>
+    <div class="brand-profile-headline">
+      <h1 class="brand-profile-title">{{ brand.display_name }}</h1>
+      <a class="brand-profile-domain-link" href="{{ brand.url }}" rel="nofollow noopener">{{ brand.domain }}</a>
+    </div>
+  </div>
+
+  <div class="brand-profile-terminal">
+    <span class="brand-profile-terminal-key">sv9</span>
+    {% if brand.current %}
+    <strong class="brand-profile-score">{{ brand.current.score if brand.current.score is not none else "—" }}</strong>
+    <span class="brand-profile-terminal-value">disponible / {{ (brand.current.created_at or "")[:10] }}</span>
+    <a class="source-link" href="/report/{{ brand.current.id }}">ver SV9</a>
+    {% else %}
+    <strong class="brand-profile-score">—</strong>
+    <span class="brand-profile-terminal-value is-empty">sin scan local</span>
+    <form method="post" action="/scan" class="brand-profile-scan-form">
+      <input type="hidden" name="url" value="{{ brand.url }}">
+      <input type="hidden" name="brand_name" value="{{ brand.display_name }}">
+      <button type="submit">escanear</button>
+    </form>
+    {% endif %}
+  </div>
+</section>
+
+<section class="brand-profile-summary">
+  <div class="brand-profile-grid">
+    <section class="brand-profile-block">
+      <div class="section-head">
+        <span class="label">qué_hace</span>
+        <span class="tag">// desde evidencia B3S</span>
+      </div>
+      {% if brand.summary or brand.outcome %}
+      {% if brand.summary %}<p class="prose">{{ brand.summary }}</p>{% endif %}
+      {% if brand.outcome %}<p class="muted">{{ brand.outcome }}</p>{% endif %}
+      {% else %}
+      <p class="muted">No hay scan local para este dominio.</p>
+      {% endif %}
+    </section>
+
+    <section class="brand-profile-block">
+      <div class="section-head">
+        <span class="label">estado</span>
+        <span class="tag">// cobertura SV9</span>
+      </div>
+      <dl class="brand-profile-kv">
+        <dt>componentes</dt><dd>{{ brand.detected_count }}/{{ brand.component_count }}</dd>
+        <dt>faltan</dt><dd>{% if brand.not_detected %}{{ brand.not_detected | join(", ") }}{% else %}none{% endif %}</dd>
+        {% if brand.current %}
+        <dt>margen</dt><dd>+{{ brand.current.immediate_margin or 0 }} pts</dd>
+        <dt>hueco</dt><dd>{{ brand.current.most_painful_gap_label or "—" }}</dd>
+        {% endif %}
+      </dl>
+    </section>
+  </div>
+
+  <div class="brand-profile-grid">
+    <section class="brand-profile-block">
+      <div class="section-head">
+        <span class="label">links_detectados</span>
+        <span class="tag">// evidencia fuente</span>
+      </div>
+      {% if brand.proof_urls %}
+      <ul class="brand-profile-evidence-list">
+        {% for url in brand.proof_urls %}
+        <li><a href="{{ url }}" rel="nofollow noopener">{{ url }}</a></li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="muted">Sin fuentes capturadas todavía.</p>
+      {% endif %}
+    </section>
+
+    <section class="brand-profile-block">
+      <div class="section-head">
+        <span class="label">historial_de_scans</span>
+        <span class="tag">// {{ brand.reports | length }} ejecuciones</span>
+      </div>
+      {% if brand.reports %}
+      <table>
+        <thead><tr><th>fecha</th><th>score</th><th>run</th><th></th></tr></thead>
+        <tbody>
+        {% for row in brand.reports %}
+        <tr>
+          <td class="muted mono">{{ (row.created_at or "")[:10] }}</td>
+          <td class="mono">{{ row.score if row.score is not none else "—" }}</td>
+          <td class="muted mono">{{ row.id }}</td>
+          <td><a href="/report/{{ row.id }}">ver</a></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="muted">Cuando exista un scan de {{ brand.domain }}, aparecerá aquí.</p>
+      {% endif %}
+    </section>
+  </div>
+</section>
+{% endblock %}

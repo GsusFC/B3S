@@ -1,6 +1,7 @@
 {% extends "base.html.j2" %}
 {% block content %}
 <h1>Scan a brand</h1>
+<p><a class="source-link" href="/scoring/lab">Scoring Lab</a></p>
 
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
 
@@ -14,9 +15,14 @@
       <span class="muted">Brand name (optional)</span>
       <input type="text" name="brand_name" placeholder="Vercel">
     </label>
+    <label class="check-row">
+      <input type="checkbox" name="allow_degraded_fallback" value="true">
+      <span>allow degraded fallback if acquisition fails</span>
+    </label>
+    <div class="form-action">
+      <button type="submit">Run evidence scan</button>
+    </div>
   </div>
-  <p class="muted" style="font-size:13px">Live capture: owned pages, Exa mentions/news, GitHub repository proof, SearchAPI fallback. Scoring runs shadow-only.</p>
-  <button type="submit">Run evidence scan</button>
 </form>
 
 <h2>Reports</h2>

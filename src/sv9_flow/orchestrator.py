@@ -23,7 +23,9 @@ def build_flow_candidate(
     *,
     snapshot: dict[str, Any],
     llm: Any,
+    adjudicator_llm: Any | None = None,
     visual_signature_evidence: dict[str, Any] | None = None,
+    gate_authority: str | None = None,
 ) -> tuple[Sv9FlowCandidate, dict[str, Any]]:
     """Build the canonical flow candidate for one audit snapshot.
 
@@ -37,10 +39,16 @@ def build_flow_candidate(
         visual_signature_evidence=visual_signature_evidence,
     )
     shortlists = build_block_evidence_shortlists(evidence_pack)
+    if gate_authority is None:
+        from src.config import SV9_FLOW_GATE_AUTHORITY
+
+        gate_authority = SV9_FLOW_GATE_AUTHORITY
     interpretation, debug = build_brand_interpretation_with_llm(
         evidence_pack,
         llm=llm,
+        adjudicator_llm=adjudicator_llm,
         block_evidence_shortlists=shortlists,
+        gate_authority=gate_authority,
     )
     debug["block_evidence_shortlists"] = shortlists
     coverage = {

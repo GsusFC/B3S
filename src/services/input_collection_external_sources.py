@@ -27,6 +27,7 @@ from src.services.input_collection_payloads import (
     from_parallel_shadow_payload,
     from_searchapi_payload,
 )
+from src.services.exa_diagnostics import exa_external_proof_empty
 from src.services.input_collection_state import (
     AcquisitionResult,
     _save_raw_input_safely,
@@ -246,7 +247,13 @@ def _searchapi_candidate_intents(exa_data) -> tuple[str, ...]:
         return ()
     failed_or_empty = set(diagnostics.get("failed_intents") or []) | set(diagnostics.get("no_result_intents") or [])
     allowed = set(BRAND3_SEARCHAPI_FALLBACK_INTENTS)
-    return tuple(intent for intent in ("news", "external_mentions", "ai_visibility") if intent in failed_or_empty and intent in allowed)
+    fallback_intents = ("news", "external_mentions", "ai_visibility")
+    explicit = tuple(intent for intent in fallback_intents if intent in failed_or_empty and intent in allowed)
+    if explicit:
+        return explicit
+    if exa_external_proof_empty(diagnostics):
+        return tuple(intent for intent in fallback_intents if intent in allowed)
+    return ()
 
 
 def _searchapi_queries_from_exa_diagnostics(exa_data) -> dict[str, str]:

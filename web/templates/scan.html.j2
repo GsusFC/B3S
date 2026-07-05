@@ -16,6 +16,17 @@
   <p class="error" id="error" role="alert" hidden></p>
 </div>
 
+<section class="panel" id="gate" hidden>
+  <h2>Acquisition control</h2>
+  <p class="muted" id="gate-summary"></p>
+  <div id="gate-issues"></div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+    <button type="button" id="gate-continue">Run with fallback</button>
+    <button type="button" class="danger" id="gate-cancel">Cancel scan</button>
+  </div>
+  <p class="muted mono" id="gate-note" style="font-size:12px"></p>
+</section>
+
 <h2>Acquisition steps</h2>
 <div class="overflow panel" style="padding:0">
 <table>
@@ -28,7 +39,7 @@
 
 <script>
 const scanId = {{ scan.id | tojson }};
-const stateClass = { done: "ok", running: "info", pending: "", error: "bad" };
+const stateClass = { done: "ok", running: "info", pending: "", error: "bad", blocked: "bad", cancelled: "bad" };
 
 function esc(value) {
   const div = document.createElement("div");
@@ -60,8 +71,15 @@ async function poll() {
         `<td class="muted">${esc(row.detail)}</td></tr>`)
       .join("");
   }
+  renderGate(payload.acquisition_gate || null, payload.state);
   if (payload.state === "done") {
     window.location.href = `/report/${scanId}`;
+    return;
+  }
+  if (payload.state === "blocked" || payload.state === "cancelled") {
+    if (payload.state === "cancelled") {
+      document.getElementById("hint").textContent = "Scan cancelled before scoring.";
+    }
     return;
   }
   if (payload.state === "error") {
@@ -73,6 +91,55 @@ async function poll() {
   }
   setTimeout(poll, 1500);
 }
+
+function renderGate(gate, scanState) {
+  const panel = document.getElementById("gate");
+  if (!gate || !gate.state || gate.state === "pending" || gate.state === "pass") {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const blocked = gate.state === "blocked";
+  const canContinue = Boolean(gate.can_continue);
+  const issues = [...(gate.issues || []), ...(gate.warnings || [])];
+  document.getElementById("gate-summary").textContent =
+    blocked
+      ? "Acquisition is incomplete. Review the blockers before SV9 interpretation starts."
+      : "Acquisition has declared limitations. They will be written into the report.";
+  document.getElementById("gate-issues").innerHTML = issues.map(item =>
+    `<div class="evidence" style="margin-top:8px">` +
+    `<div class="ref"><span class="chip ${item.severity === "blocker" ? "bad" : "warn"}">${esc(item.severity)}</span> ` +
+    `${esc(item.source)} · ${esc(item.status)}</div>` +
+    `<div class="muted" style="font-size:13px">${esc(item.message)} ${item.detail ? "· " + esc(item.detail) : ""}</div>` +
+    `</div>`
+  ).join("");
+  const continueButton = document.getElementById("gate-continue");
+  continueButton.disabled = !blocked || !canContinue || scanState === "cancelled";
+  document.getElementById("gate-cancel").disabled = scanState === "cancelled";
+  document.getElementById("gate-note").textContent = canContinue
+    ? "Fallback available: continuing will mark this scan as degraded."
+    : blocked
+      ? "No safe fallback is available for the blocking acquisition failure."
+      : "";
+}
+
+async function postAction(path) {
+  const response = await fetch(path, { method: "POST" });
+  const payload = await response.json();
+  if (!response.ok) {
+    const box = document.getElementById("error");
+    box.textContent = payload.reason || "Action could not be applied.";
+    box.hidden = false;
+  }
+  setTimeout(poll, 250);
+}
+
+document.getElementById("gate-continue").addEventListener("click", () => {
+  postAction(`/api/scan/${scanId}/continue`);
+});
+document.getElementById("gate-cancel").addEventListener("click", () => {
+  postAction(`/api/scan/${scanId}/cancel`);
+});
 poll();
 </script>
 {% endblock %}

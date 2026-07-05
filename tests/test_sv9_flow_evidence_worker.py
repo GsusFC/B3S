@@ -1,4 +1,4 @@
-from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
+from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot, _is_strategic_surface
 
 
 def test_evidence_worker_prefers_markdown_content_before_title() -> None:
@@ -162,6 +162,73 @@ def test_evidence_worker_records_absence_on_crawled_strategic_surfaces() -> None
     assert "raw_inputs.0.subpage.1.absence.vision" in absence
     assert absence["raw_inputs.0.subpage.1.absence.values"].metadata["source_class"] == "acquisition_metadata"
     assert "no explicit values" in absence["raw_inputs.0.subpage.1.absence.values"].content
+
+
+def test_strategic_surface_url_matrix_includes_spanish_about_slugs() -> None:
+    assert _is_strategic_surface("https://toteemi.com/sobre-toteemi/") is True
+    assert _is_strategic_surface("https://brand.com/quienes-somos/") is True
+    assert _is_strategic_surface("https://brand.com/filosofia/") is True
+    assert _is_strategic_surface("https://brand.com/manifiesto/") is True
+    assert _is_strategic_surface("https://brand.com/about") is True
+    assert _is_strategic_surface("https://brand.com/culture") is True
+    assert _is_strategic_surface("https://toteemi.com/misiones/") is False
+    assert _is_strategic_surface("https://brand.com/categoria-producto/zapatillas") is False
+
+
+def test_evidence_worker_records_absence_on_sobre_surface() -> None:
+    pack = build_evidence_pack_from_snapshot(
+        {
+            "run": {"brand_name": "Toteemi", "url": "https://toteemi.com"},
+            "raw_inputs": [
+                {
+                    "source": "web",
+                    "payload": {
+                        "url": "https://toteemi.com",
+                        "markdown_content": (
+                            "Homepage copy.\n"
+                            "\n---\n## Subpage: https://toteemi.com/sobre-toteemi/\n"
+                            "# Sobre Toteemi\n"
+                            "Toteemi construye una experiencia deportiva gamificada."
+                        ),
+                    },
+                }
+            ],
+        }
+    )
+
+    absence = {record.ref: record for record in pack.evidence if record.evidence_type.startswith("acquisition.absence.")}
+
+    assert "raw_inputs.0.subpage.1.absence.values" in absence
+    assert "raw_inputs.0.subpage.1.absence.vision" in absence
+
+
+def test_evidence_worker_records_no_strategic_surfaces_attempt_when_none_found() -> None:
+    pack = build_evidence_pack_from_snapshot(
+        {
+            "run": {"brand_name": "Shop", "url": "https://shop.example"},
+            "raw_inputs": [
+                {
+                    "source": "web",
+                    "payload": {
+                        "url": "https://shop.example",
+                        "markdown_content": (
+                            "Homepage copy.\n"
+                            "\n---\n## Subpage: https://shop.example/products/bike\n"
+                            "# Product page\n"
+                            "Cycling shoes and apparel."
+                        ),
+                    },
+                }
+            ],
+        }
+    )
+
+    record = next(
+        item for item in pack.evidence if item.evidence_type == "acquisition.attempt.strategic_surfaces"
+    )
+
+    assert record.metadata["status"] == "none_found"
+    assert record.metadata["crawled_url_count"] == 2
 
 
 def test_evidence_worker_skips_not_found_subpage_chunks() -> None:

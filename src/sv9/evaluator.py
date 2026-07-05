@@ -536,8 +536,30 @@ def _tiles_lines(key: str) -> str:
         note = tile.get("note")
         if note:
             line += f" [NOTA: {note}]"
+        contract = _tile_evidence_contract_text(tile)
+        if contract:
+            line += f"\n  contrato_evidencia: {contract}"
         lines.append(line)
     return "\n".join(lines)
+
+
+def _tile_evidence_contract_text(tile: dict[str, Any]) -> str:
+    contract = tile.get("evidence_contract")
+    if not isinstance(contract, dict):
+        return ""
+    parts = []
+    labels = (
+        ("ok", "ok"),
+        ("no", "no"),
+        ("sin_evidencia", "sin_evidencia"),
+        ("strong_sources", "fuentes_fuertes"),
+        ("reject", "no_aceptar"),
+    )
+    for key, label in labels:
+        value = str(contract.get(key) or "").strip()
+        if value:
+            parts.append(f"{label}={value}")
+    return " | ".join(parts)
 
 
 def _context_texts(key: str, tldr: dict[str, Any]) -> dict[str, str]:

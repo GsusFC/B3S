@@ -24,7 +24,7 @@
     --bg: #eeeeee; --panel: #f5f5f5; --panel-soft: rgba(245, 245, 245, 0.72);
     --ink: #161616; --muted: #77736d; --soft: #9a958e;
     --line: #e4e4e4; --line-strong: #d7d7d7;
-    --accent: #ff0000; --ok: #00ff00; --warn: #b7792b; --bad: #b84f3f;
+    --accent: #ff0000; --ok: #00ff00; --warn: #0000ff; --bad: #b84f3f;
     --body-bg: repeating-linear-gradient(135deg, rgba(22, 22, 22, 0.018) 0 1px, transparent 1px 7px), var(--bg);
     --shadow: rgb(0 0 0 / 18%);
     --ui: "JetBrains Mono", ui-monospace, monospace;
@@ -36,7 +36,7 @@
       --bg: #0b0d0e; --panel: #121615; --panel-soft: rgba(18, 22, 21, 0.76);
       --ink: #dedbd2; --muted: #9b968c; --soft: #706c65;
       --line: #28302d; --line-strong: #39423e;
-      --accent: #ff0000; --ok: #00ff00; --warn: #e4c76d; --bad: #e07a6d;
+      --accent: #ff0000; --ok: #00ff00; --warn: #0000ff; --bad: #e07a6d;
       --body-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 280px), repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.018) 0 1px, transparent 1px 96px), var(--bg);
       --shadow: rgb(0 0 0 / 48%);
     }
@@ -46,7 +46,7 @@
     --bg: #eeeeee; --panel: #f5f5f5; --panel-soft: rgba(245, 245, 245, 0.72);
     --ink: #161616; --muted: #77736d; --soft: #9a958e;
     --line: #e4e4e4; --line-strong: #d7d7d7;
-    --accent: #ff0000; --ok: #00ff00; --warn: #b7792b; --bad: #b84f3f;
+    --accent: #ff0000; --ok: #00ff00; --warn: #0000ff; --bad: #b84f3f;
     --body-bg: repeating-linear-gradient(135deg, rgba(22, 22, 22, 0.018) 0 1px, transparent 1px 7px), var(--bg);
     --shadow: rgb(0 0 0 / 18%);
   }
@@ -55,7 +55,7 @@
     --bg: #0b0d0e; --panel: #121615; --panel-soft: rgba(18, 22, 21, 0.76);
     --ink: #dedbd2; --muted: #9b968c; --soft: #706c65;
     --line: #28302d; --line-strong: #39423e;
-    --accent: #ff0000; --ok: #00ff00; --warn: #e4c76d; --bad: #e07a6d;
+    --accent: #ff0000; --ok: #00ff00; --warn: #0000ff; --bad: #e07a6d;
     --body-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 280px), repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.018) 0 1px, transparent 1px 96px), var(--bg);
     --shadow: rgb(0 0 0 / 48%);
   }
@@ -74,7 +74,17 @@
     border-bottom: 1px solid var(--line); padding: 16px 24px;
     display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   }
-  header.site .brand { font-family: var(--mono); font-weight: 700; font-size: 16px; color: var(--ink); text-decoration: none; }
+  header.site .brand {
+    display: inline-flex;
+    align-items: center;
+    color: var(--ink);
+    text-decoration: none;
+  }
+  header.site .brand svg {
+    display: block;
+    width: auto;
+    height: 20px;
+  }
   header.site .tagline { color: var(--muted); font-size: 13px; }
   .theme-switch { display: inline-flex; gap: 0; margin-left: auto; border: 1px solid var(--line); }
   .theme-choice {
@@ -96,7 +106,7 @@
     color: var(--accent);
     filter: none;
   }
-  main { max-width: 920px; margin: 0 auto; padding: 24px 16px 64px; }
+  main { max-width: 1320px; margin: 0 auto; padding: 24px 16px 64px; }
   h1 { font-size: 22px; margin: 8px 0 16px; }
   h2 { font-size: 16px; margin: 32px 0 8px; }
   .panel { background: var(--panel-soft); border: 1px solid var(--line); border-radius: 0; padding: 16px; }
@@ -123,10 +133,29 @@
     background: var(--accent); color: var(--bg); font: 700 13px/1.3 var(--mono); cursor: pointer;
     transition: filter 150ms ease;
   }
+  button.secondary { background: transparent; color: var(--ink); border-color: var(--line-strong); }
+  button.danger { background: transparent; color: var(--bad); border-color: var(--bad); }
+  button:disabled { cursor: not-allowed; opacity: .45; filter: none; }
   button:hover { filter: brightness(1.1); }
   button:active { filter: brightness(.92); }
-  .form-row { display: flex; gap: 8px; flex-wrap: wrap; }
-  .form-row .grow { flex: 1 1 320px; }
+  .form-row {
+    display: grid;
+    grid-template-columns: minmax(280px, 1fr) minmax(180px, 300px) minmax(220px, 280px) auto;
+    gap: 8px;
+    align-items: end;
+  }
+  .form-row label { min-width: 0; }
+  .check-row {
+    display: flex; align-items: center; gap: 8px; min-height: 41px;
+    border: 1px solid var(--line); padding: 0 10px; color: var(--muted);
+    font: 12px/1.35 var(--mono);
+  }
+  .check-row input { margin: 0; }
+  .form-action { display: flex; align-items: end; }
+  .form-action button {
+    min-height: 41px;
+    white-space: nowrap;
+  }
   .scorebox { display: flex; gap: 24px; align-items: baseline; flex-wrap: wrap; }
   .scorebox .score { font-family: var(--mono); font-size: 44px; font-weight: 700; }
   .report-hero {
@@ -214,6 +243,168 @@
   .cell { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; background: var(--panel); }
   .cell .k { font-size: 12px; color: var(--muted); }
   .cell .v { font-family: var(--mono); font-size: 18px; font-weight: 700; }
+  .section-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; margin-bottom: 12px; }
+  .section-head .label { color: var(--accent); font-family: var(--mono); font-size: 13px; font-weight: 700; text-transform: uppercase; }
+  .section-head .tag { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  .source-link {
+    width: fit-content;
+    display: inline-flex;
+    min-height: 28px;
+    align-items: center;
+    border: 1px solid var(--line);
+    padding: 3px 8px;
+    background: var(--panel);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 12px;
+    text-decoration: none;
+  }
+  .source-link:hover,
+  .source-link:focus-visible { border-color: var(--accent); color: var(--accent); }
+  .brand-profile-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(190px, .28fr);
+    gap: 18px;
+    align-items: stretch;
+    margin-top: 14px;
+    padding: 18px;
+    border: 1px solid var(--line);
+    background: var(--panel-soft);
+  }
+  .brand-profile-identity { display: flex; min-width: 0; gap: 22px; align-items: center; }
+  .brand-profile-logo {
+    width: clamp(96px, 10vw, 140px);
+    height: clamp(96px, 10vw, 140px);
+    flex: 0 0 clamp(96px, 10vw, 140px);
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--line);
+    background: var(--bg);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: clamp(48px, 6vw, 76px);
+    font-weight: 700;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+  .brand-profile-headline { display: grid; gap: 10px; min-width: 0; }
+  .brand-profile-title {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: clamp(42px, 7vw, 84px);
+    line-height: .9;
+    overflow-wrap: anywhere;
+    text-transform: uppercase;
+  }
+  .brand-profile-domain-link {
+    width: fit-content;
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 12px;
+    text-decoration-color: var(--accent);
+    text-underline-offset: 3px;
+    overflow-wrap: anywhere;
+  }
+  .brand-profile-terminal {
+    display: grid;
+    align-content: start;
+    gap: 10px;
+    border-left: 1px solid var(--line);
+    padding-left: 18px;
+  }
+  .brand-profile-terminal-key {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .brand-profile-terminal-key::before { content: "$ "; color: var(--accent); }
+  .brand-profile-score {
+    color: var(--ok);
+    font-family: var(--mono);
+    font-size: clamp(44px, 6vw, 72px);
+    line-height: .86;
+  }
+  .brand-profile-terminal-value {
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .brand-profile-terminal-value.is-empty { color: var(--muted); }
+  .brand-profile-scan-form { margin: 0; }
+  .brand-profile-summary { display: grid; gap: 18px; margin-top: 18px; }
+  .brand-profile-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 18px; }
+  .brand-profile-block {
+    min-width: 0;
+    border-top: 1px solid var(--line);
+    padding-top: 14px;
+  }
+  .brand-profile-block .prose {
+    max-width: 92ch;
+    margin: 0 0 12px;
+    font-size: 13px;
+    line-height: 1.62;
+  }
+  .brand-profile-kv {
+    display: grid;
+    grid-template-columns: minmax(90px, .28fr) minmax(0, 1fr);
+    gap: 8px 14px;
+    margin: 0;
+  }
+  .brand-profile-kv dt {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+  }
+  .brand-profile-kv dd { margin: 0; overflow-wrap: anywhere; }
+  .brand-profile-evidence-list {
+    display: grid;
+    gap: 8px;
+    margin: 10px 0 0;
+    padding-left: 18px;
+  }
+  .brand-profile-evidence-list li { overflow-wrap: anywhere; }
+  .health-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin: 14px 0;
+  }
+  .health-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px;
+    margin: 14px 0;
+  }
+  .health-card {
+    border: 1px solid var(--line);
+    background: var(--panel);
+    padding: 12px;
+  }
+  .health-card .k {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+  }
+  .health-card .v {
+    margin-top: 4px;
+    font-family: var(--mono);
+    font-size: 20px;
+    font-weight: 700;
+  }
+  .health-status-table td,
+  .health-status-table th { font-size: 13px; }
+  .health-detail {
+    max-width: 520px;
+    overflow-wrap: anywhere;
+  }
   .evidence { border-left: 3px solid var(--line); padding: 4px 12px; margin: 8px 0; }
   .evidence .ref { font-family: var(--mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
   ul.plain { list-style: none; padding: 0; margin: 8px 0; }
@@ -414,6 +605,9 @@
   }
   .drawer-meta { margin: 0 0 4px; }
   @media (max-width: 980px) {
+    .brand-profile-hero,
+    .brand-profile-grid { grid-template-columns: 1fr; }
+    .brand-profile-terminal { border-left: 0; border-top: 1px solid var(--line); padding: 14px 0 0; }
     .report-hero { grid-template-columns: 1fr 1fr; }
     .report-hero-main { grid-column: 1 / -1; border-right: 0; border-bottom: 1px solid var(--line); }
     .canvas { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -421,6 +615,8 @@
     .component-card--full { grid-column: 1 / -1; }
   }
   @media (max-width: 680px) {
+    .form-row { grid-template-columns: 1fr; }
+    .form-action button { width: 100%; }
     .report-hero { grid-template-columns: 1fr; }
     .report-hero-main,
     .report-hero-metric:not(:last-child) { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -437,7 +633,25 @@
 </head>
 <body>
 <header class="site">
-  <a class="brand" href="/">B3S</a>
+  <a class="brand" href="/" aria-label="B3S home">
+    <svg viewBox="0 0 193 63" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true">
+      <path d="M47.2207 31.4812L31.4803 31.4812L47.2207 47.2218L31.4803 62.9623L47.2207 62.9623L47.2207 31.4812Z" fill="#00FF00"/>
+      <path d="M31.4805 31.4812L15.7401 31.4812L31.4805 47.2218L15.7401 62.9623L31.4805 62.9623L31.4805 31.4812Z" fill="#0000FF"/>
+      <path d="M15.7402 31.4812L-0.00013327 31.4812L15.7402 47.2218L-0.000134646 62.9623L15.7402 62.9623L15.7402 31.4812Z" fill="#FF0000"/>
+      <path d="M47.2207 6.88042e-07L31.4803 -6.88042e-07L47.2207 15.7406L31.4803 31.4811L47.2207 31.4811L47.2207 6.88042e-07Z" fill="#00FF00"/>
+      <path d="M31.4805 6.88042e-07L15.7401 -6.88042e-07L31.4805 15.7406L15.7401 31.4811L31.4805 31.4811L31.4805 6.88042e-07Z" fill="#0000FF"/>
+      <path d="M15.7402 6.88042e-07L-0.00013327 -6.88042e-07L15.7402 15.7406L-0.000134646 31.4811L15.7402 31.4811L15.7402 6.88042e-07Z" fill="#FF0000"/>
+      <path d="M31.4803 15.7406L31.4803 6.67807e-05L47.2207 15.7406L31.4803 31.4812L31.4803 15.7406Z" fill="#0000FF"/>
+      <path d="M31.4803 47.2218L31.4803 31.4813L47.2207 47.2218L31.4803 62.9624L31.4803 47.2218Z" fill="#0000FF"/>
+      <path d="M47.2206 15.7406L47.2206 6.67807e-05L62.9609 15.7406L47.2206 31.4812L47.2206 15.7406Z" fill="#00FF00"/>
+      <path d="M47.2206 47.2218L47.2206 31.4813L62.9609 47.2218L47.2206 62.9624L47.2206 47.2218Z" fill="#00FF00"/>
+      <path d="M15.7401 15.7406L15.7401 6.49043e-05L31.4805 15.7406L15.7401 31.4812L15.7401 15.7406Z" fill="#FF0000"/>
+      <path d="M15.7401 47.2218L15.7401 31.4813L31.4805 47.2218L15.7401 62.9624L15.7401 47.2218Z" fill="#FF0000"/>
+      <path d="M74.3379 55.1585V7.72087H91.3751C97.0765 7.72087 101.375 8.74534 104.27 10.7943C107.165 12.8432 108.613 16.0948 108.613 20.5491C108.613 22.5535 108.19 24.3129 107.343 25.8273C106.497 27.3418 105.25 28.5444 103.602 29.4353C101.998 30.2816 100.083 30.727 97.856 30.7715L97.7892 30.5043C101.842 30.5934 104.983 31.7069 107.21 33.845C109.481 35.9385 110.617 38.7001 110.617 42.1298C110.617 46.4504 109.17 49.702 106.274 51.8846C103.379 54.0672 99.2591 55.1585 93.914 55.1585H74.3379ZM81.5537 48.6776H93.7136C96.6979 48.6776 99.0141 48.0762 100.662 46.8736C102.355 45.6264 103.201 43.8225 103.201 41.4617C103.201 39.1455 102.355 37.3415 100.662 36.0498C99.0141 34.7581 96.6979 34.1122 93.7136 34.1122H81.5537V48.6776ZM81.5537 27.9654H91.2415C94.404 27.9654 96.8538 27.3641 98.5909 26.1614C100.328 24.9588 101.197 23.2662 101.197 21.0836C101.197 18.7674 100.35 17.0525 98.6577 15.9389C97.0097 14.7808 94.5376 14.2018 91.2415 14.2018H81.5537V27.9654Z" fill="currentColor"/>
+      <path d="M133.232 56.2275C127.753 56.2275 123.522 54.958 120.537 52.4191C117.598 49.8802 116.016 46.5395 115.794 42.3971L123.21 41.9962C123.477 44.7133 124.502 46.6732 126.283 47.8758C128.109 49.0339 130.426 49.613 133.232 49.613C135.103 49.613 136.817 49.368 138.376 48.878C139.98 48.3435 141.249 47.4972 142.185 46.3391C143.165 45.1365 143.655 43.5775 143.655 41.6621C143.655 38.8114 142.697 36.7179 140.782 35.3817C138.866 34.0009 136.327 33.3105 133.165 33.3105H129.223V27.03H133.165C135.704 27.03 137.82 26.5177 139.512 25.4933C141.205 24.4688 142.051 22.6871 142.051 20.1482C142.051 17.9211 141.338 16.2285 139.913 15.0704C138.488 13.8677 136.305 13.2664 133.365 13.2664C130.515 13.2664 128.354 13.8232 126.885 14.9367C125.415 16.0503 124.546 17.5647 124.279 19.4801L116.863 19.0792C117.308 15.3376 118.934 12.331 121.74 10.0593C124.591 7.78769 128.466 6.65186 133.365 6.65186C136.751 6.65186 139.646 7.18636 142.051 8.25538C144.456 9.27985 146.305 10.772 147.597 12.7319C148.888 14.6917 149.534 16.9857 149.534 19.6137C149.534 22.5089 148.599 24.8697 146.728 26.6959C144.902 28.5222 142.207 29.7693 138.644 30.4375V29.2348C142.519 29.7248 145.57 31.1056 147.797 33.3773C150.024 35.6044 151.138 38.4551 151.138 41.9294C151.138 44.9137 150.38 47.4972 148.866 49.6798C147.352 51.8178 145.258 53.4436 142.586 54.5572C139.913 55.6707 136.795 56.2275 133.232 56.2275Z" fill="currentColor"/>
+      <path d="M175.19 56.2275C171.404 56.2275 168.108 55.5371 165.302 54.1563C162.54 52.7755 160.358 50.8601 158.754 48.4103C157.151 45.9605 156.215 43.1098 155.948 39.8582L163.364 39.3905C163.676 41.6176 164.322 43.5107 165.302 45.0696C166.282 46.5841 167.596 47.7422 169.244 48.5439C170.936 49.3012 172.963 49.6798 175.324 49.6798C177.373 49.6798 179.11 49.4348 180.535 48.9448C182.005 48.4103 183.119 47.6308 183.876 46.6063C184.633 45.5819 185.012 44.3347 185.012 42.8648C185.012 41.5285 184.678 40.3481 184.009 39.3237C183.386 38.2547 182.161 37.297 180.335 36.4507C178.553 35.5598 175.925 34.6913 172.451 33.845C168.665 32.9096 165.636 31.8851 163.364 30.7715C161.093 29.658 159.445 28.2772 158.42 26.6291C157.44 24.9365 156.95 22.8653 156.95 20.4154C156.95 17.6984 157.596 15.3153 158.888 13.2664C160.224 11.1729 162.117 9.54711 164.567 8.389C167.017 7.23091 169.957 6.65186 173.386 6.65186C176.994 6.65186 180.068 7.31999 182.606 8.65626C185.19 9.99253 187.216 11.8188 188.686 14.135C190.201 16.4512 191.136 19.1014 191.493 22.0858L184.076 22.4867C183.854 20.6604 183.297 19.0569 182.406 17.6761C181.515 16.2507 180.313 15.1594 178.798 14.4022C177.284 13.6005 175.435 13.1996 173.253 13.1996C170.491 13.1996 168.308 13.8454 166.705 15.1372C165.146 16.3844 164.367 18.0547 164.367 20.1482C164.367 21.4845 164.678 22.6203 165.302 23.5557C165.97 24.4465 167.128 25.226 168.776 25.8942C170.469 26.5623 172.852 27.275 175.925 28.0322C180.023 28.9676 183.275 30.1257 185.68 31.5065C188.13 32.8428 189.867 34.424 190.891 36.2502C191.916 38.0765 192.428 40.1477 192.428 42.4639C192.428 45.2701 191.693 47.7199 190.223 49.8134C188.798 51.8623 186.793 53.4436 184.21 54.5572C181.626 55.6707 178.62 56.2275 175.19 56.2275Z" fill="currentColor"/>
+    </svg>
+  </a>
   <span class="tagline">brand evidence lab — every number must survive “show me the evidence”</span>
   <div class="theme-switch" aria-label="Tema">
     <button type="button" class="theme-choice" data-theme-choice="light" aria-pressed="false">Day</button>

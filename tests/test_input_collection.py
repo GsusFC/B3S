@@ -112,6 +112,23 @@ class _FakeExaCollector:
         )
 
 
+class _MatrixExaCollector:
+    diagnostics: dict[str, object] = {}
+    calls = 0
+
+    def __init__(self, api_key=None):
+        self.api_key = api_key
+
+    def collect_brand_data(self, brand_name: str, brand_url: str, *, legal_name: str | None = None):
+        type(self).calls += 1
+        return ExaData(
+            brand_name=brand_name,
+            mentions=[],
+            news=[],
+            diagnostics=dict(type(self).diagnostics),
+        )
+
+
 class _FailingCacheStore:
     def get_latest_raw_input(self, **_kwargs):
         raise RuntimeError("sqlite unavailable")
@@ -314,6 +331,75 @@ def test_collect_exa_input_marks_partial_when_failed_intents_exist():
     assert acquisition_steps["exa"].status == "partial"
     assert acquisition_steps["exa"].eligible is True
     assert _FakeExaCollector.calls == 1
+
+
+def test_collect_exa_input_keeps_ok_when_only_external_profiles_are_empty():
+    raw_input_cache: dict[str, str] = {}
+    acquisition_steps: dict[str, object] = {}
+    _MatrixExaCollector.calls = 0
+    _MatrixExaCollector.diagnostics = {
+        "strategy": EXA_STRATEGY_VERSION,
+        "status": "ok",
+        "failed_intents": [],
+        "no_result_intents": ["external_profiles"],
+        "intent_results": {
+            "external_mentions": {"result_count": 9},
+            "news": {"result_count": 4},
+            "ai_visibility": {"result_count": 3},
+            "external_profiles": {"result_count": 0},
+        },
+    }
+
+    _exa_data, _collector = _collect_exa_input(
+        store=None,
+        run_id=None,
+        brand_name="Toteemi",
+        effective_brand_url="https://toteemi.com",
+        cache_read=lambda *_args, **_kwargs: None,
+        raw_input_cache=raw_input_cache,
+        acquisition_steps=acquisition_steps,
+        exa_collector_cls=_MatrixExaCollector,
+    )
+
+    assert raw_input_cache["exa"] == "miss"
+    assert acquisition_steps["exa"].status == "ok"
+    assert acquisition_steps["exa"].details["no_result_intents"] == ["external_profiles"]
+    assert _MatrixExaCollector.calls == 1
+
+
+def test_collect_exa_input_marks_empty_when_all_external_proof_intents_are_empty():
+    raw_input_cache: dict[str, str] = {}
+    acquisition_steps: dict[str, object] = {}
+    _MatrixExaCollector.calls = 0
+    _MatrixExaCollector.diagnostics = {
+        "strategy": EXA_STRATEGY_VERSION,
+        "status": "ok",
+        "failed_intents": [],
+        "no_result_intents": ["external_mentions", "news", "ai_visibility"],
+        "intent_results": {
+            "external_mentions": {"result_count": 0},
+            "news": {"result_count": 0},
+            "ai_visibility": {"result_count": 0},
+        },
+    }
+
+    _exa_data, _collector = _collect_exa_input(
+        store=None,
+        run_id=None,
+        brand_name="Brand",
+        effective_brand_url="https://brand.com",
+        cache_read=lambda *_args, **_kwargs: None,
+        raw_input_cache=raw_input_cache,
+        acquisition_steps=acquisition_steps,
+        exa_collector_cls=_MatrixExaCollector,
+    )
+
+    assert acquisition_steps["exa"].status == "empty"
+    assert acquisition_steps["exa"].details["no_result_intents"] == [
+        "external_mentions",
+        "news",
+        "ai_visibility",
+    ]
 
 
 def test_collect_exa_input_reuses_current_strategy_cache_without_collecting():

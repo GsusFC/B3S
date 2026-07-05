@@ -330,17 +330,7 @@ def _tile_signals_from_visual_signature(evidence: dict[str, Any] | None) -> list
         return []
     capture = evidence.get("capture") if isinstance(evidence.get("capture"), dict) else {}
     if capture.get("status") != "usable":
-        return [
-            TileSignal(
-                component="visual_signature",
-                tile="visual_signature.capture",
-                effect="capture_unreliable",
-                confidence="medium",
-                source="visual_signature",
-                evidence_refs=["visual_signature.capture"],
-                rationale="Visual Signature capture is not usable.",
-            )
-        ]
+        return []
     out: list[TileSignal] = []
     for index, item in enumerate(evidence.get("tile_signals") or []):
         if not isinstance(item, dict):

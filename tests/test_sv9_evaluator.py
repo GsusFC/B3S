@@ -313,6 +313,43 @@ class EvaluateComponentTests(unittest.TestCase):
         self.assertIn("dolor, deseo, asombro, pertenencia", system)
         self.assertIn("M1", llm.calls[0]["user"])
 
+    def test_prompt_carries_tile_evidence_contracts_when_defined(self):
+        llm = FakeLLM()
+        evaluate_component("magnetism", tldr=full_tldr(), signals=[], brand_name="Acme", url="u", llm=llm)
+        user_prompt = llm.calls[0]["user"]
+
+        self.assertIn("contrato_evidencia", user_prompt)
+        self.assertIn("MG2 · Mecanismo identificable", user_prompt)
+        self.assertIn("fuentes_fuertes=owned_copy, product mechanism, community/product proof", user_prompt)
+        self.assertIn("no_aceptar=No aceptar 'tenemos usuarios' como pertenencia/estatus", user_prompt)
+
+    def test_value_proposition_prompt_carries_mechanism_contract(self):
+        llm = FakeLLM()
+        evaluate_component("value_proposition", tldr=full_tldr(), signals=[], brand_name="Acme", url="u", llm=llm)
+        user_prompt = llm.calls[0]["user"]
+
+        self.assertIn("P8 · Mecanismo propio", user_prompt)
+        self.assertIn("ok=El cómo de la propuesta está nombrado", user_prompt)
+        self.assertIn("no_aceptar=No aceptar 'IA', 'plataforma' o 'ecosistema'", user_prompt)
+
+    def test_mission_prompt_allows_product_embodied_mission_contract(self):
+        llm = FakeLLM()
+        evaluate_component("mission", tldr=full_tldr(), signals=[], brand_name="Acme", url="u", llm=llm)
+        user_prompt = llm.calls[0]["user"]
+
+        self.assertIn("M1 · Detectada", user_prompt)
+        self.assertIn("misión encarnada en un mecanismo de producto repetible", user_prompt)
+        self.assertIn("No exigir la palabra misión", user_prompt)
+
+    def test_brand_idea_prompt_carries_visual_contract(self):
+        llm = FakeLLM()
+        evaluate_component("brand_idea", tldr=full_tldr(), signals=[], brand_name="Acme", url="u", llm=llm)
+        user_prompt = llm.calls[0]["user"]
+
+        self.assertIn("I7 · Traduce la estrategia", user_prompt)
+        self.assertIn("visual traduce propósito, personalidad o propuesta", user_prompt)
+        self.assertIn("No inferir estrategia visual desde colores aislados", user_prompt)
+
     def test_records_evaluation_model(self):
         llm = FakeLLM(model="gemini-flash-test")
         result = evaluate_component(
@@ -377,6 +414,8 @@ class EvaluateCoherenciaTests(unittest.TestCase):
         prompt = llm.calls[-1]["user"]
         self.assertIn("(no detectado)", prompt)
         self.assertIn("messaging_consistency", prompt)
+        self.assertIn("C8 · Marca-producto", prompt)
+        self.assertIn("Por defecto si el scanner no puede probar producto/uso real", prompt)
 
     def test_coherencia_without_llm_is_not_evaluated(self):
         result = evaluate_coherencia(

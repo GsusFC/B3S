@@ -9,6 +9,7 @@ from typing import Any
 from src.sv9_flow.evidence_source import SOURCE_CLASS_DERIVED_STRATEGY, classify_source
 from src.sv9_flow._utils import feature_confidence, first_string, unique_strings
 from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
+from src.visual_signature.acquisition_contract import is_visual_acquisition_source
 
 _RAW_INPUT_CONTENT_CHARS = 700
 _WEB_CHUNK_CHARS = 900
@@ -32,7 +33,15 @@ _ABSENCE_SURFACE_MARKERS = (
     "empleo",
     "cultura",
     "valores",
+    "sobre-",
+    "quienes",
+    "quiénes",
+    "filosofia",
+    "filosofía",
+    "manifiesto",
 )
+# Deliberately do not add Spanish "mision": product/gamification pages such as
+# /misiones/ often use it generically and would make absence claims too strong.
 
 
 def build_evidence_pack_from_snapshot(
@@ -107,6 +116,8 @@ def _evidence_from_raw_inputs(raw_inputs: list[Any]) -> list[EvidenceRecord]:
     for index, row in enumerate(raw_inputs):
         entry = row if isinstance(row, dict) else {}
         source = str(entry.get("source") or f"raw_input_{index}")
+        if source == "screenshot_capture" or is_visual_acquisition_source(source):
+            continue
         payload = _payload_dict(entry)
         if source == "web":
             records.extend(_evidence_from_web_payload(index=index, source=source, payload=payload))
@@ -452,6 +463,8 @@ def _evidence_from_web_payload(*, index: int, source: str, payload: dict[str, An
     records: list[EvidenceRecord] = []
     if homepage:
         records.append(_raw_input_record(index=index, source=source, content=homepage[:_RAW_INPUT_CONTENT_CHARS], url=url))
+    owned_urls = [candidate for candidate in [url, *[subpage_url for subpage_url, _ in subpages]] if candidate]
+    strategic_surface_found = any(_is_strategic_surface(candidate) for candidate in owned_urls)
     for subpage_index, (subpage_url, subpage_text) in enumerate(subpages, start=1):
         for chunk_index, chunk in enumerate(_chunk_text_by_section(subpage_text), start=1):
             records.append(
@@ -473,6 +486,14 @@ def _evidence_from_web_payload(*, index: int, source: str, payload: dict[str, An
                 text=subpage_text,
             )
         )
+    if owned_urls and not strategic_surface_found:
+        records.append(
+            _strategic_surfaces_none_found_record(
+                index=index,
+                source=source,
+                crawled_url_count=len(dict.fromkeys(owned_urls)),
+            )
+        )
     for subpage_index, (subpage_url, _) in missing_subpages:
         records.append(
             _acquisition_attempt_record(
@@ -487,6 +508,26 @@ def _evidence_from_web_payload(*, index: int, source: str, payload: dict[str, An
             )
         )
     return records
+
+
+def _strategic_surfaces_none_found_record(*, index: int, source: str, crawled_url_count: int) -> EvidenceRecord:
+    return EvidenceRecord(
+        ref=f"raw_inputs.{index}.diagnostics.strategic_surfaces",
+        source=source,
+        evidence_type="acquisition.attempt.strategic_surfaces",
+        content=(
+            "Owned web capture did not find any strategic about/culture/values/"
+            "manifesto surfaces among crawled URLs."
+        )[:_RAW_INPUT_CONTENT_CHARS],
+        confidence="low",
+        metadata={
+            "source_class": "acquisition_metadata",
+            "provider": "web",
+            "intent": "strategic_surfaces",
+            "status": "none_found",
+            "crawled_url_count": crawled_url_count,
+        },
+    )
 
 
 def _raw_input_record(
@@ -576,6 +617,8 @@ def _evidence_from_visual_signature(evidence: dict[str, Any] | None) -> list[Evi
         return []
     records: list[EvidenceRecord] = []
     capture = evidence.get("capture") if isinstance(evidence.get("capture"), dict) else {}
+    if capture.get("status") != "usable":
+        return []
     records.append(
         EvidenceRecord(
             ref="visual_signature.capture",

@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.sv9_flow_shadow_run import _load_env_file
 from scripts.sv9_flow_snapshot_eval import snapshot_and_run_id_from_envelope
+from src.config import SV9_ADJUDICATOR_MODEL, SV9_FLOW_GATE_AUTHORITY, SV9_FLOW_MODEL
 from src.features.llm_analyzer import LLMAnalyzer
 from src.sv9.flow_ingress import (
     detection_blocks_from_flow_candidate,
@@ -71,8 +72,10 @@ def build_flow_sv9_shadow_eval(
     include_full: bool = False,
     compare_legacy: bool = False,
     interpretation_llm: Any | None = None,
+    adjudicator_llm: Any | None = None,
     evaluator_llm: Any | None = None,
     reasoning_llm: Any | None = None,
+    gate_authority: str | None = None,
     sv9_runner: Callable[..., Any] = run_sv9_from_audit_snapshot,
     visual_evidence_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
@@ -80,10 +83,13 @@ def build_flow_sv9_shadow_eval(
     visual_evidence_fn = visual_evidence_fn or _visual_evidence_packet_from_snapshot
     visual_evidence_packet = visual_evidence_fn(snapshot)
     interpretation_llm = interpretation_llm or _default_interpretation_llm()
+    adjudicator_llm = adjudicator_llm or _default_adjudicator_llm()
     candidate, debug = build_flow_candidate(
         snapshot=snapshot,
         llm=interpretation_llm,
+        adjudicator_llm=adjudicator_llm,
         visual_signature_evidence=visual_evidence_packet,
+        gate_authority=gate_authority or SV9_FLOW_GATE_AUTHORITY,
     )
     evaluator_llm = evaluator_llm or _default_evaluator_llm()
     result = sv9_runner(
@@ -144,13 +150,19 @@ def build_flow_sv9_shadow_eval(
 def _default_interpretation_llm() -> LLMAnalyzer:
     """Interpretation tier; override per-role for asymmetric model configs."""
 
-    return LLMAnalyzer(model=os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL") or None)
+    return LLMAnalyzer(model=os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL") or SV9_FLOW_MODEL)
 
 
 def _default_evaluator_llm() -> LLMAnalyzer:
     """Tile evaluator tier; the score-sensitive role."""
 
-    return LLMAnalyzer(model=os.environ.get("BRAND3_FLOW_EVALUATOR_MODEL") or None)
+    return LLMAnalyzer(model=os.environ.get("BRAND3_FLOW_EVALUATOR_MODEL") or SV9_FLOW_MODEL)
+
+
+def _default_adjudicator_llm() -> LLMAnalyzer:
+    """Cheap quote-grounded rescue pass for deterministic gate false negatives."""
+
+    return LLMAnalyzer(model=os.environ.get("BRAND3_FLOW_ADJUDICATOR_MODEL") or SV9_ADJUDICATOR_MODEL)
 
 
 def _visual_evidence_packet_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any] | None:
@@ -182,6 +194,7 @@ def _compact_interpretation_debug(debug: dict[str, Any]) -> dict[str, Any]:
             "failed_blocks",
             "block_failures",
             "block_detection_decisions",
+            "gate_disagreements",
             "detection_provenance",
             "evidence_coverage",
             "failure_reason",

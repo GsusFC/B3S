@@ -11,6 +11,14 @@ from pathlib import Path
 from src.config import BRAND3_SCREENSHOT_DIR, SCREENSHOT_PROVIDER
 from src.features.visual_analyzer import VisualAnalyzer
 
+_COOKIE_BANNER_DISMISS_SELECTOR = (
+    "button:has-text('Aceptar'), button:has-text('Accept'), button:has-text('Rechazar'), "
+    "button:has-text('Cerrar'), button:has-text('Agree'), button:has-text('Allow all'), "
+    "button:has-text('Accept all'), button:has-text('Close'), button:has-text('OK'), "
+    "a:has-text('Aceptar'), a:has-text('Accept'), a:has-text('Cerrar'), a:has-text('Close'), "
+    "#cookie-accept, #accept-cookies, .cookie-accept, .accept-cookies"
+)
+
 
 def _normalized_screenshot_provider(provider: str | None = None) -> str:
     value = (provider or SCREENSHOT_PROVIDER or "firecrawl").strip().lower()
@@ -25,6 +33,19 @@ def _take_firecrawl_screenshot(url: str) -> dict[str, object]:
 
 def _screenshot_has_capture(data: dict[str, object] | None) -> bool:
     return bool(isinstance(data, dict) and str(data.get("screenshot_url") or "").strip())
+
+
+def _dismiss_cookie_banner_once(page) -> dict[str, object]:
+    """Reuse the text-capture cookie dismissal affordances before visual capture."""
+    try:
+        page.locator(_COOKIE_BANNER_DISMISS_SELECTOR).first.click(timeout=500)
+        try:
+            page.wait_for_timeout(700)
+        except Exception:
+            pass
+        return {"attempted": True, "success": True, "selector": _COOKIE_BANNER_DISMISS_SELECTOR}
+    except Exception as exc:
+        return {"attempted": True, "success": False, "error": str(exc)[:160], "selector": _COOKIE_BANNER_DISMISS_SELECTOR}
 
 
 def _take_playwright_screenshot(url: str, *, timeout_ms: int = 30000) -> dict[str, object]:
@@ -60,6 +81,7 @@ def _take_playwright_screenshot(url: str, *, timeout_ms: int = 30000) -> dict[st
                 page.wait_for_load_state("networkidle", timeout=5000)
             except Exception:
                 pass
+            cookie_dismissal = _dismiss_cookie_banner_once(page)
             page.screenshot(path=screenshot_path, full_page=False, timeout=60000, animations="disabled")
             title = page.title()
             browser.close()
@@ -67,7 +89,7 @@ def _take_playwright_screenshot(url: str, *, timeout_ms: int = 30000) -> dict[st
         return {
             "screenshot_url": Path(screenshot_path).as_uri(),
             "screenshot_path": screenshot_path,
-            "metadata": {"title": title},
+            "metadata": {"title": title, "cookie_banner_dismissal": cookie_dismissal},
             "screenshot_provider": "playwright",
         }
     except PlaywrightTimeoutError as exc:

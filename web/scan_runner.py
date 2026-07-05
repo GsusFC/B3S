@@ -8,6 +8,7 @@ report store.
 from __future__ import annotations
 
 import dataclasses
+import os
 import threading
 import traceback
 from datetime import datetime, timezone
@@ -18,10 +19,11 @@ from src.url_validator import validate_url
 from web.report_store import new_scan_id, save_report
 
 _SCANS: dict[str, dict[str, Any]] = {}
+_SCAN_EVENTS: dict[str, threading.Event] = {}
 _LOCK = threading.Lock()
 
 _PHASES = (
-    ("capture", "Capture: owned pages, Exa, GitHub proof, SearchAPI fallback"),
+    ("capture", "Capture: owned pages, Exa, GitHub proof, SearchAPI fallback, visual evidence"),
     ("interpret", "Evidence pack → shortlists → gated LLM interpretation"),
     ("score", "Tile signals → SV9 components → score"),
     ("report", "Coverage + report assembly"),
@@ -41,7 +43,7 @@ def default_brand_name(url: str) -> str:
     return label.capitalize()
 
 
-def start_scan(url: str, brand_name: str = "") -> str:
+def start_scan(url: str, brand_name: str = "", *, allow_degraded_fallback: bool = False) -> str:
     url = normalize_url(url)
     brand_name = (brand_name or "").strip() or default_brand_name(url)
     scan_id = new_scan_id()
@@ -54,10 +56,17 @@ def start_scan(url: str, brand_name: str = "") -> str:
             "phase": "capture",
             "phases": [{"key": key, "label": label, "state": "pending"} for key, label in _PHASES],
             "acquisition": [],
+            "acquisition_gate": {"state": "pending", "issues": [], "warnings": [], "fallbacks": []},
+            "allow_degraded_fallback": bool(allow_degraded_fallback),
             "error": None,
             "started_at": datetime.now(timezone.utc).isoformat(),
         }
-    thread = threading.Thread(target=_run, args=(scan_id, url, brand_name), daemon=True)
+        _SCAN_EVENTS[scan_id] = threading.Event()
+    thread = threading.Thread(
+        target=_run,
+        args=(scan_id, url, brand_name, bool(allow_degraded_fallback)),
+        daemon=True,
+    )
     thread.start()
     return scan_id
 
@@ -68,6 +77,45 @@ def scan_status(scan_id: str) -> dict[str, Any] | None:
         return dict(status) if status else None
 
 
+def approve_degraded_scan(scan_id: str) -> dict[str, Any] | None:
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        if status is None:
+            return None
+        gate = status.get("acquisition_gate") if isinstance(status.get("acquisition_gate"), dict) else {}
+        if status.get("state") != "blocked" or not gate.get("can_continue"):
+            return {"state": str(status.get("state") or "unknown"), "approved": False, "reason": "not_continuable"}
+        approved_gate = _approve_acquisition_gate(gate, decision_source="user")
+        status["acquisition_gate"] = approved_gate
+        status["state"] = "running"
+        status["phase"] = "interpret"
+        _set_phase_locked(status, "interpret", "pending")
+        event = _SCAN_EVENTS.get(scan_id)
+    if event:
+        event.set()
+    return {"state": "running", "approved": True, "acquisition_gate": approved_gate}
+
+
+def cancel_scan(scan_id: str) -> dict[str, Any] | None:
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        if status is None:
+            return None
+        gate = status.get("acquisition_gate") if isinstance(status.get("acquisition_gate"), dict) else {}
+        if isinstance(gate, dict):
+            gate = dict(gate)
+            gate["user_decision"] = "cancelled"
+            gate["state"] = "cancelled"
+            status["acquisition_gate"] = gate
+        status["state"] = "cancelled"
+        status["phase"] = "capture"
+        _mark_pending_phases_locked(status, "cancelled")
+        event = _SCAN_EVENTS.pop(scan_id, None)
+    if event:
+        event.set()
+    return {"state": "cancelled", "cancelled": True, "acquisition_gate": gate}
+
+
 def _set_phase(scan_id: str, key: str, state: str) -> None:
     with _LOCK:
         status = _SCANS.get(scan_id)
@@ -75,22 +123,50 @@ def _set_phase(scan_id: str, key: str, state: str) -> None:
             return
         if state == "running":
             status["phase"] = key
-        for phase in status["phases"]:
-            if phase["key"] == key:
-                phase["state"] = state
+        _set_phase_locked(status, key, state)
 
 
-def _run(scan_id: str, url: str, brand_name: str) -> None:
+def _set_phase_locked(status: dict[str, Any], key: str, state: str) -> None:
+    for phase in status["phases"]:
+        if phase["key"] == key:
+            phase["state"] = state
+
+
+def _mark_pending_phases_locked(status: dict[str, Any], state: str) -> None:
+    for phase in status.get("phases") or []:
+        if phase.get("state") in {"pending", "running"}:
+            phase["state"] = state
+
+
+def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool) -> None:
     try:
         _set_phase(scan_id, "capture", "running")
         snapshot = _capture_snapshot(scan_id, url, brand_name)
         _set_phase(scan_id, "capture", "done")
+        gate = _build_acquisition_gate(
+            snapshot.get("acquisition_steps") if isinstance(snapshot, dict) else {},
+            allow_degraded_fallback=allow_degraded_fallback,
+        )
+        if gate["state"] == "blocked" and allow_degraded_fallback and gate.get("can_continue"):
+            gate = _approve_acquisition_gate(gate, decision_source="preapproved")
+        snapshot["acquisition_gate"] = gate
+        _set_acquisition_gate(scan_id, gate)
+        if gate["state"] == "blocked":
+            if not _wait_for_acquisition_decision(scan_id):
+                return
+            with _LOCK:
+                status = _SCANS.get(scan_id) or {}
+                current_gate = status.get("acquisition_gate") if isinstance(status.get("acquisition_gate"), dict) else gate
+                if status.get("state") == "cancelled":
+                    return
+            snapshot["acquisition_gate"] = current_gate
 
         _set_phase(scan_id, "interpret", "running")
         from scripts.sv9_flow_sv9_shadow_eval import build_flow_sv9_shadow_eval
 
         envelope = {"snapshot": snapshot, "source_run_id": snapshot["run"]["id"]}
         payload = build_flow_sv9_shadow_eval(envelope, include_full=True)
+        payload["acquisition_gate"] = snapshot.get("acquisition_gate") or gate
         _set_phase(scan_id, "interpret", "done")
         _set_phase(scan_id, "score", "done")
 
@@ -100,6 +176,7 @@ def _run(scan_id: str, url: str, brand_name: str) -> None:
         _set_phase(scan_id, "report", "done")
         with _LOCK:
             _SCANS[scan_id]["state"] = "done"
+            _SCAN_EVENTS.pop(scan_id, None)
     except Exception as exc:  # surface the failure to the UI, never die silently
         traceback.print_exc()
         with _LOCK:
@@ -107,9 +184,295 @@ def _run(scan_id: str, url: str, brand_name: str) -> None:
             if status:
                 status["state"] = "error"
                 status["error"] = f"{type(exc).__name__}: {exc}"
+            _SCAN_EVENTS.pop(scan_id, None)
+
+
+def _set_acquisition_gate(scan_id: str, gate: dict[str, Any]) -> None:
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        if not status:
+            return
+        status["acquisition_gate"] = gate
+        if gate.get("state") == "blocked":
+            status["state"] = "blocked"
+            status["phase"] = "capture"
+
+
+def _wait_for_acquisition_decision(scan_id: str) -> bool:
+    with _LOCK:
+        event = _SCAN_EVENTS.get(scan_id)
+    if event is None:
+        return False
+    event.wait()
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        return bool(status and status.get("state") != "cancelled")
+
+
+def _build_acquisition_gate(
+    acquisition_steps: Any,
+    *,
+    allow_degraded_fallback: bool = False,
+) -> dict[str, Any]:
+    steps = acquisition_steps if isinstance(acquisition_steps, dict) else {}
+    normalized = {str(source): _step_payload(step) for source, step in steps.items()}
+    _ensure_configured_step_markers(normalized)
+
+    issues: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    fallbacks: list[dict[str, Any]] = []
+
+    web_step = normalized.get("web")
+    if web_step is None or _is_failure_status(_step_status(web_step)):
+        issues.append(
+            _issue(
+                source="web",
+                code="web_capture_failed",
+                severity="blocker",
+                message="Owned web capture failed; scoring would lack the primary evidence base.",
+                step=web_step,
+            )
+        )
+    else:
+        web_details = web_step.get("details") if isinstance(web_step.get("details"), dict) else {}
+        if web_details.get("cookie_banner_suspected") is True:
+            warnings.append(
+                _issue(
+                    source="web",
+                    code="web_cookie_banner_suspected",
+                    severity="warning",
+                    message="Owned web capture may contain unresolved cookie-banner text.",
+                    step=web_step,
+                )
+            )
+
+    exa_step = normalized.get("exa")
+    exa_status = _step_status(exa_step)
+    exa_failed = exa_step is None or _is_failure_status(exa_status)
+    searchapi_step = normalized.get("searchapi")
+    searchapi_status = _step_status(searchapi_step)
+    searchapi_available = _searchapi_available_for_fallback(searchapi_step)
+    if exa_failed:
+        fallback = {
+            "source": "searchapi",
+            "for_source": "exa",
+            "available": searchapi_available,
+            "approved": False,
+            "status": searchapi_status or "missing",
+            "reason": "vertical external-proof fallback for Exa failure",
+        }
+        fallbacks.append(fallback)
+        issues.append(
+            _issue(
+                source="exa",
+                code="exa_failed",
+                severity="blocker",
+                message="Exa failed; external proof acquisition is incomplete.",
+                step=exa_step,
+                fallback="searchapi" if searchapi_available else "",
+                can_fallback=searchapi_available,
+            )
+        )
+    elif exa_status in {"empty", "partial"}:
+        warnings.append(
+            _issue(
+                source="exa",
+                code=f"exa_{exa_status}",
+                severity="warning",
+                message="Exa returned limited external proof; score should declare reduced acquisition coverage.",
+                step=exa_step,
+            )
+        )
+
+    if _is_failure_status(searchapi_status):
+        target = issues if exa_failed else warnings
+        target.append(
+            _issue(
+                source="searchapi",
+                code="searchapi_failed",
+                severity="blocker" if exa_failed else "warning",
+                message="SearchAPI fallback failed.",
+                step=searchapi_step,
+            )
+        )
+
+    github_status = _step_status(normalized.get("github"))
+    if _is_failure_status(github_status):
+        warnings.append(
+            _issue(
+                source="github",
+                code="github_proof_failed",
+                severity="warning",
+                message="GitHub proof acquisition failed; continuing without repository proof.",
+                step=normalized.get("github"),
+            )
+        )
+
+    visual_status = _step_status(normalized.get("visual_acquisition"))
+    visual_detail = _step_detail(normalized.get("visual_acquisition")).lower()
+    if _is_failure_status(visual_status) or "blocked" in visual_detail or "not_interpretable" in visual_detail:
+        warnings.append(
+            _issue(
+                source="visual_acquisition",
+                code="visual_acquisition_limited",
+                severity="warning",
+                message="Visual acquisition was unavailable or obstructed; visual evidence remains limited.",
+                step=normalized.get("visual_acquisition"),
+            )
+        )
+
+    blocking = [item for item in issues if item.get("severity") == "blocker"]
+    can_continue = bool(blocking) and all(bool(item.get("can_fallback")) for item in blocking)
+    state = "blocked" if blocking else ("warning" if warnings else "pass")
+    return {
+        "version": "b3s-acquisition-gate-v1",
+        "state": state,
+        "can_continue": can_continue,
+        "allow_degraded_fallback": bool(allow_degraded_fallback),
+        "issues": issues,
+        "warnings": warnings,
+        "fallbacks": fallbacks,
+        "limitations": _gate_limitations(issues, warnings),
+        "user_decision": None,
+        "evaluated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _approve_acquisition_gate(gate: dict[str, Any], *, decision_source: str) -> dict[str, Any]:
+    approved = dict(gate)
+    approved["state"] = "degraded_approved"
+    approved["user_decision"] = "continue_degraded"
+    approved["decision_source"] = decision_source
+    approved["decided_at"] = datetime.now(timezone.utc).isoformat()
+    approved["fallbacks"] = [
+        {**fallback, "approved": bool(fallback.get("available"))}
+        for fallback in gate.get("fallbacks") or []
+        if isinstance(fallback, dict)
+    ]
+    return approved
+
+
+def _step_payload(step: Any) -> dict[str, Any]:
+    if step is None:
+        return {}
+    if isinstance(step, dict):
+        return step
+    if hasattr(step, "to_payload"):
+        return dict(step.to_payload())
+    if hasattr(step, "to_dict"):
+        return dict(step.to_dict())
+    if dataclasses.is_dataclass(step):
+        return dataclasses.asdict(step)
+    return dict(vars(step))
+
+
+def _ensure_configured_step_markers(steps: dict[str, dict[str, Any]]) -> None:
+    from src.config import EXA_API_KEY, SEARCHAPI_API_KEY
+
+    if not EXA_API_KEY and "exa" not in steps:
+        steps["exa"] = {
+            "source": "exa",
+            "status": "missing_key",
+            "cache_status": "missing",
+            "eligible": True,
+            "error": "EXA_API_KEY not set",
+            "details": {"reason": "EXA_API_KEY not set"},
+        }
+    if not SEARCHAPI_API_KEY and "searchapi" not in steps:
+        steps["searchapi"] = {
+            "source": "searchapi",
+            "status": "missing_key",
+            "cache_status": "missing",
+            "eligible": False,
+            "error": "SEARCHAPI_API_KEY not set",
+            "details": {"reason": "SEARCHAPI_API_KEY not set"},
+        }
+
+
+def _step_status(step: Any) -> str:
+    if not isinstance(step, dict):
+        return ""
+    return str(step.get("status") or "").strip().lower()
+
+
+def _step_detail(step: Any) -> str:
+    if not isinstance(step, dict):
+        return ""
+    details = step.get("details") if isinstance(step.get("details"), dict) else {}
+    reason = str(details.get("reason") or step.get("error") or "").strip()
+    parts = [reason] if reason else []
+    for key in ("blocked_reason", "cookie_banner_snippet"):
+        value = str(details.get(key) or "").strip()
+        if value:
+            parts.append(f"{key}: {value}")
+    if parts:
+        return "; ".join(parts)
+    for key in ("failed_intents", "no_result_intents"):
+        values = details.get(key)
+        if isinstance(values, list) and values:
+            return f"{key}: {', '.join(str(value) for value in values)}"
+    return ""
+
+
+def _is_failure_status(status: str) -> bool:
+    return status in {
+        "error",
+        "failed",
+        "failure",
+        "missing",
+        "missing_key",
+        "blocked",
+        "timeout",
+        "acquisition_failed",
+    }
+
+
+def _searchapi_available_for_fallback(step: Any) -> bool:
+    from src.config import SEARCHAPI_API_KEY
+
+    if not SEARCHAPI_API_KEY:
+        return False
+    status = _step_status(step)
+    if not status:
+        return True
+    return status not in {"disabled", "missing_key", "error", "failed", "failure", "blocked", "timeout"}
+
+
+def _issue(
+    *,
+    source: str,
+    code: str,
+    severity: str,
+    message: str,
+    step: dict[str, Any] | None,
+    fallback: str = "",
+    can_fallback: bool = False,
+) -> dict[str, Any]:
+    payload = {
+        "source": source,
+        "code": code,
+        "severity": severity,
+        "message": message,
+        "status": _step_status(step) or "missing",
+        "detail": _step_detail(step),
+        "can_fallback": bool(can_fallback),
+    }
+    if fallback:
+        payload["fallback"] = fallback
+    return payload
+
+
+def _gate_limitations(issues: list[dict[str, Any]], warnings: list[dict[str, Any]]) -> list[str]:
+    codes = []
+    for item in issues + warnings:
+        code = str(item.get("code") or "").strip()
+        if code and code not in codes:
+            codes.append(f"acquisition_gate:{code}")
+    return codes
 
 
 def _capture_snapshot(scan_id: str, url: str, brand_name: str) -> dict[str, Any]:
+    from src.config import BRAND3_VISUAL_SIGNATURE_SCAN_ENABLED
     from src.services import brand_service as service
 
     raw = service.collect_raw_inputs(
@@ -143,10 +506,22 @@ def _capture_snapshot(scan_id: str, url: str, brand_name: str) -> dict[str, Any]
             continue
         raw_inputs.append({"source": source, "payload": _to_payload(data)})
 
+    visual_rows, visual_step = _capture_visual_evidence(
+        service=service,
+        enabled=BRAND3_VISUAL_SIGNATURE_SCAN_ENABLED,
+        url=url,
+        brand_name=brand_name,
+        web_data=raw.web_data,
+        content_web=raw.web_data,
+    )
+    raw_inputs.extend(visual_rows)
+
     acquisition_steps: dict[str, Any] = {}
     acquisition_rows: list[dict[str, str]] = []
     for source, step in (raw.acquisition_steps or {}).items():
         payload = _to_payload(step)
+        if str(source) == "web":
+            _annotate_web_cookie_banner_signal(raw.web_data, payload)
         acquisition_steps[source] = payload
         details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
         acquisition_rows.append(
@@ -154,6 +529,15 @@ def _capture_snapshot(scan_id: str, url: str, brand_name: str) -> dict[str, Any]
                 "source": str(source),
                 "status": str(payload.get("status") or ""),
                 "detail": str(details.get("reason") or payload.get("error") or ""),
+            }
+        )
+    if visual_step:
+        acquisition_steps["visual_acquisition"] = visual_step
+        acquisition_rows.append(
+            {
+                "source": "visual_acquisition",
+                "status": str(visual_step.get("status") or ""),
+                "detail": str((visual_step.get("details") or {}).get("reason") or ""),
             }
         )
     with _LOCK:
@@ -167,6 +551,203 @@ def _capture_snapshot(scan_id: str, url: str, brand_name: str) -> dict[str, Any]
         "acquisition_steps": acquisition_steps,
         "features": [],
     }
+
+
+def _annotate_web_cookie_banner_signal(web_data: Any | None, step_payload: dict[str, Any]) -> None:
+    snippet = _cookie_banner_snippet_from_web_data(web_data)
+    if not snippet:
+        return
+    details = step_payload.get("details") if isinstance(step_payload.get("details"), dict) else {}
+    details["cookie_banner_suspected"] = True
+    details["cookie_banner_snippet"] = snippet
+    step_payload["details"] = details
+
+
+def _cookie_banner_snippet_from_web_data(web_data: Any | None) -> str:
+    if web_data is None:
+        return ""
+    try:
+        payload = _to_payload(web_data)
+    except Exception:
+        return ""
+    candidates = [
+        str(payload.get("title") or ""),
+        str(payload.get("body_text") or ""),
+        str(payload.get("markdown") or payload.get("markdown_content") or payload.get("content") or payload.get("text") or ""),
+    ]
+    text = " ".join(part for part in candidates if part).strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    exact_banner_markers = (
+        "valoramos tu privacidad",
+        "we value your privacy",
+        "we use cookies",
+        "usamos cookies",
+        "utilizamos cookies",
+    )
+    consent_markers = ("cookie", "cookies", "consent", "privacidad", "privacy")
+    action_markers = ("aceptar", "accept", "rechazar", "reject", "preferencias", "preferences", "consent")
+    if any(marker in lowered for marker in exact_banner_markers) or (
+        any(marker in lowered for marker in consent_markers) and any(marker in lowered for marker in action_markers)
+    ):
+        return " ".join(text.split())[:220]
+    return ""
+
+
+def _capture_visual_evidence(
+    *,
+    service: Any,
+    enabled: bool,
+    url: str,
+    brand_name: str,
+    web_data: Any | None,
+    content_web: Any | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not enabled:
+        return [], {
+            "status": "skipped",
+            "details": {"reason": "visual_acquisition_disabled"},
+        }
+
+    screenshot_capture = _capture_screenshot(service=service, url=url)
+    try:
+        result = service._run_visual_signature_shadow(
+            enabled=True,
+            store=None,
+            run_id=None,
+            brand_name=brand_name,
+            url=url,
+            web_data=web_data,
+            content_web=content_web,
+            screenshot_capture=screenshot_capture,
+        )
+    except Exception as exc:  # visual acquisition enriches the run; it must not own the run
+        return [
+            {
+                "source": "screenshot_capture",
+                "payload": {
+                    "version": "screenshot_capture_v1",
+                    "url": url,
+                    "content_source": "b3s_live_scan",
+                    "skip_visual_analysis": False,
+                    "capture": screenshot_capture,
+                },
+            }
+        ], {"status": "error", "details": {"reason": str(exc)}}
+    visual_evidence = result.get("visual_evidence_packet")
+    rows: list[dict[str, Any]] = [
+        {
+            "source": "screenshot_capture",
+            "payload": {
+                "version": "screenshot_capture_v1",
+                "url": url,
+                "content_source": "b3s_live_scan",
+                "skip_visual_analysis": False,
+                "capture": screenshot_capture,
+            },
+        }
+    ]
+    if isinstance(visual_evidence, dict):
+        rows.append(
+            {
+                "source": "visual_acquisition",
+                "payload": {
+                    "schema_version": "visual-signature-persistence-1",
+                    "run_id": None,
+                    "brand_name": brand_name,
+                    "website_url": url,
+                    "run_metadata": {
+                        "source": "b3s_live_scan",
+                        "visual_signature_scan_status": result.get("visual_signature_scan_status"),
+                        "visual_signature_score": result.get("visual_signature_score"),
+                        "interpretation_status": result.get("interpretation_status"),
+                        "agreement_level": result.get("agreement_level"),
+                    },
+                    "visual_signature_scan": result.get("visual_signature_scan"),
+                    "visual_evidence_packet": visual_evidence,
+                    "visual_signature_evidence": result.get("visual_signature_evidence"),
+                    "raw_visual_signature_payload": result.get("payload"),
+                    "vision_payload": result.get("vision"),
+                },
+            }
+        )
+
+    status = str(result.get("status") or "unknown")
+    details = {
+        "reason": _visual_acquisition_detail(result=result, screenshot_capture=screenshot_capture),
+    }
+    blocked_reason = _visual_obstruction_detail(result)
+    if blocked_reason:
+        details["blocked_reason"] = blocked_reason
+    cookie_snippet = _visual_cookie_banner_snippet(result=result, screenshot_capture=screenshot_capture)
+    if cookie_snippet:
+        details["cookie_banner_suspected"] = True
+        details["cookie_banner_snippet"] = cookie_snippet
+    return rows, {"status": status, "details": details}
+
+
+def _capture_screenshot(*, service: Any, url: str) -> dict[str, Any]:
+    try:
+        screenshot_data, limitation = service._take_screenshot_with_budget(
+            url,
+            timeout_seconds=int(os.environ.get("BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS", "20")),
+        )
+        return service._screenshot_capture_diagnostic(
+            attempted=True,
+            screenshot_data=screenshot_data,
+            limitation=limitation,
+        )
+    except Exception as exc:  # visual evidence must never block text scoring
+        return service._screenshot_capture_diagnostic(
+            attempted=True,
+            screenshot_data={"error": str(exc)},
+            limitation="error",
+        )
+
+
+def _visual_acquisition_detail(*, result: dict[str, Any], screenshot_capture: dict[str, Any]) -> str:
+    evidence = result.get("visual_evidence_packet")
+    if isinstance(evidence, dict):
+        capture = evidence.get("capture") if isinstance(evidence.get("capture"), dict) else {}
+        capture_status = str(capture.get("status") or "").strip()
+        if capture_status:
+            return f"visual_evidence_packet:{capture_status}"
+        return "visual_evidence_packet"
+    if not screenshot_capture.get("success"):
+        return str(screenshot_capture.get("error_type") or screenshot_capture.get("error") or "screenshot_unavailable")
+    return str(result.get("interpretation_status") or result.get("status") or "visual_acquisition_unavailable")
+
+
+def _visual_obstruction_detail(result: dict[str, Any]) -> str:
+    evidence = result.get("visual_evidence_packet")
+    if not isinstance(evidence, dict):
+        return ""
+    capture = evidence.get("capture") if isinstance(evidence.get("capture"), dict) else {}
+    obstruction = capture.get("obstruction") if isinstance(capture.get("obstruction"), dict) else {}
+    if not obstruction.get("present"):
+        return ""
+    obstruction_type = str(obstruction.get("type") or "unknown")
+    severity = str(obstruction.get("severity") or "unknown")
+    signals = [str(signal) for signal in obstruction.get("signals") or [] if str(signal).strip()]
+    suffix = f"; signals: {', '.join(signals[:4])}" if signals else ""
+    return f"obstruction:{obstruction_type}; severity:{severity}{suffix}"
+
+
+def _visual_cookie_banner_snippet(*, result: dict[str, Any], screenshot_capture: dict[str, Any]) -> str:
+    evidence = result.get("visual_evidence_packet")
+    if isinstance(evidence, dict):
+        capture = evidence.get("capture") if isinstance(evidence.get("capture"), dict) else {}
+        obstruction = capture.get("obstruction") if isinstance(capture.get("obstruction"), dict) else {}
+        signals = " ".join(str(signal) for signal in obstruction.get("signals") or [])
+        obstruction_type = str(obstruction.get("type") or "")
+        if "cookie" in f"{obstruction_type} {signals}".lower() or "privacy" in f"{obstruction_type} {signals}".lower():
+            return " ".join(f"{obstruction_type} {signals}".split())[:220]
+    metadata = screenshot_capture.get("metadata") if isinstance(screenshot_capture.get("metadata"), dict) else {}
+    dismissal = metadata.get("cookie_banner_dismissal") if isinstance(metadata.get("cookie_banner_dismissal"), dict) else {}
+    if dismissal.get("success") is True:
+        return "cookie_banner_dismissal:success"
+    return ""
 
 
 def _to_payload(data: Any) -> dict[str, Any]:
@@ -201,6 +782,7 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
     coverage = debug.get("evidence_coverage") or {}
     coverage_blocks = coverage.get("blocks") or {}
     sv9 = payload.get("sv9") or {}
+    acquisition_gate = payload.get("acquisition_gate") if isinstance(payload.get("acquisition_gate"), dict) else {}
 
     blocks = []
     for name, block in sorted((interpretation.get("blocks") or {}).items()):
@@ -318,6 +900,12 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
 
     gap_key = str(result.get("most_painful_gap") or "")
     detected_count = sum(1 for block in blocks if block["detected"])
+    limitations = [str(item) for item in candidate.get("limitations") or []]
+    for item in acquisition_gate.get("limitations") or []:
+        value = str(item)
+        if value and value not in limitations:
+            limitations.append(value)
+
     return {
         "id": scan_id,
         "brand_name": brand_name,
@@ -335,9 +923,10 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
         "block_count": len(blocks),
         "components": components,
         "blocks": blocks,
+        "acquisition_gate": acquisition_gate,
         "coverage_acquisition": coverage.get("acquisition") or {},
         "absences": absences,
         "attempts": attempts,
-        "limitations": [str(item) for item in candidate.get("limitations") or []],
+        "limitations": limitations,
         "raw": payload,
     }

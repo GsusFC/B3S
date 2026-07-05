@@ -1,0 +1,72 @@
+{% extends "base.html.j2" %}
+{% block title %}API Health — B3S{% endblock %}
+{% block content %}
+<p><a href="/">← Todos los informes</a></p>
+
+<section class="panel">
+  <div class="section-head">
+    <span class="label">api_health</span>
+    <span class="tag">// configuración y checks externos</span>
+  </div>
+  <h1>Estado de APIs</h1>
+  <p class="muted">
+    Esta vista no muestra secretos completos. Por defecto solo revisa configuración; ejecuta checks reales bajo demanda.
+  </p>
+  <div class="health-toolbar">
+    <div class="mono muted">checked_at: {{ health.checked_at }}</div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+      <a class="source-link" href="/api/health/apis{% if health.run_checks %}?run=1{% endif %}">JSON</a>
+      {% if health.run_checks %}
+      <a class="source-link" href="/health/apis">config only</a>
+      {% else %}
+      <a class="source-link" href="/health/apis?run=1">run checks</a>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<div class="health-summary">
+  <div class="health-card">
+    <div class="k">overall</div>
+    <div class="v">{{ health.status }}</div>
+  </div>
+  <div class="health-card">
+    <div class="k">mode</div>
+    <div class="v">{{ "live checks" if health.run_checks else "config only" }}</div>
+  </div>
+  <div class="health-card">
+    <div class="k">services</div>
+    <div class="v">{{ health.services | length }}</div>
+  </div>
+</div>
+
+<section class="panel" style="padding:0">
+  <table class="health-status-table">
+    <thead>
+      <tr>
+        <th>Servicio</th>
+        <th>Estado</th>
+        <th>Env</th>
+        <th>Enabled</th>
+        <th>Key</th>
+        <th>Latency</th>
+        <th>Detalle</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for service in health.services %}
+      {% set chip = "ok" if service.status == "ok" or service.status == "configured" else "bad" if service.status == "error" or service.status == "missing" else "warn" %}
+      <tr>
+        <td class="mono">{{ service.label }}</td>
+        <td><span class="chip {{ chip }}">{{ service.status }}</span></td>
+        <td class="mono muted">{{ service.env_var }}</td>
+        <td class="mono">{{ "yes" if service.enabled else "no" }}</td>
+        <td class="mono muted">{% if service.secret_suffix %}••••{{ service.secret_suffix }}{% else %}—{% endif %}</td>
+        <td class="mono muted">{% if service.elapsed_ms is not none %}{{ service.elapsed_ms }}ms{% else %}—{% endif %}</td>
+        <td class="muted health-detail">{{ service.detail or "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
