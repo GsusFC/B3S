@@ -1,0 +1,9 @@
+{% macro tag(text, tone="neutral", filled=true) -%}
+<span class="status-tag status-tag--{{ tone }}{% if filled %} status-tag--filled{% endif %}">{{ text }}</span>
+{%- endmacro %}
+
+{% macro status_tag(status) -%}
+{% set value = status|string|lower %}
+{% set tone = "ok" if value in ["ok", "fetched", "configured", "captured", "usable", "completed", "scored", "done", "pass"] else "bad" if value in ["error", "missing", "blocked", "cancelled", "failed"] else "warn" if value in ["warn", "warning", "empty", "limited", "skipped", "pending", "running", "missing_key", "disabled", "degraded_approved"] else "neutral" %}
+{{ tag(status, tone, true) }}
+{%- endmacro %}

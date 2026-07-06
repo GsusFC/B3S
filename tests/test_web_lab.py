@@ -87,6 +87,7 @@ def test_home_renders_report_list(monkeypatch):
     assert 'href="/report/abc123/moodboard?lang=es"' not in response.text
     assert "Vercel" in response.text
     assert "88" in response.text
+    assert "status-tag status-tag--ok status-tag--filled" in response.text
 
 
 def test_report_moodboard_renders_images_from_persisted_web_evidence(monkeypatch):
@@ -854,6 +855,7 @@ def test_scan_preview_renders_without_live_scan():
     assert "scan-shell" in response.text
     assert "visual_acquisition" in response.text
     assert "visual_evidence_packet:blocked" in response.text
+    assert "status-tag status-tag--bad status-tag--filled" in response.text
     assert "const scanPreview = true" in response.text
 
 

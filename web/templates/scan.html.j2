@@ -1,4 +1,5 @@
 {% extends "base.html.j2" %}
+{% import "_components.html.j2" as ui %}
 {% block title %}Scanning {{ scan.brand_name }} — B3S{% endblock %}
 {% block main_class %}scan-main{% endblock %}
 {% set scan_preview = scan.preview if scan.preview is defined else false %}
@@ -48,22 +49,19 @@
       {% endfor %}
     </ol>
 
+    <section class="scan-gate" id="gate" hidden>
+      <div>
+        <h2 id="gate-title">Adquisición incompleta</h2>
+      </div>
+      <div class="scan-gate-issues" id="gate-issues"></div>
+      <div class="scan-gate-actions" id="gate-actions" hidden>
+        <button type="button" id="gate-continue">Continuar degradado</button>
+        <button type="button" class="danger" id="gate-cancel">Cancelar</button>
+      </div>
+    </section>
+
     <p class="scan-hint" id="hint" hidden></p>
     <p class="error" id="error" role="alert" hidden></p>
-  </section>
-
-  <section class="scan-gate" id="gate" hidden>
-    <div>
-      <span class="label">control de adquisición</span>
-      <h2 id="gate-title">Adquisición limitada</h2>
-      <p class="muted scan-gate-summary" id="gate-summary"></p>
-    </div>
-    <div class="scan-gate-issues" id="gate-issues"></div>
-    <div class="scan-gate-actions" id="gate-actions" hidden>
-      <button type="button" id="gate-continue">Continuar degradado</button>
-      <button type="button" class="danger" id="gate-cancel">Cancelar scan</button>
-    </div>
-    <p class="muted mono scan-gate-note" id="gate-note"></p>
   </section>
 
   <details class="scan-technical">
@@ -79,7 +77,7 @@
           {% for row in scan.acquisition %}
           <tr>
             <td class="mono">{{ row.source }}</td>
-            <td><span class="chip {{ 'ok' if row.status in ['ok', 'fetched'] else 'warn' }}">{{ row.status }}</span></td>
+            <td>{{ ui.status_tag(row.status) }}</td>
             <td class="muted">{{ row.detail }}</td>
           </tr>
           {% endfor %}
@@ -122,11 +120,27 @@ const phaseLabel = {
   score: "Scoring",
   report: "Reporte",
 };
+const okStatuses = new Set(["ok", "fetched", "configured", "captured", "usable", "completed", "scored", "done", "pass"]);
+const badStatuses = new Set(["error", "missing", "blocked", "cancelled", "failed"]);
+const warnStatuses = new Set(["warn", "warning", "empty", "limited", "skipped", "pending", "running", "missing_key", "disabled", "degraded_approved"]);
 
 function esc(value) {
   const div = document.createElement("div");
   div.textContent = value == null ? "" : String(value);
   return div.innerHTML;
+}
+
+function statusTone(value) {
+  const normalized = String(value || "").toLowerCase();
+  if (okStatuses.has(normalized)) return "ok";
+  if (badStatuses.has(normalized)) return "bad";
+  if (warnStatuses.has(normalized)) return "warn";
+  return "neutral";
+}
+
+function statusTag(value) {
+  const tone = statusTone(value);
+  return `<span class="status-tag status-tag--${tone} status-tag--filled">${esc(value)}</span>`;
 }
 
 async function poll() {
@@ -143,7 +157,7 @@ async function poll() {
   if (acquisition.length) {
     document.getElementById("acquisition").innerHTML = acquisition
       .map(row => `<tr><td class="mono">${esc(row.source)}</td>` +
-        `<td><span class="chip ${row.status === "ok" || row.status === "fetched" ? "ok" : "warn"}">${esc(row.status)}</span></td>` +
+        `<td>${statusTag(row.status)}</td>` +
         `<td class="muted">${esc(row.detail)}</td></tr>`)
       .join("");
   }
@@ -172,26 +186,23 @@ async function poll() {
 
 function renderGate(gate, scanState) {
   const panel = document.getElementById("gate");
+  const card = document.querySelector(".scan-card");
   if (!gate || !gate.state || gate.state === "pending" || gate.state === "pass") {
     panel.hidden = true;
+    if (card) card.classList.remove("scan-card--decision");
     return;
   }
   panel.hidden = false;
+  if (card) card.classList.add("scan-card--decision");
   const blocked = gate.state === "blocked";
   const canContinue = Boolean(gate.can_continue);
   const issues = [...(gate.issues || []), ...(gate.warnings || [])];
   document.getElementById("gate-title").textContent = blocked
-    ? "La adquisición no es suficiente para continuar"
+    ? "Adquisición bloqueada"
     : "Evidencia limitada";
-  document.getElementById("gate-summary").textContent =
-    blocked
-      ? "Revisa el bloqueo antes de iniciar la interpretación SV9."
-      : "El scanner puede continuar, pero esta limitación quedará registrada.";
   document.getElementById("gate-issues").innerHTML = issues.map(item =>
     `<div class="scan-gate-issue">` +
-    `<div class="scan-gate-issue-head"><span class="chip ${item.severity === "blocker" ? "bad" : "warn"}">${esc(item.severity)}</span>` +
-    `<span>${esc(item.source)}</span></div>` +
-    `<div class="muted scan-gate-detail">${esc(item.message)}</div>` +
+    `<div class="scan-gate-issue-head"><span>${esc(item.source)}</span><span class="muted">${esc(compactGateMessage(item))}</span></div>` +
     `</div>`
   ).join("");
   const continueButton = document.getElementById("gate-continue");
@@ -200,11 +211,19 @@ function renderGate(gate, scanState) {
   continueButton.disabled = !blocked || !canContinue || scanState === "cancelled";
   continueButton.hidden = !canContinue;
   document.getElementById("gate-cancel").disabled = scanState === "cancelled";
-  document.getElementById("gate-note").textContent = canContinue
-    ? "Fallback disponible. El informe marcará este scan como degradado."
-    : blocked
-      ? "No hay fallback seguro para este bloqueo."
-      : "No requiere acción.";
+}
+
+function compactGateMessage(item) {
+  if (item.source === "visual_acquisition") {
+    return "No se pudo validar la primera pantalla visual.";
+  }
+  if (item.source === "web") {
+    return "La captura web no produjo evidencia suficiente.";
+  }
+  if (item.source === "exa") {
+    return "La prueba externa no devolvió resultados útiles.";
+  }
+  return item.message || item.code || item.status || "Limitación registrada.";
 }
 
 function renderProgress(phases) {

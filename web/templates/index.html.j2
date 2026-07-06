@@ -1,4 +1,5 @@
 {% extends "base.html.j2" %}
+{% import "_components.html.j2" as ui %}
 {% block content %}
 <div class="page-head">
   <h1>Scan a brand</h1>
@@ -57,7 +58,7 @@
       <td class="mono"><strong>{{ row.score if row.score is not none else "—" }}</strong></td>
       <td class="mono">{{ row.detected_count }}/{{ row.block_count }}</td>
       <td>
-        {% for name in row.not_detected %}<span class="chip warn filled">{{ name }}</span> {% else %}<span class="chip ok filled">none</span>{% endfor %}
+        {% for name in row.not_detected %}{{ ui.tag(name, "warn") }} {% else %}{{ ui.tag("none", "ok") }}{% endfor %}
       </td>
       <td class="muted mono">{{ (row.created_at or "")[8:10] if row.created_at else "—" }}</td>
     </tr>
