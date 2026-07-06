@@ -1613,7 +1613,9 @@ class BrandServiceContentFallbackTests(unittest.TestCase):
             attempted=True,
             screenshot_data={
                 "screenshot_url": "file:///tmp/brand3-shot.png",
+                "screenshot_path": "/tmp/brand3-shot.png",
                 "screenshot_provider": "playwright",
+                "metadata": {"title": "Brand", "cookie_banner_dismissal": {"success": True}},
             },
         )
         payment_error = _screenshot_capture_diagnostic(
@@ -1636,6 +1638,8 @@ class BrandServiceContentFallbackTests(unittest.TestCase):
         self.assertEqual(captured["status"], "captured")
         self.assertTrue(captured["success"])
         self.assertEqual(playwright_captured["source"], "playwright")
+        self.assertEqual(playwright_captured["screenshot_path"], "/tmp/brand3-shot.png")
+        self.assertEqual(playwright_captured["metadata"]["title"], "Brand")
         self.assertIsNone(playwright_captured["error_type"])
         self.assertEqual(payment_error["status"], "error")
         self.assertEqual(payment_error["error_type"], "payment_required")

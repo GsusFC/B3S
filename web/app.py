@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from web.report_store import domain_key, list_reports, list_reports_for_domain, load_report
@@ -17,6 +19,9 @@ from web.scoring_store import backfill_reports, dashboard as scoring_dashboard
 
 app = FastAPI(title="B3S — Brand Evidence Lab")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+_STATIC_DIR = Path(__file__).parent / "static"
+if _STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
 def _brand_profile(domain: str) -> dict:
@@ -48,6 +53,150 @@ def _brand_profile(domain: str) -> dict:
         "detected_count": len(detected),
         "component_count": len(components),
         "not_detected": (current or {}).get("not_detected") or [],
+        "visual_module": _moodboard_from_report(current) if current else {"available": False, "images": []},
+    }
+
+
+def _report_rows_for_index() -> list[dict[str, Any]]:
+    rows = []
+    for row in list_reports():
+        enriched = dict(row)
+        enriched["brand_domain"] = domain_key(str(row.get("url") or ""))
+        rows.append(enriched)
+    return rows
+
+
+def _moodboard_from_report(report: dict[str, Any]) -> dict[str, Any]:
+    from src.features.magnetism.moodboard import build_moodboard_model
+
+    web_payload = _moodboard_web_payload(report)
+    scan_payload = {
+        "url": report.get("url") or "",
+        "tldr_brand3": {
+            str(block.get("name") or ""): {
+                "detected": block.get("detected") is True,
+                "content": str(block.get("content") or ""),
+            }
+            for block in report.get("blocks") or []
+            if isinstance(block, dict) and block.get("name")
+        },
+    }
+    model = build_moodboard_model(
+        scan_payload,
+        web_payload,
+        brand_logo_url=str(report.get("brand_logo_url") or _visual_signature_logo_url(report) or ""),
+    )
+    model.update(
+        {
+            "report_id": report.get("id") or "",
+            "brand_name": report.get("brand_name") or "",
+            "score": report.get("score"),
+            "url": report.get("url") or model.get("page_url") or "",
+            "brand_domain": domain_key(str(report.get("url") or "")),
+        }
+    )
+    return model
+
+
+def _visual_signature_logo_url(report: dict[str, Any]) -> str:
+    for payload in _visual_signature_payloads(report):
+        logo_url = _logo_url_from_visual_signature_payload(payload)
+        if logo_url:
+            return logo_url
+    return ""
+
+
+def _visual_signature_payloads(report: dict[str, Any]) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    raw = report.get("raw") if isinstance(report.get("raw"), dict) else {}
+    for record in raw.get("raw_inputs") or []:
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("source") or "") not in {"visual_acquisition", "visual_signature"}:
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, dict):
+            payloads.append(payload)
+
+    evidence = (((raw.get("flow") or {}).get("candidate") or {}).get("evidence_pack") or {}).get("evidence") or []
+    for record in evidence:
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("source") or "") not in {"visual_acquisition", "visual_signature"}:
+            continue
+        payload = _json_dict(record.get("content"))
+        if payload:
+            payloads.append(payload)
+    return payloads
+
+
+def _logo_url_from_visual_signature_payload(payload: dict[str, Any]) -> str:
+    for key in ("visual_signature_evidence", "visual_evidence_packet"):
+        evidence = payload.get(key) if isinstance(payload.get(key), dict) else {}
+        identity = evidence.get("identity") if isinstance(evidence.get("identity"), dict) else {}
+        for candidate in identity.get("candidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("role") != "real_logo":
+                continue
+            url = _http_url(candidate.get("url"))
+            if url:
+                return url
+
+    raw_payload = payload.get("raw_visual_signature_payload") if isinstance(payload.get("raw_visual_signature_payload"), dict) else payload
+    logo = raw_payload.get("logo") if isinstance(raw_payload.get("logo"), dict) else {}
+    for candidate in logo.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        location = str(candidate.get("location") or "")
+        confidence = candidate.get("confidence")
+        if location not in {"header", "nav"} or not isinstance(confidence, (int, float)) or confidence < 0.55:
+            continue
+        url = _http_url(candidate.get("url"))
+        if url:
+            return url
+    return ""
+
+
+def _json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _http_url(value: Any) -> str:
+    candidate = str(value or "").strip()
+    if candidate.startswith(("http://", "https://")):
+        return candidate
+    return ""
+
+
+def _moodboard_web_payload(report: dict[str, Any]) -> dict[str, str]:
+    evidence = (
+        ((report.get("raw") or {}).get("flow") or {})
+        .get("candidate", {})
+        .get("evidence_pack", {})
+        .get("evidence", [])
+    )
+    markdown_parts = []
+    for record in evidence:
+        if not isinstance(record, dict):
+            continue
+        if record.get("source") != "web" or record.get("evidence_type") != "raw_input":
+            continue
+        content = str(record.get("content") or "").strip()
+        if content:
+            markdown_parts.append(content)
+    return {
+        "url": str(report.get("url") or ""),
+        "canonical_url": str(report.get("url") or ""),
+        "markdown_content": "\n\n".join(markdown_parts),
     }
 
 
@@ -246,6 +395,20 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/artifacts/screenshots/{filename}")
+def screenshot_artifact(filename: str):
+    safe_name = Path(filename).name
+    path = (Path("data/screenshots") / safe_name).resolve()
+    root = Path("data/screenshots").resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return JSONResponse({"error": "invalid artifact path"}, status_code=404)
+    if not path.is_file():
+        return JSONResponse({"error": "artifact not found"}, status_code=404)
+    return FileResponse(path)
+
+
 @app.get("/api/health/apis")
 def api_health_api(run: bool = False):
     return JSONResponse(_api_health(run_checks=run))
@@ -281,7 +444,7 @@ def index(request: Request, error: str = ""):
     return templates.TemplateResponse(
         request,
         "index.html.j2",
-        {"reports": list_reports(), "error": error},
+        {"reports": _report_rows_for_index(), "error": error},
     )
 
 
@@ -309,6 +472,76 @@ def create_scan(
     except ValueError as exc:
         return RedirectResponse(f"/?error={exc}", status_code=303)
     return RedirectResponse(f"/scan/{scan_id}", status_code=303)
+
+
+@app.get("/dev/scan-preview")
+def scan_preview_view(request: Request, variant: str = "blocked"):
+    return templates.TemplateResponse(
+        request,
+        "scan.html.j2",
+        {"scan": _scan_preview_status(variant)},
+    )
+
+
+def _scan_preview_status(variant: str) -> dict[str, Any]:
+    normalized = variant if variant in {"running", "warning", "blocked"} else "blocked"
+    phases = [
+        {"key": "capture", "label": "Capture evidence", "state": "done"},
+        {"key": "interpret", "label": "Interpret SV9", "state": "pending"},
+        {"key": "score", "label": "Score components", "state": "pending"},
+        {"key": "report", "label": "Write report", "state": "pending"},
+    ]
+    if normalized == "running":
+        phases[1]["state"] = "running"
+    if normalized == "warning":
+        phases[1]["state"] = "running"
+    if normalized == "blocked":
+        phases[1]["state"] = "blocked"
+    acquisition = [
+        {"source": "web", "status": "ok", "detail": "owned homepage captured with 4 strategic surfaces"},
+        {"source": "exa", "status": "fetched", "detail": "external proof available from mentions/news"},
+        {"source": "searchapi", "status": "fetched", "detail": "fallback search returned 6 candidate references"},
+        {"source": "github", "status": "skipped", "detail": "no repository links observed on owned capture"},
+        {
+            "source": "visual_acquisition",
+            "status": "blocked" if normalized == "blocked" else "limited",
+            "detail": "visual evidence packet blocked by viewport obstruction" if normalized == "blocked" else "screenshot captured; visual semantics limited",
+        },
+    ]
+    gate = {"state": "pass"} if normalized == "running" else {
+        "state": "blocked" if normalized == "blocked" else "warning",
+        "can_continue": normalized == "blocked",
+        "issues": [
+            {
+                "source": "visual_acquisition",
+                "code": "visual_acquisition_limited",
+                "severity": "blocker" if normalized == "blocked" else "warning",
+                "status": "blocked" if normalized == "blocked" else "limited",
+                "message": "Visual acquisition could not produce a reliable first-fold reading.",
+                "detail": "visual_evidence_packet:blocked; obstruction:viewport_overlay" if normalized == "blocked" else "",
+            }
+        ] if normalized == "blocked" else [],
+        "warnings": [
+            {
+                "source": "exa",
+                "code": "external_profiles_empty",
+                "severity": "warning",
+                "status": "empty",
+                "message": "External profile discovery was empty, but SearchAPI returned usable fallback references.",
+                "detail": "",
+            }
+        ] if normalized == "warning" else [],
+    }
+    return {
+        "id": f"preview-{normalized}",
+        "brand_name": "Stabolut",
+        "url": "https://stabolut.com",
+        "state": "blocked" if normalized == "blocked" else "running",
+        "preview": True,
+        "phases": phases,
+        "acquisition": acquisition,
+        "acquisition_gate": gate,
+    }
 
 
 @app.get("/scan/{scan_id}")
@@ -355,3 +588,15 @@ def report_view(request: Request, scan_id: str):
     if report is None:
         return RedirectResponse("/?error=Report not found", status_code=303)
     return templates.TemplateResponse(request, "report.html.j2", {"report": report})
+
+
+@app.get("/report/{scan_id}/moodboard")
+def report_moodboard_view(request: Request, scan_id: str, lang: str = "es"):
+    report = load_report(scan_id)
+    if report is None:
+        return RedirectResponse("/?error=Report not found", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "moodboard.html.j2",
+        {"report": report, "moodboard": _moodboard_from_report(report), "lang": lang},
+    )

@@ -167,6 +167,7 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
         envelope = {"snapshot": snapshot, "source_run_id": snapshot["run"]["id"]}
         payload = build_flow_sv9_shadow_eval(envelope, include_full=True)
         payload["acquisition_gate"] = snapshot.get("acquisition_gate") or gate
+        payload["acquisition_artifacts"] = _acquisition_artifacts_from_snapshot(snapshot)
         _set_phase(scan_id, "interpret", "done")
         _set_phase(scan_id, "score", "done")
 
@@ -750,6 +751,73 @@ def _visual_cookie_banner_snippet(*, result: dict[str, Any], screenshot_capture:
     return ""
 
 
+def _acquisition_artifacts_from_snapshot(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    for row in snapshot.get("raw_inputs") or []:
+        if not isinstance(row, dict):
+            continue
+        source = str(row.get("source") or "")
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        if source == "screenshot_capture":
+            capture = payload.get("capture") if isinstance(payload.get("capture"), dict) else {}
+            artifacts.append(_screenshot_artifact(capture))
+        elif source == "visual_acquisition":
+            evidence = payload.get("visual_evidence_packet") if isinstance(payload.get("visual_evidence_packet"), dict) else {}
+            capture = evidence.get("capture") if isinstance(evidence.get("capture"), dict) else {}
+            obstruction = capture.get("obstruction") if isinstance(capture.get("obstruction"), dict) else {}
+            artifacts.append(
+                {
+                    "source": "visual_acquisition",
+                    "kind": "visual_evidence_packet",
+                    "status": str(capture.get("status") or ""),
+                    "first_fold_evaluable": capture.get("first_fold_evaluable"),
+                    "obstruction": {
+                        "present": obstruction.get("present"),
+                        "type": str(obstruction.get("type") or ""),
+                        "severity": str(obstruction.get("severity") or ""),
+                        "signals": [str(item) for item in obstruction.get("signals") or []][:8],
+                    },
+                }
+            )
+    return [artifact for artifact in artifacts if artifact]
+
+
+def _screenshot_artifact(capture: dict[str, Any]) -> dict[str, Any]:
+    screenshot_path = str(capture.get("screenshot_path") or "").strip()
+    screenshot_url = str(capture.get("screenshot_url") or "").strip()
+    metadata = capture.get("metadata") if isinstance(capture.get("metadata"), dict) else {}
+    artifact = {
+        "source": "screenshot_capture",
+        "kind": "screenshot",
+        "status": str(capture.get("status") or ""),
+        "success": capture.get("success") is True,
+        "provider": str(capture.get("source") or ""),
+        "screenshot_url": screenshot_url,
+        "screenshot_path": screenshot_path,
+        "public_url": _public_screenshot_url(screenshot_path=screenshot_path, screenshot_url=screenshot_url),
+        "metadata": metadata,
+    }
+    return artifact if screenshot_path or screenshot_url or artifact["status"] else {}
+
+
+def _public_screenshot_url(*, screenshot_path: str, screenshot_url: str) -> str:
+    from pathlib import Path
+    from urllib.parse import urlparse
+
+    candidate = screenshot_path
+    if not candidate and screenshot_url.startswith("file://"):
+        candidate = urlparse(screenshot_url).path
+    if not candidate:
+        return ""
+    try:
+        path = Path(candidate).resolve()
+        root = Path("data/screenshots").resolve()
+        path.relative_to(root)
+    except Exception:
+        return ""
+    return f"/artifacts/screenshots/{path.name}"
+
+
 def _to_payload(data: Any) -> dict[str, Any]:
     if hasattr(data, "to_dict"):
         return data.to_dict()
@@ -783,6 +851,7 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
     coverage_blocks = coverage.get("blocks") or {}
     sv9 = payload.get("sv9") or {}
     acquisition_gate = payload.get("acquisition_gate") if isinstance(payload.get("acquisition_gate"), dict) else {}
+    acquisition_artifacts = payload.get("acquisition_artifacts") if isinstance(payload.get("acquisition_artifacts"), list) else []
 
     blocks = []
     for name, block in sorted((interpretation.get("blocks") or {}).items()):
@@ -924,6 +993,7 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
         "components": components,
         "blocks": blocks,
         "acquisition_gate": acquisition_gate,
+        "acquisition_artifacts": acquisition_artifacts,
         "coverage_acquisition": coverage.get("acquisition") or {},
         "absences": absences,
         "attempts": attempts,

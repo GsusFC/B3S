@@ -1,0 +1,177 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-05T00:00:00+02:00",
+  "title": "Design System: B3S",
+  "extensions": {
+    "colorMeta": {
+      "rgb-red": {
+        "role": "primary",
+        "displayName": "RGB Red",
+        "canonical": "#ff0000",
+        "tonalRamp": ["#260000", "#4d0000", "#800000", "#b30000", "#ff0000", "#ff6666", "#ffb3b3", "#fff0f0"]
+      },
+      "rgb-green": {
+        "role": "semantic",
+        "displayName": "RGB Green",
+        "canonical": "#00ff00",
+        "tonalRamp": ["#002600", "#004d00", "#008000", "#00b300", "#00ff00", "#66ff66", "#b3ffb3", "#f0fff0"]
+      },
+      "rgb-blue": {
+        "role": "semantic",
+        "displayName": "RGB Blue",
+        "canonical": "#0000ff",
+        "tonalRamp": ["#000026", "#00004d", "#000080", "#0000b3", "#0000ff", "#6666ff", "#b3b3ff", "#f0f0ff"]
+      },
+      "bg-night": {
+        "role": "neutral",
+        "displayName": "Night Background",
+        "canonical": "#0b0d0e",
+        "tonalRamp": ["#050606", "#0b0d0e", "#121615", "#28302d", "#39423e", "#706c65", "#9b968c", "#dedbd2"]
+      },
+      "bg-day": {
+        "role": "neutral",
+        "displayName": "Day Background",
+        "canonical": "#eeeeee",
+        "tonalRamp": ["#161616", "#77736d", "#9a958e", "#d7d7d7", "#e4e4e4", "#eeeeee", "#f5f5f5", "#ffffff"]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Mono Display",
+        "purpose": "Brand names and score hero figures only."
+      },
+      "body": {
+        "displayName": "Mono Body",
+        "purpose": "Operational text, evidence snippets, controls, and report prose."
+      },
+      "label": {
+        "displayName": "Mono Label",
+        "purpose": "Metadata, table headers, chips, score labels, and terminal keys."
+      }
+    },
+    "shadows": [
+      {
+        "name": "drawer-push",
+        "value": "-18px 0 42px var(--shadow)",
+        "purpose": "Right-side report drawer only."
+      },
+      {
+        "name": "visual-cloud-card",
+        "value": "0 18px 48px rgb(0 0 0 / 45%)",
+        "purpose": "Moodboard image cloud cards only."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-filter",
+        "value": "150ms ease",
+        "purpose": "Button hover and small state feedback."
+      },
+      {
+        "name": "score-load",
+        "value": "900ms steps(14, end)",
+        "purpose": "Report score bar loading, disabled under reduced motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "report-two-column",
+        "value": "980px"
+      },
+      {
+        "name": "mobile-single-column",
+        "value": "680px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Sharp RGB action for scan and commit-like product actions.",
+      "html": "<button class=\"ds-button-primary\">Run evidence scan</button>",
+      "css": ".ds-button-primary { padding: 10px 18px; border-radius: 0; border: 1px solid #ff0000; background: #ff0000; color: #eeeeee; font: 700 13px/1.3 'JetBrains Mono', ui-monospace, monospace; cursor: pointer; transition: filter 150ms ease; } .ds-button-primary:hover { filter: brightness(1.1); } .ds-button-primary:focus-visible { outline: 2px solid #ff0000; outline-offset: 2px; }"
+    },
+    {
+      "name": "Secondary Source Link",
+      "kind": "nav",
+      "refersTo": "button-secondary",
+      "description": "Compact bordered navigation affordance for report, brand, visual, and utility links.",
+      "html": "<a class=\"ds-source-link\" href=\"#\">ver SV9</a>",
+      "css": ".ds-source-link { width: fit-content; display: inline-flex; min-height: 28px; align-items: center; border: 1px solid #28302d; padding: 3px 8px; background: #121615; color: #dedbd2; font: 12px/1.4 'JetBrains Mono', ui-monospace, monospace; text-decoration: none; } .ds-source-link:hover, .ds-source-link:focus-visible { border-color: #ff0000; color: #ff0000; outline: 2px solid #ff0000; outline-offset: 2px; }"
+    },
+    {
+      "name": "Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "Flat bordered operational container for forms, tables, reports, and health state.",
+      "html": "<section class=\"ds-panel\">Evidence panel</section>",
+      "css": ".ds-panel { background: rgba(18, 22, 21, 0.76); border: 1px solid #28302d; border-radius: 0; padding: 16px; color: #dedbd2; font: 13px/1.5 'JetBrains Mono', ui-monospace, monospace; }"
+    },
+    {
+      "name": "Status Chip",
+      "kind": "chip",
+      "refersTo": "chip",
+      "description": "Small bordered evidence status label.",
+      "html": "<span class=\"ds-chip-ok\">con evidencia</span>",
+      "css": ".ds-chip-ok { display: inline-block; padding: 1px 8px; border-radius: 2px; font: 12px/1.5 'JetBrains Mono', ui-monospace, monospace; border: 1px solid #00ff00; color: #00ff00; background: transparent; }"
+    },
+    {
+      "name": "Report Drawer",
+      "kind": "custom",
+      "refersTo": "panel",
+      "description": "Right-side technical reading drawer for tiles, citations, and acquisition details.",
+      "html": "<aside class=\"ds-report-drawer\"><header>Propósito</header><section>Evidence detail</section></aside>",
+      "css": ".ds-report-drawer { width: min(620px, calc(100dvw - 24px)); height: calc(100dvh - 24px); border: 1px solid #28302d; border-radius: 0; background: #121615; color: #dedbd2; box-shadow: -18px 0 42px rgb(0 0 0 / 48%); overflow: auto; scrollbar-width: none; font: 13px/1.5 'JetBrains Mono', ui-monospace, monospace; } .ds-report-drawer header { position: sticky; top: 0; padding: 16px; border-bottom: 1px solid #28302d; background: #121615; font-size: 28px; font-weight: 700; } .ds-report-drawer section { margin: 14px; border: 1px solid #28302d; padding: 16px 18px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Evidence Observatory",
+    "overview": "B3S is a technical observatory for brand evidence, not a decorative analytics product. The interface should feel like a calibration desk where each number, citation, visual capture, tile, and acquisition warning can be inspected under controlled conditions.",
+    "keyCharacteristics": [
+      "Mono typography across UI, data, controls, reports, and labels.",
+      "Day/night themes using actual RGB red, green, and blue as system colors.",
+      "Rectilinear panels, sharp controls, visible borders, and minimal radius.",
+      "Progressive disclosure: summary on the card, evidence and tile detail in drawers.",
+      "Brand-first report hierarchy: brand name, URL, score, margin, then components."
+    ],
+    "rules": [
+      {
+        "name": "The RGB Semantics Rule",
+        "body": "Red, green, and blue are system signals. Use them sparingly and literally; never replace missing evidence with yellow.",
+        "section": "colors"
+      },
+      {
+        "name": "The No Beige Drift Rule",
+        "body": "The historical design/DESIGN.md beige/Fraunces/Manrope direction is not the active B3S UI language unless a task explicitly asks to revive that branch.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Font Rule",
+        "body": "Do not introduce a second family for product UI. If a future brand surface needs a different font, scope it to that surface.",
+        "section": "typography"
+      },
+      {
+        "name": "The Border Is Structure Rule",
+        "body": "Use 1px borders and layout rhythm before reaching for shadows.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do preserve the brand-first report hierarchy: brand name, URL, score, immediate margin, then cards.",
+      "Do keep report rows and cards comparable by using stable widths, explicit grid spans, and predictable score badges.",
+      "Do put long tile explanations, citations, acquisition limitations, and rejected content behind drawers or secondary panels.",
+      "Do use visible text labels for evidence status; color alone is not enough.",
+      "Do keep day/night themes aligned by role, not by unrelated palettes."
+    ],
+    "donts": [
+      "Don't make B3S look like a generic SaaS dashboard, CRM, investor analytics panel, or AI startup landing page.",
+      "Don't use beige editorial Brand3 styling as the default active UI.",
+      "Don't use yellow for not detected or missing evidence.",
+      "Don't add purple gradients, glassmorphism, glossy AI surfaces, decorative charts, or marketing hero layouts.",
+      "Don't create nested cards, repeated equal-weight card grids, or page sections styled as floating cards.",
+      "Don't expose all tile information on the first report view when the drawer can carry the explanation."
+    ]
+  }
+}

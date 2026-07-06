@@ -20,6 +20,9 @@
     <strong class="brand-profile-score">{{ brand.current.score if brand.current.score is not none else "—" }}</strong>
     <span class="brand-profile-terminal-value">disponible / {{ (brand.current.created_at or "")[:10] }}</span>
     <a class="source-link" href="/report/{{ brand.current.id }}">ver SV9</a>
+    {% if brand.visual_module.available %}
+    <a class="source-link" href="/report/{{ brand.current.id }}/moodboard?lang=es">ver visual</a>
+    {% endif %}
     {% else %}
     <strong class="brand-profile-score">—</strong>
     <span class="brand-profile-terminal-value is-empty">sin scan local</span>
@@ -33,6 +36,29 @@
 </section>
 
 <section class="brand-profile-summary">
+  {% if brand.visual_module.available %}
+  <section class="brand-profile-block brand-profile-visual">
+    <div class="section-head">
+      <span class="label">módulo_visual</span>
+      <span class="tag">// {{ brand.visual_module.image_count }} assets propios desde evidencia</span>
+    </div>
+    <div class="moodboard-stage moodboard-stage--brand cloud-stage" data-moodboard-stage aria-label="Moodboard visual de {{ brand.display_name }}">
+      <div class="cloud-layer" data-cloud-layer></div>
+      <canvas class="moodboard-grain" data-moodboard-grain></canvas>
+      <div class="moodboard-vignette"></div>
+    </div>
+    <script type="application/json" data-moodboard-items>{{ brand.visual_module.images | tojson }}</script>
+    <script src="/static/brand3_cloud.js" defer></script>
+    <script src="/static/moodboard.js" defer></script>
+    {% if brand.current %}
+    <p class="page-tools brand-visual-actions">
+      <a class="source-link" href="/report/{{ brand.current.id }}/moodboard?lang=es">abrir moodboard completo</a>
+      <button class="source-link source-link-button moodboard-shuffle" type="button" data-moodboard-shuffle>reorganizar</button>
+    </p>
+    {% endif %}
+  </section>
+  {% endif %}
+
   <div class="brand-profile-grid">
     <section class="brand-profile-block">
       <div class="section-head">

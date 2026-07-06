@@ -83,8 +83,116 @@ def test_home_renders_report_list(monkeypatch):
     assert 'aria-label="B3S home"' in response.text
     assert 'viewBox="0 0 193 63"' in response.text
     assert 'href="/report/abc123"' in response.text
+    assert 'href="/brand/vercel.com?lang=es"' in response.text
+    assert 'href="/report/abc123/moodboard?lang=es"' not in response.text
     assert "Vercel" in response.text
     assert "88" in response.text
+
+
+def test_report_moodboard_renders_images_from_persisted_web_evidence(monkeypatch):
+    from web.app import app
+
+    monkeypatch.setattr(
+        "web.app.load_report",
+        lambda scan_id: {
+            "id": scan_id,
+            "brand_name": "Stabolut",
+            "url": "https://stabolut.com",
+            "brand_logo_url": "https://stabolut.com/assets/logo.svg",
+            "score": 79,
+            "blocks": [
+                {"name": "brand_idea", "detected": True, "content": "Beyond digital dollars."},
+                {"name": "personality", "detected": True, "content": "Technical and direct."},
+            ],
+            "raw": {
+                "flow": {
+                    "candidate": {
+                        "evidence_pack": {
+                            "evidence": [
+                                {
+                                    "source": "web",
+                                    "evidence_type": "raw_input",
+                                    "content": (
+                                        "# Hero\n"
+                                        "![Layered cube](https://stabolut.com/assets/card-overcollateralized.png)\n"
+                                        "![Yield icon](https://stabolut.com/assets/icon-yield.png)"
+                                    ),
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        },
+    )
+
+    response = TestClient(app).get("/report/scan123/moodboard?lang=es")
+
+    assert response.status_code == 200
+    assert "Moodboard" in response.text
+    assert "moodboard-hero" in response.text
+    assert "moodboard-logo" in response.text
+    assert "moodboard-count" in response.text
+    assert "data-moodboard-stage" in response.text
+    assert "/static/brand3_cloud.js" in response.text
+    assert "/static/moodboard.js" in response.text
+    assert "https://stabolut.com/assets/card-overcollateralized.png" in response.text
+    assert "https://stabolut.com/assets/logo.svg" in response.text
+    assert "Beyond digital dollars." in response.text
+    assert 'href="/brand/stabolut.com?lang=es"' in response.text
+    assert "Imágenes representativas que la marca publica" not in response.text
+
+
+def test_report_moodboard_uses_visual_signature_real_logo_when_brand_logo_is_missing(monkeypatch):
+    from web.app import app
+
+    visual_payload = {
+        "schema_version": "visual-signature-persistence-1",
+        "visual_signature_evidence": {
+            "schema_version": "visual-signature-evidence-v1",
+            "identity": {
+                "candidates": [
+                    {
+                        "url": "https://stabolut.com/assets/brand-mark.svg",
+                        "role": "real_logo",
+                        "location": "header",
+                        "confidence": 0.91,
+                    }
+                ]
+            },
+        },
+    }
+    monkeypatch.setattr(
+        "web.app.load_report",
+        lambda scan_id: {
+            "id": scan_id,
+            "brand_name": "Stabolut",
+            "url": "https://stabolut.com",
+            "score": 79,
+            "blocks": [],
+            "raw": {
+                "flow": {
+                    "candidate": {
+                        "evidence_pack": {
+                            "evidence": [
+                                {
+                                    "source": "visual_acquisition",
+                                    "evidence_type": "raw_input",
+                                    "content": json.dumps(visual_payload),
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        },
+    )
+
+    response = TestClient(app).get("/report/scan123/moodboard?lang=es")
+
+    assert response.status_code == 200
+    assert "https://stabolut.com/assets/brand-mark.svg" in response.text
+    assert '<img src="https://stabolut.com/assets/brand-mark.svg"' in response.text
 
 
 def test_brand_view_renders_profile_from_matching_reports(monkeypatch):
@@ -122,6 +230,52 @@ def test_brand_view_renders_profile_from_matching_reports(monkeypatch):
     assert "Stablecoin platform." in response.text
     assert 'href="/report/report123"' in response.text
     assert "79" in response.text
+
+
+def test_brand_view_embeds_visual_module_from_latest_report(monkeypatch):
+    from web.app import app
+
+    monkeypatch.setattr(
+        "web.app.list_reports_for_domain",
+        lambda domain: [
+            {
+                "id": "report123",
+                "brand_name": "Stabolut",
+                "url": "https://stabolut.com",
+                "created_at": "2026-07-03T12:00:00+00:00",
+                "score": 79,
+                "components": [],
+                "blocks": [{"name": "brand_idea", "detected": True, "content": "Beyond digital dollars."}],
+                "raw": {
+                    "flow": {
+                        "candidate": {
+                            "evidence_pack": {
+                                "evidence": [
+                                    {
+                                        "source": "web",
+                                        "evidence_type": "raw_input",
+                                        "content": "![Layered cube](https://stabolut.com/assets/card-overcollateralized.png)",
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+            }
+        ],
+    )
+
+    response = TestClient(app).get("/brand/stabolut.com?lang=es")
+
+    assert response.status_code == 200
+    assert "módulo_visual" in response.text
+    assert "moodboard-stage--brand" in response.text
+    assert "data-moodboard-stage" in response.text
+    assert "/static/brand3_cloud.js" in response.text
+    assert "/static/moodboard.js" in response.text
+    assert '<div class="moodboard-strip"' not in response.text
+    assert "https://stabolut.com/assets/card-overcollateralized.png" in response.text
+    assert 'href="/report/report123/moodboard?lang=es"' in response.text
 
 
 def test_brand_view_handles_missing_scan(monkeypatch):
@@ -527,6 +681,58 @@ def test_acquisition_gate_warns_when_web_capture_looks_like_cookie_banner():
     assert "cookie_banner_snippet: Valoramos tu privacidad" in warning["detail"]
 
 
+def test_acquisition_artifacts_include_screenshot_and_visual_obstruction(tmp_path, monkeypatch):
+    from web.scan_runner import _acquisition_artifacts_from_snapshot
+
+    screenshot_dir = tmp_path / "data" / "screenshots"
+    screenshot_dir.mkdir(parents=True)
+    screenshot = screenshot_dir / "brand3-screenshot-test.png"
+    screenshot.write_bytes(b"png")
+    monkeypatch.chdir(tmp_path)
+
+    artifacts = _acquisition_artifacts_from_snapshot(
+        {
+            "raw_inputs": [
+                {
+                    "source": "screenshot_capture",
+                    "payload": {
+                        "capture": {
+                            "status": "captured",
+                            "success": True,
+                            "source": "playwright",
+                            "screenshot_url": screenshot.as_uri(),
+                            "screenshot_path": str(screenshot),
+                            "metadata": {"title": "Stabolut"},
+                        }
+                    },
+                },
+                {
+                    "source": "visual_acquisition",
+                    "payload": {
+                        "visual_evidence_packet": {
+                            "capture": {
+                                "status": "blocked",
+                                "first_fold_evaluable": False,
+                                "obstruction": {
+                                    "present": True,
+                                    "type": "cookie_modal",
+                                    "severity": "major",
+                                    "signals": ["dom_keyword:privacy"],
+                                },
+                            }
+                        }
+                    },
+                },
+            ]
+        }
+    )
+
+    assert artifacts[0]["public_url"] == "/artifacts/screenshots/brand3-screenshot-test.png"
+    assert artifacts[0]["metadata"]["title"] == "Stabolut"
+    assert artifacts[1]["status"] == "blocked"
+    assert artifacts[1]["obstruction"]["type"] == "cookie_modal"
+
+
 def test_capture_snapshot_adds_visual_acquisition_raw_input(monkeypatch):
     from src.services import brand_service
     from web.scan_runner import _capture_snapshot
@@ -605,6 +811,50 @@ def test_scan_and_api_fall_back_to_finished_report(monkeypatch):
     assert page.headers["location"] == "/report/done123"
     assert api.status_code == 200
     assert api.json() == {"state": "done", "id": "done123"}
+
+
+def test_scan_view_uses_structured_layout(monkeypatch):
+    from web.app import app
+
+    monkeypatch.setattr(
+        "web.app.scan_status",
+        lambda scan_id: {
+            "id": scan_id,
+            "brand_name": "Mercury",
+            "url": "https://mercury.com",
+            "state": "running",
+            "phases": [
+                {"key": "capture", "label": "Capture evidence", "state": "running"},
+                {"key": "interpret", "label": "Interpret SV9", "state": "pending"},
+            ],
+        },
+    )
+
+    response = TestClient(app).get("/scan/scan123")
+
+    assert response.status_code == 200
+    assert "scan-shell" in response.text
+    assert "scan-card" in response.text
+    assert "scan-meter" in response.text
+    assert "scan-steps" in response.text
+    assert "scan-gate-actions" in response.text
+    assert "scan-acquisition-table" in response.text
+    assert "Detalle técnico" in response.text
+    assert "https://mercury.com" in response.text
+    assert 'style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"' not in response.text
+
+
+def test_scan_preview_renders_without_live_scan():
+    from web.app import app
+
+    response = TestClient(app).get("/dev/scan-preview?variant=blocked")
+
+    assert response.status_code == 200
+    assert "preview-blocked" in response.text
+    assert "scan-shell" in response.text
+    assert "visual_acquisition" in response.text
+    assert "visual_evidence_packet:blocked" in response.text
+    assert "const scanPreview = true" in response.text
 
 
 def test_report_view_renders_report(monkeypatch):

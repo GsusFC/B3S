@@ -113,10 +113,7 @@ def _visible_obstruction_dom_snapshot(page: Any) -> str:
             """
         )
     except Exception:
-        try:
-            return page.content()
-        except Exception:
-            return ""
+        return ""
     if not isinstance(rows, list):
         return ""
     parts: list[str] = []
@@ -145,10 +142,7 @@ def _visible_obstruction_dom_snapshot(page: Any) -> str:
         parts.append(f"<visible-overlay {attrs}>{text}</visible-overlay>")
     if parts:
         return "\n".join(parts)
-    try:
-        return page.content()
-    except Exception:
-        return ""
+    return ""
 
 
 def _coerce_dict_or_none(value: Any, *, field_name: str) -> dict[str, Any] | None:

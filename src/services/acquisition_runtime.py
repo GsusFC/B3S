@@ -46,7 +46,7 @@ def _screenshot_capture_diagnostic(
     screenshot_url = str(data.get("screenshot_url") or "")
     source = str(data.get("screenshot_provider") or "firecrawl_screenshot")
     if screenshot_url:
-        return {
+        payload: dict[str, object] = {
             "attempted": True,
             "success": True,
             "status": "captured",
@@ -55,6 +55,13 @@ def _screenshot_capture_diagnostic(
             "error_message": None,
             "screenshot_url": screenshot_url,
         }
+        screenshot_path = str(data.get("screenshot_path") or "").strip()
+        if screenshot_path:
+            payload["screenshot_path"] = screenshot_path
+        metadata = data.get("metadata")
+        if isinstance(metadata, dict):
+            payload["metadata"] = metadata
+        return payload
 
     error_message = str(data.get("error") or limitation or "screenshot_capture_failed")
     error_type = str(data.get("error_type") or limitation or _classify_screenshot_error(error_message))

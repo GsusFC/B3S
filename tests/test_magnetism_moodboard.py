@@ -87,6 +87,7 @@ class MoodboardModelTests(unittest.TestCase):
         self.assertTrue(model["available"])
         self.assertEqual(model["images"][0]["url"], "https://acme.com/logo.svg")
         self.assertEqual(model["images"][0]["role"], "logo")
+        self.assertEqual(model["logo_image"]["url"], "https://acme.com/logo.svg")
         reading_keys = [item["key"] for item in model["visual_reading"]]
         self.assertEqual(reading_keys, ["personality", "attributes", "value_proposition"])
         attributes = next(item for item in model["visual_reading"] if item["key"] == "attributes")

@@ -183,10 +183,12 @@ def build_moodboard_model(
     role_counts: dict[str, int] = {}
     for item in images:
         role_counts[item["role"]] = role_counts.get(item["role"], 0) + 1
+    logo_image = next((item for item in images if item["role"] == "logo"), None)
 
     return {
         "available": bool(images),
         "images": images,
+        "logo_image": logo_image,
         "visual_reading": visual_reading,
         "role_counts": role_counts,
         "image_count": len(images),

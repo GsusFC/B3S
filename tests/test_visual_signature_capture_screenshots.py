@@ -740,11 +740,18 @@ def test_visible_obstruction_dom_snapshot_serializes_visible_overlay_rows():
     assert "Accept All Reject All" in snapshot
 
 
-def test_visible_obstruction_dom_snapshot_falls_back_to_page_content():
+def test_visible_obstruction_dom_snapshot_returns_empty_when_playwright_eval_fails():
     capturer = _load_capturer()
     page = _FakeSnapshotPage(error=RuntimeError("js unavailable"))
 
-    assert capturer._visible_obstruction_dom_snapshot(page) == "<html>fallback cookie modal</html>"
+    assert capturer._visible_obstruction_dom_snapshot(page) == ""
+
+
+def test_visible_obstruction_dom_snapshot_returns_empty_when_no_visible_overlay_rows():
+    capturer = _load_capturer()
+    page = _FakeSnapshotPage([])
+
+    assert capturer._visible_obstruction_dom_snapshot(page) == ""
 
 
 def test_cookie_modal_accept_all_is_safe_candidate():

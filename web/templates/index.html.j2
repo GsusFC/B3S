@@ -1,7 +1,11 @@
 {% extends "base.html.j2" %}
 {% block content %}
-<h1>Scan a brand</h1>
-<p><a class="source-link" href="/scoring/lab">Scoring Lab</a></p>
+<div class="page-head">
+  <h1>Scan a brand</h1>
+  <div class="page-tools">
+    <a class="source-link" href="/scoring/lab">Scoring Lab</a>
+  </div>
+</div>
 
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
 
@@ -15,34 +19,47 @@
       <span class="muted">Brand name (optional)</span>
       <input type="text" name="brand_name" placeholder="Vercel">
     </label>
-    <label class="check-row">
-      <input type="checkbox" name="allow_degraded_fallback" value="true">
-      <span>allow degraded fallback if acquisition fails</span>
-    </label>
     <div class="form-action">
       <button type="submit">Run evidence scan</button>
     </div>
   </div>
+  <div class="form-options">
+    <label class="check-row">
+      <input type="checkbox" name="allow_degraded_fallback" value="true">
+      <span>allow degraded fallback if acquisition fails</span>
+    </label>
+  </div>
 </form>
 
-<h2>Reports</h2>
+<div class="page-head page-head--section">
+  <h2>Reports</h2>
+  <span class="muted mono">{{ reports | length if reports else 0 }} runs</span>
+</div>
 {% if reports %}
 <div class="overflow panel" style="padding:0">
-<table>
+<table class="reports-table">
   <thead>
-    <tr><th>Brand</th><th>URL</th><th>Score</th><th>Blocks</th><th>Not detected</th><th>When</th></tr>
+    <tr><th>Brand</th><th>Score</th><th>Coverage</th><th>Not detected</th><th>Day</th></tr>
   </thead>
   <tbody>
   {% for row in reports %}
-    <tr>
-      <td><a href="/report/{{ row.id }}">{{ row.brand_name or row.id }}</a></td>
-      <td class="mono muted">{{ row.url }}</td>
-      <td class="mono">{{ row.score if row.score is not none else "—" }}</td>
+    <tr data-row-href="/report/{{ row.id }}" tabindex="0" aria-label="Abrir SV9 de {{ row.brand_name or row.id }}">
+      <td>
+        <div class="brand-cell">
+          {% if row.brand_domain %}
+          <a href="/brand/{{ row.brand_domain }}?lang=es">{{ row.brand_name or row.id }}</a>
+          {% else %}
+          <a href="/report/{{ row.id }}">{{ row.brand_name or row.id }}</a>
+          {% endif %}
+          <span class="brand-cell-url">{{ row.url }}</span>
+        </div>
+      </td>
+      <td class="mono"><strong>{{ row.score if row.score is not none else "—" }}</strong></td>
       <td class="mono">{{ row.detected_count }}/{{ row.block_count }}</td>
       <td>
-        {% for name in row.not_detected %}<span class="chip warn">{{ name }}</span> {% else %}<span class="chip ok">none</span>{% endfor %}
+        {% for name in row.not_detected %}<span class="chip warn filled">{{ name }}</span> {% else %}<span class="chip ok filled">none</span>{% endfor %}
       </td>
-      <td class="muted mono">{{ (row.created_at or "")[:16].replace("T", " ") }}</td>
+      <td class="muted mono">{{ (row.created_at or "")[8:10] if row.created_at else "—" }}</td>
     </tr>
   {% endfor %}
   </tbody>

@@ -1,0 +1,6 @@
+{
+  "files": ["web/templates/base.html.j2"],
+  "insertBefore": "</body>",
+  "commentSyntax": "html",
+  "cspChecked": true
+}
