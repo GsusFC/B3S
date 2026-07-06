@@ -114,12 +114,6 @@ const stateLabel = {
   blocked: "bloqueado",
   cancelled: "cancelado",
 };
-const phaseLabel = {
-  capture: "Captura de evidencia",
-  interpret: "Interpretación SV9",
-  score: "Scoring",
-  report: "Reporte",
-};
 const okStatuses = new Set(["ok", "fetched", "configured", "captured", "usable", "completed", "scored", "done", "pass"]);
 const badStatuses = new Set(["error", "missing", "blocked", "cancelled", "failed"]);
 const warnStatuses = new Set(["warn", "warning", "empty", "limited", "skipped", "pending", "running", "missing_key", "disabled", "degraded_approved"]);
@@ -246,12 +240,6 @@ function renderProgress(phases) {
   }
   if (!current && safePhases.length) {
     current = safePhases[Math.min(done, safePhases.length - 1)];
-  }
-  if (current) {
-    const currentLabel = document.getElementById("scan-current-label");
-    const currentState = document.getElementById("scan-current-state");
-    if (currentLabel) currentLabel.textContent = phaseLabel[current.key] || current.label;
-    if (currentState) currentState.textContent = stateLabel[current.state] || current.state;
   }
   paintMeter(safePhases);
 }
