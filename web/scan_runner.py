@@ -840,7 +840,88 @@ _COMPONENT_ORDER = (
 )
 
 
+def _resolve_scan_tile_profile(
+    detail: dict[str, Any],
+    *,
+    lit: int,
+    off: int,
+    blind: int,
+    scale_hint: int,
+) -> Any:
+    tile_profile = detail.get("tile_profile")
+    if tile_profile is not None:
+        if isinstance(tile_profile, list):
+            if not tile_profile:
+                return {
+                    "lit": lit,
+                    "off": off,
+                    "blind": blind,
+                    "scale": scale_hint,
+                }
+            if lit or off or blind:
+                lit_tiles = sum(
+                    1
+                    for tile in tile_profile
+                    if str((tile or {}).get("estado") or "") == "ok"
+                )
+                off_tiles = sum(
+                    1 for tile in tile_profile if str((tile or {}).get("estado") or "") == "no"
+                )
+                blind_tiles = sum(
+                    1
+                    for tile in tile_profile
+                    if str((tile or {}).get("estado") or "") == "sin_evidencia"
+                )
+                if (lit_tiles, off_tiles, blind_tiles) != (lit, off, blind):
+                    return {
+                        "lit": lit,
+                        "off": off,
+                        "blind": blind,
+                        "scale": scale_hint,
+                    }
+        return tile_profile
+
+    fallback_tiles = detail.get("tiles")
+    if isinstance(fallback_tiles, list):
+        if not fallback_tiles:
+            return {
+                "lit": lit,
+                "off": off,
+                "blind": blind,
+                "scale": scale_hint,
+            }
+        if lit or off or blind:
+            lit_tiles = sum(
+                1 for tile in fallback_tiles if str((tile or {}).get("estado") or "") == "ok"
+            )
+            off_tiles = sum(
+                1 for tile in fallback_tiles if str((tile or {}).get("estado") or "") == "no"
+            )
+            blind_tiles = sum(
+                1
+                for tile in fallback_tiles
+                if str((tile or {}).get("estado") or "") == "sin_evidencia"
+            )
+            if (lit_tiles, off_tiles, blind_tiles) != (lit, off, blind):
+                return {
+                    "lit": lit,
+                    "off": off,
+                    "blind": blind,
+                    "scale": scale_hint,
+                }
+        return fallback_tiles
+
+    return {
+        "lit": lit,
+        "off": off,
+        "blind": blind,
+        "scale": scale_hint,
+    }
+
+
 def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from src.sv9.language_guard import spanish_component_summary, spanish_component_verdict, spanish_tile_motivo
+
     flow = payload.get("flow") or {}
     candidate = flow.get("candidate") or {}
     interpretation = candidate.get("interpretation") or {}
@@ -918,23 +999,38 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
         detail = result_components.get(name) if isinstance(result_components.get(name), dict) else {}
         meta = RUBRIC_COMPONENTS.get(name) or {}
         tile_names = {tile.get("id"): tile.get("name") for tile in meta.get("tiles") or []}
-        lit = set(component.get("lit_tiles") or [])
-        off = set(component.get("off_tiles") or [])
-        blind = set(component.get("blind_spot_tiles") or [])
+        lit_tiles = set(component.get("lit_tiles") or [])
+        off_tiles = set(component.get("off_tiles") or [])
+        blind_tiles = set(component.get("blind_spot_tiles") or [])
+        lit_count = len(lit_tiles)
+        off_count = len(off_tiles)
+        blind_count = len(blind_tiles)
+        scale = int(detail.get("scale") or meta.get("scale") or 0)
+        tile_profile = _resolve_scan_tile_profile(
+            detail,
+            lit=lit_count,
+            off=off_count,
+            blind=blind_count,
+            scale_hint=scale,
+        )
+        tile_profile_for_failing_tiles = tile_profile
+        if tile_profile_for_failing_tiles is None:
+            tile_profile_for_failing_tiles = []
+
         tile_states = []
         for tile in meta.get("tiles") or []:
             tile_id = str(tile.get("id") or "")
-            if tile_id in lit:
+            if tile_id in lit_tiles:
                 state = "on"
-            elif tile_id in off:
+            elif tile_id in off_tiles:
                 state = "off"
-            elif tile_id in blind:
+            elif tile_id in blind_tiles:
                 state = "blind"
             else:
                 continue
             tile_states.append({"id": tile_id, "name": str(tile.get("name") or ""), "state": state})
         failing_tiles = []
-        for tile in detail.get("tile_profile") or []:
+        for tile in tile_profile_for_failing_tiles or []:
             if not isinstance(tile, dict) or tile.get("estado") == "ok":
                 continue
             failing_tiles.append(
@@ -942,7 +1038,7 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
                     "id": str(tile.get("id") or ""),
                     "name": str(tile_names.get(tile.get("id")) or ""),
                     "estado": str(tile.get("estado") or ""),
-                    "motivo": str(tile.get("motivo") or ""),
+                    "motivo": spanish_tile_motivo(tile.get("motivo"), estado=tile.get("estado")),
                     "evidencia": str(tile.get("evidencia") or ""),
                 }
             )
@@ -953,14 +1049,19 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
                 "question": str(meta.get("question") or ""),
                 "level_zero": str(meta.get("level_zero") or ""),
                 "score": component.get("score"),
-                "scale": detail.get("scale") or meta.get("scale"),
+                "scale": scale,
                 "status": str(component.get("status") or ""),
                 "confidence": str(detail.get("confidence") or ""),
-                "resumen": str(detail.get("detected_content") or ""),
-                "veredicto": str(detail.get("veredicto") or ""),
-                "lit": len(component.get("lit_tiles") or []),
-                "off": len(component.get("off_tiles") or []),
-                "blind": len(component.get("blind_spot_tiles") or []),
+                "tile_profile": list(tile_profile) if isinstance(tile_profile, list) else [],
+                "resumen": spanish_component_summary(
+                    name,
+                    detail.get("detected_content"),
+                    tile_profile,
+                ),
+                "veredicto": spanish_component_verdict(name, detail.get("veredicto"), tile_profile),
+                "lit": lit_count,
+                "off": off_count,
+                "blind": blind_count,
                 "tile_states": tile_states,
                 "tiles": failing_tiles,
                 "block": blocks_by_name.get(name),

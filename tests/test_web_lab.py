@@ -959,3 +959,59 @@ def test_report_view_renders_report(monkeypatch):
     assert 'id="coherencia"' in response.text
     assert "component-card--full" in response.text
     assert json.dumps({"ok": True}) not in response.text
+
+
+def test_report_view_rebuilds_verdict_from_counts_without_tile_profile(monkeypatch):
+    from web.app import app
+
+    monkeypatch.setattr(
+        "web.app.load_report",
+        lambda scan_id: {
+            "id": scan_id,
+            "brand_name": "Mercury",
+            "url": "https://mercury.com",
+            "score": 81,
+            "base_average": 72,
+            "reliability_status": "shadow",
+            "detected_count": 1,
+            "block_count": 1,
+            "not_detected": [],
+            "most_painful_gap_label": "",
+            "immediate_margin": None,
+            "total_blind_spots": 0,
+            "coverage_acquisition": {
+                "owned_url_count": 1,
+                "external_source_count": 0,
+                "absence_record_count": 0,
+                "attempt_record_count": 0,
+            },
+            "components": [
+                {
+                    "key": "magnetism",
+                    "label": "Magnetism",
+                    "score": 3,
+                    "scale": 10,
+                    "status": "scored",
+                    "resumen": "The snapshot does not provide access to the full product interface.",
+                    "veredicto": "The snapshot does not provide access to the full product interface.",
+                    "lit": 3,
+                    "off": 1,
+                    "blind": 6,
+                    "tile_states": [{"id": "MX9", "name": "Resilience", "state": "off"}],
+                    "tiles": [],
+                    "block": None,
+                }
+            ],
+            "blocks": [],
+            "absences": [],
+            "attempts": [],
+            "limitations": [],
+            "raw": {},
+        },
+    )
+
+    response = TestClient(app).get("/report/report123")
+
+    assert response.status_code == 200
+    assert "Síntesis automática: 3/10 baldosas encendidas, 1 apagada, 6 puntos ciegos." in response.text
+    assert "0/10 baldosas encendidas" not in response.text

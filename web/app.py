@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 from web.report_store import domain_key, list_reports, list_reports_for_domain, load_report
 from web.scan_runner import approve_degraded_scan, cancel_scan, scan_status, start_scan
 from web.scoring_store import backfill_reports, dashboard as scoring_dashboard
+from src.sv9.language_guard import spanish_component_summary, spanish_component_verdict, spanish_tile_motivo
 
 app = FastAPI(title="B3S — Brand Evidence Lab")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -26,6 +27,7 @@ if _STATIC_DIR.is_dir():
 
 def _brand_profile(domain: str) -> dict:
     reports = list_reports_for_domain(domain)
+    reports = [_sanitize_report_language(report) for report in reports]
     current = reports[0] if reports else None
     normalized_domain = domain_key(domain) or domain
 
@@ -64,6 +66,74 @@ def _report_rows_for_index() -> list[dict[str, Any]]:
         enriched["brand_domain"] = domain_key(str(row.get("url") or ""))
         rows.append(enriched)
     return rows
+
+
+def _resolve_component_tile_profile(component: dict[str, Any]) -> dict[str, Any] | list[Any]:
+    tile_profile = component.get("tile_profile")
+    counts = {
+        "lit": int(component.get("lit", 0) or 0),
+        "off": int(component.get("off", 0) or 0),
+        "blind": int(component.get("blind", 0) or 0),
+        "scale": int(component.get("scale", 0) or 0),
+    }
+    if tile_profile is not None:
+        if isinstance(tile_profile, list):
+            if not tile_profile:
+                return counts
+            if any(counts.values()):
+                lit = sum(1 for tile in tile_profile if str((tile or {}).get("estado") or "") == "ok")
+                off = sum(
+                    1 for tile in tile_profile if str((tile or {}).get("estado") or "") == "no"
+                )
+                blind = sum(
+                    1 for tile in tile_profile if str((tile or {}).get("estado") or "") == "sin_evidencia"
+                )
+                if (lit, off, blind) != (counts["lit"], counts["off"], counts["blind"]):
+                    return counts
+        return tile_profile
+
+    tiles = component.get("tiles")
+    if isinstance(tiles, list):
+        if not tiles:
+            return counts
+        if any(counts.values()):
+            lit = sum(1 for tile in tiles if str((tile or {}).get("estado") or "") == "ok")
+            off = sum(1 for tile in tiles if str((tile or {}).get("estado") or "") == "no")
+            blind = sum(1 for tile in tiles if str((tile or {}).get("estado") or "") == "sin_evidencia")
+            if (lit, off, blind) != (counts["lit"], counts["off"], counts["blind"]):
+                return counts
+        return tiles
+    return counts
+
+
+def _sanitize_report_language(report: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(report, dict):
+        return {}
+    sanitized = dict(report)
+    components = []
+    for component in sanitized.get("components") or []:
+        if not isinstance(component, dict):
+            continue
+        item = dict(component)
+        key = str(item.get("key") or item.get("component") or "")
+        tile_profile = _resolve_component_tile_profile(item)
+        item["resumen"] = spanish_component_summary(
+            key,
+            item.get("resumen"),
+            tile_profile,
+        )
+        item["veredicto"] = spanish_component_verdict(key, item.get("veredicto"), tile_profile)
+        tiles = []
+        for tile in item.get("tiles") or []:
+            if not isinstance(tile, dict):
+                continue
+            tile_item = dict(tile)
+            tile_item["motivo"] = spanish_tile_motivo(tile_item.get("motivo"), estado=tile_item.get("estado"))
+            tiles.append(tile_item)
+        item["tiles"] = tiles
+        components.append(item)
+    sanitized["components"] = components
+    return sanitized
 
 
 def _moodboard_from_report(report: dict[str, Any]) -> dict[str, Any]:
@@ -587,6 +657,7 @@ def report_view(request: Request, scan_id: str):
     report = load_report(scan_id)
     if report is None:
         return RedirectResponse("/?error=Report not found", status_code=303)
+    report = _sanitize_report_language(report)
     return templates.TemplateResponse(request, "report.html.j2", {"report": report})
 
 
@@ -595,6 +666,7 @@ def report_moodboard_view(request: Request, scan_id: str, lang: str = "es"):
     report = load_report(scan_id)
     if report is None:
         return RedirectResponse("/?error=Report not found", status_code=303)
+    report = _sanitize_report_language(report)
     return templates.TemplateResponse(
         request,
         "moodboard.html.j2",
