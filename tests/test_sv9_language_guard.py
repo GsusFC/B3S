@@ -27,3 +27,13 @@ def test_spanish_component_verdict_rebuilds_from_counts_when_tile_profile_missin
     )
 
     assert "Síntesis automática: 3/10 baldosas encendidas, 1 apagada, 6 puntos ciegos." in verdict
+
+
+def test_spanish_component_verdict_replaces_legacy_summary_string() -> None:
+    verdict = spanish_component_verdict(
+        "magnetism",
+        "Síntesis automática: 0/10 baldosas encendidas, 1 apagada, 6 puntos ciegos.",
+        {"lit": 3, "off": 1, "blind": 6, "scale": 10},
+    )
+
+    assert "Síntesis automática: 3/10 baldosas encendidas, 1 apagada, 6 puntos ciegos." in verdict

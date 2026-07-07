@@ -38,6 +38,12 @@ _SPANISH_WORD_RE = re.compile(
     re.IGNORECASE,
 )
 _WORD_RE = re.compile(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+")
+_SINTESIS_AUTO_RE = re.compile(
+    r"^Síntesis automática:\s*(?P<lit>\d+)\s*/\s*(?P<scale>\d+)\s+baldosas\s+encendidas"
+    r"(?:,\s*(?P<off>\d+)\s+apagada(?:s)?)?"
+    r"(?:,\s*(?P<blind>\d+)\s+punto(?:s)?\s+ciegos?)?",
+    re.IGNORECASE,
+)
 _ENGLISH_STOPWORDS = {
     "a",
     "all",
@@ -200,6 +206,18 @@ def spanish_tile_contexto(text: object) -> str:
 def spanish_component_verdict(component_key: str, text: object, tile_profile: object | None = None) -> str:
     value = str(text or "").strip()
     if value and not looks_like_generated_english(value):
+        m = _SINTESIS_AUTO_RE.match(value)
+        if m is not None:
+            lit = int(m.group("lit") or 0)
+            scale = int(m.group("scale") or 0)
+            off = int(m.group("off") or 0)
+            blind = int(m.group("blind") or 0)
+            parsed_scale, parsed_lit, parsed_off, parsed_blind = _tile_summary_counts(
+                tile_profile,
+                scale_hint=scale,
+            )
+            if (lit, scale, off, blind) != (parsed_lit, parsed_scale, parsed_off, parsed_blind):
+                return fallback_component_verdict(component_key, tile_profile)
         return value
     if not value:
         return ""
