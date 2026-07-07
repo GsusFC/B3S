@@ -998,7 +998,7 @@ def test_warn_gate_disagreement_rejects_when_adjudicator_quote_is_invalid() -> N
     assert "mission_adjudicator_rejected_gate_rejection" in interpretation.limitations
     assert "mission_structural_gate_rejected" in interpretation.limitations
     coverage = block_coverage(pack, interpretation)
-    assert coverage["mission"]["status"] in {"implied_not_explicit", "verified_absent"}
+    assert coverage["mission"]["status"] in {"implied_not_explicit", "verified_absent", "probable_absent"}
 
 
 def test_warn_gate_disagreement_without_adjudicator_fails_open_and_flags_limitation() -> None:

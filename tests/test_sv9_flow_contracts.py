@@ -658,7 +658,7 @@ def test_interpretation_contract_requires_content_and_refs_when_detected() -> No
     ]
 
 
-def test_block_coverage_derives_verified_absent_without_interpreter_claim() -> None:
+def test_block_coverage_derives_probable_absent_from_one_checked_surface() -> None:
     pack = BrandEvidencePack(
         brand_name="Acme",
         url="https://acme.example",
@@ -700,11 +700,49 @@ def test_block_coverage_derives_verified_absent_without_interpreter_claim() -> N
     coverage = block_coverage(pack, interpretation)
 
     assert coverage["mission"]["status"] == "positive_evidence"
-    assert coverage["values"]["status"] == "verified_absent"
+    assert coverage["values"]["status"] == "probable_absent"
     assert coverage["values"]["absence_refs"] == ["raw_inputs.0.subpage.1.absence.values"]
+    assert coverage["values"]["absence_surface_count"] == 1
     assert coverage["vision"]["status"] == "insufficient_acquisition"
-    assert "coverage:values_verified_absent" in coverage_limitations(coverage)
+    assert "coverage:values_probable_absent" in coverage_limitations(coverage)
     assert "coverage:vision_insufficient_acquisition" in coverage_limitations(coverage)
+
+
+def test_block_coverage_derives_verified_absent_from_two_checked_surfaces() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0.subpage.1.absence.values",
+                source="web",
+                evidence_type="acquisition.absence.values",
+                content="Crawled owned page https://acme.example/about; no explicit values section terms were observed.",
+                url="https://acme.example/about",
+                metadata={"source_class": "acquisition_metadata", "checked_block": "values"},
+            ),
+            EvidenceRecord(
+                ref="raw_inputs.0.subpage.2.absence.values",
+                source="web",
+                evidence_type="acquisition.absence.values",
+                content="Crawled owned page https://acme.example/careers; no explicit values section terms were observed.",
+                url="https://acme.example/careers",
+                metadata={"source_class": "acquisition_metadata", "checked_block": "values"},
+            ),
+        ],
+    )
+    interpretation = BrandInterpretation(
+        brand_name="Acme",
+        url="https://acme.example",
+        blocks={"values": {"detected": False, "content": "", "confidence": "low"}},
+        evidence_refs={},
+    )
+
+    coverage = block_coverage(pack, interpretation)
+
+    assert coverage["values"]["status"] == "verified_absent"
+    assert coverage["values"]["absence_surface_count"] == 2
+    assert "coverage:values_verified_absent" in coverage_limitations(coverage)
 
 
 def test_acquisition_coverage_summarizes_external_attempts_and_absence_refs() -> None:
@@ -878,11 +916,11 @@ def test_canonical_orchestrator_emits_evidence_coverage_debug_and_limitations() 
 
     coverage = debug["evidence_coverage"]
     assert coverage["blocks"]["mission"]["status"] == "positive_evidence"
-    assert coverage["blocks"]["values"]["status"] == "verified_absent"
-    assert coverage["blocks"]["vision"]["status"] == "verified_absent"
+    assert coverage["blocks"]["values"]["status"] == "probable_absent"
+    assert coverage["blocks"]["vision"]["status"] == "probable_absent"
     assert coverage["blocks"]["values"]["absence_refs"] == ["raw_inputs.0.subpage.1.absence.values"]
-    assert "coverage:values_verified_absent" in candidate.limitations
-    assert "coverage:vision_verified_absent" in candidate.limitations
+    assert "coverage:values_probable_absent" in candidate.limitations
+    assert "coverage:vision_probable_absent" in candidate.limitations
     assert not candidate.interpretation.evidence_refs.get("values")
 
 

@@ -1,4 +1,4 @@
-from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot, _is_strategic_surface
+from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot, _identity_match, _is_strategic_surface
 
 
 def test_evidence_worker_prefers_markdown_content_before_title() -> None:
@@ -99,6 +99,117 @@ def test_evidence_worker_splits_owned_subpages_into_addressable_chunks() -> None
     )
 
 
+def test_identity_match_matrix() -> None:
+    assert (
+        _identity_match(
+            brand_name="Acme",
+            scan_url="https://www.acme.com",
+            record_url="https://acme.com/about",
+            content="",
+        )
+        == "domain"
+    )
+    assert (
+        _identity_match(
+            brand_name="Acme",
+            scan_url="https://acme.com",
+            record_url="https://blog.acme.com/post",
+            content="",
+        )
+        == "domain"
+    )
+    assert (
+        _identity_match(
+            brand_name="Café Río S.L.",
+            scan_url="https://caferio.com",
+            record_url="https://review.example/case",
+            content="Cafe Rio is discussed by customers.",
+        )
+        == "brand_name"
+    )
+    assert (
+        _identity_match(
+            brand_name="Toteemi",
+            scan_url="https://toteemi.com",
+            record_url="https://trustpilot.com/review/toteemi.com",
+            content="Independent review page.",
+        )
+        == "brand_name"
+    )
+    assert (
+        _identity_match(
+            brand_name="Acme",
+            scan_url="https://acme.com",
+            record_url="https://foreign.example/story",
+            content="A different company is discussed.",
+        )
+        == "none"
+    )
+    assert (
+        _identity_match(
+            brand_name="AI",
+            scan_url="https://ai.example",
+            record_url="https://foreign.example/story",
+            content="AI appears everywhere.",
+        )
+        == "unverified"
+    )
+
+
+def test_evidence_worker_chunks_homepage_like_subpages() -> None:
+    long_homepage = "# Hero\n" + ("Opening copy. " * 70) + "\n\n## Purpose\nCopy beyond old ceiling is now visible."
+    pack = build_evidence_pack_from_snapshot(
+        {
+            "run": {"brand_name": "Acme", "url": "https://acme.example"},
+            "raw_inputs": [
+                {
+                    "source": "web",
+                    "payload": {"url": "https://acme.example", "markdown_content": long_homepage},
+                }
+            ],
+        }
+    )
+
+    refs = {record.ref: record for record in pack.evidence}
+
+    assert "raw_inputs.0" in refs
+    assert "raw_inputs.0.chunk.2" in refs
+    assert any("Copy beyond old ceiling" in record.content for record in pack.evidence)
+
+
+def test_evidence_worker_chunks_one_page_site_without_subpage_marker() -> None:
+    markdown = "# Home\n" + ("Brand story. " * 80) + "\n\n## Values\nWe value direct evidence."
+    pack = build_evidence_pack_from_snapshot(
+        {
+            "run": {"brand_name": "Acme", "url": "https://acme.example"},
+            "raw_inputs": [
+                {"source": "web", "payload": {"url": "https://acme.example", "markdown_content": markdown}}
+            ],
+        }
+    )
+
+    assert any(record.ref == "raw_inputs.0.chunk.2" for record in pack.evidence)
+    assert any("We value direct evidence" in record.content for record in pack.evidence)
+
+
+def test_evidence_worker_keeps_short_homepage_record_unchanged() -> None:
+    pack = build_evidence_pack_from_snapshot(
+        {
+            "run": {"brand_name": "Acme", "url": "https://acme.example"},
+            "raw_inputs": [
+                {"source": "web", "payload": {"url": "https://acme.example", "markdown_content": "Short homepage."}}
+            ],
+        }
+    )
+
+    homepage_records = [record for record in pack.evidence if record.ref.startswith("raw_inputs.0")]
+
+    assert len(homepage_records) == 2
+    assert homepage_records[0].ref == "raw_inputs.0"
+    assert homepage_records[0].content == "Short homepage."
+    assert homepage_records[1].ref == "raw_inputs.0.diagnostics.strategic_surfaces"
+
+
 def test_evidence_worker_chunks_owned_subpages_by_markdown_sections() -> None:
     pack = build_evidence_pack_from_snapshot(
         {
@@ -161,17 +272,25 @@ def test_evidence_worker_records_absence_on_crawled_strategic_surfaces() -> None
     assert "raw_inputs.0.subpage.1.absence.values" in absence
     assert "raw_inputs.0.subpage.1.absence.vision" in absence
     assert absence["raw_inputs.0.subpage.1.absence.values"].metadata["source_class"] == "acquisition_metadata"
+    assert absence["raw_inputs.0.subpage.1.absence.values"].metadata["absence_signal"] == "keyword_miss"
     assert "no explicit values" in absence["raw_inputs.0.subpage.1.absence.values"].content
 
 
 def test_strategic_surface_url_matrix_includes_spanish_about_slugs() -> None:
     assert _is_strategic_surface("https://toteemi.com/sobre-toteemi/") is True
     assert _is_strategic_surface("https://brand.com/quienes-somos/") is True
+    assert _is_strategic_surface("https://brand.com/quiénes-somos/") is True
     assert _is_strategic_surface("https://brand.com/filosofia/") is True
     assert _is_strategic_surface("https://brand.com/manifiesto/") is True
     assert _is_strategic_surface("https://brand.com/about") is True
     assert _is_strategic_surface("https://brand.com/culture") is True
     assert _is_strategic_surface("https://toteemi.com/misiones/") is False
+    assert _is_strategic_surface("https://brand.com/agricultura/") is False
+    assert _is_strategic_surface("https://brand.com/about-cookies") is False
+    assert _is_strategic_surface("https://brand.com/cookies/about") is True
+    assert _is_strategic_surface("https://brand.com/our-values/") is True
+    assert _is_strategic_surface("https://brand.com/") is False
+    assert _is_strategic_surface("") is False
     assert _is_strategic_surface("https://brand.com/categoria-producto/zapatillas") is False
 
 
@@ -382,8 +501,122 @@ def test_evidence_worker_exposes_exa_results_as_citable_external_proof() -> None
     assert mention.url == "https://review.example/acme"
     assert mention.confidence == "high"
     assert mention.metadata["source_class"] == "external_proof"
+    assert mention.metadata["identity_match"] == "brand_name"
     assert "active community" in mention.content
     assert refs["raw_inputs.0.exa.news.0"].metadata["intent"] == "news"
+
+
+def test_evidence_worker_lowers_external_result_without_identity_match() -> None:
+    pack = build_evidence_pack_from_snapshot(
+        {
+            "run": {"brand_name": "Acme", "url": "https://acme.example"},
+            "raw_inputs": [
+                {
+                    "source": "exa",
+                    "payload": {
+                        "mentions": [
+                            {
+                                "url": "https://foreign.example/story",
+                                "title": "Unrelated market news",
+                                "text": "Beta launches a new product.",
+                                "score": 0.91,
+                                "intent": "external_mentions",
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+
+    record = next(item for item in pack.evidence if item.ref == "raw_inputs.0.exa.mentions.0")
+
+    assert record.confidence == "low"
+    assert record.metadata["identity_match"] == "none"
+
+
+def test_evidence_worker_demotes_owned_confirmation_without_domain_match() -> None:
+    domain_pack = build_evidence_pack_from_snapshot(
+        {
+            "run": {"brand_name": "Acme", "url": "https://acme.example"},
+            "raw_inputs": [
+                {
+                    "source": "exa",
+                    "payload": {
+                        "mentions": [
+                            {
+                                "url": "https://www.acme.example/about",
+                                "title": "Acme about page",
+                                "text": "Acme builds operating software.",
+                                "intent": "owned_confirmation",
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+    foreign_pack = build_evidence_pack_from_snapshot(
+        {
+            "run": {"brand_name": "Acme", "url": "https://acme.example"},
+            "raw_inputs": [
+                {
+                    "source": "exa",
+                    "payload": {
+                        "mentions": [
+                            {
+                                "url": "https://review.example/acme",
+                                "title": "Acme review",
+                                "text": "Acme is mentioned here.",
+                                "intent": "owned_confirmation",
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+
+    owned = next(item for item in domain_pack.evidence if item.ref == "raw_inputs.0.exa.mentions.0")
+    demoted = next(item for item in foreign_pack.evidence if item.ref == "raw_inputs.0.exa.mentions.0")
+
+    assert owned.metadata["source_class"] == "owned_copy"
+    assert owned.metadata["identity_match"] == "domain"
+    assert demoted.metadata["source_class"] == "external_proof"
+    assert demoted.metadata["identity_match"] == "brand_name"
+    assert demoted.metadata["intent_demoted"] == "owned_confirmation_without_domain_match"
+
+
+def test_evidence_worker_does_not_lower_unverified_external_identity() -> None:
+    pack = build_evidence_pack_from_snapshot(
+        {
+            "run": {"brand_name": "AI", "url": "https://ai.example"},
+            "raw_inputs": [
+                {
+                    "source": "searchapi",
+                    "payload": {
+                        "intents": {
+                            "news": {
+                                "status": "ok",
+                                "results": [
+                                    {
+                                        "url": "https://foreign.example/story",
+                                        "title": "AI appears everywhere",
+                                        "snippet": "A generic AI article.",
+                                    }
+                                ],
+                            }
+                        }
+                    },
+                }
+            ],
+        }
+    )
+
+    record = next(item for item in pack.evidence if item.ref == "raw_inputs.0.searchapi.news.0")
+
+    assert record.confidence == "medium"
+    assert record.metadata["identity_match"] == "unverified"
 
 
 def test_evidence_worker_keeps_exa_failed_intents_as_acquisition_metadata() -> None:

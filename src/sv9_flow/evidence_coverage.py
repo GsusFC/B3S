@@ -20,6 +20,7 @@ BlockCoverageStatus = Literal[
     "positive_evidence",
     "implied_not_explicit",
     "verified_absent",
+    "probable_absent",
     "insufficient_acquisition",
 ]
 
@@ -96,12 +97,15 @@ def block_coverage(pack: BrandEvidencePack, interpretation: BrandInterpretation)
             for record in pack.evidence
             if record.evidence_type == f"acquisition.absence.{block}"
         ]
+        absence_surface_count = _distinct_absence_surface_count(pack, block)
         if positive_refs:
             status: BlockCoverageStatus = "positive_evidence"
         elif _is_implied_not_explicit(block_payload, block, absence_blocks_by_surface):
             status = "implied_not_explicit"
-        elif absence_refs:
+        elif absence_surface_count >= 2:
             status = "verified_absent"
+        elif absence_surface_count == 1:
+            status = "probable_absent"
         else:
             status = "insufficient_acquisition"
         coverage[block] = {
@@ -109,6 +113,7 @@ def block_coverage(pack: BrandEvidencePack, interpretation: BrandInterpretation)
             "positive_refs": positive_refs,
             "absence_refs": absence_refs,
             "cited_refs": cited_refs,
+            "absence_surface_count": absence_surface_count,
         }
     return coverage
 
@@ -121,6 +126,8 @@ def coverage_limitations(blocks: dict[str, dict[str, Any]]) -> list[str]:
         status = str(payload.get("status") or "")
         if status == "verified_absent":
             out.append(f"coverage:{block}_verified_absent")
+        elif status == "probable_absent":
+            out.append(f"coverage:{block}_probable_absent")
         elif status == "implied_not_explicit":
             out.append(f"coverage:{block}_implied_not_explicit")
         elif status == "insufficient_acquisition":
@@ -141,6 +148,17 @@ def _absence_blocks_by_surface(pack: BrandEvidencePack) -> dict[str, set[str]]:
     return by_surface
 
 
+def _distinct_absence_surface_count(pack: BrandEvidencePack, block: str) -> int:
+    urls: set[str] = set()
+    for record in pack.evidence:
+        if record.evidence_type != f"acquisition.absence.{block}":
+            continue
+        url = str(record.url or record.metadata.get("checked_url") or "").strip()
+        if url:
+            urls.add(url)
+    return len(urls)
+
+
 def _is_implied_not_explicit(
     block_payload: dict[str, Any],
     name: str,
@@ -150,7 +168,8 @@ def _is_implied_not_explicit(
 
     Only claim "implied" when some checked strategic surface actually carried
     the block's terms — it emitted absence records for other blocks but not for
-    this one. Otherwise the gate veto plus absence records mean verified_absent.
+    this one. Otherwise the gate veto plus absence records fall through to the
+    graduated absence rule below.
     """
 
     provenance = block_payload.get("detection_provenance")

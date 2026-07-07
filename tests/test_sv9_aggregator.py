@@ -293,6 +293,33 @@ class AggregateTests(unittest.TestCase):
             result.components["coherencia"].source_policy_notes,
         )
 
+    def test_verified_absent_caps_owned_expression(self):
+        result = aggregate(
+            full_components(
+                mission=scored("mission", 5, detection_limitations=["coverage:mission_verified_absent"]),
+            ),
+            brand_name="Acme",
+            url="https://acme.test",
+        )
+
+        self.assertEqual(result.components["mission"].score, 3)
+        self.assertIn("source_policy:mission_owned_expression_verified_absent", result.components["mission"].source_policy_notes)
+
+    def test_probable_absent_does_not_apply_verified_absent_cap(self):
+        result = aggregate(
+            full_components(
+                mission=scored("mission", 5, detection_limitations=["coverage:mission_probable_absent"]),
+            ),
+            brand_name="Acme",
+            url="https://acme.test",
+        )
+
+        self.assertEqual(result.components["mission"].score, 5)
+        self.assertNotIn(
+            "source_policy:mission_owned_expression_verified_absent",
+            result.components["mission"].source_policy_notes,
+        )
+
     def test_external_proof_can_support_but_not_max_out_magnetism_without_owned_surface(self):
         result = aggregate(
             full_components(
