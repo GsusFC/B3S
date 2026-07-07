@@ -3,7 +3,8 @@
     "changelog": {
       "v3": "2026-07-02: generalize overfit 'transform the experience' to transform/transformation. Justified by Nium run 361: owned copy 'leading a transformation in payments' was LLM-detected with cited refs and wrongly vetoed by the gate.",
       "v4": "2026-07-03: add repository-proof terms (github repository, stars, forks, open source) to magnetism support terms, gravity family, and block-evidence magnetism terms. Justified by Vercel live capture 900400: vercel/next.js (140k stars) reached the pack via the org-level GitHub fallback but scored too low for the magnetism shortlist, so magnetism_no_gravity_evidence persisted despite direct ecosystem-gravity proof.",
-      "v5": "2026-07-04: add product-embodied mission terms for reward/conversion mechanics. Justified by Toteemi local report 74a65fe08ae9: evidence such as 'Convierte tu esfuerzo en descuentos' and 'Una app que te paga por entrenar' existed in the pack but mission shortlisting selected generic product/navigation text and the sensitive gate rejected product-embodied strategy."
+      "v5": "2026-07-04: add product-embodied mission terms for reward/conversion mechanics. Justified by Toteemi local report 74a65fe08ae9: evidence such as 'Convierte tu esfuerzo en descuentos' and 'Una app que te paga por entrenar' existed in the pack but mission shortlisting selected generic product/navigation text and the sensitive gate rejected product-embodied strategy.",
+      "v6": "2026-07-07: add owned product-hook terms to magnetism support, shortlists, and owned_hook/direct_pull families. Justified by Darwin Biomedical local report 53d0362d5e1e: owned copy such as 'prevención activa de caídas', 'Seguridad & libertad', and 'primer andador inteligente' carried pain/desire magnetism, but the flow selected external funding evidence only and emitted magnetism_no_owned_hook_evidence."
     },
     "support_terms": {
       "magnetism": [
@@ -23,6 +24,14 @@
         "follower growth",
         "audience growth",
         "market pull",
+        "active fall prevention",
+        "fall prevention",
+        "prevención activa de caídas",
+        "seguridad & libertad",
+        "safety & freedom",
+        "safety and freedom",
+        "primer andador inteligente",
+        "first smart walker",
         "word of mouth",
         "preference",
         "differentiator",
@@ -124,7 +133,7 @@
         "transformation"
       ]
     },
-    "version": "sv9-flow-block-detection-policy-v4",
+    "version": "sv9-flow-block-detection-policy-v6",
     "weaken_terms": {
       "magnetism": [
         "lack of active engagement",
@@ -197,6 +206,14 @@
         "choose",
         "competitor",
         "native integration",
+        "active fall prevention",
+        "fall prevention",
+        "prevención activa de caídas",
+        "seguridad & libertad",
+        "safety & freedom",
+        "safety and freedom",
+        "primer andador inteligente",
+        "first smart walker",
         "github repository",
         "stars",
         "forks",
@@ -291,7 +308,7 @@
       "diferenciacion",
       "coherencia"
     ],
-    "version": "sv9-flow-block-evidence-shortlists-v2"
+    "version": "sv9-flow-block-evidence-shortlists-v3"
   },
   "core_purpose_heuristics": {
     "action_terms": [
@@ -456,6 +473,14 @@
       "follower growth",
       "audience growth",
       "market pull",
+      "active fall prevention",
+      "fall prevention",
+      "prevención activa de caídas",
+      "seguridad & libertad",
+      "safety & freedom",
+      "safety and freedom",
+      "primer andador inteligente",
+      "first smart walker",
       "word of mouth"
     ],
     "gravity": [
@@ -481,6 +506,14 @@
       "customer reviews",
       "user growth",
       "market pull",
+      "active fall prevention",
+      "fall prevention",
+      "prevención activa de caídas",
+      "seguridad & libertad",
+      "safety & freedom",
+      "safety and freedom",
+      "primer andador inteligente",
+      "first smart walker",
       "word of mouth"
     ],
     "preference": [

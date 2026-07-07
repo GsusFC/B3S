@@ -26,6 +26,7 @@ from src.sv9.rubric import (
     PRESENTATION_ORDER,
     component_max_points,
 )
+from src.sv9.source_policy import apply_source_policy
 
 
 def score_from_tile_profile(tile_profile: list[TileVerdict]) -> int:
@@ -122,6 +123,7 @@ def aggregate(
     if missing:
         raise ValueError(f"SV9 aggregate requires every component; missing: {sorted(missing)}")
 
+    apply_source_policy(components)
     avg, capped = apply_magnetism_cap(components)
     brand3_score = sum(c.points for c in components.values())
     coherencia = components["coherencia"]

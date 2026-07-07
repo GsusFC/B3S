@@ -93,6 +93,9 @@ class ComponentResult:
     detected_content: str | None = None
     detection_mode: str | None = None
     detection_confidence: str | None = None
+    detection_limitations: list[str] = field(default_factory=list)
+    evidence_source_summary: dict[str, int] = field(default_factory=dict)
+    source_policy_notes: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
     error: str | None = None  # populated for STATUS_NOT_EVALUATED
 
@@ -155,6 +158,9 @@ class ComponentResult:
             "detected_content": self.detected_content,
             "detection_mode": self.detection_mode,
             "detection_confidence": self.detection_confidence,
+            "detection_limitations": list(self.detection_limitations),
+            "evidence_source_summary": dict(self.evidence_source_summary),
+            "source_policy_notes": list(self.source_policy_notes),
             "evidence": list(self.evidence),
             "error": self.error,
         }

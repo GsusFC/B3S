@@ -332,6 +332,33 @@ def test_magnetism_detection_accepts_structural_momentum_evidence() -> None:
     assert decision.support_terms == ["momentum", "community engagement", "community", "revenue growth", "press"]
 
 
+def test_magnetism_detection_accepts_owned_product_hook_evidence() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Darwin Biomedical",
+        url="https://darwinbiomedical.com",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content=(
+                    "MICHELANGELO. Descubre el primer andador inteligente con prevención activa de caídas. "
+                    "Seguridad & libertad."
+                ),
+            )
+        ],
+    )
+
+    decision = resolve_block_detection("magnetism", pack, evidence_refs=["raw_inputs.0"])
+
+    assert decision.outcome == "supports_detection"
+    assert decision.support_terms == [
+        "prevención activa de caídas",
+        "seguridad & libertad",
+        "primer andador inteligente",
+    ]
+
+
 def test_mission_detection_accepts_action_language() -> None:
     pack = BrandEvidencePack(
         brand_name="Acme",
@@ -484,7 +511,7 @@ def test_block_detection_decision_serializes_for_debug_payloads() -> None:
     decision = resolve_block_detection("magnetism", pack, evidence_refs=["raw_inputs.0"])
 
     assert decision.to_dict() == {
-        "version": "sv9-flow-block-detection-policy-v4",
+        "version": "sv9-flow-block-detection-policy-v6",
         "block": "magnetism",
         "outcome": "supports_detection",
         "evidence_refs": ["raw_inputs.0"],

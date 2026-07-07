@@ -191,6 +191,8 @@ def evaluate_component(
             score=0,
             detection_mode=str(block.get("mode") or "not_detected"),
             detection_confidence=str(block.get("confidence") or "insufficient"),
+            detection_limitations=[str(item) for item in block.get("limitations") or []],
+            evidence_source_summary=_int_dict(block.get("evidence_source_summary")),
         )
 
     if llm is None or not getattr(llm, "api_key", None):
@@ -198,6 +200,10 @@ def evaluate_component(
             component=key,
             status=STATUS_NOT_EVALUATED,
             detected_content=_block_content_text(block),
+            detection_mode=str(block.get("mode") or ""),
+            detection_confidence=str(block.get("confidence") or ""),
+            detection_limitations=[str(item) for item in block.get("limitations") or []],
+            evidence_source_summary=_int_dict(block.get("evidence_source_summary")),
             error="llm_unavailable",
         )
 
@@ -218,6 +224,8 @@ def evaluate_component(
         detected_content=_block_content_text(block),
         detection_mode=str(block.get("mode") or ""),
         detection_confidence=str(block.get("confidence") or ""),
+        detection_limitations=[str(item) for item in block.get("limitations") or []],
+        evidence_source_summary=_int_dict(block.get("evidence_source_summary")),
         evidence=[str(e) for e in (block.get("evidence") or [])],
     )
 
@@ -264,6 +272,8 @@ def _run_tile_call(
     detected_content: str | None = None,
     detection_mode: str | None = None,
     detection_confidence: str | None = None,
+    detection_limitations: list[str] | None = None,
+    evidence_source_summary: dict[str, int] | None = None,
     evidence: list[str] | None = None,
 ) -> ComponentResult:
     ids = tile_ids(key)
@@ -307,6 +317,8 @@ def _run_tile_call(
                 detected_content=detected_content,
                 detection_mode=detection_mode,
                 detection_confidence=detection_confidence,
+                detection_limitations=list(detection_limitations or []),
+                evidence_source_summary=dict(evidence_source_summary or {}),
                 evidence=evidence or [],
             )
 
@@ -327,9 +339,23 @@ def _run_tile_call(
         detected_content=detected_content,
         detection_mode=detection_mode,
         detection_confidence=detection_confidence,
+        detection_limitations=list(detection_limitations or []),
+        evidence_source_summary=dict(evidence_source_summary or {}),
         evidence=evidence or [],
         error=last_error,
     )
+
+
+def _int_dict(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, item in value.items():
+        try:
+            out[str(key)] = int(item)
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def _apply_sv9_flow_tile_signal_overrides(

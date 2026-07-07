@@ -105,6 +105,15 @@ def test_detection_blocks_resolve_refs_to_citable_snippets() -> None:
             "Tone is operational and precise.",
         ],
         "evidence_refs": ["raw_inputs.0.text", "features.0"],
+        "evidence_source_summary": {
+            "owned_copy": 1,
+            "external_proof": 0,
+            "visual_signal": 0,
+            "derived_strategy": 0,
+            "acquisition_metadata": 0,
+            "other": 1,
+            "total": 2,
+        },
         "source": "sv9_flow",
         "ingress_version": SV9_FLOW_INGRESS_VERSION,
     }

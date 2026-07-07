@@ -19,12 +19,12 @@ def test_policy_versions_match_worker_constants() -> None:
     assert (
         block_detection_policy()["version"]
         == BLOCK_DETECTION_POLICY_VERSION
-        == "sv9-flow-block-detection-policy-v4"
+        == "sv9-flow-block-detection-policy-v6"
     )
     assert (
         block_evidence_policy()["version"]
         == BLOCK_EVIDENCE_SHORTLIST_VERSION
-        == "sv9-flow-block-evidence-shortlists-v2"
+        == "sv9-flow-block-evidence-shortlists-v3"
     )
 
 
@@ -33,7 +33,8 @@ def test_detection_terms_cover_all_sensitive_blocks() -> None:
 
 
 def test_magnetism_families_are_complete() -> None:
-    assert set(magnetism_families()) == {
+    families = magnetism_families()
+    assert set(families) == {
         "direct_pull",
         "broad_market",
         "owned_hook",
@@ -41,6 +42,8 @@ def test_magnetism_families_are_complete() -> None:
         "belonging_status",
         "gravity",
     }
+    assert "prevención activa de caídas" in families["owned_hook"]
+    assert "prevención activa de caídas" in families["direct_pull"]
     assert magnetism_direct_pull_gap_markers()
 
 

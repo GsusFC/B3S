@@ -18,6 +18,12 @@ SV9_FLOW_INGRESS_VERSION = "sv9-flow-ingress-v1"
 SV9_FLOW_DETECTION_MODE = "sv9_flow"
 _MAX_EVIDENCE_ITEMS = 5
 _MAX_EVIDENCE_CHARS = 700
+_SOURCE_CLASS_OWNED_COPY = "owned_copy"
+_SOURCE_CLASS_EXTERNAL_PROOF = "external_proof"
+_SOURCE_CLASS_DERIVED_STRATEGY = "derived_strategy"
+_SOURCE_CLASS_ACQUISITION_METADATA = "acquisition_metadata"
+_SOURCE_CLASS_VISUAL_SIGNAL = "visual_signal"
+_SOURCE_CLASS_OTHER = "other"
 
 
 def detection_blocks_from_flow_candidate(candidate: Sv9FlowCandidate) -> dict[str, dict[str, Any]]:
@@ -51,6 +57,7 @@ def detection_blocks_from_flow_candidate(candidate: Sv9FlowCandidate) -> dict[st
             "limitations": limitations,
             "evidence": _evidence_snippets(refs, evidence_by_ref),
             "evidence_refs": refs[:_MAX_EVIDENCE_ITEMS],
+            "evidence_source_summary": _source_summary(refs, evidence_by_ref),
             "source": "sv9_flow",
             "ingress_version": SV9_FLOW_INGRESS_VERSION,
         }
@@ -99,6 +106,84 @@ def _evidence_snippets(
             continue
         snippets.append(content[:_MAX_EVIDENCE_CHARS])
     return _unique_strings(snippets)[:_MAX_EVIDENCE_ITEMS]
+
+
+def _source_summary(
+    refs: list[str],
+    evidence_by_ref: dict[str, EvidenceRecord],
+) -> dict[str, int]:
+    summary = {
+        _SOURCE_CLASS_OWNED_COPY: 0,
+        _SOURCE_CLASS_EXTERNAL_PROOF: 0,
+        _SOURCE_CLASS_VISUAL_SIGNAL: 0,
+        _SOURCE_CLASS_DERIVED_STRATEGY: 0,
+        _SOURCE_CLASS_ACQUISITION_METADATA: 0,
+        _SOURCE_CLASS_OTHER: 0,
+        "total": 0,
+    }
+    for ref in refs:
+        record = evidence_by_ref.get(ref)
+        if record is None:
+            continue
+        source_class = _source_class_for_record(record)
+        if source_class not in summary:
+            source_class = _SOURCE_CLASS_OTHER
+        summary[source_class] += 1
+        summary["total"] += 1
+    return summary
+
+
+def _source_class_for_record(record: EvidenceRecord) -> str:
+    metadata = record.metadata if isinstance(record.metadata, dict) else {}
+    explicit = _normalized_source_class(str(metadata.get("source_class") or ""))
+    if explicit:
+        return explicit
+    source = str(record.source or "").lower()
+    evidence_type = str(record.evidence_type or "").lower()
+    ref = str(record.ref or "").lower()
+    if source in {"visual_signature", "visual_acquisition"} or ref.startswith(("visual_signature.", "visual_acquisition.")):
+        return _SOURCE_CLASS_VISUAL_SIGNAL
+    if source in {"web", "homepage", "home", "about", "website", "owned", "owned_web", "owned_surface"}:
+        return _SOURCE_CLASS_OWNED_COPY
+    if source == "report_narrative":
+        return _SOURCE_CLASS_DERIVED_STRATEGY
+    if source in {"exa", "searchapi", "search_api", "github"}:
+        return _SOURCE_CLASS_EXTERNAL_PROOF
+    if source in {"context", "social", "competitors", "parallel_shadow", "screenshot_capture", "entity_research_packet"}:
+        return _SOURCE_CLASS_ACQUISITION_METADATA
+    if evidence_type.startswith("acquisition."):
+        return _SOURCE_CLASS_ACQUISITION_METADATA
+    return _SOURCE_CLASS_OTHER
+
+
+def _normalized_source_class(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in {"owned_copy", "owned_surface", "audited_surface", "owned", "same_root_surface"}:
+        return _SOURCE_CLASS_OWNED_COPY
+    if normalized in {
+        "external_proof",
+        "external_third_party",
+        "marketplace_listing",
+        "trust_security",
+        "repository",
+        "competitor_comparison",
+    }:
+        return _SOURCE_CLASS_EXTERNAL_PROOF
+    if normalized in {"derived_strategy", "report_narrative"}:
+        return _SOURCE_CLASS_DERIVED_STRATEGY
+    if normalized in {
+        "acquisition_metadata",
+        "related_unresolved",
+        "technical_internal",
+        "visual_internal_metric",
+        "noise",
+        "social_metadata",
+        "entity_research_packet",
+    }:
+        return _SOURCE_CLASS_ACQUISITION_METADATA
+    if normalized in {"visual_signal", "visual_signature", "visual_acquisition"}:
+        return _SOURCE_CLASS_VISUAL_SIGNAL
+    return normalized
 
 
 def _confidence(value: Any) -> str:

@@ -27,7 +27,14 @@ def _tile(tid: str, estado: str) -> TileVerdict:
     return TileVerdict(tile_id=tid, estado=estado, motivo="motivo")
 
 
-def scored(key: str, score: int, *, blind: int = 0) -> ComponentResult:
+def scored(
+    key: str,
+    score: int,
+    *,
+    blind: int = 0,
+    evidence_source_summary: dict[str, int] | None = None,
+    detection_limitations: list[str] | None = None,
+) -> ComponentResult:
     """Light the first `score` tiles; mark `blind` of the rest as sin_evidencia."""
     ids = tile_ids(key)
     profile = []
@@ -38,7 +45,14 @@ def scored(key: str, score: int, *, blind: int = 0) -> ComponentResult:
             profile.append(_tile(tid, ESTADO_SIN_EVIDENCIA))
         else:
             profile.append(_tile(tid, ESTADO_NO))
-    return ComponentResult(component=key, status=STATUS_SCORED, score=score, tile_profile=profile)
+    return ComponentResult(
+        component=key,
+        status=STATUS_SCORED,
+        score=score,
+        tile_profile=profile,
+        evidence_source_summary=evidence_source_summary or {},
+        detection_limitations=detection_limitations or [],
+    )
 
 
 def full_components(**overrides: ComponentResult) -> dict[str, ComponentResult]:
@@ -230,6 +244,81 @@ class AggregateTests(unittest.TestCase):
         components.pop("coherencia")
         with self.assertRaises(ValueError):
             aggregate(components, brand_name="Acme", url="https://acme.test")
+
+    def test_owned_expression_is_capped_when_only_external_proof_supports_it(self):
+        result = aggregate(
+            full_components(
+                mission=scored(
+                    "mission",
+                    5,
+                    evidence_source_summary={
+                        "owned_copy": 0,
+                        "external_proof": 2,
+                        "visual_signal": 0,
+                        "derived_strategy": 0,
+                        "acquisition_metadata": 0,
+                        "other": 0,
+                        "total": 2,
+                    },
+                )
+            ),
+            brand_name="Acme",
+            url="https://acme.test",
+        )
+
+        mission = result.components["mission"]
+        self.assertEqual(mission.score, 3)
+        self.assertIn("source_policy:mission_requires_owned_expression", mission.source_policy_notes)
+        self.assertEqual(len(mission.lit_tiles), 3)
+        self.assertEqual(len(mission.blind_spot_tiles), 2)
+
+    def test_implied_owned_expression_is_capped_and_coherence_follows(self):
+        result = aggregate(
+            full_components(
+                mission=scored("mission", 5, detection_limitations=["coverage:mission_implied_not_explicit"]),
+                vision=scored("vision", 5, detection_limitations=["coverage:vision_implied_not_explicit"]),
+                values=scored("values", 5, detection_limitations=["coverage:values_implied_not_explicit"]),
+                coherencia=scored("coherencia", 10),
+            ),
+            brand_name="Acme",
+            url="https://acme.test",
+        )
+
+        self.assertEqual(result.components["mission"].score, 3)
+        self.assertEqual(result.components["vision"].score, 3)
+        self.assertEqual(result.components["values"].score, 3)
+        self.assertEqual(result.components["coherencia"].score, 5)
+        self.assertIn(
+            "source_policy:coherencia_capped_after_component_authority_caps",
+            result.components["coherencia"].source_policy_notes,
+        )
+
+    def test_external_proof_can_support_but_not_max_out_magnetism_without_owned_surface(self):
+        result = aggregate(
+            full_components(
+                magnetism=scored(
+                    "magnetism",
+                    10,
+                    evidence_source_summary={
+                        "owned_copy": 0,
+                        "external_proof": 4,
+                        "visual_signal": 0,
+                        "derived_strategy": 0,
+                        "acquisition_metadata": 0,
+                        "other": 0,
+                        "total": 4,
+                    },
+                )
+            ),
+            brand_name="Acme",
+            url="https://acme.test",
+        )
+
+        self.assertEqual(result.components["magnetism"].score, 7)
+        self.assertIn(
+            "source_policy:magnetism_external_proof_without_owned_surface",
+            result.components["magnetism"].source_policy_notes,
+        )
 
 
 class ImmediateMarginTests(unittest.TestCase):
