@@ -37,6 +37,7 @@ from src.sv9.models import (
 )
 from src.sv9.language_guard import (
     spanish_component_verdict,
+    spanish_generated_text,
     spanish_tile_contexto,
     spanish_tile_motivo,
 )
@@ -74,6 +75,7 @@ _TILES_JSON_SCHEMA: dict[str, Any] = {
         "puntos": {"type": "integer"},
         "confianza": {"type": "string"},
         "veredicto": {"type": "string"},
+        "message": {"type": "string"},
     },
     "required": ["baldosas"],
 }
@@ -104,7 +106,8 @@ FRONTERA ENTRE "no" Y "sin_evidencia": si la prueba PODRÍA estar en la huella p
 REGLAS DE SALIDA
 - Evalúa TODAS las baldosas del componente, siempre. Una por una. Sin orden ni dependencia.
 - No inventes. No promedies. No premies ambición sin prueba.
-- Devuelve JSON estricto con una entrada por cada baldosa, usando su id exacto."""
+- Devuelve JSON estricto con una entrada por cada baldosa, usando su id exacto.
+- Además, si puedes, devuelve "message": una lectura editorial breve en español para el fundador. Debe sintetizar la implicación estratégica del resultado sin mencionar la rúbrica, el pipeline ni las baldosas."""
 
 _EVALUATOR_SYSTEM_PROMPT = f"""{_ANTIBIAS_PREAMBLE}
 
@@ -302,6 +305,7 @@ def _run_tile_call(
 
         verdicts, error = _normalize_tiles(raw, ids, lenient=is_last)
         veredicto = str((raw or {}).get("veredicto") or "").strip() if isinstance(raw, dict) else ""
+        message = spanish_generated_text((raw or {}).get("message")) if isinstance(raw, dict) else ""
         if verdicts is not None and (veredicto or not requires_veredicto or is_last):
             verdicts = _apply_sv9_flow_tile_signal_overrides(verdicts, signals or [])
             final_veredicto = spanish_component_verdict(key, veredicto, verdicts)
@@ -318,6 +322,7 @@ def _run_tile_call(
                 score=score_from_tile_profile(verdicts),
                 tile_profile=verdicts,
                 veredicto=final_veredicto,
+                message=message,
                 evaluation_model=getattr(llm, "model", None),
                 detected_content=detected_content,
                 detection_mode=detection_mode,
@@ -647,7 +652,7 @@ def _json_shape_hint(key: str) -> str:
     first = COMPONENTS[key]["tiles"][0]["id"]
     veredicto = ', "veredicto": "frase de síntesis"' if key == "coherencia" else ""
     return (
-        '{"componente": "%s", "baldosas": ['
+        '{"componente": "%s", "message": "lectura editorial breve en español", "baldosas": ['
         '{"id": "%s", "estado": "ok|no|sin_evidencia", '
         '"evidencia": "cita literal (si ok)", '
         '"motivo": "por qué (si no/sin_evidencia)", '

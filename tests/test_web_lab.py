@@ -1248,6 +1248,57 @@ def test_attach_sv9_editorial_only_requests_components_with_unusable_prose():
     assert result["sv9"]["result"]["executive_reading"] == "Lectura ejecutiva del scan."
 
 
+def test_attach_sv9_editorial_skips_when_evaluator_messages_exist():
+    from src.sv9.rubric import tile_ids
+    from web.scan_runner import _attach_sv9_editorial
+
+    ids = tile_ids("magnetism")
+    payload = {
+        "sv9": {
+            "result": {
+                "brand_name": "Optiak",
+                "url": "https://optiak.com",
+                "brand3_score": 61,
+                "components": {
+                    "magnetism": {
+                        "component": "magnetism",
+                        "status": "scored",
+                        "score": 3,
+                        "scale": 10,
+                        "message": "La marca necesita convertir utilidad técnica en tensión narrativa.",
+                        "veredicto": "Síntesis automática: 3/10 baldosas encendidas.",
+                        "tile_profile": [
+                            {"id": ids[0], "estado": "ok", "evidencia": "promesa visible"},
+                            {"id": ids[1], "estado": "no", "motivo": "falta"},
+                        ],
+                    },
+                    "mission": {
+                        "component": "mission",
+                        "status": "scored",
+                        "score": 5,
+                        "scale": 5,
+                        "message": "La misión está formulada con claridad.",
+                        "veredicto": "La misión está formulada con claridad.",
+                        "tile_profile": [],
+                    },
+                },
+            }
+        }
+    }
+
+    def fail_build_editorial(*_args, **_kwargs):
+        raise AssertionError("editorial fallback should not run")
+
+    result = _attach_sv9_editorial(
+        payload,
+        llm=object(),
+        build_editorial_fn=fail_build_editorial,
+    )
+
+    assert "editorial" not in result["sv9"]
+    assert result["sv9"]["result"]["components"]["magnetism"]["message"].startswith("La marca")
+
+
 def test_report_view_rehydrates_reduced_projection_from_raw_sv9_result(monkeypatch):
     from src.sv9.rubric import tile_ids
     from web.app import app

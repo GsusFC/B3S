@@ -144,7 +144,7 @@ class Sv9Store:
                 component.detection_mode,
                 component.detection_confidence,
                 json.dumps(component.evidence, ensure_ascii=False),
-                None,  # editorial message: presentation layer
+                component.message,
                 component.error,
                 rubric_version,
                 created_at,

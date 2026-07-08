@@ -97,6 +97,65 @@ class EvaluateComponentTests(unittest.TestCase):
         self.assertEqual(result.score, 4)
         self.assertEqual(len(result.tile_profile), 10)
 
+    def test_component_message_is_captured_without_changing_score(self):
+        class MessageLLM(FakeLLM):
+            def _call_json(self, system, user, max_tokens=8000, *, json_schema=None, schema_name=None, timeout_seconds=None, strict_schema=True):
+                payload = super()._call_json(
+                    system,
+                    user,
+                    max_tokens=max_tokens,
+                    json_schema=json_schema,
+                    schema_name=schema_name,
+                    timeout_seconds=timeout_seconds,
+                    strict_schema=strict_schema,
+                )
+                payload["message"] = "La marca convierte precisión técnica en una promesa clara para el comprador."
+                return payload
+
+        result = evaluate_component(
+            "personality",
+            tldr=full_tldr(),
+            signals=[],
+            brand_name="Acme",
+            url="u",
+            llm=MessageLLM(ok_up_to=4),
+        )
+
+        self.assertEqual(result.status, STATUS_SCORED)
+        self.assertEqual(result.score, 4)
+        self.assertEqual(
+            result.message,
+            "La marca convierte precisión técnica en una promesa clara para el comprador.",
+        )
+        self.assertEqual(result.to_dict()["message"], result.message)
+
+    def test_component_message_is_sanitized_to_spanish(self):
+        class EnglishMessageLLM(FakeLLM):
+            def _call_json(self, system, user, max_tokens=8000, *, json_schema=None, schema_name=None, timeout_seconds=None, strict_schema=True):
+                payload = super()._call_json(
+                    system,
+                    user,
+                    max_tokens=max_tokens,
+                    json_schema=json_schema,
+                    schema_name=schema_name,
+                    timeout_seconds=timeout_seconds,
+                    strict_schema=strict_schema,
+                )
+                payload["message"] = "The available evidence requires a stronger claim."
+                return payload
+
+        result = evaluate_component(
+            "personality",
+            tldr=full_tldr(),
+            signals=[],
+            brand_name="Acme",
+            url="u",
+            llm=EnglishMessageLLM(),
+        )
+
+        self.assertNotIn("The available evidence", result.message)
+        self.assertEqual(result.message, "")
+
     def test_generated_tile_explanations_are_sanitized_to_spanish(self):
         class EnglishLLM(FakeLLM):
             def _call_json(self, system, user, max_tokens=8000, *, json_schema=None, schema_name=None, timeout_seconds=None, strict_schema=True):

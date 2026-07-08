@@ -89,6 +89,7 @@ class ComponentResult:
     score: int = 0
     tile_profile: list[TileVerdict] = field(default_factory=list)
     veredicto: str = ""  # synthesis sentence (mandatory for Coherencia)
+    message: str = ""  # founder-facing component reading; never affects score
     evaluation_model: str | None = None  # which model tier judged this component
     detected_content: str | None = None
     detection_mode: str | None = None
@@ -150,6 +151,7 @@ class ComponentResult:
             "confidence": self.confidence,
             "blind_spot_count": self.blind_spot_count,
             "veredicto": self.veredicto,
+            "message": self.message,
             "evaluation_model": self.evaluation_model,
             "tile_profile": [v.to_dict() for v in self.tile_profile],
             "lit_tiles": self.lit_tiles,

@@ -54,6 +54,7 @@ class Sv9StoreTests(unittest.TestCase):
         components["coherencia"].veredicto = "La marca cuenta una historia única."
         components["coherencia"].evaluation_model = "reasoning-tier"
         components["mission"].evaluation_model = "flash-tier"
+        components["mission"].message = "La misión traduce el producto en una promesa clara."
         components["values"] = ComponentResult(
             component="values", status=STATUS_NOT_EVALUATED, error="llm_timeout"
         )
@@ -79,6 +80,7 @@ class Sv9StoreTests(unittest.TestCase):
         self.assertEqual(by_component["mission"]["score"], 3)
         self.assertEqual(len(by_component["mission"]["tile_profile"]), 5)
         self.assertEqual(by_component["mission"]["evaluation_model"], "flash-tier")
+        self.assertEqual(by_component["mission"]["message"], "La misión traduce el producto en una promesa clara.")
         self.assertEqual(by_component["coherencia"]["veredicto"], "La marca cuenta una historia única.")
         self.assertEqual(by_component["coherencia"]["evaluation_model"], "reasoning-tier")
         self.assertEqual(by_component["attributes"]["confidence"], "media")
