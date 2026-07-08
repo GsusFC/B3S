@@ -14,6 +14,7 @@ from src.sv9_flow._utils import unique_strings
 from src.sv9_flow.block_evidence_worker import build_block_evidence_shortlists
 from src.sv9_flow.contracts import Sv9FlowCandidate, interpretation_contract_violations
 from src.sv9_flow.evidence_coverage import acquisition_coverage, block_coverage, coverage_limitations
+from src.sv9_flow.evidence_labeling_worker import label_evidence_pack
 from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
 from src.sv9_flow.interpretation_llm_worker import build_brand_interpretation_with_llm
 from src.sv9_flow.tile_signal_worker import build_tile_signals_from_interpretation
@@ -24,6 +25,7 @@ def build_flow_candidate(
     snapshot: dict[str, Any],
     llm: Any,
     adjudicator_llm: Any | None = None,
+    labeling_llm: Any | None = None,
     visual_signature_evidence: dict[str, Any] | None = None,
     gate_authority: str | None = None,
 ) -> tuple[Sv9FlowCandidate, dict[str, Any]]:
@@ -38,6 +40,7 @@ def build_flow_candidate(
         snapshot,
         visual_signature_evidence=visual_signature_evidence,
     )
+    labeling_debug = label_evidence_pack(evidence_pack, llm=labeling_llm)
     shortlists = build_block_evidence_shortlists(evidence_pack)
     if gate_authority is None:
         from src.config import SV9_FLOW_GATE_AUTHORITY
@@ -50,6 +53,7 @@ def build_flow_candidate(
         block_evidence_shortlists=shortlists,
         gate_authority=gate_authority,
     )
+    debug["evidence_labeling"] = labeling_debug
     debug["block_evidence_shortlists"] = shortlists
     coverage = {
         "acquisition": acquisition_coverage(evidence_pack),

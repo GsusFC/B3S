@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.sv9_flow_shadow_run import _load_env_file
 from scripts.sv9_flow_snapshot_eval import snapshot_and_run_id_from_envelope
-from src.config import SV9_ADJUDICATOR_MODEL, SV9_FLOW_GATE_AUTHORITY, SV9_FLOW_MODEL
+from src.config import SV9_ADJUDICATOR_MODEL, SV9_FLOW_GATE_AUTHORITY, SV9_FLOW_LABELING_MODEL, SV9_FLOW_MODEL
 from src.features.llm_analyzer import LLMAnalyzer
 from src.sv9.flow_ingress import (
     detection_blocks_from_flow_candidate,
@@ -73,6 +73,7 @@ def build_flow_sv9_shadow_eval(
     compare_legacy: bool = False,
     interpretation_llm: Any | None = None,
     adjudicator_llm: Any | None = None,
+    labeling_llm: Any | None = None,
     evaluator_llm: Any | None = None,
     reasoning_llm: Any | None = None,
     gate_authority: str | None = None,
@@ -84,10 +85,12 @@ def build_flow_sv9_shadow_eval(
     visual_evidence_packet = visual_evidence_fn(snapshot)
     interpretation_llm = interpretation_llm or _default_interpretation_llm()
     adjudicator_llm = adjudicator_llm or _default_adjudicator_llm()
+    labeling_llm = labeling_llm or _default_labeling_llm()
     candidate, debug = build_flow_candidate(
         snapshot=snapshot,
         llm=interpretation_llm,
         adjudicator_llm=adjudicator_llm,
+        labeling_llm=labeling_llm,
         visual_signature_evidence=visual_evidence_packet,
         gate_authority=gate_authority or SV9_FLOW_GATE_AUTHORITY,
     )
@@ -141,6 +144,7 @@ def build_flow_sv9_shadow_eval(
             payload["legacy_sv9"]["result"] = legacy_result.to_dict()
     payload["llm_usage"] = _llm_usage_payload(
         interpretation_llm=interpretation_llm,
+        labeling_llm=labeling_llm,
         evaluator_llm=evaluator_llm,
         reasoning_llm=reasoning_llm,
     )
@@ -163,6 +167,12 @@ def _default_adjudicator_llm() -> LLMAnalyzer:
     """Cheap quote-grounded rescue pass for deterministic gate false negatives."""
 
     return LLMAnalyzer(model=os.environ.get("BRAND3_FLOW_ADJUDICATOR_MODEL") or SV9_ADJUDICATOR_MODEL)
+
+
+def _default_labeling_llm() -> LLMAnalyzer:
+    """Cheap semantic evidence labeling pass for shortlist recall."""
+
+    return LLMAnalyzer(model=os.environ.get("BRAND3_FLOW_LABELING_MODEL") or SV9_FLOW_LABELING_MODEL)
 
 
 def _visual_evidence_packet_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any] | None:
@@ -196,6 +206,7 @@ def _compact_interpretation_debug(debug: dict[str, Any]) -> dict[str, Any]:
             "block_detection_decisions",
             "gate_disagreements",
             "detection_provenance",
+            "evidence_labeling",
             "evidence_coverage",
             "failure_reason",
             "failure",
@@ -229,10 +240,12 @@ def _result_summary(result: dict[str, Any]) -> dict[str, Any]:
 def _llm_usage_payload(
     *,
     interpretation_llm: Any,
+    labeling_llm: Any,
     evaluator_llm: Any,
     reasoning_llm: Any | None,
 ) -> dict[str, Any]:
     roles = {
+        "flow_labeling": labeling_llm,
         "flow_interpretation": interpretation_llm,
         "sv9_evaluator": evaluator_llm,
     }

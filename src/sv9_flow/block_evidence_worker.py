@@ -32,6 +32,7 @@ _TYPE_BONUS: dict[str, int] = {
 }
 
 _FEATURE_BONUS_TERMS = tuple(_POLICY["feature_bonus_terms"])
+_SEMANTIC_RELEVANCE_BONUS = 3
 
 _TEXT_STRATEGY_BLOCKS = {
     "brand_idea",
@@ -104,6 +105,8 @@ def _score_record(block: str, record: EvidenceRecord) -> int:
         )
     ).lower()
     score = sum(3 for term in terms if term in haystack)
+    if _semantic_relevance_supports_block(record, block):
+        score += _SEMANTIC_RELEVANCE_BONUS
     score += _TYPE_BONUS.get(record.evidence_type, 0)
     if is_acquisition_noise(record):
         score -= 20
@@ -128,3 +131,12 @@ def _score_record(block: str, record: EvidenceRecord) -> int:
     if record.confidence == "high":
         score += 1
     return score
+
+
+def _semantic_relevance_supports_block(record: EvidenceRecord, block: str) -> bool:
+    relevant_blocks = record.metadata.get("relevant_blocks")
+    if not isinstance(relevant_blocks, list) or block not in relevant_blocks:
+        return False
+    if record.metadata.get("specificity") == "incidental":
+        return False
+    return record.metadata.get("stance") in {"supports", "contradicts"}

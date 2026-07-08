@@ -380,3 +380,28 @@ def test_core_purpose_shortlist_penalizes_report_narrative_when_owned_copy_exist
     shortlists = build_block_evidence_shortlists(pack, blocks=("core_purpose",), limit=2)
 
     assert shortlists["core_purpose"][0] == "raw_inputs.1"
+
+
+def test_semantic_labeling_rescues_relevant_record_without_keyword_hits() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="web",
+                evidence_type="raw_input",
+                content="We turn every training ride into a reward loop.",
+                metadata={
+                    "source_class": "owned_copy",
+                    "relevant_blocks": ["mission"],
+                    "stance": "supports",
+                    "specificity": "implied",
+                },
+            )
+        ],
+    )
+
+    shortlists = build_block_evidence_shortlists(pack, blocks=("mission",), limit=2)
+
+    assert shortlists["mission"] == ["raw_inputs.0"]

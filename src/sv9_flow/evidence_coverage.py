@@ -92,6 +92,11 @@ def block_coverage(pack: BrandEvidencePack, interpretation: BrandInterpretation)
             for ref in cited_refs
             if final_detected and _is_positive_ref(records_by_ref.get(ref))
         ]
+        counter_refs = [
+            ref
+            for ref in cited_refs
+            if _is_counter_ref(records_by_ref.get(ref), block)
+        ]
         absence_refs = [
             record.ref
             for record in pack.evidence
@@ -100,7 +105,11 @@ def block_coverage(pack: BrandEvidencePack, interpretation: BrandInterpretation)
         absence_surface_count = _distinct_absence_surface_count(pack, block)
         if positive_refs:
             status: BlockCoverageStatus = "positive_evidence"
-        elif _is_implied_not_explicit(block_payload, block, absence_blocks_by_surface):
+        elif _is_implied_not_explicit(block_payload, block, absence_blocks_by_surface) or _has_implied_semantic_ref(
+            block,
+            cited_refs,
+            records_by_ref,
+        ):
             status = "implied_not_explicit"
         elif absence_surface_count >= 2:
             status = "verified_absent"
@@ -111,6 +120,7 @@ def block_coverage(pack: BrandEvidencePack, interpretation: BrandInterpretation)
         coverage[block] = {
             "status": status,
             "positive_refs": positive_refs,
+            "counter_refs": counter_refs,
             "absence_refs": absence_refs,
             "cited_refs": cited_refs,
             "absence_surface_count": absence_surface_count,
@@ -187,7 +197,42 @@ def _is_positive_ref(record: EvidenceRecord | None) -> bool:
         return False
     if record.evidence_type.startswith("acquisition."):
         return False
+    if record.metadata.get("stance") == "contradicts":
+        return False
     return source_class_for_record(record) != SOURCE_CLASS_ACQUISITION_METADATA
+
+
+def _is_counter_ref(record: EvidenceRecord | None, block: str) -> bool:
+    if record is None:
+        return False
+    if record.evidence_type.startswith("acquisition."):
+        return False
+    relevant_blocks = record.metadata.get("relevant_blocks")
+    return (
+        isinstance(relevant_blocks, list)
+        and block in relevant_blocks
+        and record.metadata.get("stance") == "contradicts"
+        and source_class_for_record(record) != SOURCE_CLASS_ACQUISITION_METADATA
+    )
+
+
+def _has_implied_semantic_ref(
+    block: str,
+    cited_refs: list[str],
+    records_by_ref: dict[str, EvidenceRecord],
+) -> bool:
+    for ref in cited_refs:
+        record = records_by_ref.get(ref)
+        if record is None:
+            continue
+        relevant_blocks = record.metadata.get("relevant_blocks")
+        if not isinstance(relevant_blocks, list) or block not in relevant_blocks:
+            continue
+        if record.metadata.get("stance") != "supports":
+            continue
+        if record.metadata.get("specificity") == "implied":
+            return True
+    return False
 
 
 def _attempt_summary(record: EvidenceRecord) -> dict[str, Any]:

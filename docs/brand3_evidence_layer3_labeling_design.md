@@ -1,12 +1,11 @@
 # B3S — Layer 3: semantic evidence labeling pass (design)
 
-Status: **DESIGN ONLY — do not implement.** Implementation gate: land C1 + C2
-(`docs/brand3_evidence_first_instance_classification_plan.md`), then measure how
-many blocks still resolve to `insufficient_acquisition` while relevant copy sits
-in the pack. That number is the business case for this pass.
-
-This document is deliberately separate from the C1/C2 plan so that the plan Codex
-is implementing carries no actionable layer-3 spec.
+Status: **IMPLEMENTED — runtime advisory pass.** C1 + C2 landed first, and the
+offline measurement gate found latent relevant evidence in blocks still resolving
+to `insufficient_acquisition`. Runtime implementation is intentionally advisory:
+it enriches evidence metadata, rescues semantically relevant records into
+shortlists, and surfaces `counter_refs`; it does not score or directly flip a
+block negative.
 
 ---
 

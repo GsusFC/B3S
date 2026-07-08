@@ -745,6 +745,71 @@ def test_block_coverage_derives_verified_absent_from_two_checked_surfaces() -> N
     assert "coverage:values_verified_absent" in coverage_limitations(coverage)
 
 
+def test_block_coverage_surfaces_counter_refs_without_counting_positive_support() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="review",
+                evidence_type="external_proof.review",
+                content="Customers say Acme claims care but behaves transactionally.",
+                metadata={
+                    "source_class": "external_proof",
+                    "relevant_blocks": ["values"],
+                    "stance": "contradicts",
+                    "specificity": "explicit",
+                },
+            )
+        ],
+    )
+    interpretation = BrandInterpretation(
+        brand_name="Acme",
+        url="https://acme.example",
+        blocks={"values": {"detected": True, "content": "Acme values care.", "confidence": "medium"}},
+        evidence_refs={"values": ["raw_inputs.0"]},
+    )
+
+    coverage = block_coverage(pack, interpretation)
+
+    assert coverage["values"]["positive_refs"] == []
+    assert coverage["values"]["counter_refs"] == ["raw_inputs.0"]
+    assert coverage["values"]["status"] == "insufficient_acquisition"
+
+
+def test_block_coverage_uses_implied_semantic_ref_for_implied_not_explicit() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="web",
+                evidence_type="raw_input",
+                content="We turn every training ride into a reward loop.",
+                metadata={
+                    "source_class": "owned_copy",
+                    "relevant_blocks": ["mission"],
+                    "stance": "supports",
+                    "specificity": "implied",
+                },
+            )
+        ],
+    )
+    interpretation = BrandInterpretation(
+        brand_name="Acme",
+        url="https://acme.example",
+        blocks={"mission": {"detected": False, "content": "", "confidence": "low"}},
+        evidence_refs={"mission": ["raw_inputs.0"]},
+    )
+
+    coverage = block_coverage(pack, interpretation)
+
+    assert coverage["mission"]["status"] == "implied_not_explicit"
+    assert coverage["mission"]["positive_refs"] == []
+
+
 def test_acquisition_coverage_summarizes_external_attempts_and_absence_refs() -> None:
     pack = BrandEvidencePack(
         brand_name="Acme",
@@ -853,6 +918,71 @@ def test_canonical_orchestrator_builds_candidate_from_evidence_and_llm() -> None
     assert debug["gate_authority"] == "veto_only"
     assert "raw_inputs.0" in debug["block_evidence_shortlists"]["mission"]
     assert not [item for item in candidate.limitations if item.startswith("contract_violation:")]
+
+
+def test_canonical_orchestrator_labels_evidence_before_shortlisting() -> None:
+    class LabelingLLM:
+        api_key = "test-key"
+
+        def _call_json(self, _system, _user, **_kwargs):
+            return {
+                "labels": [
+                    {
+                        "ref": "raw_inputs.0",
+                        "relevant_blocks": ["mission"],
+                        "stance": "supports",
+                        "identity_match": "domain",
+                        "specificity": "implied",
+                    }
+                ]
+            }
+
+    class FlowLLM:
+        api_key = "test-key"
+        model = "flow-fake"
+        last_failure_reason = None
+        call_failures = []
+
+        def _call_json(self, _system, user, **_kwargs):
+            if '"block": "mission"' in user:
+                assert '"semantic_relevant_blocks": [' in user
+                return {
+                    "detected": True,
+                    "content": "Acme turns training rides into a reward loop.",
+                    "confidence": "medium",
+                    "evidence_refs": ["raw_inputs.0"],
+                    "rationale": "The homepage implies the mission through the product outcome.",
+                    "limitations": [],
+                }
+            return {
+                "detected": False,
+                "content": "",
+                "confidence": "low",
+                "evidence_refs": [],
+                "rationale": "Not enough evidence.",
+                "limitations": [],
+            }
+
+    candidate, debug = build_flow_candidate(
+        snapshot={
+            "run": {"brand_name": "Acme", "url": "https://acme.example"},
+            "raw_inputs": [
+                {
+                    "source": "web",
+                    "payload": {"text": "We turn every training ride into a reward loop."},
+                }
+            ],
+        },
+        llm=FlowLLM(),
+        labeling_llm=LabelingLLM(),
+        gate_authority="warn",
+    )
+
+    assert debug["evidence_labeling"]["status"] == "labeled"
+    assert debug["evidence_labeling"]["records_labeled"] == 1
+    assert "raw_inputs.0" in debug["block_evidence_shortlists"]["mission"]
+    assert candidate.evidence_pack.evidence[0].metadata["relevant_blocks"] == ["mission"]
+    assert candidate.interpretation.blocks["mission"]["detected"] is True
 
 
 def test_canonical_orchestrator_emits_evidence_coverage_debug_and_limitations() -> None:
@@ -970,6 +1100,10 @@ def test_flow_sv9_shadow_eval_runs_current_sv9_from_flow_interpretation() -> Non
                 payload["veredicto"] = "La marca cuenta una historia única."
             return payload
 
+    class NoKeyLabelingLLM:
+        api_key = None
+        model = "labeling-disabled"
+
     report = build_flow_sv9_shadow_eval(
         {
             "source_run_id": 44,
@@ -990,6 +1124,7 @@ def test_flow_sv9_shadow_eval_runs_current_sv9_from_flow_interpretation() -> Non
         interpretation_llm=FlowLLM(),
         evaluator_llm=TileLLM(),
         reasoning_llm=TileLLM(),
+        labeling_llm=NoKeyLabelingLLM(),
         visual_evidence_fn=lambda _snapshot: {
             "schema_version": "visual-signature-evidence-v1",
             "capture": {"status": "usable", "first_fold_evaluable": True},
