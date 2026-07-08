@@ -106,6 +106,19 @@ class BuildEditorialTests(unittest.TestCase):
         payload = build_editorial(scan, llm=FakeEditorialLLM())
         self.assertEqual(len(payload["component_messages"]), 10)
 
+    def test_can_limit_component_messages_and_skip_executive_reading(self):
+        llm = FakeEditorialLLM()
+        payload = build_editorial(
+            scan_dict(),
+            llm=llm,
+            component_keys=["magnetism"],
+            include_executive_reading=False,
+        )
+
+        self.assertEqual(set(payload["component_messages"]), {"magnetism"})
+        self.assertIsNone(payload["executive_reading"])
+        self.assertEqual([call["schema_name"] for call in llm.calls], ["sv9_editorial_magnetism"])
+
 
 class EditorialPersistenceTests(unittest.TestCase):
     def test_save_editorial_roundtrip(self):

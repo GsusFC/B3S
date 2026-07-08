@@ -116,6 +116,32 @@ class ExportMarkdownTests(unittest.TestCase):
         self.assertIn("Fallo técnico", md)
         self.assertIn("provider_http_error", md)
 
+    def test_generated_english_prose_and_reason_codes_render_in_spanish(self):
+        scan = self._scan()
+        scan["executive_reading"] = "The snapshot does not provide enough evidence."
+        scan["reliability_status"] = "shadow"
+        scan["reliability_reason_codes"] = ["components_not_detected", "blind_spots_above_usable_threshold"]
+        scan["canonical_status"] = "non_canonical"
+        scan["canonical_reason_codes"] = ["shadow_not_canonical"]
+        scan["components"]["brand_idea"]["veredicto"] = "The brand idea is clearly articulated and consistently executed."
+        scan["components"]["brand_idea"]["message"] = "The available evidence requires a stronger claim."
+        scan["components"]["attributes"]["tile_profile"][2]["motivo"] = "The snapshot does not provide access to the full product interface."
+        scan["components"]["attributes"]["tile_profile"][2]["contexto_requerido"] = "Access to the logged-in product dashboard and error states."
+
+        md = build_scan_markdown(scan)
+
+        self.assertIn("Confiabilidad: **sombra**", md)
+        self.assertIn("componentes no detectados", md)
+        self.assertIn("Canonicidad: **no canónico**", md)
+        self.assertIn("sombra, no canónico", md)
+        self.assertNotIn("components_not_detected", md)
+        self.assertNotIn("non_canonical", md)
+        self.assertNotIn("The snapshot", md)
+        self.assertNotIn("Access to", md)
+        self.assertNotIn("The brand idea", md)
+        self.assertIn("Síntesis automática", md)
+        self.assertIn("Aporta contexto externo verificable", md)
+
     def test_accepts_persisted_list_shape(self):
         scan = self._scan()
         scan["components"] = [

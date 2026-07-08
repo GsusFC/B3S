@@ -97,6 +97,40 @@ class EvaluateComponentTests(unittest.TestCase):
         self.assertEqual(result.score, 4)
         self.assertEqual(len(result.tile_profile), 10)
 
+    def test_generated_tile_explanations_are_sanitized_to_spanish(self):
+        class EnglishLLM(FakeLLM):
+            def _call_json(self, system, user, max_tokens=8000, *, json_schema=None, schema_name=None, timeout_seconds=None, strict_schema=True):
+                ids = self._tiles_for(schema_name)
+                return {
+                    "componente": schema_name,
+                    "baldosas": [
+                        {"id": ids[0], "estado": "ok", "evidencia": "quote"},
+                        {
+                            "id": ids[1],
+                            "estado": "sin_evidencia",
+                            "motivo": "The snapshot does not provide access to the full product interface.",
+                            "contexto_requerido": "Access to the logged-in product dashboard and error states.",
+                        },
+                        *[{"id": tid, "estado": "no", "motivo": "falta"} for tid in ids[2:]],
+                    ],
+                }
+
+        result = evaluate_component(
+            "personality",
+            tldr=full_tldr(),
+            signals=[],
+            brand_name="Acme",
+            url="u",
+            llm=EnglishLLM(),
+        )
+
+        blind = result.tile_profile[1]
+        self.assertEqual(result.status, STATUS_SCORED)
+        self.assertNotIn("The snapshot", blind.motivo)
+        self.assertNotIn("Access to", blind.contexto_requerido)
+        self.assertIn("snapshot no aporta evidencia suficiente", blind.motivo)
+        self.assertIn("Aporta contexto externo verificable", blind.contexto_requerido)
+
     def test_sv9_flow_tile_signals_are_rendered_as_tile_scoped_context(self):
         llm = FakeLLM(ok_up_to=2)
         evaluate_component(

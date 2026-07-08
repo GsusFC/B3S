@@ -521,6 +521,7 @@ def _system_prompt() -> str:
 Return strict JSON only. Do not score the brand. Do not invent evidence.
 Every detected block must cite existing evidence_refs from the provided evidence list.
 If evidence is weak, set detected=false or confidence=low.
+Write generated fields in Spanish: content, rationale, rejected_content-style explanations and user-facing limitations. Keep literal evidence quotes in their original language.
 """
 
 
@@ -568,6 +569,7 @@ def _user_prompt(
             "Do not use outside knowledge.",
             "A detected block requires at least one evidence_ref from the evidence list.",
             "For each block, only cite refs listed in block_evidence_shortlists for that block.",
+            "Write generated content and rationale in Spanish. Do not translate literal evidence.",
             "Prefer insufficient evidence over speculation.",
         ],
     }
@@ -610,6 +612,7 @@ def _block_user_prompt(
             "Only cite refs from allowed_evidence_refs.",
             "Use evidence source_class/type/intent to separate owned copy, external proof, visual signal, and acquisition metadata.",
             "If the allowed evidence is weak or missing, set detected=false.",
+            "Write generated content and rationale in Spanish. Do not translate literal evidence.",
             "Keep content and rationale concise so the JSON completes.",
         ],
     }

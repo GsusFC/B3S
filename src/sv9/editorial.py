@@ -14,6 +14,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from src.sv9.language_guard import spanish_generated_text
 from src.sv9.rubric import COMPONENTS, PRESENTATION_ORDER
 
 SV9_EDITORIAL_PROMPT_VERSION = "sv9-editorial-v0.2"
@@ -78,6 +79,8 @@ def build_editorial(
     scan: dict[str, Any],
     *,
     llm: Any,
+    component_keys: list[str] | tuple[str, ...] | set[str] | None = None,
+    include_executive_reading: bool = True,
 ) -> dict[str, Any]:
     """Generate per-component messages and the executive reading for a scan.
 
@@ -90,7 +93,8 @@ def build_editorial(
         return {"component_messages": {}, "executive_reading": None}
 
     components = _normalize_components(scan)
-    keys = [key for key in PRESENTATION_ORDER if key in components]
+    requested = {str(key) for key in component_keys} if component_keys is not None else None
+    keys = [key for key in PRESENTATION_ORDER if key in components and (requested is None or key in requested)]
 
     def _one(key: str) -> tuple[str, str | None]:
         return key, _component_message(scan, key, components[key], llm)
@@ -103,7 +107,7 @@ def build_editorial(
 
     return {
         "component_messages": messages,
-        "executive_reading": _executive_reading(scan, components, llm),
+        "executive_reading": _executive_reading(scan, components, llm) if include_executive_reading else None,
     }
 
 
@@ -174,7 +178,7 @@ Escribe el mensaje. JSON estricto: {{"message": "..."}}"""
     except Exception:
         return None
     message = str((raw or {}).get("message") or "").strip()
-    return message or None
+    return spanish_generated_text(message) or None
 
 
 def _executive_reading(
@@ -219,4 +223,4 @@ Escribe la lectura ejecutiva. JSON estricto: {{"reading": "..."}}"""
     except Exception:
         return None
     reading = str((raw or {}).get("reading") or "").strip()
-    return reading or None
+    return spanish_generated_text(reading) or None

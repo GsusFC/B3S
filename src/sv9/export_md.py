@@ -12,6 +12,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.sv9.language_guard import (
+    spanish_component_verdict,
+    spanish_generated_text,
+    spanish_reason_labels,
+    spanish_status_label,
+    spanish_tile_contexto,
+    spanish_tile_motivo,
+)
 from src.sv9.rubric import (
     COMPONENTS,
     ESTADO_NO,
@@ -37,7 +45,7 @@ def _components_by_key(scan: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return by_key
 
 
-def build_scan_markdown(scan: dict[str, Any]) -> str:
+def build_scan_markdown(scan: dict[str, Any], *, lang: str = "es") -> str:
     """Render the scan as a Brand3 .md report."""
     components = _components_by_key(scan)
     brand = scan.get("display_name") or scan.get("brand_name") or "(marca)"
@@ -52,18 +60,18 @@ def build_scan_markdown(scan: dict[str, Any]) -> str:
     lines.append(f"- Brand3 Score: **{scan.get('brand3_score', 0)}/100**")
     lines.append(f"- Modelo: {model}")
     if scan.get("reliability_status"):
-        lines.append(f"- Confiabilidad: **{scan.get('reliability_status')}**")
+        lines.append(f"- Confiabilidad: **{spanish_status_label(scan.get('reliability_status'))}**")
         reason_codes = scan.get("reliability_reason_codes") or []
         if reason_codes:
-            lines.append(f"- Razones de confiabilidad: {', '.join(reason_codes)}")
+            lines.append(f"- Razones de confiabilidad: {', '.join(spanish_reason_labels(reason_codes))}")
     if scan.get("canonical_status"):
-        lines.append(f"- Canonicidad: **{scan.get('canonical_status')}**")
+        lines.append(f"- Canonicidad: **{spanish_status_label(scan.get('canonical_status'))}**")
         reason_codes = scan.get("canonical_reason_codes") or []
         if reason_codes:
-            lines.append(f"- Razones de canonicidad: {', '.join(reason_codes)}")
+            lines.append(f"- Razones de canonicidad: {', '.join(spanish_reason_labels(reason_codes))}")
     if scan.get("magnetism_capped"):
         lines.append("- Tope de Magnetism aplicado: sí")
-    reading = scan.get("executive_reading")
+    reading = spanish_generated_text(scan.get("executive_reading"))
     if reading:
         lines.append("")
         lines.append(f"> {reading}")
@@ -81,11 +89,11 @@ def build_scan_markdown(scan: dict[str, Any]) -> str:
         multiplier = " ×2" if spec["multiplier"] == 2 else ""
 
         lines.append(f"## {spec['label']}")
-        veredicto = str(component.get("veredicto") or "").strip()
+        veredicto = spanish_component_verdict(key, component.get("veredicto"), component.get("tile_profile") or [])
         if veredicto:
             lines.append("")
             lines.append(f"> {veredicto}")
-        message = str(component.get("message") or "").strip()
+        message = spanish_generated_text(component.get("message"))
         if message and message != veredicto:
             lines.append("")
             lines.append(message)
@@ -144,10 +152,10 @@ def build_scan_markdown(scan: dict[str, Any]) -> str:
         if blind_spots:
             for tile, verdict in blind_spots:
                 detail = f"- **{tile['id']} · {tile['name']}** — {tile['condition']}"
-                motivo = str(verdict.get("motivo") or "").strip()
+                motivo = spanish_tile_motivo(verdict.get("motivo"), estado=verdict.get("estado"))
                 if motivo:
                     detail += f"\n  - motivo: {motivo}"
-                contexto = str(verdict.get("contexto_requerido") or "").strip()
+                contexto = spanish_tile_contexto(verdict.get("contexto_requerido"))
                 if contexto:
                     detail += f"\n  - aporta contexto: {contexto}"
                 lines.append(detail)
