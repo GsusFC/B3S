@@ -132,7 +132,7 @@ def _take_playwright_screenshot_with_firecrawl_fallback(
 
     fallback["fallback_from_provider"] = "playwright"
     fallback["fallback_reason"] = fallback_reason
-    if not screenshot_has_capture(fallback) and primary.get("error"):
+    if primary.get("error"):
         fallback.setdefault("primary_error", primary.get("error"))
         fallback.setdefault("primary_error_type", primary.get("error_type"))
     return fallback

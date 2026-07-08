@@ -45,6 +45,15 @@ def _screenshot_capture_diagnostic(
     data = screenshot_data or {}
     screenshot_url = str(data.get("screenshot_url") or "")
     source = str(data.get("screenshot_provider") or "firecrawl_screenshot")
+    fallback_keys = (
+        "fallback_from_provider",
+        "fallback_reason",
+        "fallback_attempted",
+        "fallback_provider",
+        "fallback_error",
+        "primary_error",
+        "primary_error_type",
+    )
     if screenshot_url:
         payload: dict[str, object] = {
             "attempted": True,
@@ -61,11 +70,15 @@ def _screenshot_capture_diagnostic(
         metadata = data.get("metadata")
         if isinstance(metadata, dict):
             payload["metadata"] = metadata
+        for key in fallback_keys:
+            value = data.get(key)
+            if value not in (None, ""):
+                payload[key] = value
         return payload
 
     error_message = str(data.get("error") or limitation or "screenshot_capture_failed")
     error_type = str(data.get("error_type") or limitation or _classify_screenshot_error(error_message))
-    return {
+    payload = {
         "attempted": True,
         "success": False,
         "status": "error" if error_type != "timeout" else "timeout",
@@ -73,3 +86,8 @@ def _screenshot_capture_diagnostic(
         "error_type": error_type,
         "error_message": error_message[:300],
     }
+    for key in fallback_keys:
+        value = data.get(key)
+        if value not in (None, ""):
+            payload[key] = value
+    return payload

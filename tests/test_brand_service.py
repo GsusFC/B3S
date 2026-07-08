@@ -1702,6 +1702,11 @@ class BrandServiceContentFallbackTests(unittest.TestCase):
         self.assertTrue(diagnostic["success"])
         self.assertEqual(data["fallback_from_provider"], "playwright")
         self.assertEqual(data["fallback_reason"], "missing_dependency")
+        self.assertEqual(data["primary_error"], "Playwright not available")
+        self.assertEqual(diagnostic["fallback_from_provider"], "playwright")
+        self.assertEqual(diagnostic["fallback_reason"], "missing_dependency")
+        self.assertEqual(diagnostic["primary_error_type"], "missing_dependency")
+        self.assertEqual(diagnostic["primary_error"], "Playwright not available")
 
     def test_playwright_provider_failure_is_structured_when_fallback_fails(self):
         with patch(
