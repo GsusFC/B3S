@@ -9,20 +9,42 @@ from time import perf_counter
 from typing import Any
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from web.report_store import domain_key, list_reports, list_reports_for_domain, load_report
 from web.scan_runner import approve_degraded_scan, cancel_scan, scan_status, start_scan
 from web.scoring_store import backfill_reports, dashboard as scoring_dashboard
-from src.sv9.language_guard import spanish_component_summary, spanish_component_verdict, spanish_tile_motivo
+from src.sv9.language_guard import (
+    spanish_component_summary,
+    spanish_component_verdict,
+    spanish_generated_text,
+    spanish_tile_contexto,
+    spanish_tile_motivo,
+)
+from src.sv9.rubric import COMPONENTS as SV9_COMPONENTS
 
 app = FastAPI(title="B3S — Brand Evidence Lab")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 _STATIC_DIR = Path(__file__).parent / "static"
 if _STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+
+def _component_display_text(component: dict[str, Any], *, prefer_summary: bool = False) -> str:
+    message = str(component.get("message") or "").strip()
+    if message:
+        return message
+    verdict = str(component.get("veredicto") or "").strip()
+    summary = str(component.get("resumen") or "").strip()
+    if prefer_summary and summary and not component.get("resumen_is_fallback"):
+        return summary
+    if verdict:
+        return verdict
+    if summary and not component.get("resumen_is_fallback"):
+        return summary
+    return summary
 
 
 def _brand_profile(domain: str) -> dict:
@@ -49,8 +71,8 @@ def _brand_profile(domain: str) -> dict:
         "url": (current or {}).get("url") or f"https://{normalized_domain}",
         "current": current,
         "reports": reports,
-        "summary": purpose.get("resumen") or value.get("resumen") or "",
-        "outcome": value.get("veredicto") or purpose.get("veredicto") or "",
+        "summary": _component_display_text(purpose, prefer_summary=True) or _component_display_text(value, prefer_summary=True),
+        "outcome": _component_display_text(value) or _component_display_text(purpose),
         "proof_urls": proof_urls[:6],
         "detected_count": len(detected),
         "component_count": len(components),
@@ -106,15 +128,112 @@ def _resolve_component_tile_profile(component: dict[str, Any]) -> dict[str, Any]
     return counts
 
 
+def _raw_sv9_result(report: dict[str, Any]) -> dict[str, Any]:
+    raw = report.get("raw") if isinstance(report.get("raw"), dict) else {}
+    sv9 = raw.get("sv9") if isinstance(raw.get("sv9"), dict) else {}
+    result = sv9.get("result") if isinstance(sv9.get("result"), dict) else {}
+    return result
+
+
+def _raw_sv9_components(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    result = _raw_sv9_result(report)
+    components = result.get("components") if isinstance(result.get("components"), dict) else {}
+    return {str(key): value for key, value in components.items() if isinstance(value, dict)}
+
+
+def _tile_names(component_key: str) -> dict[str, str]:
+    spec = SV9_COMPONENTS.get(component_key) or {}
+    return {str(tile.get("id") or ""): str(tile.get("name") or "") for tile in spec.get("tiles") or []}
+
+
+def _tile_counts(tile_profile: list[dict[str, Any]]) -> tuple[int, int, int]:
+    lit = sum(1 for tile in tile_profile if str((tile or {}).get("estado") or "") == "ok")
+    off = sum(1 for tile in tile_profile if str((tile or {}).get("estado") or "") == "no")
+    blind = sum(1 for tile in tile_profile if str((tile or {}).get("estado") or "") == "sin_evidencia")
+    return lit, off, blind
+
+
+def _failing_tiles(component_key: str, tile_profile: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    names = _tile_names(component_key)
+    rows = []
+    for tile in tile_profile:
+        if not isinstance(tile, dict) or tile.get("estado") == "ok":
+            continue
+        tile_id = str(tile.get("id") or tile.get("tile_id") or "")
+        rows.append(
+            {
+                "id": tile_id,
+                "name": names.get(tile_id) or "",
+                "estado": str(tile.get("estado") or ""),
+                "motivo": spanish_tile_motivo(tile.get("motivo"), estado=tile.get("estado")),
+                "contexto_requerido": spanish_tile_contexto(tile.get("contexto_requerido")),
+                "evidencia": str(tile.get("evidencia") or ""),
+            }
+        )
+    return rows
+
+
+def _enrich_component_from_raw_sv9(item: dict[str, Any], raw_component: dict[str, Any]) -> dict[str, Any]:
+    if not raw_component:
+        return item
+    enriched = dict(item)
+    key = str(enriched.get("key") or enriched.get("component") or raw_component.get("component") or "")
+    if key:
+        enriched.setdefault("key", key)
+        enriched.setdefault("component", key)
+    for field in (
+        "status",
+        "score",
+        "scale",
+        "points",
+        "confidence",
+        "evaluation_model",
+        "evidence",
+        "source_policy_notes",
+        "detected_content",
+    ):
+        if enriched.get(field) in (None, "", []):
+            enriched[field] = raw_component.get(field)
+
+    raw_tile_profile = raw_component.get("tile_profile")
+    if isinstance(raw_tile_profile, list) and not enriched.get("tile_profile"):
+        enriched["tile_profile"] = [tile for tile in raw_tile_profile if isinstance(tile, dict)]
+    tile_profile = enriched.get("tile_profile") if isinstance(enriched.get("tile_profile"), list) else []
+    if tile_profile:
+        lit, off, blind = _tile_counts(tile_profile)
+        enriched["lit"] = lit
+        enriched["off"] = off
+        enriched["blind"] = blind
+        if not enriched.get("tiles"):
+            enriched["tiles"] = _failing_tiles(key, tile_profile)
+
+    resumen = str(enriched.get("resumen") or "").strip()
+    if not resumen or resumen.startswith("Componente "):
+        enriched["resumen"] = raw_component.get("detected_content") or resumen
+
+    veredicto = str(enriched.get("veredicto") or "").strip()
+    if not veredicto or veredicto.startswith("Síntesis automática"):
+        enriched["veredicto"] = raw_component.get("message") or raw_component.get("veredicto") or veredicto
+    if not enriched.get("message"):
+        enriched["message"] = raw_component.get("message")
+    return enriched
+
+
 def _sanitize_report_language(report: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(report, dict):
         return {}
     sanitized = dict(report)
+    raw_result = _raw_sv9_result(report)
+    if not sanitized.get("executive_reading") and raw_result.get("executive_reading"):
+        sanitized["executive_reading"] = raw_result.get("executive_reading")
+    raw_components = _raw_sv9_components(report)
     components = []
     for component in sanitized.get("components") or []:
         if not isinstance(component, dict):
             continue
         item = dict(component)
+        key = str(item.get("key") or item.get("component") or "")
+        item = _enrich_component_from_raw_sv9(item, raw_components.get(key) or {})
         key = str(item.get("key") or item.get("component") or "")
         tile_profile = _resolve_component_tile_profile(item)
         item["resumen"] = spanish_component_summary(
@@ -123,17 +242,48 @@ def _sanitize_report_language(report: dict[str, Any] | None) -> dict[str, Any]:
             tile_profile,
         )
         item["veredicto"] = spanish_component_verdict(key, item.get("veredicto"), tile_profile)
+        item["message"] = spanish_generated_text(item.get("message"))
+        item["resumen_is_fallback"] = str(item.get("resumen") or "").startswith("Componente ")
         tiles = []
-        for tile in item.get("tiles") or []:
+        source_tiles = item.get("tiles") or []
+        if not source_tiles and isinstance(tile_profile, list):
+            source_tiles = _failing_tiles(key, tile_profile)
+        for tile in source_tiles:
             if not isinstance(tile, dict):
                 continue
             tile_item = dict(tile)
             tile_item["motivo"] = spanish_tile_motivo(tile_item.get("motivo"), estado=tile_item.get("estado"))
+            tile_item["contexto_requerido"] = spanish_tile_contexto(tile_item.get("contexto_requerido"))
             tiles.append(tile_item)
         item["tiles"] = tiles
         components.append(item)
     sanitized["components"] = components
     return sanitized
+
+
+def _scan_payload_for_markdown(report: dict[str, Any]) -> dict[str, Any]:
+    result = dict(_raw_sv9_result(report))
+    if not result:
+        components = {}
+        for component in report.get("components") or []:
+            if not isinstance(component, dict):
+                continue
+            key = str(component.get("key") or component.get("component") or "")
+            if key:
+                components[key] = dict(component)
+        result = {
+            "brand3_score": report.get("score"),
+            "base_average": report.get("base_average"),
+            "brand_name": report.get("brand_name"),
+            "url": report.get("url"),
+            "reliability_status": report.get("reliability_status"),
+            "components": components,
+        }
+    result.setdefault("display_name", report.get("brand_name"))
+    result.setdefault("brand_name", report.get("brand_name"))
+    result.setdefault("url", report.get("url"))
+    result.setdefault("brand3_score", report.get("score"))
+    return result
 
 
 def _moodboard_from_report(report: dict[str, Any]) -> dict[str, Any]:
@@ -650,6 +800,17 @@ def scan_cancel_api(scan_id: str):
     if result is None:
         return JSONResponse({"state": "unknown", "id": scan_id}, status_code=404)
     return JSONResponse(result)
+
+
+@app.get("/report/{scan_id}.md")
+def report_markdown_view(scan_id: str):
+    report = load_report(scan_id)
+    if report is None:
+        return PlainTextResponse("Report not found\n", status_code=404)
+    from src.sv9.export_md import build_scan_markdown
+
+    markdown = build_scan_markdown(_scan_payload_for_markdown(_sanitize_report_language(report)))
+    return PlainTextResponse(markdown, media_type="text/markdown; charset=utf-8")
 
 
 @app.get("/report/{scan_id}")

@@ -7,3 +7,16 @@
 {% set tone = "ok" if value in ["ok", "fetched", "configured", "captured", "usable", "completed", "scored", "done", "pass"] else "bad" if value in ["error", "missing", "blocked", "cancelled", "failed"] else "warn" if value in ["warn", "warning", "empty", "limited", "skipped", "pending", "running", "missing_key", "disabled", "degraded_approved"] else "neutral" %}
 {{ tag(status, tone, true) }}
 {%- endmacro %}
+
+{% macro acquisition_status_tag(source, status, detail="") -%}
+{% set source_value = source|string %}
+{% set status_value = status|string|lower %}
+{% set detail_value = detail|string|lower %}
+{% if source_value == "visual_acquisition" and status_value in ["blocked", "limited", "not_interpretable"] %}
+{{ tag("limited", "warn", true) }}
+{% elif source_value == "visual_acquisition" and status_value == "completed" and "blocked" in detail_value %}
+{{ tag("limited", "warn", true) }}
+{% else %}
+{{ status_tag(status) }}
+{% endif %}
+{%- endmacro %}

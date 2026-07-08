@@ -233,6 +233,52 @@ def test_brand_view_renders_profile_from_matching_reports(monkeypatch):
     assert "79" in response.text
 
 
+def test_brand_view_prefers_component_editorial_message(monkeypatch):
+    from web.app import app
+
+    monkeypatch.setattr(
+        "web.app.list_reports_for_domain",
+        lambda domain: [
+            {
+                "id": "report123",
+                "brand_name": "Optiak",
+                "url": "https://optiak.com",
+                "created_at": "2026-07-07T12:00:00+00:00",
+                "score": 65,
+                "components": [
+                    {
+                        "key": "core_purpose",
+                        "status": "scored",
+                        "resumen": "Componente Propósito detectado: 7/10 baldosas encendidas.",
+                        "resumen_is_fallback": True,
+                        "veredicto": "Propósito técnico sólido.",
+                        "message": "Lectura editorial de propósito.",
+                        "block": None,
+                    },
+                    {
+                        "key": "value_proposition",
+                        "status": "scored",
+                        "resumen": "Componente Propuesta de valor detectado.",
+                        "resumen_is_fallback": True,
+                        "veredicto": "Propuesta aún demasiado técnica.",
+                        "message": "Lectura editorial de propuesta.",
+                        "block": None,
+                    },
+                ],
+                "blocks": [],
+                "raw": {},
+            }
+        ],
+    )
+
+    response = TestClient(app).get("/brand/optiak.com?lang=es")
+
+    assert response.status_code == 200
+    assert "Lectura editorial de propósito." in response.text
+    assert "Lectura editorial de propuesta." in response.text
+    assert "Componente Propósito detectado" not in response.text
+
+
 def test_brand_view_embeds_visual_module_from_latest_report(monkeypatch):
     from web.app import app
 
@@ -855,8 +901,52 @@ def test_scan_preview_renders_without_live_scan():
     assert "scan-shell" in response.text
     assert "visual_acquisition" in response.text
     assert "visual_evidence_packet:blocked" in response.text
-    assert "status-tag status-tag--bad status-tag--filled" in response.text
+    assert "status-tag status-tag--warn status-tag--filled" in response.text
+    assert ">limited</span>" in response.text
     assert "const scanPreview = true" in response.text
+
+
+def test_scan_view_marks_blocked_visual_packet_as_limited_warning(monkeypatch):
+    from web.app import app
+
+    monkeypatch.setattr(
+        "web.app.scan_status",
+        lambda scan_id: {
+            "id": scan_id,
+            "brand_name": "Optiak",
+            "url": "https://optiak.com",
+            "state": "running",
+            "phases": [
+                {"key": "capture", "label": "Capture evidence", "state": "running"},
+            ],
+            "acquisition": [
+                {
+                    "source": "visual_acquisition",
+                    "status": "completed",
+                    "detail": "visual_evidence_packet:blocked; blocked_reason: obstruction:cookie_modal",
+                }
+            ],
+            "acquisition_gate": {
+                "state": "warning",
+                "issues": [],
+                "warnings": [
+                    {
+                        "source": "visual_acquisition",
+                        "code": "visual_acquisition_limited",
+                        "status": "completed",
+                        "message": "Visual acquisition was obstructed.",
+                    }
+                ],
+            },
+        },
+    )
+
+    response = TestClient(app).get("/scan/scan123")
+
+    assert response.status_code == 200
+    assert "visual_evidence_packet:blocked" in response.text
+    assert "status-tag status-tag--warn status-tag--filled" in response.text
+    assert ">limited</span>" in response.text
 
 
 def test_report_view_renders_report(monkeypatch):
@@ -1015,3 +1105,358 @@ def test_report_view_rebuilds_verdict_from_counts_without_tile_profile(monkeypat
     assert response.status_code == 200
     assert "Síntesis automática: 3/10 baldosas encendidas, 1 apagada, 6 puntos ciegos." in response.text
     assert "0/10 baldosas encendidas" not in response.text
+
+
+def test_compose_report_preserves_canonical_sv9_tile_profile():
+    from src.sv9.rubric import tile_ids
+    from web.scan_runner import _compose_report
+
+    ids = tile_ids("magnetism")
+    tile_profile = [
+        {"id": ids[0], "estado": "ok", "evidencia": "promesa visible"},
+        {"id": ids[1], "estado": "ok", "evidencia": "dolor visible"},
+        {"id": ids[2], "estado": "ok", "evidencia": "deseo visible"},
+        {"id": ids[3], "estado": "no", "motivo": "No hay contraste narrativo."},
+        *[
+            {
+                "id": tile_id,
+                "estado": "sin_evidencia",
+                "motivo": "El snapshot no aporta prueba externa.",
+                "contexto_requerido": "Aporta entrevistas o métricas de adopción.",
+            }
+            for tile_id in ids[4:]
+        ],
+    ]
+    payload = {
+        "schema_version": "test",
+        "source_run_id": 1,
+        "flow": {
+            "candidate": {"interpretation": {"blocks": {}}, "evidence_pack": {"evidence": []}},
+            "interpretation_debug": {},
+        },
+        "sv9": {
+            "brand3_score": 61,
+            "base_average": 6.1,
+            "components": {
+                "magnetism": {
+                    "status": "scored",
+                    "score": 3,
+                    "lit_tiles": ids[:3],
+                    "off_tiles": [ids[3]],
+                    "blind_spot_tiles": ids[4:],
+                }
+            },
+            "result": {
+                "brand3_score": 61,
+                "components": {
+                    "magnetism": {
+                        "component": "magnetism",
+                        "status": "scored",
+                        "score": 3,
+                        "scale": 10,
+                        "points": 6,
+                        "confidence": "baja",
+                        "detected_content": "Promesa de soberanía tecnológica.",
+                        "veredicto": "La marca tiene utilidad técnica, pero necesita más tensión narrativa.",
+                        "tile_profile": tile_profile,
+                    }
+                },
+                "most_painful_gap": "magnetism",
+                "immediate_margin": 8,
+                "total_blind_spots": 6,
+            },
+        },
+    }
+
+    report = _compose_report("scan123", "https://optiak.com", "Optiak", payload)
+    magnetism = next(component for component in report["components"] if component["key"] == "magnetism")
+
+    assert len(magnetism["tile_profile"]) == 10
+    assert magnetism["lit"] == 3
+    assert magnetism["off"] == 1
+    assert magnetism["blind"] == 6
+    assert magnetism["resumen"] == "Promesa de soberanía tecnológica."
+    assert "tensión narrativa" in magnetism["veredicto"]
+    assert magnetism["tiles"][0]["id"] == ids[3]
+    assert magnetism["tiles"][1]["contexto_requerido"] == "Aporta entrevistas o métricas de adopción."
+
+
+def test_attach_sv9_editorial_only_requests_components_with_unusable_prose():
+    from src.sv9.rubric import tile_ids
+    from web.scan_runner import _attach_sv9_editorial
+
+    ids = tile_ids("magnetism")
+    payload = {
+        "sv9": {
+            "result": {
+                "brand_name": "Optiak",
+                "url": "https://optiak.com",
+                "brand3_score": 61,
+                "components": {
+                    "magnetism": {
+                        "component": "magnetism",
+                        "status": "scored",
+                        "score": 3,
+                        "scale": 10,
+                        "veredicto": "The snapshot does not provide enough narrative evidence.",
+                        "tile_profile": [
+                            {"id": ids[0], "estado": "ok", "evidencia": "promesa visible"},
+                            {"id": ids[1], "estado": "no", "motivo": "falta"},
+                        ],
+                    },
+                    "mission": {
+                        "component": "mission",
+                        "status": "scored",
+                        "score": 5,
+                        "scale": 5,
+                        "veredicto": "La misión está formulada con claridad.",
+                        "tile_profile": [],
+                    },
+                },
+            }
+        }
+    }
+    calls = []
+
+    class FakeLLM:
+        api_key = "test-key"
+
+    def fake_build_editorial(scan, *, llm, component_keys, include_executive_reading):
+        calls.append(
+            {
+                "component_keys": list(component_keys),
+                "include_executive_reading": include_executive_reading,
+            }
+        )
+        return {
+            "component_messages": {
+                "magnetism": "La marca necesita convertir utilidad técnica en tensión narrativa."
+            },
+            "executive_reading": "Lectura ejecutiva del scan.",
+        }
+
+    result = _attach_sv9_editorial(
+        payload,
+        llm=FakeLLM(),
+        build_editorial_fn=fake_build_editorial,
+    )
+
+    assert calls == [{"component_keys": ["magnetism"], "include_executive_reading": True}]
+    components = result["sv9"]["result"]["components"]
+    assert components["magnetism"]["message"] == "La marca necesita convertir utilidad técnica en tensión narrativa."
+    assert "message" not in components["mission"]
+    assert result["sv9"]["result"]["executive_reading"] == "Lectura ejecutiva del scan."
+
+
+def test_report_view_rehydrates_reduced_projection_from_raw_sv9_result(monkeypatch):
+    from src.sv9.rubric import tile_ids
+    from web.app import app
+
+    ids = tile_ids("magnetism")
+    tile_profile = [
+        {"id": ids[0], "estado": "ok", "evidencia": "promesa visible"},
+        {"id": ids[1], "estado": "ok", "evidencia": "dolor visible"},
+        {"id": ids[2], "estado": "ok", "evidencia": "deseo visible"},
+        {"id": ids[3], "estado": "no", "motivo": "No hay contraste narrativo."},
+        *[
+            {
+                "id": tile_id,
+                "estado": "sin_evidencia",
+                "motivo": "El snapshot no aporta prueba externa.",
+                "contexto_requerido": "Aporta entrevistas o métricas de adopción.",
+            }
+            for tile_id in ids[4:]
+        ],
+    ]
+    monkeypatch.setattr(
+        "web.app.load_report",
+        lambda scan_id: {
+            "id": scan_id,
+            "brand_name": "Optiak",
+            "url": "https://optiak.com",
+            "score": 61,
+            "base_average": 61,
+            "reliability_status": "shadow",
+            "detected_count": 1,
+            "block_count": 1,
+            "not_detected": [],
+            "most_painful_gap_label": "Magnetism",
+            "immediate_margin": 8,
+            "total_blind_spots": 6,
+            "coverage_acquisition": {
+                "owned_url_count": 1,
+                "external_source_count": 0,
+                "absence_record_count": 0,
+                "attempt_record_count": 0,
+            },
+            "components": [
+                {
+                    "key": "magnetism",
+                    "label": "Magnetism",
+                    "score": 3,
+                    "scale": 10,
+                    "status": "scored",
+                    "resumen": "Componente Magnetism detectado: 3/10 baldosas encendidas.",
+                    "veredicto": "Síntesis automática: 3/10 baldosas encendidas, 1 apagada, 6 puntos ciegos.",
+                    "lit": 3,
+                    "off": 1,
+                    "blind": 6,
+                    "tiles": [],
+                    "block": None,
+                }
+            ],
+            "blocks": [],
+            "absences": [],
+            "attempts": [],
+            "limitations": [],
+            "raw": {
+                "sv9": {
+                    "result": {
+                        "brand3_score": 61,
+                        "model": "v3.1",
+                        "components": {
+                            "magnetism": {
+                                "component": "magnetism",
+                                "status": "scored",
+                                "score": 3,
+                                "scale": 10,
+                                "points": 6,
+                                "confidence": "baja",
+                                "detected_content": "Promesa de soberanía tecnológica.",
+                                "veredicto": "La marca tiene utilidad técnica, pero necesita más tensión narrativa.",
+                                "tile_profile": tile_profile,
+                            }
+                        },
+                    }
+                }
+            },
+        },
+    )
+
+    response = TestClient(app).get("/report/report123")
+
+    assert response.status_code == 200
+    assert "Promesa de soberanía tecnológica." in response.text
+    assert "La marca tiene utilidad técnica" in response.text
+    assert "Síntesis automática" not in response.text
+    assert ids[3] in response.text
+    assert "aporta contexto: Aporta entrevistas o métricas de adopción." in response.text
+
+
+def test_report_markdown_exports_raw_sv9_contract(monkeypatch):
+    from src.sv9.rubric import tile_ids
+    from web.app import app
+
+    ids = tile_ids("magnetism")
+    monkeypatch.setattr(
+        "web.app.load_report",
+        lambda scan_id: {
+            "id": scan_id,
+            "brand_name": "Optiak",
+            "url": "https://optiak.com",
+            "score": 61,
+            "components": [],
+            "raw": {
+                "sv9": {
+                    "result": {
+                        "brand_name": "Optiak",
+                        "url": "https://optiak.com",
+                        "brand3_score": 61,
+                        "model": "v3.1",
+                        "components": {
+                            "magnetism": {
+                                "component": "magnetism",
+                                "status": "scored",
+                                "score": 3,
+                                "scale": 10,
+                                "points": 6,
+                                "confidence": "baja",
+                                "detected_content": "Promesa de soberanía tecnológica.",
+                                "message": "Lectura editorial de Magnetism.",
+                                "veredicto": "La marca necesita más tensión narrativa.",
+                                "tile_profile": [
+                                    {"id": ids[0], "estado": "ok", "evidencia": "promesa visible"},
+                                    {"id": ids[1], "estado": "ok", "evidencia": "dolor visible"},
+                                    {"id": ids[2], "estado": "ok", "evidencia": "deseo visible"},
+                                    {"id": ids[3], "estado": "no", "motivo": "No hay contraste narrativo."},
+                                ],
+                            }
+                        },
+                    }
+                }
+            },
+        },
+    )
+
+    response = TestClient(app).get("/report/report123.md")
+
+    assert response.status_code == 200
+    assert "text/markdown" in response.headers["content-type"]
+    assert "# Brand3 Scanner — Optiak" in response.text
+    assert "Brand3 Score: **61/100**" in response.text
+    assert "## Magnetism" in response.text
+    assert "Lectura editorial de Magnetism." in response.text
+
+
+def test_report_view_renders_coherencia_once_and_prioritizes_editorial_message(monkeypatch):
+    from web.app import app
+
+    base_component = {
+        "score": 5,
+        "scale": 10,
+        "status": "scored",
+        "resumen": "Texto detectado.",
+        "veredicto": "Veredicto estratégico.",
+        "tile_states": [],
+        "tiles": [],
+        "block": None,
+    }
+    components = [
+        {**base_component, "key": "core_purpose", "label": "Propósito"},
+        {
+            **base_component,
+            "key": "coherencia",
+            "label": "Coherencia",
+            "score": 6,
+            "resumen": "Componente Coherencia detectado: 6/10 baldosas encendidas, 0 apagadas, 4 puntos ciegos. Revisa las fuentes para validar el matiz exacto.",
+            "veredicto": "Optiak construye un discurso técnico sólido.",
+            "message": "Lectura editorial de coherencia.",
+        },
+    ]
+    monkeypatch.setattr(
+        "web.app.load_report",
+        lambda scan_id: {
+            "id": scan_id,
+            "brand_name": "Optiak",
+            "url": "https://optiak.com",
+            "score": 65,
+            "base_average": 65,
+            "reliability_status": "shadow",
+            "detected_count": 2,
+            "block_count": 2,
+            "not_detected": [],
+            "most_painful_gap_label": "Magnetism",
+            "immediate_margin": 8,
+            "total_blind_spots": 4,
+            "coverage_acquisition": {
+                "owned_url_count": 1,
+                "external_source_count": 0,
+                "absence_record_count": 0,
+                "attempt_record_count": 0,
+            },
+            "components": components,
+            "blocks": [],
+            "absences": [],
+            "attempts": [],
+            "limitations": [],
+            "raw": {},
+        },
+    )
+
+    response = TestClient(app).get("/report/report123")
+
+    assert response.status_code == 200
+    assert response.text.count('id="coherencia"') == 1
+    assert "Lectura editorial de coherencia." in response.text
+    assert "Optiak construye un discurso técnico sólido." in response.text
+    assert "Componente Coherencia detectado" not in response.text

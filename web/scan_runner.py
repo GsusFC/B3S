@@ -166,6 +166,7 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
 
         envelope = {"snapshot": snapshot, "source_run_id": snapshot["run"]["id"]}
         payload = build_flow_sv9_shadow_eval(envelope, include_full=True)
+        payload = _attach_sv9_editorial(payload)
         payload["acquisition_gate"] = snapshot.get("acquisition_gate") or gate
         payload["acquisition_artifacts"] = _acquisition_artifacts_from_snapshot(snapshot)
         _set_phase(scan_id, "interpret", "done")
@@ -919,8 +920,125 @@ def _resolve_scan_tile_profile(
     }
 
 
+def _tile_name_map(component_key: str) -> dict[str, str]:
+    from src.sv9.rubric import COMPONENTS as RUBRIC_COMPONENTS
+
+    meta = RUBRIC_COMPONENTS.get(component_key) or {}
+    return {str(tile.get("id") or ""): str(tile.get("name") or "") for tile in meta.get("tiles") or []}
+
+
+def _tile_counts_from_profile(tile_profile: list[dict[str, Any]]) -> tuple[int, int, int]:
+    lit = sum(1 for tile in tile_profile if str((tile or {}).get("estado") or "") == "ok")
+    off = sum(1 for tile in tile_profile if str((tile or {}).get("estado") or "") == "no")
+    blind = sum(1 for tile in tile_profile if str((tile or {}).get("estado") or "") == "sin_evidencia")
+    return lit, off, blind
+
+
+def _failing_tiles_from_profile(component_key: str, tile_profile: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from src.sv9.language_guard import spanish_tile_contexto, spanish_tile_motivo
+
+    tile_names = _tile_name_map(component_key)
+    failing_tiles: list[dict[str, Any]] = []
+    for tile in tile_profile:
+        if not isinstance(tile, dict) or tile.get("estado") == "ok":
+            continue
+        failing_tiles.append(
+            {
+                "id": str(tile.get("id") or tile.get("tile_id") or ""),
+                "name": str(tile_names.get(str(tile.get("id") or tile.get("tile_id") or "")) or ""),
+                "estado": str(tile.get("estado") or ""),
+                "motivo": spanish_tile_motivo(tile.get("motivo"), estado=tile.get("estado")),
+                "contexto_requerido": spanish_tile_contexto(tile.get("contexto_requerido")),
+                "evidencia": str(tile.get("evidencia") or ""),
+            }
+        )
+    return failing_tiles
+
+
+def _sv9_editorial_enabled() -> bool:
+    return os.environ.get("B3S_SV9_EDITORIAL_ENABLED", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _component_needs_editorial_message(component_key: str, detail: dict[str, Any]) -> bool:
+    from src.sv9.language_guard import spanish_component_verdict
+
+    if str(detail.get("message") or "").strip():
+        return False
+    tile_profile = detail.get("tile_profile") if isinstance(detail.get("tile_profile"), list) else []
+    verdict = spanish_component_verdict(component_key, detail.get("veredicto"), tile_profile)
+    return not verdict or verdict.startswith("Síntesis automática")
+
+
+def _attach_sv9_editorial(
+    payload: dict[str, Any],
+    *,
+    llm: Any | None = None,
+    build_editorial_fn: Any | None = None,
+) -> dict[str, Any]:
+    if not _sv9_editorial_enabled():
+        return payload
+    sv9 = payload.get("sv9") if isinstance(payload.get("sv9"), dict) else {}
+    result = sv9.get("result") if isinstance(sv9.get("result"), dict) else {}
+    components = result.get("components") if isinstance(result.get("components"), dict) else {}
+    if not components:
+        return payload
+    needed = [
+        key
+        for key, detail in components.items()
+        if isinstance(detail, dict) and _component_needs_editorial_message(str(key), detail)
+    ]
+    if not needed:
+        return payload
+    try:
+        if llm is None:
+            from src.config import SV9_EDITORIAL_MODEL
+            from src.features.llm_analyzer import LLMAnalyzer
+
+            llm = LLMAnalyzer(model=SV9_EDITORIAL_MODEL)
+        if not getattr(llm, "api_key", None):
+            return payload
+        if build_editorial_fn is None:
+            from src.sv9.editorial import build_editorial as build_editorial_fn
+
+        editorial = build_editorial_fn(
+            result,
+            llm=llm,
+            component_keys=needed,
+            include_executive_reading=True,
+        )
+    except Exception as exc:
+        sv9["editorial"] = {"status": "failed", "error": str(exc)}
+        return payload
+
+    messages = editorial.get("component_messages") if isinstance(editorial, dict) else {}
+    for key, message in (messages or {}).items():
+        detail = components.get(key)
+        if isinstance(detail, dict) and str(message or "").strip():
+            detail["message"] = str(message).strip()
+    reading = editorial.get("executive_reading") if isinstance(editorial, dict) else None
+    if str(reading or "").strip():
+        result["executive_reading"] = str(reading).strip()
+    sv9["editorial"] = {
+        "status": "attached",
+        "mode": "selective",
+        "requested_components": needed,
+        "message_components": sorted(str(key) for key in (messages or {}).keys()),
+        "executive_reading": bool(str(reading or "").strip()),
+    }
+    return payload
+
+
 def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, Any]) -> dict[str, Any]:
-    from src.sv9.language_guard import spanish_component_summary, spanish_component_verdict, spanish_tile_motivo
+    from src.sv9.language_guard import (
+        spanish_component_summary,
+        spanish_component_verdict,
+        spanish_generated_text,
+    )
 
     flow = payload.get("flow") or {}
     candidate = flow.get("candidate") or {}
@@ -998,53 +1116,65 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
             continue
         detail = result_components.get(name) if isinstance(result_components.get(name), dict) else {}
         meta = RUBRIC_COMPONENTS.get(name) or {}
-        tile_names = {tile.get("id"): tile.get("name") for tile in meta.get("tiles") or []}
-        lit_tiles = set(component.get("lit_tiles") or [])
-        off_tiles = set(component.get("off_tiles") or [])
-        blind_tiles = set(component.get("blind_spot_tiles") or [])
-        lit_count = len(lit_tiles)
-        off_count = len(off_tiles)
-        blind_count = len(blind_tiles)
         scale = int(detail.get("scale") or meta.get("scale") or 0)
-        tile_profile = _resolve_scan_tile_profile(
-            detail,
-            lit=lit_count,
-            off=off_count,
-            blind=blind_count,
-            scale_hint=scale,
+        raw_tile_profile = detail.get("tile_profile")
+        tile_profile = (
+            [tile for tile in raw_tile_profile if isinstance(tile, dict)]
+            if isinstance(raw_tile_profile, list)
+            else []
         )
-        tile_profile_for_failing_tiles = tile_profile
-        if tile_profile_for_failing_tiles is None:
-            tile_profile_for_failing_tiles = []
+        if tile_profile:
+            lit_count, off_count, blind_count = _tile_counts_from_profile(tile_profile)
+        else:
+            lit_tiles = set(component.get("lit_tiles") or detail.get("lit_tiles") or [])
+            off_tiles = set(component.get("off_tiles") or detail.get("off_tiles") or [])
+            blind_tiles = set(component.get("blind_spot_tiles") or detail.get("blind_spot_tiles") or [])
+            lit_count = len(lit_tiles)
+            off_count = len(off_tiles)
+            blind_count = len(blind_tiles)
+            resolved = _resolve_scan_tile_profile(
+                detail,
+                lit=lit_count,
+                off=off_count,
+                blind=blind_count,
+                scale_hint=scale,
+            )
+            tile_profile = list(resolved) if isinstance(resolved, list) else []
 
         tile_states = []
-        for tile in meta.get("tiles") or []:
-            tile_id = str(tile.get("id") or "")
-            if tile_id in lit_tiles:
-                state = "on"
-            elif tile_id in off_tiles:
-                state = "off"
-            elif tile_id in blind_tiles:
-                state = "blind"
-            else:
-                continue
-            tile_states.append({"id": tile_id, "name": str(tile.get("name") or ""), "state": state})
-        failing_tiles = []
-        for tile in tile_profile_for_failing_tiles or []:
-            if not isinstance(tile, dict) or tile.get("estado") == "ok":
-                continue
-            failing_tiles.append(
-                {
-                    "id": str(tile.get("id") or ""),
-                    "name": str(tile_names.get(tile.get("id")) or ""),
-                    "estado": str(tile.get("estado") or ""),
-                    "motivo": spanish_tile_motivo(tile.get("motivo"), estado=tile.get("estado")),
-                    "evidencia": str(tile.get("evidencia") or ""),
-                }
-            )
+        tile_names = _tile_name_map(name)
+        if tile_profile:
+            for tile in tile_profile:
+                tile_id = str(tile.get("id") or tile.get("tile_id") or "")
+                estado = str(tile.get("estado") or "")
+                state = {"ok": "on", "no": "off", "sin_evidencia": "blind"}.get(estado)
+                if state:
+                    tile_states.append(
+                        {"id": tile_id, "name": str(tile_names.get(tile_id) or ""), "state": state}
+                    )
+        else:
+            lit_tiles = set(component.get("lit_tiles") or detail.get("lit_tiles") or [])
+            off_tiles = set(component.get("off_tiles") or detail.get("off_tiles") or [])
+            blind_tiles = set(component.get("blind_spot_tiles") or detail.get("blind_spot_tiles") or [])
+            for tile in meta.get("tiles") or []:
+                tile_id = str(tile.get("id") or "")
+                if tile_id in lit_tiles:
+                    state = "on"
+                elif tile_id in off_tiles:
+                    state = "off"
+                elif tile_id in blind_tiles:
+                    state = "blind"
+                else:
+                    continue
+                tile_states.append({"id": tile_id, "name": str(tile.get("name") or ""), "state": state})
+
+        failing_tiles = _failing_tiles_from_profile(name, tile_profile)
+        detected_content = str(detail.get("detected_content") or "").strip()
+        message = spanish_generated_text(detail.get("message"))
         components.append(
             {
                 "key": name,
+                "component": name,
                 "label": str(meta.get("label") or name),
                 "question": str(meta.get("question") or ""),
                 "level_zero": str(meta.get("level_zero") or ""),
@@ -1055,10 +1185,16 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
                 "tile_profile": list(tile_profile) if isinstance(tile_profile, list) else [],
                 "resumen": spanish_component_summary(
                     name,
-                    detail.get("detected_content"),
-                    tile_profile,
+                    detected_content,
+                    tile_profile or {"lit": lit_count, "off": off_count, "blind": blind_count, "scale": scale},
                 ),
+                "detected_content": detected_content,
                 "veredicto": spanish_component_verdict(name, detail.get("veredicto"), tile_profile),
+                "message": message,
+                "points": detail.get("points"),
+                "evaluation_model": detail.get("evaluation_model"),
+                "evidence": list(detail.get("evidence") or []),
+                "source_policy_notes": list(detail.get("source_policy_notes") or []),
                 "lit": lit_count,
                 "off": off_count,
                 "blind": blind_count,
@@ -1089,6 +1225,7 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
         "most_painful_gap_label": str((RUBRIC_COMPONENTS.get(gap_key) or {}).get("label") or gap_key),
         "immediate_margin": result.get("immediate_margin"),
         "total_blind_spots": result.get("total_blind_spots"),
+        "executive_reading": result.get("executive_reading"),
         "detected_count": detected_count,
         "block_count": len(blocks),
         "components": components,

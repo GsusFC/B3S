@@ -4,6 +4,7 @@
   "positive_evidence": ("ok", "con evidencia"),
   "implied_not_explicit": ("info", "implícito, no explícito"),
   "verified_absent": ("warn", "ausencia verificada"),
+  "probable_absent": ("warn", "ausencia probable"),
   "insufficient_acquisition": ("bad", "adquisición insuficiente"),
 } %}
 {% set report_rows = [
@@ -40,14 +41,21 @@
     </div>
   </div>
 
-  {% if component.resumen %}
+  {% if component.message %}
+  <p class="card-result">{{ component.message }}</p>
+  {% elif component.veredicto %}
+  <p class="card-result">{{ component.veredicto }}</p>
+  {% elif component.resumen %}
   <p class="card-result">{{ component.resumen }}</p>
   {% elif component.status == "not_detected" and component.level_zero %}
   <p class="card-result muted">{{ component.level_zero }}</p>
   {% endif %}
 
-  {% if component.veredicto %}
+  {% if component.message and component.veredicto and component.veredicto != component.message %}
   <p class="card-verdict">{{ component.veredicto }}</p>
+  {% endif %}
+  {% if (component.message or component.veredicto) and component.resumen and not component.resumen_is_fallback and component.resumen != component.message and component.resumen != component.veredicto %}
+  <p class="card-verdict">{{ component.resumen }}</p>
   {% endif %}
 
   {% set has_component_details = component.tiles or (component.block and (component.block.refs or component.block.rejected_content)) %}
@@ -74,7 +82,11 @@
           <span class="badge">{{ component.score }}/{{ component.scale or 10 }}</span>
           <span class="muted">evaluado</span>
         </div>
-        {% if component.resumen %}
+        {% if component.message %}
+        <p>{{ component.message }}</p>
+        {% elif component.veredicto %}
+        <p>{{ component.veredicto }}</p>
+        {% elif component.resumen %}
         <p>{{ component.resumen }}</p>
         {% elif component.status == "not_detected" and component.level_zero %}
         <p>{{ component.level_zero }}</p>
@@ -97,6 +109,7 @@
                 <span class="chip {{ 'bad' if tile.estado == 'no' else 'warn' }}">{{ "apagada" if tile.estado == "no" else "punto ciego" }}</span>
               </div>
               {% if tile.motivo %}<p>{{ tile.motivo }}</p>{% endif %}
+              {% if tile.contexto_requerido %}<p class="muted">aporta contexto: {{ tile.contexto_requerido }}</p>{% endif %}
               {% if tile.evidencia %}<p class="muted">“{{ tile.evidencia }}”</p>{% endif %}
             </div>
           </article>
@@ -109,6 +122,9 @@
       <section class="drawer-section">
         <h4>V9</h4>
         <p>{{ component.veredicto }}</p>
+        {% if component.message and component.message != component.veredicto %}
+        <p>{{ component.message }}</p>
+        {% endif %}
       </section>
       {% endif %}
 
@@ -144,7 +160,7 @@
 {% endmacro %}
 {% block main_class %}wide{% endblock %}
 {% block content %}
-<p><a href="/">← Todos los informes</a> · <a href="/report/{{ report.id }}/moodboard?lang=es">Moodboard</a></p>
+<p><a href="/">← Todos los informes</a> · <a href="/report/{{ report.id }}/moodboard?lang=es">Moodboard</a> · <a href="/report/{{ report.id }}.md">Markdown</a></p>
 
 {% set score_width = report.score if report.score is not none else 0 %}
 <div class="report-hero">
@@ -181,6 +197,12 @@
   </div>
 </div>
 
+{% if report.executive_reading %}
+<section class="panel report-reading">
+  <p>{{ report.executive_reading }}</p>
+</section>
+{% endif %}
+
 <div class="canvas">
 {% for row in report_rows %}
   {% set row_class, keys = row %}
@@ -196,7 +218,7 @@
   {{ component_card(coherencia, "component-card--full") }}
 {% endif %}
 {% for component in report.components %}
-  {% if component.key not in row_component_keys.keys %}
+  {% if component.key not in row_component_keys.keys and component.key != "coherencia" %}
     {{ component_card(component, "component-card--full") }}
   {% endif %}
 {% endfor %}
