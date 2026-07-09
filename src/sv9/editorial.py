@@ -76,7 +76,7 @@ Contrato V3.1:
 Reglas de componentes:
 - tldr: titular estratégico, máximo 24 palabras.
 - diagnosis: párrafo interpretativo, 45-65 palabras. Debe explicar causa + consecuencia + siguiente tensión.
-- detected_basis: base factual detectada, 16-30 palabras. Sin interpretación excesiva.
+- detected_basis: base factual detectada, 16-30 palabras. Sin interpretación excesiva. Entra directo por el hecho concreto (la frase citada, el mecanismo, el dato observado); no arranques con "La marca" ni con el nombre propio.
 - next_artifact: artefacto o decisión concreta que crear, máximo 14 palabras.
 - terms: SOLO attributes y values. Para attributes: 3-5 rasgos percibidos. Para values: 3-5 principios observados. Si values está missing/no detectado, terms debe ser [].
 - claim_type: "observed", "inferred" o "missing".
