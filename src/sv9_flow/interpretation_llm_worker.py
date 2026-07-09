@@ -176,6 +176,9 @@ def build_brand_interpretation_with_llm(
             json_schema=brand_interpretation_response_schema(),
             schema_name="sv9_flow_brand_interpretation",
             strict_schema=False,
+            # temp 0: deterministic reading. At 0.1, sampling swung the score 7 pts
+            # on frozen evidence (3 distinct value_proposition readings in 5 runs).
+            temperature=0.0,
         )
     normalized = normalize_llm_interpretation_response(
         raw,
@@ -489,6 +492,7 @@ def _call_block_json(*, llm: Any, system: str, user: str) -> tuple[Any, dict[str
         json_schema=None,
         schema_name=None,
         strict_schema=False,
+        temperature=0.0,  # deterministic reading; see brand-interpretation call
     )
     if _coerce_block_object(raw):
         return raw, {
@@ -842,6 +846,7 @@ def _adjudicate_gate_rejection(
         json_schema=None,
         schema_name=None,
         strict_schema=False,
+        temperature=0.0,  # deterministic adjudication
     )
     payload = _coerce_response_object(raw)
     state = str(payload.get("state") or "").strip().lower()

@@ -59,7 +59,7 @@ class FakeLLM:
                 return tile_ids(key)
         return []
 
-    def _call_json(self, system, user, max_tokens=8000, *, json_schema=None, schema_name=None, timeout_seconds=None, strict_schema=True):
+    def _call_json(self, system, user, max_tokens=8000, *, json_schema=None, schema_name=None, timeout_seconds=None, strict_schema=True, temperature=None):
         self.calls.append({"system": system, "user": user, "schema_name": schema_name})
         if self.fail_call:
             return {}
@@ -99,7 +99,7 @@ class EvaluateComponentTests(unittest.TestCase):
 
     def test_component_message_is_captured_without_changing_score(self):
         class MessageLLM(FakeLLM):
-            def _call_json(self, system, user, max_tokens=8000, *, json_schema=None, schema_name=None, timeout_seconds=None, strict_schema=True):
+            def _call_json(self, system, user, max_tokens=8000, *, json_schema=None, schema_name=None, timeout_seconds=None, strict_schema=True, temperature=None):
                 payload = super()._call_json(
                     system,
                     user,
@@ -131,7 +131,7 @@ class EvaluateComponentTests(unittest.TestCase):
 
     def test_component_message_is_sanitized_to_spanish(self):
         class EnglishMessageLLM(FakeLLM):
-            def _call_json(self, system, user, max_tokens=8000, *, json_schema=None, schema_name=None, timeout_seconds=None, strict_schema=True):
+            def _call_json(self, system, user, max_tokens=8000, *, json_schema=None, schema_name=None, timeout_seconds=None, strict_schema=True, temperature=None):
                 payload = super()._call_json(
                     system,
                     user,
@@ -158,7 +158,7 @@ class EvaluateComponentTests(unittest.TestCase):
 
     def test_generated_tile_explanations_are_sanitized_to_spanish(self):
         class EnglishLLM(FakeLLM):
-            def _call_json(self, system, user, max_tokens=8000, *, json_schema=None, schema_name=None, timeout_seconds=None, strict_schema=True):
+            def _call_json(self, system, user, max_tokens=8000, *, json_schema=None, schema_name=None, timeout_seconds=None, strict_schema=True, temperature=None):
                 ids = self._tiles_for(schema_name)
                 return {
                     "componente": schema_name,

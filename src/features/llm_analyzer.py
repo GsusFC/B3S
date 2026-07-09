@@ -182,6 +182,7 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
         schema_name: str | None = None,
         strict_schema: bool = True,
         timeout_seconds: int | None = None,
+        temperature: float | None = None,
     ) -> dict:
         """Make an LLM call expecting strict JSON response.
 
@@ -214,7 +215,7 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
                 {"role": "user", "content": user},
             ],
             "max_tokens": max_tokens,
-            "temperature": 0.1,
+            "temperature": 0.1 if temperature is None else temperature,
             "response_format": _json_response_format(
                 json_schema=json_schema,
                 schema_name=schema_name,

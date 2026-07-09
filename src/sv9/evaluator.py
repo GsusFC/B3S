@@ -53,6 +53,11 @@ SV9_EVALUATOR_PROMPT_VERSION = "baldosas-v3.1-evaluator-v1"
 SV9_EVALUATOR_TIMEOUT_SECONDS = 90
 SV9_EVALUATOR_MAX_WORKERS = 4
 SV9_EVALUATOR_MAX_ATTEMPTS = 2
+# Greedy decoding: the tile evaluator must be deterministic. At temperature 0.1
+# borderline components collapsed 0<->5 across identical frozen inputs (pure
+# sampling noise, sd=0 at temp 0 over 32 runs). Only this role changes; other
+# LLM roles keep the 0.1 default in _call_json.
+SV9_EVALUATOR_TEMPERATURE = 0.0
 
 _TILES_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -298,6 +303,7 @@ def _run_tile_call(
                 json_schema=_TILES_JSON_SCHEMA,
                 schema_name=f"baldosas_{key}",
                 timeout_seconds=SV9_EVALUATOR_TIMEOUT_SECONDS,
+                temperature=SV9_EVALUATOR_TEMPERATURE,
             )
         except Exception as exc:  # Total evaluation: a crash is a status, not an abort.
             last_error = f"evaluator_exception: {exc}"

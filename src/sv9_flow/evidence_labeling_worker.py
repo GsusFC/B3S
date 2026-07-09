@@ -118,6 +118,7 @@ def _call_labeler(*, evidence_pack: BrandEvidencePack, records: list[EvidenceRec
         max_tokens=8000,
         json_schema=_LABEL_SCHEMA,
         schema_name="sv9_flow_evidence_labeling",
+        temperature=0.0,  # deterministic evidence labeling
     )
     if not isinstance(raw, dict):
         return []
