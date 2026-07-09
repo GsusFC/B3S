@@ -147,6 +147,7 @@ def _component_view_model(component: dict[str, Any]) -> dict[str, Any]:
     support = _support_text(component, primary_text=primary.get("text") or "")
     off_tiles, blind_spots = _split_tiles(component, tile_profile)
     evidence = _evidence_items(component)
+    brand_quote = _lit_evidence_quote(tile_profile, evidence)
     block = component.get("block") if isinstance(component.get("block"), dict) else {}
     drawer = {
         "summary": {
@@ -201,6 +202,7 @@ def _component_view_model(component: dict[str, Any]) -> dict[str, Any]:
         "card": {
             "primary": primary,
             "support": support,
+            "brand_quote": brand_quote,
             "meta": {
                 "lit": lit,
                 "off": off,
@@ -417,11 +419,36 @@ def _split_tiles(component: dict[str, Any], tile_profile: list[Any]) -> tuple[li
     return off_tiles, blind_spots
 
 
+def _ref_is_brand(ref: str) -> bool:
+    """True when the ref points at the brand's own web (raw_inputs.1*) — its own voice."""
+    r = str(ref or "").strip().lower()
+    return r == "raw_inputs.1" or r.startswith("raw_inputs.1.")
+
+
+def _lit_evidence_quote(tile_profile: list, evidence_items: list) -> dict[str, str]:
+    """Literal quote that lit the first ON tile — this component's own brand-voice
+    evidence (differs per component, unlike the shared block-level owned copy)."""
+    snippet = ""
+    for tile in tile_profile:
+        if isinstance(tile, dict) and str(tile.get("estado")) == "ok":
+            candidate = _strip_markdown(tile.get("evidencia"))
+            if candidate:
+                snippet = candidate
+                break
+    if not snippet:
+        return {}
+    url = next(
+        (item.get("url") for item in evidence_items if item.get("is_brand") and item.get("url")),
+        "",
+    )
+    return {"snippet": snippet, "url": url}
+
+
 def _evidence_items(component: dict[str, Any]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for evidence in component.get("evidence") or []:
         if isinstance(evidence, dict):
-            snippet = _clean_text(
+            snippet = _strip_markdown(
                 evidence.get("snippet")
                 or evidence.get("content")
                 or evidence.get("text")
@@ -431,7 +458,7 @@ def _evidence_items(component: dict[str, Any]) -> list[dict[str, Any]]:
             ref = _clean_text(evidence.get("ref") or evidence.get("id") or evidence.get("source"))
             source_class = _clean_text(evidence.get("source_class") or evidence.get("source"))
         else:
-            snippet = _clean_text(evidence)
+            snippet = _strip_markdown(evidence)
             url = ""
             ref = ""
             source_class = ""
@@ -442,6 +469,7 @@ def _evidence_items(component: dict[str, Any]) -> list[dict[str, Any]]:
                     "url": url,
                     "snippet": snippet,
                     "source_class": source_class or "unknown",
+                    "is_brand": _ref_is_brand(ref),
                 }
             )
 
@@ -449,12 +477,14 @@ def _evidence_items(component: dict[str, Any]) -> list[dict[str, Any]]:
     for ref_item in block.get("refs") or []:
         if not isinstance(ref_item, dict):
             continue
+        ref = _clean_text(ref_item.get("ref"))
         items.append(
             {
-                "ref": _clean_text(ref_item.get("ref")),
+                "ref": ref,
                 "url": _clean_text(ref_item.get("url")),
-                "snippet": _clean_text(ref_item.get("snippet")),
+                "snippet": _strip_markdown(ref_item.get("snippet")),
                 "source_class": _clean_text(ref_item.get("source_class")) or "unknown",
+                "is_brand": _ref_is_brand(ref),
             }
         )
     return items
@@ -587,6 +617,11 @@ def _artifact_chip_class(artifact: dict[str, Any]) -> str:
 
 def _clean_text(value: object) -> str:
     return " ".join(str(value or "").split())
+
+
+def _strip_markdown(value: object) -> str:
+    """Drop leftover markdown header markers (#, ##, …) from an inline snippet."""
+    return " ".join(re.sub(r"#{1,6}\s*", " ", str(value or "")).split())
 
 
 def _is_technical_fallback(value: object) -> bool:

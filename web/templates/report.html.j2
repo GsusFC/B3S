@@ -44,6 +44,11 @@
     {% endif %}
   {% endif %}
 
+  {% set bq = component.card.brand_quote %}
+  {% if bq and bq.snippet %}
+  <p class="card-evidence"><em>“{{ bq.snippet | truncate(180) }}”</em>{% if bq.url %} · <a class="source-link" href="{{ bq.url }}" target="_blank" rel="noopener noreferrer">fuente</a>{% endif %}</p>
+  {% endif %}
+
   {% if meta.has_drawer %}
   <dialog class="report-drawer" id="drawer-{{ component.key }}" aria-labelledby="drawer-title-{{ component.key }}">
     <div class="report-drawer-head">
@@ -68,11 +73,30 @@
           <span class="muted">evaluado</span>
         </div>
         {% if drawer.summary.primary_text %}
-        <p>{{ drawer.summary.primary_text }}</p>
+        <p class="drawer-lead"><em>{{ drawer.summary.primary_text }}</em></p>
         {% else %}
         <p class="muted">(no detectado)</p>
         {% endif %}
       </section>
+
+      {% if drawer.evidence %}
+      <section class="drawer-section">
+        <h4>Evidencia</h4>
+        {% for item in drawer.evidence %}
+        <div class="evidence">
+          <div class="ref">{% if item.ref %}{{ item.ref }}{% else %}evidencia{% endif %}{% if item.url %} · <a class="source-link" href="{{ item.url }}" rel="noopener noreferrer" target="_blank">abrir fuente</a>{% endif %}</div>
+          {% if item.snippet %}<div class="muted snippet">{{ item.snippet }}</div>{% endif %}
+        </div>
+        {% endfor %}
+      </section>
+      {% endif %}
+
+      {% if drawer.evaluator_verdict %}
+      <section class="drawer-section">
+        <h4>Explicación</h4>
+        <p>{{ drawer.evaluator_verdict }}</p>
+      </section>
+      {% endif %}
 
       {% if drawer.detected_basis and (drawer.detected_basis.text or drawer.detected_basis["items"]) %}
       <section class="drawer-section">
@@ -139,29 +163,11 @@
       </section>
       {% endif %}
 
-      {% if drawer.evaluator_verdict %}
-      <section class="drawer-section">
-        <h4>Veredicto SV9</h4>
-        <p>{{ drawer.evaluator_verdict }}</p>
-      </section>
-      {% endif %}
-
       {% if drawer.summary.coverage_status and drawer.summary.coverage_status != "unknown" %}
       {% set chip = coverage_chip.get(drawer.summary.coverage_status, ("", drawer.summary.coverage_status)) %}
       <div class="drawer-meta"><span class="chip {{ chip[0] }}">{{ chip[1] }}</span></div>
       {% endif %}
 
-      {% if drawer.evidence %}
-      <section class="drawer-section">
-        <h4>Evidencia</h4>
-        {% for item in drawer.evidence %}
-        <div class="evidence">
-          <div class="ref">{% if item.ref %}{{ item.ref }}{% else %}evidencia{% endif %}{% if item.url %} · <a class="source-link" href="{{ item.url }}" rel="noopener noreferrer" target="_blank">abrir fuente</a>{% endif %}</div>
-          {% if item.snippet %}<div class="muted snippet">{{ item.snippet }}</div>{% endif %}
-        </div>
-        {% endfor %}
-      </section>
-      {% endif %}
     </div>
   </dialog>
   {% endif %}
