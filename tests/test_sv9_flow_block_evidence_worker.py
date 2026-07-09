@@ -100,6 +100,81 @@ def test_product_embodied_mission_evidence_ranks_above_product_navigation() -> N
     assert shortlists["mission"][0] == "raw_inputs.1"
 
 
+def test_values_shortlist_prefers_operational_principle_evidence_over_product_benefits() -> None:
+    product_refs = [
+        EvidenceRecord(
+            ref=f"raw_inputs.product.{index}",
+            source="web",
+            evidence_type="raw_input",
+            content="AI agents automate invoices, reduce coordination, and improve efficiency for finance teams.",
+        )
+        for index in range(5)
+    ]
+    policy_refs = [
+        EvidenceRecord(
+            ref="raw_inputs.legal.0",
+            source="exa",
+            evidence_type="external_proof.owned_confirmation",
+            content=(
+                "Data Processing Agreement. Customers may object to new sub-processors "
+                "on reasonable data-protection grounds."
+            ),
+            confidence="high",
+        ),
+        EvidenceRecord(
+            ref="raw_inputs.docs.0",
+            source="exa",
+            evidence_type="external_proof.owned_confirmation",
+            content=(
+                "Scribo is a free, EN 16931-compliant e-invoicing tool. "
+                "The /api/v1 namespace is the public contract."
+            ),
+            confidence="high",
+        ),
+    ]
+    pack = BrandEvidencePack(
+        brand_name="Causa Prima",
+        url="https://causaprima.ai",
+        evidence=product_refs + policy_refs,
+    )
+
+    shortlists = build_block_evidence_shortlists(pack, blocks=("values",), limit=3)
+
+    assert shortlists["values"][:2] == ["raw_inputs.legal.0", "raw_inputs.docs.0"]
+
+
+def test_vision_shortlist_promotes_agent_network_target_state() -> None:
+    filler = [
+        EvidenceRecord(
+            ref=f"raw_inputs.product.{index}",
+            source="web",
+            evidence_type="raw_input",
+            content="Feature overview for invoice handling, disputes, discounts, and payment operations.",
+        )
+        for index in range(5)
+    ]
+    target_state = EvidenceRecord(
+        ref="raw_inputs.home.0",
+        source="web",
+        evidence_type="raw_input",
+        content=(
+            "The agent-to-agent network for finance teams. "
+            "Where buyer and supplier finally meet. "
+            "So money moves on the right terms, at the right time, on its own."
+        ),
+        confidence="high",
+    )
+    pack = BrandEvidencePack(
+        brand_name="Causa Prima",
+        url="https://causaprima.ai",
+        evidence=filler + [target_state],
+    )
+
+    shortlists = build_block_evidence_shortlists(pack, blocks=("vision",), limit=2)
+
+    assert shortlists["vision"][0] == "raw_inputs.home.0"
+
+
 def test_block_evidence_shortlist_serializes_version() -> None:
     item = BlockEvidenceShortlist(block="vision", evidence_refs=["raw_inputs.0"])
 

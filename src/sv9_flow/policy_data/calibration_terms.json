@@ -4,7 +4,8 @@
       "v3": "2026-07-02: generalize overfit 'transform the experience' to transform/transformation. Justified by Nium run 361: owned copy 'leading a transformation in payments' was LLM-detected with cited refs and wrongly vetoed by the gate.",
       "v4": "2026-07-03: add repository-proof terms (github repository, stars, forks, open source) to magnetism support terms, gravity family, and block-evidence magnetism terms. Justified by Vercel live capture 900400: vercel/next.js (140k stars) reached the pack via the org-level GitHub fallback but scored too low for the magnetism shortlist, so magnetism_no_gravity_evidence persisted despite direct ecosystem-gravity proof.",
       "v5": "2026-07-04: add product-embodied mission terms for reward/conversion mechanics. Justified by Toteemi local report 74a65fe08ae9: evidence such as 'Convierte tu esfuerzo en descuentos' and 'Una app que te paga por entrenar' existed in the pack but mission shortlisting selected generic product/navigation text and the sensitive gate rejected product-embodied strategy.",
-      "v6": "2026-07-07: add owned product-hook terms to magnetism support, shortlists, and owned_hook/direct_pull families. Justified by Darwin Biomedical local report 53d0362d5e1e: owned copy such as 'prevención activa de caídas', 'Seguridad & libertad', and 'primer andador inteligente' carried pain/desire magnetism, but the flow selected external funding evidence only and emitted magnetism_no_owned_hook_evidence."
+      "v6": "2026-07-07: add owned product-hook terms to magnetism support, shortlists, and owned_hook/direct_pull families. Justified by Darwin Biomedical local report 53d0362d5e1e: owned copy such as 'prevención activa de caídas', 'Seguridad & libertad', and 'primer andador inteligente' carried pain/desire magnetism, but the flow selected external funding evidence only and emitted magnetism_no_owned_hook_evidence.",
+      "v7": "2026-07-08: add operational-principle evidence terms for values and concrete category-target terms for vision. Justified by Causa Prima local report a8ba05137817: the pack contained compliance/legal/API evidence and autonomous agent-network target-state copy, but values shortlisting selected product-benefit refs and vision required adjudicator rescue."
     },
     "support_terms": {
       "magnetism": [
@@ -112,7 +113,14 @@
         "relentless focus",
         "fast execution",
         "deep care",
-        "craftsmanship"
+        "craftsmanship",
+        "en 16931-compliant",
+        "compliant e-invoicing",
+        "data processing agreement",
+        "sub-processors",
+        "data-protection grounds",
+        "public contract",
+        "openapi 3.1 spec is canonical"
       ],
       "vision": [
         "our vision",
@@ -130,10 +138,15 @@
         "next generation",
         "operating system for",
         "transform",
-        "transformation"
+        "transformation",
+        "agent-to-agent network",
+        "buyer and supplier finally meet",
+        "one network for your entire",
+        "so money moves",
+        "ai agents negotiate directly"
       ]
     },
-    "version": "sv9-flow-block-detection-policy-v6",
+    "version": "sv9-flow-block-detection-policy-v7",
     "weaken_terms": {
       "magnetism": [
         "lack of active engagement",
@@ -280,7 +293,18 @@
         "clarity",
         "efficiency",
         "empathy",
-        "collaboration"
+        "collaboration",
+        "privacy policy",
+        "data processing agreement",
+        "sub-processors",
+        "data-protection",
+        "data protection",
+        "en 16931",
+        "compliant e-invoicing",
+        "public contract",
+        "openapi",
+        "canonical",
+        "security"
       ],
       "vision": [
         "vision",
@@ -295,7 +319,15 @@
         "toward",
         "long-term",
         "next generation",
-        "category leader"
+        "category leader",
+        "agent-to-agent",
+        "agent-to-agent network",
+        "buyer and supplier",
+        "one network",
+        "money moves",
+        "on its own",
+        "ai agents negotiate directly",
+        "autonomous agents"
       ]
     },
     "feature_bonus_terms": [
@@ -308,7 +340,7 @@
       "diferenciacion",
       "coherencia"
     ],
-    "version": "sv9-flow-block-evidence-shortlists-v3"
+    "version": "sv9-flow-block-evidence-shortlists-v4"
   },
   "core_purpose_heuristics": {
     "action_terms": [

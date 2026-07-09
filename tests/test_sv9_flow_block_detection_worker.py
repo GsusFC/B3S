@@ -63,6 +63,79 @@ def test_values_detection_rejects_financial_value_language() -> None:
     assert decision.support_terms == []
 
 
+def test_values_detection_accepts_operational_compliance_evidence() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Causa Prima",
+        url="https://causaprima.ai",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="exa",
+                evidence_type="external_proof.owned_confirmation",
+                content=(
+                    "Scribo is a free, EN 16931-compliant e-invoicing tool. "
+                    "It generates invoices in the format each jurisdiction requires."
+                ),
+            ),
+            EvidenceRecord(
+                ref="raw_inputs.1",
+                source="exa",
+                evidence_type="external_proof.owned_confirmation",
+                content=(
+                    "The /api/v1 namespace is the public contract. "
+                    "The OpenAPI 3.1 spec is canonical."
+                ),
+            ),
+            EvidenceRecord(
+                ref="raw_inputs.2",
+                source="exa",
+                evidence_type="external_proof.owned_confirmation",
+                content=(
+                    "The Data Processing Agreement lists sub-processors and lets customers "
+                    "object on reasonable data-protection grounds."
+                ),
+            ),
+        ],
+    )
+
+    decision = resolve_block_detection(
+        "values",
+        pack,
+        evidence_refs=["raw_inputs.0", "raw_inputs.1", "raw_inputs.2"],
+    )
+
+    assert decision.outcome == "supports_detection"
+    assert decision.support_terms == [
+        "en 16931-compliant",
+        "compliant e-invoicing",
+        "data processing agreement",
+        "sub-processors",
+        "data-protection grounds",
+        "public contract",
+        "openapi 3.1 spec is canonical",
+    ]
+
+
+def test_values_detection_rejects_generic_privacy_boilerplate() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="web",
+                evidence_type="raw_input",
+                content="Privacy policy. We process website cookies, analytics data, and contact form messages.",
+            )
+        ],
+    )
+
+    decision = resolve_block_detection("values", pack, evidence_refs=["raw_inputs.0"])
+
+    assert decision.outcome == "insufficient_evidence"
+    assert decision.support_terms == []
+
+
 def test_vision_detection_accepts_explicit_future_language() -> None:
     pack = BrandEvidencePack(
         brand_name="Acme",
@@ -121,6 +194,48 @@ def test_vision_detection_accepts_category_operating_system_language() -> None:
 
     assert decision.outcome == "supports_detection"
     assert decision.support_terms == ["operating system for"]
+
+
+def test_vision_detection_accepts_agent_network_target_state() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Causa Prima",
+        url="https://causaprima.ai",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="web",
+                evidence_type="raw_input",
+                content=(
+                    "The agent-to-agent network for finance teams. "
+                    "Where buyer and supplier finally meet. "
+                    "One network for your entire financial operations."
+                ),
+            ),
+            EvidenceRecord(
+                ref="raw_inputs.1",
+                source="web",
+                evidence_type="raw_input",
+                content=(
+                    "We help finance teams handle both sides of every transaction on one network. "
+                    "So money moves on the right terms, at the right time, on its own."
+                ),
+            ),
+        ],
+    )
+
+    decision = resolve_block_detection(
+        "vision",
+        pack,
+        evidence_refs=["raw_inputs.0", "raw_inputs.1"],
+    )
+
+    assert decision.outcome == "supports_detection"
+    assert decision.support_terms == [
+        "agent-to-agent network",
+        "buyer and supplier finally meet",
+        "one network for your entire",
+        "so money moves",
+    ]
 
 
 def test_vision_detection_accepts_manifesto_goal_language() -> None:
@@ -511,7 +626,7 @@ def test_block_detection_decision_serializes_for_debug_payloads() -> None:
     decision = resolve_block_detection("magnetism", pack, evidence_refs=["raw_inputs.0"])
 
     assert decision.to_dict() == {
-        "version": "sv9-flow-block-detection-policy-v6",
+        "version": "sv9-flow-block-detection-policy-v7",
         "block": "magnetism",
         "outcome": "supports_detection",
         "evidence_refs": ["raw_inputs.0"],

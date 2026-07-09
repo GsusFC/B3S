@@ -8,11 +8,14 @@ from typing import Any, Literal
 from src.sv9_flow._utils import truthy_detected, unique_strings
 from src.sv9_flow.block_detection_worker import SENSITIVE_BLOCKS, resolve_block_detection
 from src.sv9_flow.calibration_terms import magnetism_families
-from src.sv9_flow.block_evidence_worker import build_block_evidence_shortlists
+from src.sv9_flow.block_evidence_worker import (
+    BLOCK_EVIDENCE_SHORTLIST_VERSION,
+    build_block_evidence_shortlists,
+)
 from src.sv9_flow.contracts import BrandEvidencePack, BrandInterpretation
 from src.sv9_flow.evidence_source import source_class_for_record
 
-FLOW_INTERPRETATION_PROMPT_VERSION = "sv9-flow-brand-interpretation-v1"
+FLOW_INTERPRETATION_PROMPT_VERSION = "sv9-flow-brand-interpretation-v1.1"
 _BLOCK_MAX_TOKENS = 1800
 GateAuthority = Literal["veto_only", "warn", "disabled"]
 
@@ -47,6 +50,16 @@ _BLOCK_GUIDANCE: dict[str, list[str]] = {
     "value_proposition": [
         "Look for who gets what concrete value: measurable business outcomes, financial value, capital, investment, speed, or operational benefit.",
         "Prefer a concrete offer statement over a broad mission statement.",
+    ],
+    "values": [
+        "Values can be declared principles or operational principles made visible through decisions, policies, compliance posture, data protection, transparency, or product constraints.",
+        "Do not treat generic efficiency, speed, automation, or financial value as values unless the evidence shows a principle or commitment behind the behavior.",
+        "Keep values distinct from attributes: 'secure' or 'compliant' is an attribute; 'data protection as an operating constraint' or 'standards-first compliance' can be a value when evidenced.",
+    ],
+    "vision": [
+        "Vision describes a future state, category direction, or world-state the brand wants to make normal.",
+        "Concrete target-state copy can support vision even without a formal 'our vision' heading when it describes how the market or user world should work.",
+        "Do not treat a product capability alone as vision unless the evidence points to a broader category or operating future.",
     ],
 }
 
@@ -207,7 +220,7 @@ def build_brand_interpretation_with_llm(
     debug = {
         "status": "ok" if raw_blocks and detected_count else "empty",
         "prompt_version": FLOW_INTERPRETATION_PROMPT_VERSION,
-        "shortlist_version": "sv9-flow-block-evidence-shortlists-v1",
+        "shortlist_version": BLOCK_EVIDENCE_SHORTLIST_VERSION,
         "gate_authority": gate_authority,
         "shortlisted_blocks": sorted(shortlists.keys()),
         "mode": "per_block" if per_block else "all_blocks",
