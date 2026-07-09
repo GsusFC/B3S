@@ -7,30 +7,18 @@
   "probable_absent": ("warn", "ausencia probable"),
   "insufficient_acquisition": ("bad", "adquisición insuficiente"),
 } %}
-{% set report_rows = [
-  ("component-card--half", ["core_purpose", "magnetism"]),
-  ("component-card--third", ["value_proposition", "personality", "brand_idea"]),
-  ("component-card--half", ["attributes", "values"]),
-  ("component-card--half", ["mission", "vision"]),
-] %}
-{% set components_by_key = namespace(map={}) %}
-{% for component in report.components %}
-{% set _ = components_by_key.map.update({component.key: component}) %}
-{% endfor %}
-{% set row_component_keys = namespace(keys=[]) %}
-{% for row in report_rows %}
-{% for key in row[1] %}
-{% set _ = row_component_keys.keys.append(key) %}
-{% endfor %}
-{% endfor %}
 
-{% macro component_card(component, span_class) %}
-<section class="panel component-card {{ span_class }}{% if component.status != 'scored' %} component-card--muted{% endif %}" id="{{ component.key }}">
+{% macro component_card(component) %}
+{% set primary = component.card.primary %}
+{% set support = component.card.support %}
+{% set drawer = component.drawer %}
+{% set meta = component.card.meta %}
+<section class="panel component-card {{ component.span_class }}{% if component.status != 'scored' %} component-card--muted{% endif %}" id="{{ component.key }}">
   <div class="card-head">
     <h2 class="card-title">{{ component.label }}</h2>
     <div class="card-actions">
       <span class="badge">{{ component.score }}/{{ component.scale or 10 }}</span>
-      {% if component.tiles or (component.block and (component.block.refs or component.block.rejected_content)) %}
+      {% if meta.has_drawer %}
       <button type="button" class="icon-button" data-dialog-target="drawer-{{ component.key }}" aria-label="Abrir lectura de {{ component.label }}" title="Abrir lectura de {{ component.label }}">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
@@ -41,25 +29,22 @@
     </div>
   </div>
 
-  {% if component.message %}
-  <p class="card-result">{{ component.message }}</p>
-  {% elif component.veredicto %}
-  <p class="card-result">{{ component.veredicto }}</p>
-  {% elif component.resumen %}
-  <p class="card-result">{{ component.resumen }}</p>
-  {% elif component.status == "not_detected" and component.level_zero %}
-  <p class="card-result muted">{{ component.level_zero }}</p>
+  {% if primary["items"] %}
+  <p class="card-result card-result--terms">{{ primary["items"] | join(" · ") }}</p>
+  {% elif primary.text %}
+  <p class="card-result{% if primary.is_fallback %} muted{% endif %}">{{ primary.text }}</p>
   {% endif %}
 
-  {% if component.message and component.veredicto and component.veredicto != component.message %}
-  <p class="card-verdict">{{ component.veredicto }}</p>
-  {% endif %}
-  {% if (component.message or component.veredicto) and component.resumen and not component.resumen_is_fallback and component.resumen != component.message and component.resumen != component.veredicto %}
-  <p class="card-verdict">{{ component.resumen }}</p>
+  {% if support.show_on_card and (support.text or support["items"]) %}
+    {% if support["items"] %}
+    <p class="card-verdict card-verdict--terms">{{ support["items"] | join(" · ") }}</p>
+    {% endif %}
+    {% if support.text %}
+    <p class="card-verdict">{{ support.text }}</p>
+    {% endif %}
   {% endif %}
 
-  {% set has_component_details = component.tiles or (component.block and (component.block.refs or component.block.rejected_content)) %}
-  {% if has_component_details %}
+  {% if meta.has_drawer %}
   <dialog class="report-drawer" id="drawer-{{ component.key }}" aria-labelledby="drawer-title-{{ component.key }}">
     <div class="report-drawer-head">
       <div>
@@ -82,31 +67,44 @@
           <span class="badge">{{ component.score }}/{{ component.scale or 10 }}</span>
           <span class="muted">evaluado</span>
         </div>
-        {% if component.message %}
-        <p>{{ component.message }}</p>
-        {% elif component.veredicto %}
-        <p>{{ component.veredicto }}</p>
-        {% elif component.resumen %}
-        <p>{{ component.resumen }}</p>
-        {% elif component.status == "not_detected" and component.level_zero %}
-        <p>{{ component.level_zero }}</p>
+        {% if drawer.summary.primary_text %}
+        <p>{{ drawer.summary.primary_text }}</p>
         {% else %}
         <p class="muted">(no detectado)</p>
         {% endif %}
       </section>
 
-      {% if component.tiles %}
+      {% if drawer.detected_basis and (drawer.detected_basis.text or drawer.detected_basis["items"]) %}
       <section class="drawer-section">
-        <h4>Baldosas</h4>
-        <p class="drawer-section-note">{{ component.tiles | length }} fallos o puntos ciegos detectados.</p>
+        <h4>Base detectada</h4>
+        {% if drawer.detected_basis["items"] %}
+        <p class="card-verdict card-verdict--terms">{{ drawer.detected_basis["items"] | join(" · ") }}</p>
+        {% endif %}
+        {% if drawer.detected_basis.text %}
+        <p class="muted">{{ drawer.detected_basis.text }}</p>
+        {% endif %}
+      </section>
+      {% endif %}
+
+      {% if drawer.next_artifact %}
+      <section class="drawer-section">
+        <h4>Siguiente artefacto</h4>
+        <p>{{ drawer.next_artifact }}</p>
+      </section>
+      {% endif %}
+
+      {% if drawer.off_tiles %}
+      <section class="drawer-section">
+        <h4>Baldosas apagadas</h4>
+        <p class="drawer-section-note">{{ drawer.off_tiles | length }} fallos detectados: plan de trabajo.</p>
         <div class="drawer-tiles">
-          {% for tile in component.tiles %}
-          <article class="drawer-tile {{ 'is-off' if tile.estado == 'no' else 'is-blind' }}">
+          {% for tile in drawer.off_tiles %}
+          <article class="drawer-tile is-off">
             <div class="drawer-tile-id">{{ tile.id }}</div>
             <div class="drawer-tile-body">
               <div class="drawer-tile-head">
                 <strong>{{ tile.name }}</strong>
-                <span class="chip {{ 'bad' if tile.estado == 'no' else 'warn' }}">{{ "apagada" if tile.estado == "no" else "punto ciego" }}</span>
+                <span class="chip bad">apagada</span>
               </div>
               {% if tile.motivo %}<p>{{ tile.motivo }}</p>{% endif %}
               {% if tile.contexto_requerido %}<p class="muted">aporta contexto: {{ tile.contexto_requerido }}</p>{% endif %}
@@ -118,40 +116,51 @@
       </section>
       {% endif %}
 
-      {% if component.veredicto %}
+      {% if drawer.blind_spots %}
       <section class="drawer-section">
-        <h4>V9</h4>
-        <p>{{ component.veredicto }}</p>
-        {% if component.message and component.message != component.veredicto %}
-        <p>{{ component.message }}</p>
-        {% endif %}
+        <h4>Puntos ciegos</h4>
+        <p class="drawer-section-note">{{ drawer.blind_spots | length }} piezas de contexto pendientes.</p>
+        <div class="drawer-tiles">
+          {% for tile in drawer.blind_spots %}
+          <article class="drawer-tile is-blind">
+            <div class="drawer-tile-id">{{ tile.id }}</div>
+            <div class="drawer-tile-body">
+              <div class="drawer-tile-head">
+                <strong>{{ tile.name }}</strong>
+                <span class="chip warn">punto ciego</span>
+              </div>
+              {% if tile.motivo %}<p>{{ tile.motivo }}</p>{% endif %}
+              {% if tile.contexto_requerido %}<p class="muted">aporta contexto: {{ tile.contexto_requerido }}</p>{% endif %}
+              {% if tile.evidencia %}<p class="muted">“{{ tile.evidencia }}”</p>{% endif %}
+            </div>
+          </article>
+          {% endfor %}
+        </div>
       </section>
       {% endif %}
 
-      {% if component.block and component.block.coverage_status %}
-      {% set chip = coverage_chip.get(component.block.coverage_status, ("", component.block.coverage_status)) %}
+      {% if drawer.evaluator_verdict %}
+      <section class="drawer-section">
+        <h4>Veredicto SV9</h4>
+        <p>{{ drawer.evaluator_verdict }}</p>
+      </section>
+      {% endif %}
+
+      {% if drawer.summary.coverage_status and drawer.summary.coverage_status != "unknown" %}
+      {% set chip = coverage_chip.get(drawer.summary.coverage_status, ("", drawer.summary.coverage_status)) %}
       <div class="drawer-meta"><span class="chip {{ chip[0] }}">{{ chip[1] }}</span></div>
       {% endif %}
 
-      {% if component.block %}
-      {% set block = component.block %}
-      {% if block.rejected_content and not block.detected %}
-      <section class="drawer-section">
-        <h4>Filtro</h4>
-        <p class="muted">{{ block.rejected_content }}</p>
-      </section>
-      {% endif %}
-      {% if block.refs %}
+      {% if drawer.evidence %}
       <section class="drawer-section">
         <h4>Evidencia</h4>
-      {% for item in block.refs %}
-      <div class="evidence">
-        <div class="ref">{{ item.ref }}{% if item.url %} · <a href="{{ item.url }}" rel="noopener noreferrer">{{ item.url }}</a>{% endif %}</div>
-        <div class="muted snippet">{{ item.snippet }}</div>
-      </div>
-      {% endfor %}
+        {% for item in drawer.evidence %}
+        <div class="evidence">
+          <div class="ref">{% if item.ref %}{{ item.ref }}{% else %}evidencia{% endif %}{% if item.url %} · <a class="source-link" href="{{ item.url }}" rel="noopener noreferrer" target="_blank">abrir fuente</a>{% endif %}</div>
+          {% if item.snippet %}<div class="muted snippet">{{ item.snippet }}</div>{% endif %}
+        </div>
+        {% endfor %}
       </section>
-      {% endif %}
       {% endif %}
     </div>
   </dialog>
@@ -160,24 +169,24 @@
 {% endmacro %}
 {% block main_class %}wide{% endblock %}
 {% block content %}
-<p><a href="/">← Todos los informes</a> · <a href="/report/{{ report.id }}/moodboard?lang=es">Moodboard</a> · <a href="/report/{{ report.id }}.md">Markdown</a></p>
+<p><a href="/">← Todos los informes</a> · <a href="{{ report.export.moodboard_url }}">Moodboard</a> · <a href="{{ report.export.markdown_url }}">Markdown</a></p>
 
-{% set score_width = report.score if report.score is not none else 0 %}
+{% set score_width = report.score_width if report.score_width is not none else 0 %}
 <div class="report-hero">
   <div class="report-hero-main">
     <h1 class="report-hero-title">{{ report.brand_name }}</h1>
     <a class="report-hero-url" href="{{ report.url }}" target="_blank" rel="noopener noreferrer">{{ report.url }}</a>
   </div>
   <div class="report-hero-metric">
-    <div class="report-hero-label">Brand3 Score</div>
+    <div class="report-hero-label">{{ report.hero.score_label }}</div>
     <div class="report-hero-score">
       {{ report.score if report.score is not none else "—" }}<span>/100</span>
     </div>
     <div class="report-score-bar" aria-hidden="true">
       <span style="--score-width: {{ score_width }}%;"></span>
     </div>
-    {% if report.most_painful_gap_label %}
-    <div class="report-hero-note">hueco: {{ report.most_painful_gap_label }}</div>
+    {% if report.hero.most_painful_gap.label %}
+    <div class="report-hero-note">hueco: {{ report.hero.most_painful_gap.label }}</div>
     {% elif report.base_average is not none %}
     <div class="report-hero-note">media base {{ report.base_average }}</div>
     {% endif %}
@@ -185,54 +194,39 @@
   <div class="report-hero-metric">
     <div class="report-hero-label">Margen inmediato</div>
     <div class="report-hero-score report-hero-score--gain">
-      {% if report.immediate_margin %}+{{ report.immediate_margin }}{% else %}0{% endif %}<span> pts</span>
+      {% if report.hero.immediate_margin %}+{{ report.hero.immediate_margin }}{% else %}0{% endif %}<span> pts</span>
     </div>
-    {% if report.not_detected %}
-    <div class="report-hero-note">faltan: {{ report.not_detected | join(", ") }}</div>
-    {% elif report.most_painful_gap_label %}
-    <div class="report-hero-note">siguiente foco: {{ report.most_painful_gap_label }}</div>
+    {% if report.hero.not_detected %}
+    <div class="report-hero-note">faltan: {{ report.hero.not_detected | join(", ") }}</div>
+    {% elif report.hero.most_painful_gap.label %}
+    <div class="report-hero-note">siguiente foco: {{ report.hero.most_painful_gap.label }}</div>
     {% else %}
     <div class="report-hero-note">sin hueco inmediato</div>
     {% endif %}
   </div>
 </div>
 
-{% if report.executive_reading %}
+{% if report.hero.executive_reading %}
 <section class="panel report-reading">
-  <p>{{ report.executive_reading }}</p>
+  <p>{{ report.hero.executive_reading }}</p>
 </section>
 {% endif %}
 
 <div class="canvas">
-{% for row in report_rows %}
-  {% set row_class, keys = row %}
-  {% for key in keys %}
-    {% set component = components_by_key.map.get(key) %}
-    {% if component %}
-      {{ component_card(component, row_class) }}
-    {% endif %}
-  {% endfor %}
-{% endfor %}
-{% set coherencia = components_by_key.map.get("coherencia") %}
-{% if coherencia %}
-  {{ component_card(coherencia, "component-card--full") }}
-{% endif %}
 {% for component in report.components %}
-  {% if component.key not in row_component_keys.keys and component.key != "coherencia" %}
-    {{ component_card(component, "component-card--full") }}
-  {% endif %}
+  {{ component_card(component) }}
 {% endfor %}
 </div>
 
 <section class="acquisition-trace">
 <h2>Trazabilidad de adquisición</h2>
-{% if report.acquisition_gate and report.acquisition_gate.state in ['blocked', 'cancelled', 'degraded_approved'] %}
+{% if report.acquisition and report.acquisition.state in ['blocked', 'cancelled', 'degraded_approved'] %}
 <div class="panel acquisition-panel">
-  <div class="ref">acquisition_gate · <span class="chip {% if report.acquisition_gate.state in ['blocked', 'cancelled'] %}bad{% elif report.acquisition_gate.state in ['warning', 'degraded_approved'] %}warn{% else %}ok{% endif %}">{{ report.acquisition_gate.state }}</span></div>
-  {% if report.acquisition_gate.user_decision %}
-  <p class="muted">decision: <span class="mono">{{ report.acquisition_gate.user_decision }}</span>{% if report.acquisition_gate.decision_source %} · source: <span class="mono">{{ report.acquisition_gate.decision_source }}</span>{% endif %}</p>
+  <div class="ref">acquisition_gate · <span class="chip {% if report.acquisition.state in ['blocked', 'cancelled'] %}bad{% elif report.acquisition.state in ['warning', 'degraded_approved'] %}warn{% else %}ok{% endif %}">{{ report.acquisition.state }}</span></div>
+  {% if report.acquisition.user_decision %}
+  <p class="muted">decision: <span class="mono">{{ report.acquisition.user_decision }}</span>{% if report.acquisition.decision_source %} · source: <span class="mono">{{ report.acquisition.decision_source }}</span>{% endif %}</p>
   {% endif %}
-  {% for issue in report.acquisition_gate.issues or [] %}
+  {% for issue in report.acquisition.issues or [] %}
   <div class="evidence">
     <div class="ref"><span class="chip bad">{{ issue.source }}</span> {{ issue.code }} · {{ issue.status }}</div>
     <div class="muted snippet">{{ issue.message }}</div>
@@ -240,36 +234,28 @@
   {% endfor %}
 </div>
 {% endif %}
-{% if report.acquisition_artifacts %}
+{% if report.acquisition.artifacts %}
 <div class="panel acquisition-panel">
   <div class="ref">capturas y artefactos</div>
   <div class="acquisition-artifacts">
-  {% for artifact in report.acquisition_artifacts %}
-  {% if artifact.public_url or artifact.screenshot_url or artifact.screenshot_path %}
+  {% for artifact in report.acquisition.artifacts %}
   <div class="evidence">
     <div class="ref">
-      <span class="chip {% if artifact.success or artifact.status in ['usable', 'captured'] %}ok{% elif artifact.status in ['blocked', 'limited'] %}warn{% else %}bad{% endif %}">{{ artifact.source }}</span>
+      <span class="chip {{ artifact.chip_class }}">{{ artifact.source }}</span>
       {{ artifact.kind }}{% if artifact.status %} · {{ artifact.status }}{% endif %}
     </div>
-    {% if artifact.public_url %}
-    <p><a href="{{ artifact.public_url }}" target="_blank" rel="noreferrer">abrir captura</a></p>
-    {% elif artifact.screenshot_url %}
-    <p class="muted mono">{{ artifact.screenshot_url }}</p>
-    {% elif artifact.screenshot_path %}
-    <p class="muted mono">{{ artifact.screenshot_path }}</p>
-    {% endif %}
+    <p><a href="{{ artifact.href }}" target="_blank" rel="noreferrer">{{ artifact.display_label }}</a></p>
   </div>
-  {% endif %}
   {% endfor %}
   </div>
 </div>
 {% endif %}
 <div class="acquisition-metrics">
-  <div class="cell acquisition-metric"><div class="k">páginas propias</div><div class="v">{{ report.coverage_acquisition.owned_url_count }}</div></div>
-  <div class="cell acquisition-metric"><div class="k">pruebas externas</div><div class="v">{{ report.coverage_acquisition.external_proof_count }}</div></div>
-  <div class="cell acquisition-metric"><div class="k">intentos externos</div><div class="v">{{ report.coverage_acquisition.external_attempt_count }}</div></div>
-  <div class="cell acquisition-metric"><div class="k">registros de ausencia</div><div class="v">{{ report.coverage_acquisition.absence_ref_count }}</div></div>
-  <div class="cell acquisition-metric"><div class="k">registros de evidencia</div><div class="v">{{ report.coverage_acquisition.evidence_record_count }}</div></div>
+  <div class="cell acquisition-metric"><div class="k">páginas propias</div><div class="v">{{ report.acquisition.metrics.owned_url_count }}</div></div>
+  <div class="cell acquisition-metric"><div class="k">pruebas externas</div><div class="v">{{ report.acquisition.metrics.external_proof_count }}</div></div>
+  <div class="cell acquisition-metric"><div class="k">intentos externos</div><div class="v">{{ report.acquisition.metrics.external_attempt_count }}</div></div>
+  <div class="cell acquisition-metric"><div class="k">registros de ausencia</div><div class="v">{{ report.acquisition.metrics.absence_ref_count }}</div></div>
+  <div class="cell acquisition-metric"><div class="k">registros de evidencia</div><div class="v">{{ report.acquisition.metrics.evidence_record_count }}</div></div>
 </div>
 
 {% if report.absences %}

@@ -1051,7 +1051,7 @@ def test_report_view_renders_report(monkeypatch):
     assert json.dumps({"ok": True}) not in response.text
 
 
-def test_report_view_rebuilds_verdict_from_counts_without_tile_profile(monkeypatch):
+def test_report_view_hides_automatic_verdict_from_card_without_tile_profile(monkeypatch):
     from web.app import app
 
     monkeypatch.setattr(
@@ -1103,7 +1103,8 @@ def test_report_view_rebuilds_verdict_from_counts_without_tile_profile(monkeypat
     response = TestClient(app).get("/report/report123")
 
     assert response.status_code == 200
-    assert "Síntesis automática: 3/10 baldosas encendidas, 1 apagada, 6 puntos ciegos." in response.text
+    assert "Síntesis automática: 3/10 baldosas encendidas, 1 apagada, 6 puntos ciegos." not in response.text
+    assert "The snapshot does not provide access" not in response.text
     assert "0/10 baldosas encendidas" not in response.text
 
 
@@ -1192,6 +1193,13 @@ def test_attach_sv9_editorial_only_requests_components_with_unusable_prose():
                 "brand_name": "Optiak",
                 "url": "https://optiak.com",
                 "brand3_score": 61,
+                "editorial_v3_1": {
+                    "schema_version": "sv9_editorial_v3_1",
+                    "components": {
+                        "magnetism": {"diagnosis": "Diagnóstico estructurado."},
+                        "mission": {"diagnosis": "Diagnóstico estructurado."},
+                    },
+                },
                 "components": {
                     "magnetism": {
                         "component": "magnetism",
@@ -1233,6 +1241,18 @@ def test_attach_sv9_editorial_only_requests_components_with_unusable_prose():
                 "magnetism": "La marca necesita convertir utilidad técnica en tensión narrativa."
             },
             "executive_reading": "Lectura ejecutiva del scan.",
+            "structured": {
+                "schema_version": "sv9_editorial_v3_1",
+                "executive_reading": "Lectura ejecutiva del scan.",
+                "components": {
+                    "magnetism": {
+                        "diagnosis": "La marca necesita convertir utilidad técnica en tensión narrativa.",
+                        "detected_basis": "Base detectada.",
+                        "next_artifact": "Narrativa de tensión.",
+                        "terms": [],
+                    }
+                },
+            },
         }
 
     result = _attach_sv9_editorial(
@@ -1246,6 +1266,67 @@ def test_attach_sv9_editorial_only_requests_components_with_unusable_prose():
     assert components["magnetism"]["message"] == "La marca necesita convertir utilidad técnica en tensión narrativa."
     assert "message" not in components["mission"]
     assert result["sv9"]["result"]["executive_reading"] == "Lectura ejecutiva del scan."
+    assert result["sv9"]["result"]["editorial_v3_1"]["schema_version"] == "sv9_editorial_v3_1"
+
+
+def test_attach_sv9_editorial_requests_all_components_when_structured_contract_is_missing():
+    from src.sv9.rubric import tile_ids
+    from web.scan_runner import _attach_sv9_editorial
+
+    ids = tile_ids("magnetism")
+    payload = {
+        "sv9": {
+            "result": {
+                "brand_name": "Optiak",
+                "url": "https://optiak.com",
+                "brand3_score": 61,
+                "components": {
+                    "magnetism": {
+                        "component": "magnetism",
+                        "status": "scored",
+                        "score": 3,
+                        "scale": 10,
+                        "message": "La marca necesita convertir utilidad técnica en tensión narrativa.",
+                        "veredicto": "Síntesis automática: 3/10 baldosas encendidas.",
+                        "tile_profile": [
+                            {"id": ids[0], "estado": "ok", "evidencia": "promesa visible"},
+                            {"id": ids[1], "estado": "no", "motivo": "falta"},
+                        ],
+                    },
+                    "mission": {
+                        "component": "mission",
+                        "status": "scored",
+                        "score": 5,
+                        "scale": 5,
+                        "message": "La misión está formulada con claridad.",
+                        "veredicto": "La misión está formulada con claridad.",
+                        "tile_profile": [],
+                    },
+                },
+            }
+        }
+    }
+    calls = []
+
+    class FakeLLM:
+        api_key = "test-key"
+
+    def fake_build_editorial(scan, *, llm, component_keys, include_executive_reading):
+        calls.append(
+            {
+                "component_keys": list(component_keys),
+                "include_executive_reading": include_executive_reading,
+            }
+        )
+        return {"component_messages": {}, "executive_reading": None}
+
+    _attach_sv9_editorial(
+        payload,
+        llm=FakeLLM(),
+        build_editorial_fn=fake_build_editorial,
+    )
+
+    assert calls == [{"component_keys": ["magnetism", "mission"], "include_executive_reading": True}]
 
 
 def test_attach_sv9_editorial_skips_when_evaluator_messages_exist():
@@ -1511,3 +1592,41 @@ def test_report_view_renders_coherencia_once_and_prioritizes_editorial_message(m
     assert "Lectura editorial de coherencia." in response.text
     assert "Optiak construye un discurso técnico sólido." in response.text
     assert "Componente Coherencia detectado" not in response.text
+
+
+def test_report_view_does_not_instantiate_llm_analyzer(monkeypatch):
+    from web.app import app
+
+    def fail_llm(*_args, **_kwargs):
+        raise AssertionError("report view must not instantiate LLMAnalyzer")
+
+    monkeypatch.setattr("src.features.llm_analyzer.LLMAnalyzer", fail_llm)
+    monkeypatch.setattr(
+        "web.app.load_report",
+        lambda scan_id: {
+            "id": scan_id,
+            "brand_name": "Optiak",
+            "url": "https://optiak.com",
+            "score": 65,
+            "components": [
+                {
+                    "key": "mission",
+                    "label": "Misión",
+                    "score": 5,
+                    "scale": 5,
+                    "status": "scored",
+                    "message": "Lectura persistida.",
+                    "detected_content": "Misión detectada.",
+                }
+            ],
+            "raw": {},
+        },
+    )
+
+    response = TestClient(app).get("/report/report123")
+
+    assert response.status_code == 200
+    assert "Lectura persistida." in response.text
+    assert "Base detectada" in response.text
+    assert "Misión detectada." in response.text
+    assert '<p class="card-verdict">Misión detectada.</p>' in response.text

@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from web.report_store import domain_key, list_reports, list_reports_for_domain, load_report
+from web.report_view_model import build_report_view_model
 from web.scan_runner import approve_degraded_scan, cancel_scan, scan_status, start_scan
 from web.scoring_store import backfill_reports, dashboard as scoring_dashboard
 from src.sv9.language_guard import (
@@ -224,9 +225,15 @@ def _sanitize_report_language(report: dict[str, Any] | None) -> dict[str, Any]:
         return {}
     sanitized = dict(report)
     raw_result = _raw_sv9_result(report)
+    if not sanitized.get("editorial") and isinstance(raw_result.get("editorial_v3_1"), dict):
+        sanitized["editorial"] = raw_result.get("editorial_v3_1")
     if not sanitized.get("executive_reading") and raw_result.get("executive_reading"):
         sanitized["executive_reading"] = raw_result.get("executive_reading")
     raw_components = _raw_sv9_components(report)
+    raw_editorial = raw_result.get("editorial_v3_1") if isinstance(raw_result.get("editorial_v3_1"), dict) else {}
+    raw_editorial_components = (
+        raw_editorial.get("components") if isinstance(raw_editorial.get("components"), dict) else {}
+    )
     components = []
     for component in sanitized.get("components") or []:
         if not isinstance(component, dict):
@@ -234,6 +241,8 @@ def _sanitize_report_language(report: dict[str, Any] | None) -> dict[str, Any]:
         item = dict(component)
         key = str(item.get("key") or item.get("component") or "")
         item = _enrich_component_from_raw_sv9(item, raw_components.get(key) or {})
+        if not item.get("editorial") and isinstance(raw_editorial_components.get(key), dict):
+            item["editorial"] = raw_editorial_components.get(key)
         key = str(item.get("key") or item.get("component") or "")
         tile_profile = _resolve_component_tile_profile(item)
         item["resumen"] = spanish_component_summary(
@@ -819,7 +828,8 @@ def report_view(request: Request, scan_id: str):
     if report is None:
         return RedirectResponse("/?error=Report not found", status_code=303)
     report = _sanitize_report_language(report)
-    return templates.TemplateResponse(request, "report.html.j2", {"report": report})
+    report_vm = build_report_view_model(report)
+    return templates.TemplateResponse(request, "report.html.j2", {"report": report_vm})
 
 
 @app.get("/report/{scan_id}/moodboard")

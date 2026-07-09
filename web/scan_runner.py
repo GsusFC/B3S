@@ -987,11 +987,31 @@ def _attach_sv9_editorial(
     components = result.get("components") if isinstance(result.get("components"), dict) else {}
     if not components:
         return payload
-    needed = [
+    structured = result.get("editorial_v3_1") if isinstance(result.get("editorial_v3_1"), dict) else {}
+    structured_components = (
+        structured.get("components") if isinstance(structured.get("components"), dict) else {}
+    )
+    ordered_keys = [
+        key for key in _COMPONENT_ORDER
+        if key in components and isinstance(components.get(key), dict)
+    ]
+    ordered_keys.extend(
         key
         for key, detail in components.items()
+        if key not in ordered_keys and isinstance(detail, dict)
+    )
+    needed = [
+        key
+        for key in ordered_keys
+        for detail in [components.get(key)]
         if isinstance(detail, dict) and _component_needs_editorial_message(str(key), detail)
     ]
+    if not structured_components:
+        needed = ordered_keys
+    else:
+        for key in ordered_keys:
+            if key not in structured_components and key not in needed:
+                needed.append(key)
     if not needed:
         return payload
     try:
@@ -1023,12 +1043,21 @@ def _attach_sv9_editorial(
     reading = editorial.get("executive_reading") if isinstance(editorial, dict) else None
     if str(reading or "").strip():
         result["executive_reading"] = str(reading).strip()
+    structured = editorial.get("structured") if isinstance(editorial, dict) else None
+    structured_components = {}
+    if isinstance(structured, dict):
+        result["editorial_v3_1"] = structured
+        structured_components = (
+            structured.get("components") if isinstance(structured.get("components"), dict) else {}
+        )
     sv9["editorial"] = {
         "status": "attached",
-        "mode": "selective",
+        "mode": "v3_1_structured",
         "requested_components": needed,
         "message_components": sorted(str(key) for key in (messages or {}).keys()),
         "executive_reading": bool(str(reading or "").strip()),
+        "structured_schema_version": str((structured or {}).get("schema_version") or ""),
+        "structured_components": sorted(str(key) for key in structured_components.keys()),
     }
     return payload
 
@@ -1106,6 +1135,14 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
     blocks_by_name = {block["name"]: block for block in blocks}
     result = sv9.get("result") if isinstance(sv9.get("result"), dict) else {}
     result_components = result.get("components") if isinstance(result.get("components"), dict) else {}
+    structured_editorial = (
+        result.get("editorial_v3_1") if isinstance(result.get("editorial_v3_1"), dict) else {}
+    )
+    structured_editorial_components = (
+        structured_editorial.get("components")
+        if isinstance(structured_editorial.get("components"), dict)
+        else {}
+    )
     from src.sv9.rubric import COMPONENTS as RUBRIC_COMPONENTS
 
     components = []
@@ -1171,6 +1208,11 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
         failing_tiles = _failing_tiles_from_profile(name, tile_profile)
         detected_content = str(detail.get("detected_content") or "").strip()
         message = spanish_generated_text(detail.get("message"))
+        editorial_component = (
+            structured_editorial_components.get(name)
+            if isinstance(structured_editorial_components.get(name), dict)
+            else {}
+        )
         components.append(
             {
                 "key": name,
@@ -1191,6 +1233,7 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
                 "detected_content": detected_content,
                 "veredicto": spanish_component_verdict(name, detail.get("veredicto"), tile_profile),
                 "message": message,
+                "editorial": editorial_component,
                 "points": detail.get("points"),
                 "evaluation_model": detail.get("evaluation_model"),
                 "evidence": list(detail.get("evidence") or []),
@@ -1225,7 +1268,8 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
         "most_painful_gap_label": str((RUBRIC_COMPONENTS.get(gap_key) or {}).get("label") or gap_key),
         "immediate_margin": result.get("immediate_margin"),
         "total_blind_spots": result.get("total_blind_spots"),
-        "executive_reading": result.get("executive_reading"),
+        "executive_reading": structured_editorial.get("executive_reading") or result.get("executive_reading"),
+        "editorial": structured_editorial,
         "detected_count": detected_count,
         "block_count": len(blocks),
         "components": components,
