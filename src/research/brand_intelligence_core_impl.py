@@ -9,6 +9,7 @@ from src.research.brand_intelligence import (
     BrandEvidenceItem,
     BrandIdentityBakeoffCase,
     BrandIdentityBakeoffResult,
+    BrandSeed,
     IDENTITY_BAKEOFF_VERSION,
     BrandSourceBakeoffCase,
     BrandSourceBakeoffResult,
@@ -19,6 +20,7 @@ from src.research.brand_intelligence import (
     BrandSourceRequest,
     BrandEvidenceKind,
     EvidenceStrength,
+    ResolvedBrandEntity,
     SourceChannel,
 )
 from src.research.brand_intelligence_identity import (
