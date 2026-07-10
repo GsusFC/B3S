@@ -11,6 +11,8 @@ import re
 import unicodedata
 from typing import Any
 
+from web.report_store import domain_key
+
 from src.sv9.rubric import COMPONENTS as SV9_COMPONENTS
 
 SCHEMA_VERSION = "b3s_report_view_model_v0_1"
@@ -128,7 +130,7 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
         "attempts": list(report.get("attempts") or []),
         "export": {
             "markdown_url": f"/report/{report.get('id')}.md",
-            "moodboard_url": f"/report/{report.get('id')}/moodboard?lang=es",
+            "brand_visual_url": f"/brand/{domain_key(str(report.get('url') or ''))}?lang=es#modulo-visual",
         },
         "raw_refs": {
             "has_raw": isinstance(report.get("raw"), dict) and bool(report.get("raw")),

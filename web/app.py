@@ -658,16 +658,6 @@ def scoring_lab_api():
     return JSONResponse(scoring_dashboard())
 
 
-@app.get("/scoring/lab")
-def scoring_lab_view(request: Request):
-    imported = backfill_reports()
-    return templates.TemplateResponse(
-        request,
-        "scoring_lab.html.j2",
-        {"lab": scoring_dashboard(), "imported": imported},
-    )
-
-
 @app.get("/")
 def index(request: Request, error: str = ""):
     return templates.TemplateResponse(
@@ -830,16 +820,3 @@ def report_view(request: Request, scan_id: str):
     report = _sanitize_report_language(report)
     report_vm = build_report_view_model(report)
     return templates.TemplateResponse(request, "report.html.j2", {"report": report_vm})
-
-
-@app.get("/report/{scan_id}/moodboard")
-def report_moodboard_view(request: Request, scan_id: str, lang: str = "es"):
-    report = load_report(scan_id)
-    if report is None:
-        return RedirectResponse("/?error=Report not found", status_code=303)
-    report = _sanitize_report_language(report)
-    return templates.TemplateResponse(
-        request,
-        "moodboard.html.j2",
-        {"report": report, "moodboard": _moodboard_from_report(report), "lang": lang},
-    )

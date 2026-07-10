@@ -5,8 +5,11 @@
 
 <section class="brand-profile-hero">
   <div class="brand-profile-identity">
-    <div class="brand-profile-logo" aria-hidden="true">
-      <span>{{ brand.display_name[:1] }}</span>
+    <div class="brand-profile-logo">
+      {% if brand.domain %}
+      <img class="brand-profile-favicon" src="https://icons.duckduckgo.com/ip3/{{ brand.domain }}.ico" alt="Logo de {{ brand.display_name }}" loading="lazy" style="width:100%;height:100%;object-fit:contain;border-radius:inherit" onerror="this.style.display='none';this.nextElementSibling.style.display=''">
+      {% endif %}
+      <span{% if brand.domain %} style="display:none"{% endif %}>{{ brand.display_name[:1] }}</span>
     </div>
     <div class="brand-profile-headline">
       <h1 class="brand-profile-title">{{ brand.display_name }}</h1>
@@ -21,7 +24,7 @@
     <span class="brand-profile-terminal-value">disponible / {{ (brand.current.created_at or "")[:10] }}</span>
     <a class="source-link" href="/report/{{ brand.current.id }}">ver SV9</a>
     {% if brand.visual_module.available %}
-    <a class="source-link" href="/report/{{ brand.current.id }}/moodboard?lang=es">ver visual</a>
+    <a class="source-link" href="#modulo-visual">ver visual</a>
     {% endif %}
     {% else %}
     <strong class="brand-profile-score">—</strong>
@@ -37,11 +40,12 @@
 
 <section class="brand-profile-summary">
   {% if brand.visual_module.available %}
-  <section class="brand-profile-block brand-profile-visual">
+  <section class="brand-profile-block brand-profile-visual" id="modulo-visual">
     <div class="section-head">
       <span class="label">módulo_visual</span>
       <span class="tag">// {{ brand.visual_module.image_count }} assets propios desde evidencia</span>
     </div>
+    {% if brand.visual_module.images %}
     <div class="moodboard-stage moodboard-stage--brand cloud-stage" data-moodboard-stage aria-label="Moodboard visual de {{ brand.display_name }}">
       <div class="cloud-layer" data-cloud-layer></div>
       <canvas class="moodboard-grain" data-moodboard-grain></canvas>
@@ -50,11 +54,47 @@
     <script type="application/json" data-moodboard-items>{{ brand.visual_module.images | tojson }}</script>
     <script src="/static/brand3_cloud.js" defer></script>
     <script src="/static/moodboard.js" defer></script>
-    {% if brand.current %}
     <p class="page-tools brand-visual-actions">
-      <a class="source-link" href="/report/{{ brand.current.id }}/moodboard?lang=es">abrir moodboard completo</a>
       <button class="source-link source-link-button moodboard-shuffle" type="button" data-moodboard-shuffle>reorganizar</button>
     </p>
+    {% else %}
+    <p class="muted">No hay assets visuales persistidos para este scan.</p>
+    {% endif %}
+
+    {% if brand.visual_module.visual_reading %}
+    <div class="section-head">
+      <span class="label">lectura_visual</span>
+      <span class="tag">// bloques estratégicos que enmarcan las imágenes</span>
+    </div>
+    <div class="moodboard-reading">
+      {% for block in brand.visual_module.visual_reading %}
+      <article class="panel">
+        <h3 class="card-title">{{ block.key | replace('_', ' ') }}</h3>
+        <p class="prose">{{ block.text }}</p>
+      </article>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if brand.visual_module.images %}
+    <div class="section-head">
+      <span class="label">inventario</span>
+      <span class="tag">// assets capturados y su rol</span>
+    </div>
+    <div class="overflow panel" style="padding:0">
+      <table>
+        <thead><tr><th>url</th><th>rol</th><th>texto alt</th></tr></thead>
+        <tbody>
+        {% for image in brand.visual_module.images %}
+        <tr>
+          <td class="mono muted"><a href="{{ image.url }}" target="_blank" rel="noopener noreferrer">{{ image.url }}</a></td>
+          <td><span class="chip">{{ image.role }}</span></td>
+          <td class="muted">{{ image.alt or "—" }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
     {% endif %}
   </section>
   {% endif %}

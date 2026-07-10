@@ -175,7 +175,7 @@
 {% endmacro %}
 {% block main_class %}wide{% endblock %}
 {% block content %}
-<p><a href="/">← Todos los informes</a> · <a href="{{ report.export.moodboard_url }}">Moodboard</a> · <a href="{{ report.export.markdown_url }}">Markdown</a></p>
+<p><a href="/">← Todos los informes</a> · <a href="{{ report.export.brand_visual_url }}">Módulo visual</a> · <a href="{{ report.export.markdown_url }}">Markdown</a></p>
 
 {% set score_width = report.score_width if report.score_width is not none else 0 %}
 <div class="report-hero">
