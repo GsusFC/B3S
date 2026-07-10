@@ -92,9 +92,9 @@ These values are safe to commit as placeholders or documented defaults, but not 
 | Variable | Default / Example | Purpose |
 | --- | --- | --- |
 | `BRAND3_LLM_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai` | OpenAI-compatible provider base URL |
-| `BRAND3_LLM_MODEL` | `gemini-3.1-pro-preview` | Default scoring model |
+| `BRAND3_LLM_MODEL` | `gemini-3.1-flash-lite` | Default scoring model |
 | `BRAND3_LLM_CHEAP_MODEL` | `gemini-3.1-flash-lite` | High-volume extraction / low-risk checks |
-| `BRAND3_LLM_PREMIUM_MODEL` | `gemini-3.1-pro-preview` | Final narrative / complex validation |
+| `BRAND3_LLM_PREMIUM_MODEL` | `gemini-3.1-flash-lite` | Final narrative / complex validation |
 | `BRAND3_AUDIT_ANALYST_MODEL` | `BRAND3_LLM_CHEAP_MODEL` | Brand Audit executive analyst pass |
 | `BRAND3_CLIENT_TLDR_V2_MODEL` | `BRAND3_LLM_MODEL` | Client-facing TLDR v2 prose |
 | `BRAND3_MAGNETISM_EXTRACTOR_MODEL` | `BRAND3_LLM_PREMIUM_MODEL` | Magnetism layer extraction |

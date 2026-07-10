@@ -1549,21 +1549,21 @@ class BrandServiceContentFallbackTests(unittest.TestCase):
     def test_llm_provider_payload_exposes_provider_without_api_key(self):
         class FakeLLM:
             api_key = "secret-key"
-            model = "gemini-3.1-pro-preview"
+            model = "gemini-3.1-flash-lite"
             base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
 
         payload = _llm_provider_payload(FakeLLM())
 
         self.assertEqual(payload["provider"], "Google AI Studio / Gemini")
-        self.assertEqual(payload["model"], "gemini-3.1-pro-preview")
+        self.assertEqual(payload["model"], "gemini-3.1-flash-lite")
         self.assertEqual(payload["base_url"], "https://generativelanguage.googleapis.com/v1beta/openai")
         self.assertTrue(payload["openai_compatible"])
         self.assertNotIn("api_key", payload)
 
     def test_llm_model_role_defaults_are_documented(self):
-        self.assertEqual(DEFAULT_LLM_MODEL, "gemini-3.1-pro-preview")
+        self.assertEqual(DEFAULT_LLM_MODEL, "gemini-3.1-flash-lite")
         self.assertEqual(DEFAULT_LLM_CHEAP_MODEL, "gemini-3.1-flash-lite")
-        self.assertEqual(DEFAULT_LLM_PREMIUM_MODEL, "gemini-3.1-pro-preview")
+        self.assertEqual(DEFAULT_LLM_PREMIUM_MODEL, "gemini-3.1-flash-lite")
         self.assertEqual(DEFAULT_VISION_MODEL, "gemini-2.5-flash")
 
     def test_llm_model_roles_payload_exposes_models_without_secrets(self):
