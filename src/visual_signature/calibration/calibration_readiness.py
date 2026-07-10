@@ -55,7 +55,7 @@ def build_calibration_readiness(
 ) -> ReadinessResult:
     root = Path(bundle_root)
     threshold_model = thresholds or DEFAULT_READINESS_THRESHOLDS
-    scope_thresholds = _thresholds_for_scope(readiness_scope, threshold_model)
+    scope_thresholds = _thresholds_for_scope(readiness_scope, threshold_model, DEFAULT_READINESS_SCOPE)
     validation_errors = validate_calibration_output_root(root)
     manifest, records_file, summary = _load_bundle(root)
     corpus_manifest, corpus_manifest_ref = _load_corpus_manifest(corpus_manifest_path)
@@ -66,7 +66,9 @@ def build_calibration_readiness(
     unresolved_rate = summary.unresolved_rate if summary is not None else 0.0
     overconfidence_rate = summary.overconfidence_rate if summary is not None else 0.0
     category_coverage = _category_coverage(summary, records_file, scope_thresholds.minimum_claims_per_category)
-    confidence_bucket_coverage = _confidence_bucket_coverage(records_file, scope_thresholds.minimum_confidence_buckets)
+    confidence_bucket_coverage = _confidence_bucket_coverage(
+        records_file, scope_thresholds.minimum_confidence_buckets, STANDARD_CONFIDENCE_BUCKETS
+    )
     category_count = sum(1 for row in category_coverage.values() if row.count > 0)
     confidence_bucket_count = sum(1 for row in confidence_bucket_coverage.values() if row.count > 0)
     high_confidence_contradictions = summary.high_confidence_contradiction_count if summary is not None else 0
