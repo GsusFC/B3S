@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.research.brand_intelligence import (
+    BrandEntityType,
     BrandIdentityBakeoffCase,
     BrandIdentityBakeoffResult,
     BrandIdentityResolution,
