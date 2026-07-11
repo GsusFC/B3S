@@ -15,6 +15,7 @@ dependencies = [
   "jinja2>=3.1.4",
   "pillow>=10.0,<12",
   "playwright>=1.44.0,<2",
+  "psycopg[binary]>=3.2.10,<4",
   "pydantic-settings>=2.5.0",
   "python-multipart>=0.0.9",
   "uvicorn[standard]>=0.30.0",
@@ -28,6 +29,7 @@ dev = [
 
 [tool.setuptools.package-data]
 "web" = ["templates/*.j2", "static/*"]
+"src.history" = ["migrations/*.sql"]
 "src.sv9_flow" = ["policy_data/*.json"]
 
 [tool.setuptools.packages.find]

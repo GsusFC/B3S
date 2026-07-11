@@ -60,6 +60,10 @@ BRAND3_DB_PATH = os.environ.get(
     "BRAND3_DB_PATH",
     str(Path(__file__).parent.parent / "data" / "brand3.sqlite3"),
 )
+B3S_DATABASE_URL = os.environ.get(
+    "B3S_DATABASE_URL",
+    os.environ.get("DATABASE_URL", "postgresql://b3s:b3s@localhost:5433/b3s"),
+)
 BRAND3_CACHE_TTL_HOURS = int(os.environ.get("BRAND3_CACHE_TTL_HOURS", "24"))
 # Owned-site captures must stay fresh: a client who changed their site and
 # re-scans must not be served the previous run's capture. External perception

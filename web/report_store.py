@@ -1,22 +1,54 @@
-"""File-backed report store for B3S lab scans.
+"""PostgreSQL-first report reads with a file compatibility fallback.
 
-One JSON file per scan under data/reports/. Deliberately boring: the lab's
-artifacts are files first; Postgres replaces this seam when the store port
-lands (see README, Database).
+New scans still write one JSON file per scan under data/reports/ for rollback.
+When configured, PostgreSQL mirrors those writes and serves the historical read
+model, including imported reports that no longer exist on the mounted volume.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
+from functools import lru_cache
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 from urllib.parse import urlparse
+
+from src.history.models import ReportConflictError
+
+
+_LOG = logging.getLogger(__name__)
+_POSTGRES_PAGE_SIZE = 200
 
 
 def reports_dir() -> Path:
     return Path(os.environ.get("B3S_REPORTS_DIR", "data/reports"))
+
+
+def _postgres_repository():
+    # Tests and local tooling may point the file store at a temporary directory;
+    # keep that explicit override authoritative even when a .env has a DSN.
+    configured_reports_dir = os.environ.get("B3S_REPORTS_DIR")
+    if configured_reports_dir and configured_reports_dir != "/data/reports":
+        return None
+    database_url = os.environ.get("B3S_DATABASE_URL", "").strip()
+    if not database_url:
+        return None
+    try:
+        return _postgres_repository_for_url(database_url)
+    except Exception:
+        _LOG.exception("failed to configure postgres history repository")
+        return None
+
+
+@lru_cache(maxsize=4)
+def _postgres_repository_for_url(database_url: str):
+    from src.history.repository import PostgresHistoryRepository
+
+    return PostgresHistoryRepository(database_url)
 
 
 def new_scan_id() -> str:
@@ -30,7 +62,27 @@ def report_path(scan_id: str) -> Path:
 def save_report(report: dict[str, Any]) -> None:
     path = report_path(str(report["id"]))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = None
+        if isinstance(existing, dict) and existing != report:
+            raise ReportConflictError(f"report {report['id']} already exists with different content")
+    repository = _postgres_repository()
+    if repository is not None:
+        try:
+            repository.import_report(report)
+        except ReportConflictError:
+            raise
+        except Exception:
+            # The mounted file store remains the recovery source when history
+            # cannot persist an otherwise valid web report.
+            _LOG.exception(
+                "failed to mirror report to postgres",
+                extra={"scan_id": str(report.get("id") or "")},
+            )
+    _write_immutable_report_file(path, report)
     try:
         from web.scoring_store import record_report
 
@@ -40,6 +92,14 @@ def save_report(report: dict[str, Any]) -> None:
 
 
 def load_report(scan_id: str) -> dict[str, Any] | None:
+    repository = _postgres_repository()
+    if repository is not None:
+        try:
+            report = repository.get_report_payload(scan_id)
+            if report is not None:
+                return report
+        except Exception:
+            _LOG.exception("failed to load report from postgres", extra={"scan_id": str(scan_id)})
     path = report_path(scan_id)
     if not path.is_file():
         return None
@@ -52,27 +112,28 @@ def load_report(scan_id: str) -> dict[str, Any] | None:
 def list_reports() -> list[dict[str, Any]]:
     """Return summary rows for every stored report, newest first."""
 
-    rows: list[dict[str, Any]] = []
-    directory = reports_dir()
-    if not directory.is_dir():
-        return rows
-    for path in directory.glob("*.json"):
+    rows_by_id: dict[str, dict[str, Any]] = {}
+    repository = _postgres_repository()
+    if repository is not None:
         try:
-            report = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        rows.append(
-            {
-                "id": report.get("id") or path.stem,
-                "brand_name": report.get("brand_name") or "",
-                "url": report.get("url") or "",
-                "created_at": report.get("created_at") or "",
-                "score": report.get("score"),
-                "detected_count": report.get("detected_count"),
-                "block_count": report.get("block_count"),
-                "not_detected": report.get("not_detected") or [],
-            }
-        )
+            for row in _all_postgres_pages(repository.list_report_summaries):
+                report_id = str(row.get("id") or "")
+                if report_id:
+                    rows_by_id[report_id] = row
+        except Exception:
+            _LOG.exception("failed to list reports from postgres")
+
+    directory = reports_dir()
+    if directory.is_dir():
+        for path in directory.glob("*.json"):
+            try:
+                report = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            row = _summary_row(report, fallback_id=path.stem)
+            report_id = str(row.get("id") or path.stem)
+            rows_by_id.setdefault(report_id, row)
+    rows = list(rows_by_id.values())
     rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
     return rows
 
@@ -95,16 +156,82 @@ def list_reports_for_domain(domain: str) -> list[dict[str, Any]]:
     if not target:
         return []
 
-    matches: list[dict[str, Any]] = []
-    directory = reports_dir()
-    if not directory.is_dir():
-        return matches
-    for path in directory.glob("*.json"):
+    matches_by_id: dict[str, dict[str, Any]] = {}
+    repository = _postgres_repository()
+    if repository is not None:
         try:
-            report = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if domain_key(str(report.get("url") or "")) == target:
-            matches.append(report)
+            fetch_page = lambda **page: repository.list_report_payloads_for_domain(target, **page)
+            for report in _all_postgres_pages(fetch_page):
+                report_id = str(report.get("id") or "")
+                if report_id:
+                    matches_by_id[report_id] = report
+        except Exception:
+            _LOG.exception("failed to list brand reports from postgres", extra={"domain": target})
+
+    directory = reports_dir()
+    if directory.is_dir():
+        for path in directory.glob("*.json"):
+            try:
+                report = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if domain_key(str(report.get("url") or "")) == target:
+                report_id = str(report.get("id") or path.stem)
+                matches_by_id.setdefault(report_id, report)
+    matches = list(matches_by_id.values())
     matches.sort(key=lambda report: str(report.get("created_at") or ""), reverse=True)
     return matches
+
+
+def _summary_row(report: dict[str, Any], *, fallback_id: str = "") -> dict[str, Any]:
+    return {
+        "id": report.get("id") or fallback_id,
+        "brand_name": report.get("brand_name") or "",
+        "url": report.get("url") or "",
+        "created_at": report.get("created_at") or "",
+        "score": report.get("score"),
+        "detected_count": report.get("detected_count"),
+        "block_count": report.get("block_count"),
+        "not_detected": report.get("not_detected") or [],
+    }
+
+
+def _write_immutable_report_file(path: Path, report: dict[str, Any]) -> None:
+    serialized = json.dumps(report, ensure_ascii=False, indent=1)
+    temporary_path: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as handle:
+            handle.write(serialized)
+            temporary_path = Path(handle.name)
+        try:
+            os.link(temporary_path, path)
+            return
+        except FileExistsError:
+            pass
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReportConflictError(f"report {report['id']} already exists but is unreadable") from exc
+    if existing != report:
+        raise ReportConflictError(f"report {report['id']} already exists with different content")
+
+
+def _all_postgres_pages(fetch_page) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        page = fetch_page(limit=_POSTGRES_PAGE_SIZE, offset=offset)
+        rows.extend(item for item in page if isinstance(item, dict))
+        if len(page) < _POSTGRES_PAGE_SIZE:
+            return rows
+        offset += _POSTGRES_PAGE_SIZE

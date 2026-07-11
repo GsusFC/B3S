@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+
+from src.history.models import ReportConflictError
 
 
 def test_normalize_url_accepts_domains_and_rejects_bad_inputs():
@@ -55,6 +58,175 @@ def test_report_store_saves_loads_lists_and_ignores_corrupt_json(tmp_path, monke
     assert report_store.load_report("older")["brand_name"] == "Older"
     assert report_store.load_report("missing") is None
     assert [row["id"] for row in report_store.list_reports()] == ["newer", "older"]
+
+
+def test_report_store_mirrors_new_reports_and_falls_back_to_files(tmp_path, monkeypatch):
+    from web import report_store
+
+    report = {
+        "id": "fresh",
+        "brand_name": "Fresh",
+        "url": "https://fresh.test",
+        "created_at": "2026-07-10T10:00:00+00:00",
+        "score": 81,
+    }
+
+    class Repository:
+        def __init__(self):
+            self.imported = []
+
+        def import_report(self, payload):
+            self.imported.append(payload)
+
+        def get_report_payload(self, report_id):
+            return next((item for item in self.imported if item["id"] == report_id), None)
+
+        def list_report_summaries(self, *, limit, offset):
+            rows = [report_store._summary_row(item) for item in self.imported]
+            return rows[offset : offset + limit]
+
+        def list_report_payloads_for_domain(self, domain, *, limit, offset):
+            rows = [item for item in self.imported if report_store.domain_key(item["url"]) == domain]
+            return rows[offset : offset + limit]
+
+    repository = Repository()
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+
+    report_store.save_report(report)
+
+    assert repository.imported == [report]
+    assert report_store.load_report("fresh") == report
+    assert [row["id"] for row in report_store.list_reports()] == ["fresh"]
+    assert report_store.list_reports_for_domain("fresh.test") == [report]
+
+
+def test_report_store_merges_postgres_and_file_reports(tmp_path, monkeypatch):
+    from web import report_store
+
+    file_report = {
+        "id": "file-only",
+        "brand_name": "File",
+        "url": "https://same.test",
+        "created_at": "2026-07-10T11:00:00+00:00",
+    }
+    postgres_report = {
+        "id": "postgres-only",
+        "brand_name": "Postgres",
+        "url": "https://same.test",
+        "created_at": "2026-07-10T10:00:00+00:00",
+    }
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    report_store.report_path("file-only").write_text(json.dumps(file_report), encoding="utf-8")
+    repository = SimpleNamespace(
+        get_report_payload=lambda report_id: postgres_report if report_id == "postgres-only" else None,
+        list_report_summaries=lambda *, limit, offset: (
+            [report_store._summary_row(postgres_report)][offset : offset + limit]
+        ),
+        list_report_payloads_for_domain=lambda domain, *, limit, offset: (
+            [postgres_report][offset : offset + limit] if domain == "same.test" else []
+        ),
+    )
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+
+    assert [row["id"] for row in report_store.list_reports()] == ["file-only", "postgres-only"]
+    assert [row["id"] for row in report_store.list_reports_for_domain("same.test")] == [
+        "file-only",
+        "postgres-only",
+    ]
+
+
+def test_report_store_rejects_reused_file_id_with_different_content(tmp_path, monkeypatch):
+    from web import report_store
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    original = {"id": "immutable", "brand_name": "Original"}
+    report_store.save_report(original)
+
+    with pytest.raises(ReportConflictError, match="different content"):
+        report_store.save_report({"id": "immutable", "brand_name": "Changed"})
+
+    assert json.loads(report_store.report_path("immutable").read_text(encoding="utf-8")) == original
+
+
+def test_report_store_does_not_write_file_after_postgres_conflict(tmp_path, monkeypatch):
+    from web import report_store
+
+    class ConflictingRepository:
+        def import_report(self, payload):
+            raise ReportConflictError(f"report {payload['id']} already exists with different content")
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: ConflictingRepository())
+
+    with pytest.raises(ReportConflictError, match="different content"):
+        report_store.save_report({"id": "postgres-conflict", "brand_name": "Changed"})
+
+    assert not report_store.report_path("postgres-conflict").exists()
+
+
+def test_report_store_allows_concurrent_identical_file_write(tmp_path, monkeypatch):
+    from web import report_store
+
+    report = {"id": "concurrent", "brand_name": "Same"}
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(report_store.save_report, [report, report]))
+
+    assert outcomes == [None, None]
+    assert json.loads(report_store.report_path("concurrent").read_text(encoding="utf-8")) == report
+
+
+def test_report_store_falls_back_when_postgres_is_unavailable(tmp_path, monkeypatch):
+    from web import report_store
+
+    report = {
+        "id": "file-fallback",
+        "brand_name": "Fallback",
+        "url": "https://fallback.test",
+        "created_at": "2026-07-10T12:00:00+00:00",
+    }
+
+    class UnavailableRepository:
+        def get_report_payload(self, report_id):
+            raise OSError("postgres unavailable")
+
+        def list_report_summaries(self, *, limit, offset):
+            raise OSError("postgres unavailable")
+
+        def list_report_payloads_for_domain(self, domain, *, limit, offset):
+            raise OSError("postgres unavailable")
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    report_store.report_path(report["id"]).write_text(json.dumps(report), encoding="utf-8")
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: UnavailableRepository())
+
+    assert report_store.load_report(report["id"]) == report
+    assert [row["id"] for row in report_store.list_reports()] == [report["id"]]
+    assert report_store.list_reports_for_domain("fallback.test") == [report]
+
+
+def test_report_store_paginates_all_postgres_summaries(tmp_path, monkeypatch):
+    from web import report_store
+
+    summaries = [
+        {
+            "id": f"postgres-{index:03d}",
+            "brand_name": "Postgres",
+            "url": "https://postgres.test",
+            "created_at": f"2026-07-10T12:{index % 60:02d}:00+00:00",
+            "not_detected": [],
+        }
+        for index in range(501)
+    ]
+    repository = SimpleNamespace(
+        list_report_summaries=lambda *, limit, offset: summaries[offset : offset + limit]
+    )
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+
+    assert len(report_store.list_reports()) == 501
 
 
 def test_home_renders_report_list(monkeypatch):
