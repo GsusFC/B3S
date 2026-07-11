@@ -1,0 +1,51 @@
+app = "b3s"
+primary_region = "cdg"
+kill_signal = "SIGINT"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[deploy]
+  release_command = "python scripts/import_b3s_reports_postgres.py --migrate-only"
+  release_command_timeout = "5m"
+
+[env]
+  BRAND3_BASE_URL = "https://b3s.fly.dev"
+  BRAND3_DB_PATH = "/data/brand3.sqlite3"
+  BRAND3_ENVIRONMENT = "production"
+  BRAND3_SCREENSHOT_DIR = "/data/screenshots"
+  B3S_REPORTS_DIR = "/data/reports"
+  B3S_SCORING_DB_PATH = "/data/b3s_scoring.sqlite3"
+  SCREENSHOT_PROVIDER = "playwright"
+
+[[mounts]]
+  source = "b3s_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  # Scans continue in a background thread after the HTTP response. Keeping the
+  # single Machine alive prevents Fly Proxy from killing in-flight scan state.
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 40
+    hard_limit = 60
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "1gb"
