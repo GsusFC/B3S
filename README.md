@@ -43,20 +43,33 @@ PYTHONPATH=. .venv/bin/python scripts/sv9_flow_snapshot_eval.py \
 ## Web lab
 
 ```bash
-.venv/bin/python -m uvicorn web.app:app --port 8035
+.venv/bin/python -m uvicorn web.app:app --port 8000
 ```
 
-`http://127.0.0.1:8035` — submit a brand URL, watch the run (phases plus per-source acquisition steps), then read the evidence-first report: score, components, per-block coverage (`evidence / implied / verified absent / insufficient`), cited snippets, absence records, and acquisition attempts. Every stored report lands in the home list. Reports persist as JSON files under `data/reports/` (`B3S_REPORTS_DIR` overrides); the store moves to Postgres with the port milestone.
+`http://127.0.0.1:8000` — submit a brand URL, watch the run (phases plus per-source acquisition steps), then read the evidence-first report: score, components, per-block coverage (`evidence / implied / verified absent / insufficient`), cited snippets, absence records, and acquisition attempts. Every stored report lands in the home list. When `B3S_DATABASE_URL` is configured, PostgreSQL serves the historical read model and mirrors completed reports; JSON files under `data/reports/` (`B3S_REPORTS_DIR` overrides) remain the compatibility writer and rollback fallback until the scan lifecycle cutover.
 
 ## Database
 
-Storage today is SQLite (embedded, zero setup) inherited from the shared ancestry. B3S targets **Postgres** as its system of record; a local instance ships with:
+The B3S historical model is implemented in **PostgreSQL** under the isolated `b3s_history` schema. It stores immutable captures separately from versioned evaluations so re-scoring an old capture cannot look like a new brand observation. A local instance ships with:
 
 ```bash
 docker compose up -d db   # postgres 16 on localhost:5433 (b3s/b3s)
 ```
 
-Porting the store is the first infrastructure milestone. The inherited analysis lives in `docs/database_read_model_and_postgres_plan.md` (read models first, migrate what earns it).
+Validate and import the current file-backed reports:
+
+```bash
+.venv/bin/python scripts/import_b3s_reports_postgres.py --dry-run
+.venv/bin/python scripts/import_b3s_reports_postgres.py
+```
+
+The import is idempotent and rejects a reused report id with different content. The schema, invariants, queries and cutover boundary are documented in `docs/b3s_postgres_history_v1.md`.
+
+## Deployment
+
+Fly deploys use the GitHub `production` environment and its `FLY_API_TOKEN` secret. The `Fly Deploy` workflow is manual from `main` while the guarded rollout is active. Automatic deploys after successful CI remain disabled until the repository variable `AUTO_DEPLOY_ENABLED` is explicitly changed from `false` to `true`.
+
+Every deploy validates `fly.toml`, builds the committed Dockerfile and runs the idempotent PostgreSQL migration as Fly's `release_command` before replacing the application Machine.
 
 ## Status
 

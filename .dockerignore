@@ -7,6 +7,8 @@
 __pycache__
 *.py[cod]
 .pytest_cache
+tests
+docs
 .mypy_cache
 .ruff_cache
 .DS_Store
@@ -19,9 +21,7 @@ brand3.db-*
 *.db-*
 
 # Local runtime state. Production uses the mounted /data volume.
-data/*.db
-data/*.sqlite3
-data/*.sqlite3-*
+data
 
 # Local analysis artifacts and generated reports.
 out
