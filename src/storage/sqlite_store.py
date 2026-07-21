@@ -20,6 +20,7 @@ from .raw_inputs import RawInputsStoreMixin
 from .reviewed_scores import ReviewedScoresStoreMixin
 from .run_audits import RunAuditsStoreMixin
 from .run_snapshots import RunSnapshotsStoreMixin
+from .scanner_api_jobs import ScannerApiJobsStoreMixin
 from .schema import SchemaManagementStoreMixin
 
 
@@ -38,6 +39,7 @@ class SQLiteStore(
     RunAuditsStoreMixin,
     RunSnapshotsStoreMixin,
     AnnotationsReportsStoreMixin,
+    ScannerApiJobsStoreMixin,
 ):
     """Persists runs, raw collector inputs, features, and scores in SQLite."""
 

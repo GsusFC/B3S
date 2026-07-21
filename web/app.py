@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import json
 from pathlib import Path
 from datetime import datetime, timezone
@@ -13,9 +14,10 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from web.api_v1 import install_scanner_api
 from web.report_store import domain_key, list_reports, list_reports_for_domain, load_report
 from web.report_view_model import build_report_view_model
-from web.scan_runner import approve_degraded_scan, cancel_scan, scan_status, start_scan
+from web.scan_runner import approve_degraded_scan, cancel_scan, recover_interrupted_scans, scan_status, start_scan
 from web.scoring_store import backfill_reports, dashboard as scoring_dashboard
 from src.sv9.language_guard import (
     spanish_component_summary,
@@ -26,7 +28,24 @@ from src.sv9.language_guard import (
 )
 from src.sv9.rubric import COMPONENTS as SV9_COMPONENTS
 
-app = FastAPI(title="B3S — Brand Evidence Lab")
+
+def _initialize_runtime() -> None:
+    env_file = Path(".env")
+    if env_file.is_file():
+        from scripts.sv9_flow_shadow_run import _load_env_file
+
+        _load_env_file(str(env_file))
+    recover_interrupted_scans()
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    _initialize_runtime()
+    yield
+
+
+app = FastAPI(title="B3S — Brand Evidence Lab", lifespan=_lifespan)
+install_scanner_api(app)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 _STATIC_DIR = Path(__file__).parent / "static"
 if _STATIC_DIR.is_dir():
@@ -608,15 +627,6 @@ def _overall_api_status(services: list[dict[str, Any]]) -> str:
     if "error" in statuses or "missing" in statuses:
         return "degraded"
     return "ok"
-
-
-@app.on_event("startup")
-def _load_env() -> None:
-    env_file = Path(".env")
-    if env_file.is_file():
-        from scripts.sv9_flow_shadow_run import _load_env_file
-
-        _load_env_file(str(env_file))
 
 
 @app.get("/health")

@@ -48,6 +48,25 @@ PYTHONPATH=. .venv/bin/python scripts/sv9_flow_snapshot_eval.py \
 
 `http://127.0.0.1:8000` — submit a brand URL, watch the run (phases plus per-source acquisition steps), then read the evidence-first report: score, components, per-block coverage (`evidence / implied / verified absent / insufficient`), cited snippets, absence records, and acquisition attempts. Every stored report lands in the home list. When `B3S_DATABASE_URL` is configured, PostgreSQL serves the historical read model and mirrors completed reports; JSON files under `data/reports/` (`B3S_REPORTS_DIR` overrides) remain the compatibility writer and rollback fallback until the scan lifecycle cutover.
 
+## Scanner API v1
+
+B3S exposes a versioned asynchronous API for product integrations:
+
+```text
+POST /api/v1/scans
+GET  /api/v1/scans/{scan_id}
+GET  /api/v1/scans/{scan_id}/result
+GET  /api/v1/scans/{scan_id}/evidence
+```
+
+Bearer authentication uses `BRAND3_SCANNER_API_TOKEN`. Create requests support
+durable `Idempotency-Key` reservations, status survives restarts, errors share a
+stable envelope, and completed result/evidence resources provide ETags.
+
+- Interactive docs: `http://127.0.0.1:8000/api/v1/docs`
+- Dedicated OpenAPI: `http://127.0.0.1:8000/api/v1/openapi.json`
+- Full contract and examples: [`docs/scanner_api_v1.md`](docs/scanner_api_v1.md)
+
 ## Database
 
 The B3S historical model is implemented in **PostgreSQL** under the isolated `b3s_history` schema. It stores immutable captures separately from versioned evaluations so re-scoring an old capture cannot look like a new brand observation. A local instance ships with:

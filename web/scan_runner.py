@@ -1,13 +1,17 @@
 """Live B3S scan runner: capture → envelope → evidence flow → SV9 → report.
 
-Runs in a background thread per scan. In-flight status lives in memory (a
-process restart forgets running scans); finished reports are files in the
-report store.
+Runs in a background thread per scan. The active thread state lives in memory,
+while a durable control-plane envelope is mirrored to SQLite. A process restart
+cannot resume a thread, so orphaned jobs are surfaced as explicit interrupted
+failures instead of disappearing or being silently duplicated. Finished reports
+remain immutable records in the report store.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import copy
+import logging
 import os
 import threading
 import traceback
@@ -21,6 +25,7 @@ from web.report_store import new_scan_id, save_report
 _SCANS: dict[str, dict[str, Any]] = {}
 _SCAN_EVENTS: dict[str, threading.Event] = {}
 _LOCK = threading.Lock()
+_LOG = logging.getLogger(__name__)
 
 _PHASES = (
     ("capture", "Capture: owned pages, Exa, GitHub proof, SearchAPI fallback, visual evidence"),
@@ -43,10 +48,18 @@ def default_brand_name(url: str) -> str:
     return label.capitalize()
 
 
-def start_scan(url: str, brand_name: str = "", *, allow_degraded_fallback: bool = False) -> str:
+def start_scan(
+    url: str,
+    brand_name: str = "",
+    *,
+    allow_degraded_fallback: bool = False,
+    scan_id: str | None = None,
+    client_id: str = "",
+) -> str:
     url = normalize_url(url)
     brand_name = (brand_name or "").strip() or default_brand_name(url)
-    scan_id = new_scan_id()
+    scan_id = str(scan_id or new_scan_id())
+    started_at = datetime.now(timezone.utc).isoformat()
     with _LOCK:
         _SCANS[scan_id] = {
             "id": scan_id,
@@ -59,9 +72,27 @@ def start_scan(url: str, brand_name: str = "", *, allow_degraded_fallback: bool 
             "acquisition_gate": {"state": "pending", "issues": [], "warnings": [], "fallbacks": []},
             "allow_degraded_fallback": bool(allow_degraded_fallback),
             "error": None,
-            "started_at": datetime.now(timezone.utc).isoformat(),
+            "error_code": None,
+            "started_at": started_at,
+            "completed_at": None,
         }
         _SCAN_EVENTS[scan_id] = threading.Event()
+        persisted_status = _status_copy_locked(_SCANS[scan_id])
+    try:
+        _persist_scan_status(
+            persisted_status,
+            request_payload={
+                "url": url,
+                "brand_name": brand_name,
+                "allow_degraded_fallback": bool(allow_degraded_fallback),
+            },
+            client_id=client_id,
+        )
+    except Exception:
+        with _LOCK:
+            _SCANS.pop(scan_id, None)
+            _SCAN_EVENTS.pop(scan_id, None)
+        raise
     thread = threading.Thread(
         target=_run,
         args=(scan_id, url, brand_name, bool(allow_degraded_fallback)),
@@ -74,7 +105,22 @@ def start_scan(url: str, brand_name: str = "", *, allow_degraded_fallback: bool 
 def scan_status(scan_id: str) -> dict[str, Any] | None:
     with _LOCK:
         status = _SCANS.get(scan_id)
-        return dict(status) if status else None
+        if status:
+            return _status_copy_locked(status)
+    return _load_persisted_scan_status(scan_id)
+
+
+def recover_interrupted_scans() -> int:
+    """Mark process-bound jobs left behind by a restart as interrupted."""
+
+    from src.config import BRAND3_DB_PATH
+    from src.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(BRAND3_DB_PATH)
+    try:
+        return store.interrupt_incomplete_scanner_jobs()
+    finally:
+        store.close()
 
 
 def approve_degraded_scan(scan_id: str) -> dict[str, Any] | None:
@@ -91,6 +137,8 @@ def approve_degraded_scan(scan_id: str) -> dict[str, Any] | None:
         status["phase"] = "interpret"
         _set_phase_locked(status, "interpret", "pending")
         event = _SCAN_EVENTS.get(scan_id)
+        persisted_status = _status_copy_locked(status)
+    _persist_scan_status(persisted_status)
     if event:
         event.set()
     return {"state": "running", "approved": True, "acquisition_gate": approved_gate}
@@ -109,8 +157,11 @@ def cancel_scan(scan_id: str) -> dict[str, Any] | None:
             status["acquisition_gate"] = gate
         status["state"] = "cancelled"
         status["phase"] = "capture"
+        status["completed_at"] = datetime.now(timezone.utc).isoformat()
         _mark_pending_phases_locked(status, "cancelled")
         event = _SCAN_EVENTS.pop(scan_id, None)
+        persisted_status = _status_copy_locked(status)
+    _persist_scan_status(persisted_status)
     if event:
         event.set()
     return {"state": "cancelled", "cancelled": True, "acquisition_gate": gate}
@@ -124,6 +175,8 @@ def _set_phase(scan_id: str, key: str, state: str) -> None:
         if state == "running":
             status["phase"] = key
         _set_phase_locked(status, key, state)
+        persisted_status = _status_copy_locked(status)
+    _persist_scan_status(persisted_status)
 
 
 def _set_phase_locked(status: dict[str, Any], key: str, state: str) -> None:
@@ -138,10 +191,53 @@ def _mark_pending_phases_locked(status: dict[str, Any], state: str) -> None:
             phase["state"] = state
 
 
+def _status_copy_locked(status: dict[str, Any]) -> dict[str, Any]:
+    return copy.deepcopy(status)
+
+
+def _persist_scan_status(
+    status: dict[str, Any],
+    *,
+    request_payload: dict[str, Any] | None = None,
+    client_id: str = "",
+) -> None:
+    from src.config import BRAND3_DB_PATH
+    from src.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(BRAND3_DB_PATH)
+    try:
+        store.save_scanner_job_status(
+            status,
+            request_payload=request_payload,
+            client_id=client_id,
+        )
+    finally:
+        store.close()
+
+
+def _load_persisted_scan_status(scan_id: str) -> dict[str, Any] | None:
+    from src.config import BRAND3_DB_PATH
+    from src.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(BRAND3_DB_PATH)
+    try:
+        return store.get_scanner_job_status(scan_id)
+    finally:
+        store.close()
+
+
+def _scan_cancelled(scan_id: str) -> bool:
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        return status is None or status.get("state") == "cancelled"
+
+
 def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool) -> None:
     try:
         _set_phase(scan_id, "capture", "running")
         snapshot = _capture_snapshot(scan_id, url, brand_name)
+        if _scan_cancelled(scan_id):
+            return
         _set_phase(scan_id, "capture", "done")
         gate = _build_acquisition_gate(
             snapshot.get("acquisition_steps") if isinstance(snapshot, dict) else {},
@@ -161,6 +257,8 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                     return
             snapshot["acquisition_gate"] = current_gate
 
+        if _scan_cancelled(scan_id):
+            return
         _set_phase(scan_id, "interpret", "running")
         from scripts.sv9_flow_sv9_shadow_eval import build_flow_sv9_shadow_eval
 
@@ -169,24 +267,48 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
         payload = _attach_sv9_editorial(payload)
         payload["acquisition_gate"] = snapshot.get("acquisition_gate") or gate
         payload["acquisition_artifacts"] = _acquisition_artifacts_from_snapshot(snapshot)
+        if _scan_cancelled(scan_id):
+            return
         _set_phase(scan_id, "interpret", "done")
         _set_phase(scan_id, "score", "done")
 
         _set_phase(scan_id, "report", "running")
         report = _compose_report(scan_id, url, brand_name, payload)
-        save_report(report)
-        _set_phase(scan_id, "report", "done")
-        with _LOCK:
-            _SCANS[scan_id]["state"] = "done"
-            _SCAN_EVENTS.pop(scan_id, None)
-    except Exception as exc:  # surface the failure to the UI, never die silently
-        traceback.print_exc()
         with _LOCK:
             status = _SCANS.get(scan_id)
-            if status:
-                status["state"] = "error"
-                status["error"] = f"{type(exc).__name__}: {exc}"
+            if status is None or status.get("state") == "cancelled":
+                return
+            # Keep the final cancellation check, immutable report write, and
+            # terminal transition in one critical section. A concurrent cancel
+            # therefore wins before publication or receives an already-terminal
+            # scan after publication; it can never be overwritten silently.
+            save_report(report)
+            _set_phase_locked(status, "report", "done")
+            status["state"] = "done"
+            status["phase"] = "done"
+            status["completed_at"] = datetime.now(timezone.utc).isoformat()
             _SCAN_EVENTS.pop(scan_id, None)
+            persisted_status = _status_copy_locked(status)
+        _persist_scan_status(persisted_status)
+    except Exception as exc:  # surface the failure to the UI, never die silently
+        traceback.print_exc()
+        persisted_status = None
+        with _LOCK:
+            status = _SCANS.get(scan_id)
+            if status and status.get("state") != "cancelled":
+                status["state"] = "error"
+                status["phase"] = "error"
+                status["error"] = f"{type(exc).__name__}: {exc}"
+                status["error_code"] = "scan_execution_failed"
+                status["completed_at"] = datetime.now(timezone.utc).isoformat()
+                _mark_pending_phases_locked(status, "error")
+                persisted_status = _status_copy_locked(status)
+            _SCAN_EVENTS.pop(scan_id, None)
+        if persisted_status is not None:
+            try:
+                _persist_scan_status(persisted_status)
+            except Exception:
+                _LOG.exception("failed to persist terminal scanner error", extra={"scan_id": scan_id})
 
 
 def _set_acquisition_gate(scan_id: str, gate: dict[str, Any]) -> None:
@@ -198,6 +320,8 @@ def _set_acquisition_gate(scan_id: str, gate: dict[str, Any]) -> None:
         if gate.get("state") == "blocked":
             status["state"] = "blocked"
             status["phase"] = "capture"
+        persisted_status = _status_copy_locked(status)
+    _persist_scan_status(persisted_status)
 
 
 def _wait_for_acquisition_decision(scan_id: str) -> bool:
@@ -546,6 +670,11 @@ def _capture_snapshot(scan_id: str, url: str, brand_name: str) -> dict[str, Any]
         status = _SCANS.get(scan_id)
         if status:
             status["acquisition"] = sorted(acquisition_rows, key=lambda row: row["source"])
+            persisted_status = _status_copy_locked(status)
+        else:
+            persisted_status = None
+    if persisted_status is not None:
+        _persist_scan_status(persisted_status)
 
     return {
         "run": {"brand_name": brand_name, "id": int(datetime.now(timezone.utc).timestamp()), "url": url},
