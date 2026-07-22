@@ -27,8 +27,6 @@ from src.config import (
     BRAND3_NICHE_AUTO_APPLY_MIN_CONFIDENCE,
     BRAND3_PROMOTION_MAX_COMPOSITE_DROP,
     BRAND3_PROMOTION_MAX_DIMENSION_DROPS,
-    EXA_API_KEY,
-    FIRECRAWL_API_KEY,
     LLM_CHEAP_MODEL,
 )
 from src.discovery.enrichment import build_discovery_enrichment

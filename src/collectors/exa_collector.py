@@ -18,6 +18,8 @@ import re
 import time
 from urllib.parse import urlparse
 
+from src.api_key_pool import ApiKeySource, shared_api_key_pool
+from src.config import EXA_API_KEYS
 from src.services.legal_identity import legal_name_aliases
 
 _TRANSIENT_SEARCH_ATTEMPTS = 2
@@ -205,7 +207,9 @@ class ExaCollector:
         "category",
     )
 
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: ApiKeySource = None):
+        configured_keys = api_key if api_key is not None else EXA_API_KEYS
+        self._api_keys = shared_api_key_pool("exa", configured_keys)
         self.api_key = api_key
         self._client = None
         self._search_events: list[dict] = []
@@ -232,12 +236,16 @@ class ExaCollector:
 
     @property
     def client(self):
-        if self._client is None:
-            from exa_py import Exa
-            if not self.api_key:
-                raise ValueError("EXA_API_KEY not set")
-            self._client = Exa(api_key=self.api_key)
-        return self._client
+        if self._client is not None:
+            return self._client
+        from exa_py import Exa
+        api_key = self._api_keys.next_key()
+        if not api_key:
+            raise ValueError("EXA_API_KEY not set")
+        client = Exa(api_key=api_key)
+        if self._api_keys.size == 1:
+            self._client = client
+        return client
 
     @staticmethod
     def _domain_anchor(brand_url: str | None) -> str:
@@ -553,15 +561,18 @@ class ExaCollector:
     def _search_with_retry(self, query: str, params: dict):
         """One retry on transient search failures.
 
-        Config errors (missing API key) surface immediately through the
-        `client` property access, outside the retry loop.
+        Each attempt borrows the next configured key. With a single key this
+        preserves the previous retry behaviour; with a pool it fails over
+        across independent credentials without exposing them in diagnostics.
         """
-        client = self.client
-        for attempt in range(_TRANSIENT_SEARCH_ATTEMPTS):
+        if not self._api_keys:
+            raise ValueError("EXA_API_KEY not set")
+        attempts = max(_TRANSIENT_SEARCH_ATTEMPTS, self._api_keys.size)
+        for attempt in range(attempts):
             try:
-                return client.search(query, **params)
+                return self.client.search(query, **params)
             except Exception:
-                if attempt + 1 >= _TRANSIENT_SEARCH_ATTEMPTS:
+                if attempt + 1 >= attempts:
                     raise
                 time.sleep(_TRANSIENT_SEARCH_DELAY_S)
 

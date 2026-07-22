@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from src.collectors.exa_collector import ExaCollector, ExaData
-from src.config import BRAND3_CACHE_TTL_HOURS, EXA_API_KEY
+from src.config import BRAND3_CACHE_TTL_HOURS, EXA_API_KEYS
 from src.services.legal_identity import derive_legal_name
 from src.services.exa_diagnostics import exa_external_proof_empty
 from src.services.input_collection_payloads import from_exa_payload
@@ -32,7 +32,7 @@ def _collect_exa_input(
     acquisition_steps: dict[str, AcquisitionResult] | None = None,
     exa_collector_cls=ExaCollector,
 ) -> tuple[ExaData, ExaCollector]:
-    exa_collector = exa_collector_cls(api_key=EXA_API_KEY)
+    exa_collector = exa_collector_cls(api_key=EXA_API_KEYS)
     exa_data = cache_read("exa", BRAND3_CACHE_TTL_HOURS, from_exa_payload)
     if exa_data:
         _use_cached_input(
@@ -50,7 +50,7 @@ def _collect_exa_input(
             message=f"  Exa: cache hit ({len(exa_data.mentions)} mentions, {len(exa_data.news)} news)",
         )
         return exa_data, exa_collector
-    if not EXA_API_KEY:
+    if not EXA_API_KEYS:
         exa_data = ExaData(
             brand_name=brand_name,
             diagnostics={

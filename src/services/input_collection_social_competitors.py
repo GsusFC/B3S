@@ -8,7 +8,7 @@ from src.collectors.competitor_collector import CompetitorCollector, CompetitorD
 from src.collectors.exa_collector import ExaData
 from src.collectors.social_collector import SocialData
 from src.collectors.web_collector import WebData, WebCollector
-from src.config import BRAND3_CACHE_TTL_HOURS, FIRECRAWL_API_KEY
+from src.config import BRAND3_CACHE_TTL_HOURS, FIRECRAWL_API_KEYS
 from src.services.input_collection_payloads import (
     _competitor_storage_payload,
     from_competitor_payload,
@@ -68,7 +68,7 @@ def _collect_social_input(
         social_data, social_limitation = social_collector(
             brand_name,
             web_data.markdown_content,
-            api_key=FIRECRAWL_API_KEY,
+            api_key=FIRECRAWL_API_KEYS,
         )
         platforms_count = len(social_data.platforms)
         if social_limitation:

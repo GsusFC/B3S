@@ -6,7 +6,7 @@ import logging
 
 from src.collectors.context_collector import ContextCollector, ContextData
 from src.collectors.web_collector import WebCollector, WebData
-from src.config import BRAND3_CACHE_TTL_HOURS, FIRECRAWL_API_KEY
+from src.config import BRAND3_CACHE_TTL_HOURS, FIRECRAWL_API_KEYS
 from src.services.input_collection_payloads import from_context_payload, from_exa_payload, from_web_payload
 from src.services.input_collection_state import (
     AcquisitionResult,
@@ -110,7 +110,7 @@ def _collect_web_input(
     acquisition_steps: dict[str, AcquisitionResult] | None = None,
     web_collector_cls=WebCollector,
 ) -> tuple[WebData, WebCollector]:
-    web_collector = web_collector_cls(api_key=FIRECRAWL_API_KEY)
+    web_collector = web_collector_cls(api_key=FIRECRAWL_API_KEYS)
     web_data = cache_read("web", BRAND3_CACHE_TTL_HOURS, from_web_payload)
     if web_data:
         _use_cached_input(
