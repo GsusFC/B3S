@@ -10,8 +10,9 @@ from dataclasses import is_dataclass
 from datetime import datetime
 from typing import Any
 
+from src.api_key_pool import ApiKeySource, normalize_api_keys
 from src.collectors.web_collector import WebCollector, WebData
-from src.config import FIRECRAWL_API_KEY
+from src.config import FIRECRAWL_API_KEYS
 from src.visual_signature._internal.utils import int_or_none as _int_or_none
 from src.visual_signature.types import (
     ScreenshotSignal,
@@ -24,13 +25,15 @@ from src.visual_signature.types import (
 class FirecrawlVisualSignatureAdapter:
     name = "firecrawl"
 
-    def __init__(self, api_key: str | None = None, web_collector: WebCollector | None = None):
-        self.api_key = api_key if api_key is not None else FIRECRAWL_API_KEY
-        self.web_collector = web_collector or WebCollector(api_key=self.api_key)
+    def __init__(self, api_key: ApiKeySource = None, web_collector: WebCollector | None = None):
+        configured_keys = api_key if api_key is not None else FIRECRAWL_API_KEYS
+        self._has_api_keys = bool(normalize_api_keys(configured_keys))
+        self.api_key = api_key
+        self.web_collector = web_collector or WebCollector(api_key=configured_keys)
 
     def acquire(self, input_data: VisualSignatureInput) -> VisualAcquisitionResult:
         acquired_at = datetime.now().isoformat()
-        if not self.api_key:
+        if not self._has_api_keys:
             return VisualAcquisitionResult(
                 adapter=self.name,
                 requested_url=input_data.website_url,

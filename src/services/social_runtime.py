@@ -5,6 +5,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import queue
 
+from src.api_key_pool import ApiKeySource
 from src.collectors.social_collector import SocialCollector, SocialData
 
 
@@ -13,7 +14,7 @@ _SOCIAL_COLLECTION_TIMEOUT_SECONDS = 25
 
 def _social_collect_worker(
     output_queue,
-    api_key: str | None,
+    api_key: ApiKeySource,
     brand_name: str,
     web_content: str,
 ) -> None:
@@ -28,7 +29,7 @@ def _collect_social_with_budget(
     brand_name: str,
     web_content: str,
     *,
-    api_key: str | None = None,
+    api_key: ApiKeySource = None,
     timeout_seconds: int = _SOCIAL_COLLECTION_TIMEOUT_SECONDS,
 ) -> tuple[SocialData, str | None]:
     if timeout_seconds <= 0:

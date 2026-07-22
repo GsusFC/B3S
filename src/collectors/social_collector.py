@@ -12,10 +12,13 @@ Supported platforms: Instagram, LinkedIn, TikTok, Twitter/X
 
 import re
 import json
-import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Tuple
+
+from src.api_key_pool import ApiKeySource, shared_api_key_pool
+from src.config import FIRECRAWL_API_KEYS
 
 @dataclass
 class PlatformMetrics:
@@ -78,22 +81,31 @@ class SocialCollector:
         },
     }
     
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: ApiKeySource = None):
         """Initialize the social collector."""
-        self.api_key = api_key or os.environ.get("FIRECRAWL_API_KEY", "")
+        configured_keys = api_key if api_key is not None else FIRECRAWL_API_KEYS
+        self._api_keys = shared_api_key_pool("firecrawl", configured_keys)
+        self.api_key = api_key
     
     def _run_firecrawl(self, url: str) -> dict:
         """Scrape URL via Firecrawl Python SDK. Returns legacy {content, raw, error} shape."""
-        if not self.api_key:
+        if not self._api_keys:
             return {"error": "FIRECRAWL_API_KEY not set"}
-        try:
-            from firecrawl import Firecrawl
+        last_error = ""
+        for attempt in range(self._api_keys.size):
+            try:
+                from firecrawl import Firecrawl
 
-            doc = Firecrawl(api_key=self.api_key).scrape(
-                url, formats=["markdown"], timeout=60000
-            )
-        except Exception as exc:
-            return {"error": str(exc)}
+                doc = Firecrawl(api_key=self._api_keys.next_key()).scrape(
+                    url, formats=["markdown"], timeout=60000
+                )
+                break
+            except Exception as exc:
+                last_error = str(exc)
+                if attempt + 1 < self._api_keys.size:
+                    time.sleep(1.5)
+        else:
+            return {"error": last_error}
         content = (doc.markdown or "").strip()
         return {"content": content, "raw": content}
     

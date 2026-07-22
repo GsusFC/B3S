@@ -24,7 +24,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Optional
 
-from src.config import BRAND3_LLM_API_KEY, LLM_BASE_URL, VISION_MODEL
+from src.api_key_pool import ApiKeySource, shared_api_key_pool
+from src.config import BRAND3_LLM_API_KEY, FIRECRAWL_API_KEYS, LLM_BASE_URL, VISION_MODEL
 
 
 @dataclass
@@ -46,9 +47,11 @@ class VisualAnalysisResult:
 class VisualAnalyzer:
     """Analyzes brand website screenshots for visual consistency."""
 
-    def __init__(self, api_key: str = None, vision_api_key: str = None,
+    def __init__(self, api_key: ApiKeySource = None, vision_api_key: str = None,
                  vision_base_url: str = None, vision_model: str = None):
-        self.firecrawl_api_key = api_key or os.environ.get("FIRECRAWL_API_KEY", "")
+        configured_keys = api_key if api_key is not None else FIRECRAWL_API_KEYS
+        self._firecrawl_api_keys = shared_api_key_pool("firecrawl", configured_keys)
+        self.firecrawl_api_key = api_key
         self.vision_api_key = vision_api_key or BRAND3_LLM_API_KEY
         self.vision_base_url = vision_base_url or LLM_BASE_URL
         self.vision_model = vision_model or VISION_MODEL
@@ -57,16 +60,21 @@ class VisualAnalyzer:
         """
         Take a screenshot via Firecrawl SDK. Returns {screenshot_url, metadata, error}.
         """
-        if not self.firecrawl_api_key:
+        if not self._firecrawl_api_keys:
             return {"error": "FIRECRAWL_API_KEY not set"}
-        try:
-            from firecrawl import Firecrawl
+        last_error = ""
+        for _attempt in range(self._firecrawl_api_keys.size):
+            try:
+                from firecrawl import Firecrawl
 
-            doc = Firecrawl(api_key=self.firecrawl_api_key).scrape(
-                url, formats=["screenshot"], max_age=0, timeout=60000
-            )
-        except Exception as exc:
-            return {"error": f"Screenshot failed: {exc}"}
+                doc = Firecrawl(api_key=self._firecrawl_api_keys.next_key()).scrape(
+                    url, formats=["screenshot"], max_age=0, timeout=60000
+                )
+                break
+            except Exception as exc:
+                last_error = str(exc)
+        else:
+            return {"error": f"Screenshot failed: {last_error}"}
 
         screenshot_url = doc.screenshot or ""
         if not screenshot_url:

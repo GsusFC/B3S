@@ -12,9 +12,11 @@ import time
 from dataclasses import dataclass
 from urllib.parse import quote, urlsplit, urlunsplit
 
+from src.api_key_pool import ApiKeySource, shared_api_key_pool
 from src.collectors.web_collector_capture_runtime import WebCollectorCaptureSupport
 from src.collectors.web_collector_content_runtime import WebCollectorContentSupport
 from src.collectors.web_collector_support_linking_runtime import WebCollectorLinkingSupport
+from src.config import FIRECRAWL_API_KEYS
 
 _TRANSIENT_FETCH_ATTEMPTS = 2
 _TRANSIENT_FETCH_DELAY_S = 1.5
@@ -96,7 +98,9 @@ class WebCollector(
         r"you are not logged in",
     ]
 
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: ApiKeySource = None):
+        configured_keys = api_key if api_key is not None else FIRECRAWL_API_KEYS
+        self._api_keys = shared_api_key_pool("firecrawl", configured_keys)
         self.api_key = api_key
 
     @staticmethod
@@ -115,14 +119,15 @@ class WebCollector(
 
     def _run_firecrawl(self, url: str) -> dict:
         """Scrape URL via Firecrawl Python SDK. Returns legacy {content, raw, error} shape."""
-        if not self.api_key:
+        if not self._api_keys:
             return {"error": "FIRECRAWL_API_KEY not set"}
         last_error = ""
-        for attempt in range(_TRANSIENT_FETCH_ATTEMPTS):
+        attempts = max(_TRANSIENT_FETCH_ATTEMPTS, self._api_keys.size)
+        for attempt in range(attempts):
             try:
                 from firecrawl import Firecrawl
 
-                doc = Firecrawl(api_key=self.api_key).scrape(
+                doc = Firecrawl(api_key=self._api_keys.next_key()).scrape(
                     url,
                     formats=["markdown", "html"],
                     timeout=60000,
@@ -135,7 +140,7 @@ class WebCollector(
                 # retry keeps the capture on the best tier instead of
                 # degrading to the HTML/browser fallbacks.
                 last_error = str(exc)
-                if attempt + 1 < _TRANSIENT_FETCH_ATTEMPTS:
+                if attempt + 1 < attempts:
                     time.sleep(_TRANSIENT_FETCH_DELAY_S)
         else:
             return {"error": last_error}

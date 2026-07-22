@@ -12,6 +12,8 @@ docs
 .mypy_cache
 .ruff_cache
 .DS_Store
+.worktrees
+node_modules
 brand3.db
 brand3.db-*
 *.sqlite

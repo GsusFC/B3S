@@ -22,8 +22,6 @@ from src.config import (
     BRAND3_CACHE_TTL_HOURS,
     BRAND3_CACHE_TTL_HOURS_BY_SOURCE,
     BRAND3_HYPERBROWSER_ENABLED,
-    EXA_API_KEY,
-    FIRECRAWL_API_KEY,
 )
 from src.services.input_collection_payloads import (
     _competitor_storage_payload as _competitor_storage_payload_impl,

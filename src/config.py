@@ -4,6 +4,8 @@ import os
 import json
 from pathlib import Path
 
+from src.api_key_pool import normalize_api_keys
+
 # Try loading .env file
 env_file = Path(__file__).parent.parent / ".env"
 if env_file.exists():
@@ -13,9 +15,18 @@ if env_file.exists():
             key, value = line.split("=", 1)
             os.environ.setdefault(key.strip(), value.strip())
 
-# API Keys
-FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY", "")
-EXA_API_KEY = os.environ.get("EXA_API_KEY", "")
+# API Keys. The singular variables remain the primary, backwards-compatible
+# credentials. Plural variables append comma-separated keys for rotation.
+FIRECRAWL_API_KEYS = normalize_api_keys(
+    os.environ.get("FIRECRAWL_API_KEY", ""),
+    os.environ.get("FIRECRAWL_API_KEYS", ""),
+)
+EXA_API_KEYS = normalize_api_keys(
+    os.environ.get("EXA_API_KEY", ""),
+    os.environ.get("EXA_API_KEYS", ""),
+)
+FIRECRAWL_API_KEY = FIRECRAWL_API_KEYS[0] if FIRECRAWL_API_KEYS else ""
+EXA_API_KEY = EXA_API_KEYS[0] if EXA_API_KEYS else ""
 SEARCHAPI_API_KEY = os.environ.get("SEARCHAPI_API_KEY", "")
 HYPERBROWSER_API_KEY = os.environ.get("HYPERBROWSER_API_KEY", "")
 HYPERBROWSER_API_URL = os.environ.get(
