@@ -279,3 +279,27 @@ def test_component_primary_prefers_structured_editorial_v31():
     assert attributes["drawer"]["next_artifact"] == "Mapa de atributos."
     assert values["card"]["primary"]["text"] == "No hay principios observables."
     assert values["card"]["primary"]["items"] == []
+
+
+def test_report_hero_separates_insufficient_acquisition_from_absence():
+    vm = build_report_view_model(
+        {
+            "id": "r2",
+            "brand_name": "Movyn",
+            "url": "https://movyn.ai",
+            "not_detected": ["values"],
+            "components": [
+                {
+                    "key": "values",
+                    "label": "Valores",
+                    "score": 0,
+                    "scale": 5,
+                    "status": "not_detected",
+                    "block": {"coverage_status": "insufficient_acquisition"},
+                    "tile_profile": [],
+                }
+            ],
+        }
+    )
+
+    assert vm["hero"]["insufficient_evidence"] == ["values"]

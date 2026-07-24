@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from src.storage.sqlite_store import SQLiteStore
 from web import scan_runner
-from web.api_v1.presenters import status_payload
+from web.api_v1.presenters import result_payload, status_payload
 from web.app import app
 
 
@@ -207,6 +207,27 @@ def test_completed_result_has_stable_schema_and_etag(monkeypatch):
     cached = client.get("/api/v1/scans/scan123/result", headers={**AUTH, "If-None-Match": etag})
     assert cached.status_code == 304
     assert cached.content == b""
+
+
+def test_completed_result_exposes_insufficient_evidence_separately():
+    report = _report("scan-insufficient")
+    report["not_detected"] = ["values"]
+    report["components"].append(
+        {
+            "key": "values",
+            "label": "Valores",
+            "status": "not_detected",
+            "score": 0,
+            "scale": 5,
+            "block": {"coverage_status": "insufficient_acquisition", "refs": []},
+            "tile_profile": [],
+        }
+    )
+
+    payload = result_payload(report)
+
+    assert payload["not_detected"] == ["values"]
+    assert payload["insufficient_evidence"] == ["values"]
 
 
 def test_evidence_endpoint_separates_evidence_from_result(monkeypatch):

@@ -202,7 +202,9 @@
     <div class="report-hero-score report-hero-score--gain">
       {% if report.hero.immediate_margin %}+{{ report.hero.immediate_margin }}{% else %}0{% endif %}<span> pts</span>
     </div>
-    {% if report.hero.not_detected %}
+    {% if report.hero.insufficient_evidence %}
+    <div class="report-hero-note">sin evidencia suficiente: {{ report.hero.insufficient_evidence | join(", ") }}</div>
+    {% elif report.hero.not_detected %}
     <div class="report-hero-note">faltan: {{ report.hero.not_detected | join(", ") }}</div>
     {% elif report.hero.most_painful_gap.label %}
     <div class="report-hero-note">siguiente foco: {{ report.hero.most_painful_gap.label }}</div>

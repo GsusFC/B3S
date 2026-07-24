@@ -123,6 +123,14 @@ The result contract (`b3s-scanner-result-v1`) contains:
 - Acquisition coverage, limitations, and gate state.
 - Pipeline, rubric, prompt, and evaluator metadata.
 
+When acquisition did not cover a component sufficiently, the result exposes
+that state explicitly in `insufficient_evidence` (for example,
+`["values"]`). This list is separate from `not_detected`: an item in
+`not_detected` means the available evidence did not support the component,
+whereas an item in `insufficient_evidence` means the scanner could not acquire
+enough reliable evidence to make that claim. The component drawer and
+`acquisition_summary` retain the detailed coverage status and diagnostics.
+
 Evidence is a separate resource because clients often need citations without
 the full editorial result. It exposes normalized references, verified absences,
 acquisition attempts, and aggregate counts.

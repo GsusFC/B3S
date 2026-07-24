@@ -137,6 +137,7 @@ class ScanResultResponse(StrictModel):
     detected_count: int
     component_count: int
     not_detected: list[str]
+    insufficient_evidence: list[str] = Field(default_factory=list)
     limitations: list[str]
     acquisition_summary: dict[str, Any]
     acquisition_gate: dict[str, Any]

@@ -15,7 +15,7 @@ from web.report_store import domain_key
 
 from src.sv9.rubric import COMPONENTS as SV9_COMPONENTS
 
-SCHEMA_VERSION = "b3s_report_view_model_v0_1"
+SCHEMA_VERSION = "b3s_report_view_model_v0_2"
 
 COMPONENT_ROWS = (
     ("component-card--half", ("core_purpose", "magnetism")),
@@ -95,6 +95,7 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
     acquisition = _acquisition_view_model(report)
     score = report.get("score")
     editorial = report.get("editorial") if isinstance(report.get("editorial"), dict) else {}
+    insufficient_evidence = _coverage_limited_keys(report)
     return {
         "schema_version": SCHEMA_VERSION,
         "id": str(report.get("id") or ""),
@@ -118,6 +119,7 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
             },
             "immediate_margin": report.get("immediate_margin"),
             "not_detected": [str(item) for item in report.get("not_detected") or []],
+            "insufficient_evidence": insufficient_evidence,
             "executive_reading": _clean_text(editorial.get("executive_reading") or report.get("executive_reading")),
         },
         "components": ordered_components,
@@ -136,6 +138,20 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
             "has_raw": isinstance(report.get("raw"), dict) and bool(report.get("raw")),
         },
     }
+
+
+def _coverage_limited_keys(report: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    for component in report.get("components") or []:
+        if not isinstance(component, dict):
+            continue
+        block = component.get("block") if isinstance(component.get("block"), dict) else {}
+        if str(block.get("coverage_status") or "") != "insufficient_acquisition":
+            continue
+        key = str(component.get("key") or component.get("component") or "").strip()
+        if key and key not in keys:
+            keys.append(key)
+    return keys
 
 
 def _component_view_model(component: dict[str, Any]) -> dict[str, Any]:

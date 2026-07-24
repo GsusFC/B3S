@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from collections.abc import Iterable
 
 
@@ -43,6 +44,7 @@ class ApiKeyPool:
         self.__keys = normalize_api_keys(keys)
         self.__index = 0
         self.__lock = threading.Lock()
+        self.__quarantined_until: dict[str, float] = {}
 
     @property
     def size(self) -> int:
@@ -52,13 +54,29 @@ class ApiKeyPool:
     def configured(self) -> bool:
         return bool(self.__keys)
 
-    def next_key(self) -> str:
+    def next_key(self, *, exclude: Iterable[str] = ()) -> str:
         if not self.__keys:
             return ""
+        excluded = set(exclude)
+        now = time.monotonic()
         with self.__lock:
-            key = self.__keys[self.__index]
-            self.__index = (self.__index + 1) % len(self.__keys)
-            return key
+            self.__quarantined_until = {
+                key: until for key, until in self.__quarantined_until.items() if until > now
+            }
+            for _ in range(len(self.__keys)):
+                key = self.__keys[self.__index]
+                self.__index = (self.__index + 1) % len(self.__keys)
+                if key not in excluded and key not in self.__quarantined_until:
+                    return key
+        return ""
+
+    def quarantine(self, key: str, *, cooldown_seconds: float = 300.0) -> None:
+        """Temporarily stop assigning a provider key after a credential failure."""
+        if not key or cooldown_seconds <= 0:
+            return
+        with self.__lock:
+            if key in self.__keys:
+                self.__quarantined_until[key] = time.monotonic() + cooldown_seconds
 
     def __bool__(self) -> bool:
         return self.configured
