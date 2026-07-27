@@ -148,6 +148,9 @@ def result_payload(report: dict[str, Any]) -> dict[str, Any]:
         "acquisition_gate": (
             dict(report.get("acquisition_gate")) if isinstance(report.get("acquisition_gate"), dict) else {}
         ),
+        "stability": (
+            dict(report.get("stability")) if isinstance(report.get("stability"), dict) else {}
+        ),
         "metadata": {
             "schema_version": "b3s-scanner-result-v1",
             "pipeline_schema_version": str(raw.get("schema_version") or "unknown"),

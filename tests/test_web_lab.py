@@ -344,6 +344,37 @@ def test_brand_view_renders_profile_from_matching_reports(monkeypatch):
     assert "79" in response.text
 
 
+def test_brand_view_repeated_mode_keeps_selected_baseline_visible(monkeypatch):
+    from web.app import _brand_profile
+
+    older = {
+        "id": "baseline",
+        "brand_name": "Example",
+        "url": "https://example.com",
+        "created_at": "2026-07-01T00:00:00Z",
+        "score": 56,
+        "reliability_status": "shadow",
+        "components": [],
+        "raw": {},
+    }
+    newer = {
+        **older,
+        "id": "drifted",
+        "created_at": "2026-07-02T00:00:00Z",
+        "score": 40,
+        "components": [{"key": "value_proposition", "status": "scored", "score": 0}],
+    }
+    monkeypatch.setenv("B3S_CANONICAL_ENFORCEMENT_MODE", "repeated")
+    monkeypatch.setattr("web.app.list_reports_for_domain", lambda _domain: [newer, older])
+
+    profile = _brand_profile("example.com")
+
+    assert profile["current"]["id"] == "baseline"
+    assert profile["current"]["score"] == 56
+    assert profile["latest_attempt"]["id"] == "drifted"
+    assert profile["enforcement_mode"] == "repeated"
+
+
 def test_brand_view_prefers_component_editorial_message(monkeypatch):
     from web.app import app
 

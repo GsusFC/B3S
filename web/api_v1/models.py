@@ -141,6 +141,7 @@ class ScanResultResponse(StrictModel):
     limitations: list[str]
     acquisition_summary: dict[str, Any]
     acquisition_gate: dict[str, Any]
+    stability: dict[str, Any] = Field(default_factory=dict)
     metadata: ResultMetadata
     links: ScanLinks
 
@@ -173,6 +174,10 @@ class ScanHistoryItem(StrictModel):
     url: str
     score: float | int | None = None
     created_at: str | None = None
+    reliability_status: str = "unknown"
+    canonical_status: str = "unknown"
+    stability_classification: str = "unknown"
+    stability_reason_codes: list[str] = Field(default_factory=list)
     result_url: str
     report_url: str
 
@@ -182,6 +187,9 @@ class BrandScanHistoryResponse(StrictModel):
     api_version: Literal["v1"] = "v1"
     domain: str
     items: list[ScanHistoryItem]
+    canonical_report_id: str | None = None
+    provisional_report_id: str | None = None
+    selected_report_id: str | None = None
     pagination: Pagination
 
 

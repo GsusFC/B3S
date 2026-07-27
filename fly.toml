@@ -17,6 +17,9 @@ kill_timeout = "30s"
   BRAND3_SCREENSHOT_DIR = "/data/screenshots"
   B3S_REPORTS_DIR = "/data/reports"
   B3S_SCORING_DB_PATH = "/data/b3s_scoring.sqlite3"
+  # Keep single scans unchanged; repeated histories show the selected
+  # canonical/provisional baseline instead of blindly publishing the latest run.
+  B3S_CANONICAL_ENFORCEMENT_MODE = "repeated"
   SCREENSHOT_PROVIDER = "playwright"
 
 [[mounts]]

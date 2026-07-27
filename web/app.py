@@ -14,6 +14,10 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from src.services.scanner_evidence_comparison import (
+    canonical_enforcement_mode,
+    selected_report_for_display,
+)
 from web.api_v1 import install_scanner_api
 from web.report_store import domain_key, list_reports, list_reports_for_domain, load_report
 from web.report_view_model import build_report_view_model
@@ -68,9 +72,12 @@ def _component_display_text(component: dict[str, Any], *, prefer_summary: bool =
 
 
 def _brand_profile(domain: str) -> dict:
-    reports = list_reports_for_domain(domain)
-    reports = [_sanitize_report_language(report) for report in reports]
-    current = reports[0] if reports else None
+    raw_reports = list_reports_for_domain(domain)
+    selected, classified_reports, history_state = selected_report_for_display(raw_reports)
+    reports = [_sanitize_report_language(report) for report in classified_reports]
+    selected_id = str((selected or {}).get("id") or "")
+    current = next((report for report in reports if str(report.get("id") or "") == selected_id), None)
+    latest_attempt = reports[0] if reports else None
     normalized_domain = domain_key(domain) or domain
 
     components = list((current or {}).get("components") or [])
@@ -90,7 +97,10 @@ def _brand_profile(domain: str) -> dict:
         "display_name": (current or {}).get("brand_name") or normalized_domain,
         "url": (current or {}).get("url") or f"https://{normalized_domain}",
         "current": current,
+        "latest_attempt": latest_attempt,
         "reports": reports,
+        "history_state": history_state,
+        "enforcement_mode": canonical_enforcement_mode(),
         "summary": _component_display_text(purpose, prefer_summary=True) or _component_display_text(value, prefer_summary=True),
         "outcome": _component_display_text(value) or _component_display_text(purpose),
         "proof_urls": proof_urls[:6],

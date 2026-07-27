@@ -19,8 +19,13 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
+from src.services.scanner_evidence_comparison import (
+    EVIDENCE_COMPARISON_VERSION,
+    annotate_candidate_report,
+    canonical_enforcement_mode,
+)
 from src.url_validator import validate_url
-from web.report_store import new_scan_id, save_report
+from web.report_store import list_reports_for_domain, new_scan_id, save_report
 
 _SCANS: dict[str, dict[str, Any]] = {}
 _SCAN_EVENTS: dict[str, threading.Event] = {}
@@ -274,6 +279,7 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
 
         _set_phase(scan_id, "report", "running")
         report = _compose_report(scan_id, url, brand_name, payload)
+        report = _attach_evidence_stability(report)
         with _LOCK:
             status = _SCANS.get(scan_id)
             if status is None or status.get("state") == "cancelled":
@@ -309,6 +315,35 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 _persist_scan_status(persisted_status)
             except Exception:
                 _LOG.exception("failed to persist terminal scanner error", extra={"scan_id": scan_id})
+
+
+def _attach_evidence_stability(report: dict[str, Any]) -> dict[str, Any]:
+    """Classify a candidate without allowing comparison failures to erase it."""
+
+    try:
+        prior_reports = list_reports_for_domain(str(report.get("url") or ""))
+        return annotate_candidate_report(report, prior_reports)
+    except Exception as exc:
+        _LOG.exception(
+            "failed to classify report evidence stability",
+            extra={"scan_id": str(report.get("id") or "")},
+        )
+        fallback = dict(report)
+        fallback["canonical_status"] = "non_canonical"
+        fallback["stability"] = {
+            "schema_version": EVIDENCE_COMPARISON_VERSION,
+            "classification": "comparison_error",
+            "canonical_status": "non_canonical",
+            "reason_codes": ["evidence_comparison_failed"],
+            "error_type": type(exc).__name__,
+        }
+        fallback["canonical_selection"] = {
+            "enforcement_mode": canonical_enforcement_mode(),
+            "selected_report_id": None,
+            "canonical_report_id": None,
+            "provisional_report_id": None,
+        }
+        return fallback
 
 
 def _set_acquisition_gate(scan_id: str, gate: dict[str, Any]) -> None:

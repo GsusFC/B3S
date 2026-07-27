@@ -293,6 +293,8 @@ def _run_tile_call(
     requires_veredicto = key == "coherencia"
     last_error = "llm_error"
     user_with_feedback = user
+    last_valid_verdicts: list[TileVerdict] | None = None
+    last_valid_message = ""
 
     for attempt in range(SV9_EVALUATOR_MAX_ATTEMPTS):
         is_last = attempt == SV9_EVALUATOR_MAX_ATTEMPTS - 1
@@ -312,6 +314,9 @@ def _run_tile_call(
         verdicts, error = _normalize_tiles(raw, ids, lenient=is_last)
         veredicto = str((raw or {}).get("veredicto") or "").strip() if isinstance(raw, dict) else ""
         message = spanish_generated_text((raw or {}).get("message")) if isinstance(raw, dict) else ""
+        if verdicts is not None:
+            last_valid_verdicts = verdicts
+            last_valid_message = message
         if verdicts is not None and (veredicto or not requires_veredicto or is_last):
             verdicts = _apply_sv9_flow_tile_signal_overrides(verdicts, signals or [])
             final_veredicto = spanish_component_verdict(key, veredicto, verdicts)
@@ -346,6 +351,28 @@ def _run_tile_call(
             "Corrige y devuelve JSON estricto con una baldosa por cada id, "
             "evidencia literal en cada 'ok' y motivo en cada 'no' y 'sin_evidencia'."
             + (" Incluye el campo 'veredicto'." if requires_veredicto else "")
+        )
+
+    if last_valid_verdicts is not None:
+        # A corrective retry must never destroy a structurally valid tile
+        # profile from an earlier attempt. This matters most for Coherencia:
+        # missing prose can be synthesized deterministically, while losing ten
+        # valid tile verdicts would fabricate a 20-point score collapse.
+        verdicts = _apply_sv9_flow_tile_signal_overrides(last_valid_verdicts, signals or [])
+        return ComponentResult(
+            component=key,
+            status=STATUS_SCORED,
+            score=score_from_tile_profile(verdicts),
+            tile_profile=verdicts,
+            veredicto=_fallback_veredicto(key, verdicts),
+            message=last_valid_message,
+            evaluation_model=getattr(llm, "model", None),
+            detected_content=detected_content,
+            detection_mode=detection_mode,
+            detection_confidence=detection_confidence,
+            detection_limitations=list(detection_limitations or []),
+            evidence_source_summary=dict(evidence_source_summary or {}),
+            evidence=evidence or [],
         )
 
     return ComponentResult(

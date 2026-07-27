@@ -121,6 +121,7 @@ The result contract (`b3s-scanner-result-v1`) contains:
 - Tile summaries and per-tile outcomes.
 - Evidence references, not raw acquisition blobs.
 - Acquisition coverage, limitations, and gate state.
+- Scan-time evidence-stability classification and reason codes.
 - Pipeline, rubric, prompt, and evaluator metadata.
 
 When acquisition did not cover a component sufficiently, the result exposes
@@ -142,7 +143,12 @@ GET /api/v1/brands/{domain}/scans?limit=20&offset=0
 ```
 
 This returns completed immutable reports for the normalized domain, newest
-first, with bounded offset pagination.
+first, with bounded offset pagination. Each item includes `reliability_status`,
+`canonical_status`, `stability_classification`, and
+`stability_reason_codes`. The list envelope includes
+`canonical_report_id`, `provisional_report_id`, and `selected_report_id`.
+Those fields are a current derived projection over immutable scans; they can
+change when a later scan supplies comparison evidence.
 
 ## Errors
 

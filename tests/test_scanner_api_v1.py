@@ -230,6 +230,20 @@ def test_completed_result_exposes_insufficient_evidence_separately():
     assert payload["insufficient_evidence"] == ["values"]
 
 
+def test_completed_result_exposes_scan_time_stability_assessment():
+    report = _report("scan-stability")
+    report["canonical_status"] = "non_canonical"
+    report["stability"] = {
+        "classification": "evaluation_drift",
+        "canonical_status": "non_canonical",
+        "reason_codes": ["evaluation_changed_without_material_evidence_delta"],
+    }
+
+    payload = result_payload(report)
+
+    assert payload["stability"] == report["stability"]
+
+
 def test_evidence_endpoint_separates_evidence_from_result(monkeypatch):
     monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
     monkeypatch.setattr("web.api_v1.router.get_completed_report", lambda scan_id: _report(scan_id))
@@ -262,6 +276,11 @@ def test_brand_history_is_paginated(monkeypatch):
     assert response.status_code == 200
     assert response.json()["domain"] == "example.com"
     assert response.json()["pagination"] == {"limit": 1, "offset": 0, "count": 1, "has_more": True}
+    assert response.json()["selected_report_id"] == "one"
+    assert response.json()["provisional_report_id"] == "one"
+    assert response.json()["canonical_report_id"] is None
+    assert response.json()["items"][0]["canonical_status"] == "non_canonical"
+    assert response.json()["items"][0]["stability_classification"] == "stable"
 
 
 def test_failed_status_never_exposes_internal_exception_text():

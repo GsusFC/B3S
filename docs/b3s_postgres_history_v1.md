@@ -17,6 +17,11 @@ Captures and evaluations are append-only. Re-evaluating an old capture creates a
 
 `b3s_history.brand_history` selects the latest evaluation for every capture. `b3s_history.brand_current_state` then selects the latest observed capture for each brand. Ordering by observation time before evaluation time prevents a newly re-evaluated old capture from becoming the apparent current brand state.
 
+`brand_current_state` deliberately preserves those chronological semantics.
+Temporal publication is a separate derived projection in
+`brand_canonical_selections`: the latest observation and the selected
+canonical/provisional reference are related but not interchangeable.
+
 ## Tables
 
 - `workspaces`: tenancy boundary prepared before authentication and RLS.
@@ -32,6 +37,9 @@ Captures and evaluations are append-only. Re-evaluating an old capture creates a
 - `acquisition_attempts`: failed, skipped or degraded provider attempts.
 - `artifacts`: screenshot and visual artifact references.
 - `report_snapshots`: complete report projection for exact retrieval and migration rollback.
+- `capture_fingerprints`: normalized evidence identity and acquisition profile.
+- `evaluation_comparisons`: derived baseline/previous comparison and reason codes.
+- `brand_canonical_selections`: current canonical or provisional reference per brand.
 
 ## Invariants
 
@@ -42,6 +50,7 @@ Captures and evaluations are append-only. Re-evaluating an old capture creates a
 - Block references must resolve to evidence before import.
 - A scan has one observed capture; a capture can have many evaluation revisions.
 - Historical records are deleted only through explicit parent deletion, never by routine import.
+- Stability recomputation updates only derived comparison/selection tables; immutable report payloads are returned exactly as imported.
 
 PostgreSQL cannot represent NUL inside `text` or `jsonb`. Imported text replaces NUL with U+FFFD for querying, while `evidence_records.content_raw` and `report_snapshots.payload_raw` preserve canonical original bytes. Hashes are calculated from the unsanitized content.
 

@@ -84,6 +84,18 @@ Validate and import the current file-backed reports:
 
 The import is idempotent and rejects a reused report id with different content. The schema, invariants, queries and cutover boundary are documented in `docs/b3s_postgres_history_v1.md`.
 
+## Temporal evidence stability
+
+Repeated scans are compared against the first non-invalid baseline using normalized evidence, independently from LLM prose and scores. A weaker acquisition or a changed evaluation over materially equivalent evidence is retained in history but cannot silently replace the selected report.
+
+Preview the policy globally without writes:
+
+```bash
+.venv/bin/python scripts/canonical_evidence_dry_run.py --format markdown
+```
+
+`B3S_CANONICAL_ENFORCEMENT_MODE` controls publication: `observe` only classifies, `repeated` enforces the selected baseline for brands with at least two scans, and `all` also enforces single-scan histories. Fly starts with `repeated`; local development defaults to `observe`. The contract and rollback procedure are documented in [`docs/canonical_evidence_stability.md`](docs/canonical_evidence_stability.md).
+
 ## Deployment
 
 Fly deploys use the GitHub `production` environment and its `FLY_API_TOKEN` secret. The `Fly Deploy` workflow is manual from `main` while the guarded rollout is active. Automatic deploys after successful CI remain disabled until the repository variable `AUTO_DEPLOY_ENABLED` is explicitly changed from `false` to `true`.
