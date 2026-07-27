@@ -159,6 +159,9 @@
     }
   },
   "block_evidence": {
+    "changelog": {
+      "v5": "2026-07-27: make shortlist ordering content-addressed and restrict scoring metadata to stable semantic fields so provider result order, rank, dates, and positional refs cannot change the selected evidence."
+    },
     "block_terms": {
       "attributes": [
         "attribute",
@@ -340,7 +343,7 @@
       "diferenciacion",
       "coherencia"
     ],
-    "version": "sv9-flow-block-evidence-shortlists-v4"
+    "version": "sv9-flow-block-evidence-shortlists-v5"
   },
   "core_purpose_heuristics": {
     "action_terms": [

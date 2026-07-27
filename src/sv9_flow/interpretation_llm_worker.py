@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import Any, Literal
 
 from src.sv9_flow._utils import truthy_detected, unique_strings
@@ -13,9 +14,18 @@ from src.sv9_flow.block_evidence_worker import (
     build_block_evidence_shortlists,
 )
 from src.sv9_flow.contracts import BrandEvidencePack, BrandInterpretation
+from src.sv9_flow.evidence_identity import (
+    canonical_evidence_records,
+    canonical_evidence_ref,
+    canonicalize_evidence_refs,
+    normalize_evidence_text,
+    normalize_evidence_url,
+    original_ref_for_canonical,
+    restore_evidence_refs,
+)
 from src.sv9_flow.evidence_source import source_class_for_record
 
-FLOW_INTERPRETATION_PROMPT_VERSION = "sv9-flow-brand-interpretation-v1.1"
+FLOW_INTERPRETATION_PROMPT_VERSION = "sv9-flow-brand-interpretation-v1.2"
 _BLOCK_MAX_TOKENS = 1800
 GateAuthority = Literal["veto_only", "warn", "disabled"]
 
@@ -193,6 +203,7 @@ def build_brand_interpretation_with_llm(
             # on frozen evidence (3 distinct value_proposition readings in 5 runs).
             temperature=0.0,
         )
+    raw = _restore_interpretation_refs(raw, evidence_pack)
     normalized = normalize_llm_interpretation_response(
         raw,
         evidence_pack,
@@ -547,24 +558,26 @@ def _user_prompt(
     *,
     block_evidence_shortlists: dict[str, list[str]],
 ) -> str:
+    canonical_shortlists = {
+        block: canonicalize_evidence_refs(refs, evidence_pack)
+        for block, refs in sorted(block_evidence_shortlists.items())
+    }
     shortlisted_refs = {
-        ref
-        for refs in block_evidence_shortlists.values()
-        for ref in refs
+        ref for refs in canonical_shortlists.values() for ref in refs
     }
     evidence = [
         _classified_evidence_item(record, max_chars=500)
-        for record in evidence_pack.evidence
-        if record.ref in shortlisted_refs
+        for record in canonical_evidence_records(evidence_pack.evidence)
+        if canonical_evidence_ref(record) in shortlisted_refs
     ]
     payload = {
         "prompt_version": FLOW_INTERPRETATION_PROMPT_VERSION,
         "task": "Build brand_interpretation_v1 from evidence only.",
         "brand": {"name": evidence_pack.brand_name, "url": evidence_pack.url},
         "required_blocks": list(_BLOCK_KEYS),
-        "block_evidence_shortlists": block_evidence_shortlists,
+        "block_evidence_shortlists": canonical_shortlists,
         "evidence": evidence,
-        "limitations": evidence_pack.limitations,
+        "limitations": sorted(set(evidence_pack.limitations)),
         "output_contract": {
             "prompt_version": FLOW_INTERPRETATION_PROMPT_VERSION,
             "blocks": {
@@ -599,11 +612,12 @@ def _block_user_prompt(
     block: str,
     evidence_refs: list[str],
 ) -> str:
-    allowed = set(evidence_refs)
+    canonical_refs = canonicalize_evidence_refs(evidence_refs, evidence_pack)
+    allowed = set(canonical_refs)
     evidence = [
         _classified_evidence_item(record, max_chars=700)
-        for record in evidence_pack.evidence
-        if record.ref in allowed
+        for record in canonical_evidence_records(evidence_pack.evidence)
+        if canonical_evidence_ref(record) in allowed
     ]
     payload = {
         "prompt_version": FLOW_INTERPRETATION_PROMPT_VERSION,
@@ -611,7 +625,7 @@ def _block_user_prompt(
         "brand": {"name": evidence_pack.brand_name, "url": evidence_pack.url},
         "block": block,
         "block_guidance": _BLOCK_GUIDANCE.get(block, []),
-        "allowed_evidence_refs": evidence_refs,
+        "allowed_evidence_refs": canonical_refs,
         "evidence": evidence,
         "examples": _BLOCK_EXAMPLES.get(block, []),
         "required_json": {
@@ -639,20 +653,38 @@ def _block_user_prompt(
 def _classified_evidence_item(record: Any, *, max_chars: int) -> dict[str, Any]:
     metadata = record.metadata if isinstance(record.metadata, dict) else {}
     return {
-        "ref": record.ref,
-        "source": record.source,
+        "ref": canonical_evidence_ref(record),
         "source_class": metadata.get("source_class") or source_class_for_record(record),
         "type": record.evidence_type,
         "intent": metadata.get("intent") or "",
-        "result_group": metadata.get("result_group") or "",
-        "semantic_relevant_blocks": metadata.get("relevant_blocks") or [],
+        "semantic_relevant_blocks": sorted(metadata.get("relevant_blocks") or []),
         "semantic_stance": metadata.get("stance") or "",
         "semantic_specificity": metadata.get("specificity") or "",
         "identity_match_llm": metadata.get("identity_match_llm") or "",
-        "content": record.content[:max_chars],
-        "confidence": record.confidence,
-        "url": record.url,
+        "deterministic_identity_match": metadata.get("identity_match") or "",
+        "content": normalize_evidence_text(record.content)[:max_chars],
+        "url": normalize_evidence_url(record.url),
     }
+
+
+def _restore_interpretation_refs(
+    raw: Any,
+    evidence_pack: BrandEvidencePack,
+) -> Any:
+    """Translate model-facing content aliases back to acquisition provenance."""
+
+    payload = _coerce_response_object(raw)
+    if not payload:
+        return raw
+    restored = deepcopy(payload)
+    blocks = restored.get("blocks") if isinstance(restored.get("blocks"), dict) else {}
+    for block in blocks.values():
+        if not isinstance(block, dict):
+            continue
+        refs = block.get("evidence_refs")
+        if isinstance(refs, list):
+            block["evidence_refs"] = restore_evidence_refs(refs, evidence_pack)
+    return restored
 
 
 def _block_failures(
@@ -863,7 +895,10 @@ def _adjudicate_gate_rejection(
     )
     payload = _coerce_response_object(raw)
     state = str(payload.get("state") or "").strip().lower()
-    ref = str(payload.get("ref") or "").strip()
+    ref = original_ref_for_canonical(
+        str(payload.get("ref") or "").strip(),
+        evidence_pack,
+    )
     quote = str(payload.get("quote") or "").strip()
     confidence = _confidence(payload.get("confidence"))
     inference_type = str(payload.get("inference_type") or "").strip().lower()
@@ -936,17 +971,18 @@ def _adjudicator_user_prompt(
     evidence_pack: BrandEvidencePack,
     evidence_refs: list[str],
 ) -> str:
-    allowed = set(evidence_refs)
+    canonical_refs = canonicalize_evidence_refs(evidence_refs, evidence_pack)
+    allowed = set(canonical_refs)
     evidence = [
         {
-            "ref": record.ref,
-            "source": record.source,
+            "ref": canonical_evidence_ref(record),
             "type": record.evidence_type,
-            "url": record.url,
-            "content": record.content[:1200],
+            "source_class": source_class_for_record(record),
+            "url": normalize_evidence_url(record.url),
+            "content": normalize_evidence_text(record.content)[:1200],
         }
-        for record in evidence_pack.evidence
-        if record.ref in allowed
+        for record in canonical_evidence_records(evidence_pack.evidence)
+        if canonical_evidence_ref(record) in allowed
     ]
     block_rules = {
         "mission": [
@@ -974,9 +1010,12 @@ def _adjudicator_user_prompt(
             "content": _block_content(block),
             "rationale": _block_rationale(block),
             "confidence": _confidence(block.get("confidence")),
-            "evidence_refs": [str(ref) for ref in block.get("evidence_refs") or []],
+            "evidence_refs": canonicalize_evidence_refs(
+                block.get("evidence_refs") or [],
+                evidence_pack,
+            ),
         },
-        "allowed_evidence_refs": evidence_refs,
+        "allowed_evidence_refs": canonical_refs,
         "evidence": evidence,
         "block_rules": block_rules,
         "required_json": {

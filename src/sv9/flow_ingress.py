@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.evidence_identity import canonical_evidence_alias
 from src.sv9_flow.contracts import EvidenceRecord, Sv9FlowCandidate
 
 SV9_FLOW_INGRESS_VERSION = "sv9-flow-ingress-v1"
@@ -72,6 +73,8 @@ def flow_candidate_extra_signals(candidate: Sv9FlowCandidate) -> dict[str, list[
         component = str(signal.component or "").strip()
         if not component:
             continue
+        source_refs = list(signal.evidence_refs)
+        stable_refs = _canonical_signal_refs(source_refs, candidate)
         grouped.setdefault(component, []).append(
             {
                 "feature": "sv9_flow_tile_signal",
@@ -81,15 +84,38 @@ def flow_candidate_extra_signals(candidate: Sv9FlowCandidate) -> dict[str, list[
                 "source": signal.source,
                 "tile": signal.tile,
                 "effect": signal.effect,
-                "evidence_refs": list(signal.evidence_refs),
+                "evidence_refs": stable_refs,
+                "source_evidence_refs": source_refs,
                 "rationale": signal.rationale,
                 "detail": (
                     f"tile={signal.tile}; effect={signal.effect}; "
-                    f"rationale={signal.rationale}; evidence_refs={', '.join(signal.evidence_refs)}"
+                    f"rationale={signal.rationale}; evidence_refs={', '.join(stable_refs)}"
                 ),
             }
         )
     return grouped
+
+
+def _canonical_signal_refs(
+    refs: list[str],
+    candidate: Sv9FlowCandidate,
+) -> list[str]:
+    evidence_by_ref = {record.ref: record for record in candidate.evidence_pack.evidence}
+    stable: list[str] = []
+    for ref in refs:
+        record = evidence_by_ref.get(ref)
+        if record is None:
+            value = str(ref or "").strip()
+        else:
+            value = canonical_evidence_alias(
+                source_class=_source_class_for_record(record),
+                evidence_type=record.evidence_type,
+                url=record.url,
+                content=record.content,
+            )
+        if value and value not in stable:
+            stable.append(value)
+    return stable
 
 
 def _evidence_snippets(

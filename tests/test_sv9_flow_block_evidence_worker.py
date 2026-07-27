@@ -4,6 +4,7 @@ from src.sv9_flow.block_evidence_worker import (
     build_block_evidence_shortlists,
 )
 from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
+from src.sv9_flow.evidence_identity import canonical_evidence_id
 
 
 def test_block_evidence_shortlists_are_deterministic_and_block_specific() -> None:
@@ -43,6 +44,45 @@ def test_block_evidence_shortlists_are_deterministic_and_block_specific() -> Non
     assert shortlists == build_block_evidence_shortlists(pack, blocks=("personality", "brand_idea"), limit=2)
     assert shortlists["personality"][0] == "features.0"
     assert shortlists["brand_idea"][0] == "features.1"
+
+
+def test_shortlist_is_invariant_to_provider_order_refs_and_volatile_metadata() -> None:
+    def record(ref: str, content: str, *, score: float) -> EvidenceRecord:
+        return EvidenceRecord(
+            ref=ref,
+            source="exa",
+            evidence_type="external_proof.external_mentions",
+            content=content,
+            url=f"https://proof.example/{content.split()[0].lower()}",
+            confidence="low" if score < 0.5 else "high",
+            metadata={
+                "source_class": "external_proof",
+                "intent": "external_mentions",
+                "score": score,
+                "published_date": f"2026-07-{int(score * 10) + 10}",
+                "result_group": "mentions",
+            },
+        )
+
+    first_records = [
+        record("raw_inputs.2.exa.mentions.0", "Mission reward mechanism", score=0.1),
+        record("raw_inputs.2.exa.mentions.1", "Mission purpose for teams", score=0.9),
+        record("raw_inputs.2.exa.mentions.2", "Mission enables progress", score=0.3),
+    ]
+    second_records = [
+        record("raw_inputs.8.exa.news.7", "Mission enables progress", score=0.95),
+        record("raw_inputs.8.exa.news.3", "Mission reward mechanism", score=0.8),
+        record("raw_inputs.8.exa.news.5", "Mission purpose for teams", score=0.05),
+    ]
+    first = BrandEvidencePack("Acme", "https://acme.example", first_records)
+    second = BrandEvidencePack("Acme", "https://acme.example", second_records)
+
+    first_refs = build_block_evidence_shortlists(first, blocks=("mission",), limit=2)["mission"]
+    second_refs = build_block_evidence_shortlists(second, blocks=("mission",), limit=2)["mission"]
+    first_ids = [canonical_evidence_id(next(item for item in first_records if item.ref == ref)) for ref in first_refs]
+    second_ids = [canonical_evidence_id(next(item for item in second_records if item.ref == ref)) for ref in second_refs]
+
+    assert first_ids == second_ids
 
 
 def test_repository_proof_ranks_into_magnetism_shortlist() -> None:

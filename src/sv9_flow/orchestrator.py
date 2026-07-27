@@ -14,6 +14,11 @@ from src.sv9_flow._utils import unique_strings
 from src.sv9_flow.block_evidence_worker import build_block_evidence_shortlists
 from src.sv9_flow.contracts import Sv9FlowCandidate, interpretation_contract_violations
 from src.sv9_flow.evidence_coverage import acquisition_coverage, block_coverage, coverage_limitations
+from src.sv9_flow.evidence_identity import (
+    EVIDENCE_IDENTITY_VERSION,
+    canonical_evidence_records,
+    canonical_evidence_set_digest,
+)
 from src.sv9_flow.evidence_labeling_worker import label_evidence_pack
 from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
 from src.sv9_flow.interpretation_llm_worker import build_brand_interpretation_with_llm
@@ -55,6 +60,11 @@ def build_flow_candidate(
     )
     debug["evidence_labeling"] = labeling_debug
     debug["block_evidence_shortlists"] = shortlists
+    debug["evidence_identity"] = {
+        "version": EVIDENCE_IDENTITY_VERSION,
+        "fingerprint": canonical_evidence_set_digest(evidence_pack),
+        "record_count": len(canonical_evidence_records(evidence_pack.evidence)),
+    }
     coverage = {
         "acquisition": acquisition_coverage(evidence_pack),
         "blocks": block_coverage(evidence_pack, interpretation),

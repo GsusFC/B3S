@@ -6,6 +6,7 @@ from src.sv9.flow_ingress import (
     flow_candidate_extra_signals,
 )
 from src.sv9.rubric import COMPONENTS, tile_ids
+from src.sv9.evaluator import _build_component_prompt
 from src.sv9.service import run_sv9_from_audit_snapshot
 from src.sv9_flow.contracts import (
     BrandEvidencePack,
@@ -14,6 +15,7 @@ from src.sv9_flow.contracts import (
     Sv9FlowCandidate,
     TileSignal,
 )
+from src.sv9_flow.evidence_identity import canonical_evidence_ref
 
 
 def _candidate(tile_signals: list[TileSignal] | None = None) -> Sv9FlowCandidate:
@@ -85,6 +87,26 @@ class _TileLLM:
         return payload
 
 
+class _PromptCachingTileLLM(_TileLLM):
+    def __init__(self):
+        self.cache = {}
+        self.provider_calls = 0
+
+    def _call_json(self, system, user, **kwargs):
+        key = (
+            system,
+            user,
+            kwargs.get("schema_name"),
+            kwargs.get("temperature"),
+        )
+        if key in self.cache:
+            return self.cache[key]
+        self.provider_calls += 1
+        payload = super()._call_json(system, user, **kwargs)
+        self.cache[key] = payload
+        return payload
+
+
 class _ForbiddenExtractor:
     def __init__(self, *args, **kwargs):
         raise AssertionError("MagnetismExtractor must not run in the native flow path")
@@ -141,7 +163,102 @@ def test_flow_candidate_extra_signals_group_by_component() -> None:
     assert signals["mission"][0]["feature"] == "sv9_flow_tile_signal"
     assert signals["mission"][0]["tile"] == "mission.M1"
     assert signals["mission"][0]["effect"] == "supports"
-    assert signals["mission"][0]["evidence_refs"] == ["raw_inputs.0.text"]
+    assert signals["mission"][0]["evidence_refs"] == [
+        canonical_evidence_ref(_candidate().evidence_pack.evidence[0])
+    ]
+    assert signals["mission"][0]["source_evidence_refs"] == ["raw_inputs.0.text"]
+
+
+def test_evaluator_prompt_reuses_semantically_identical_component_evidence() -> None:
+    first = _candidate(
+        tile_signals=[
+            TileSignal(
+                component="mission",
+                tile="mission.M1",
+                effect="supports",
+                confidence="high",
+                source="brand_interpretation",
+                evidence_refs=["raw_inputs.0.text"],
+                rationale="mission is detected in brand interpretation.",
+            )
+        ]
+    )
+    second = _candidate(
+        tile_signals=[
+            TileSignal(
+                component="mission",
+                tile="mission.M1",
+                effect="supports",
+                confidence="high",
+                source="brand_interpretation",
+                evidence_refs=["raw_inputs.9.text"],
+                rationale="mission is detected in brand interpretation.",
+            )
+        ]
+    )
+    second.evidence_pack.evidence[0].ref = "raw_inputs.9.text"
+    second.evidence_pack.evidence.reverse()
+    second.interpretation.evidence_refs["mission"] = ["raw_inputs.9.text", "features.0"]
+
+    first_tldr = detection_blocks_from_flow_candidate(first)
+    second_tldr = detection_blocks_from_flow_candidate(second)
+    first_signals = flow_candidate_extra_signals(first)["mission"]
+    second_signals = flow_candidate_extra_signals(second)["mission"]
+
+    first_prompt = _build_component_prompt(
+        "mission",
+        block=first_tldr["mission"],
+        signals=first_signals,
+        tldr=first_tldr,
+        brand_name="Acme",
+        url="https://acme.example",
+    )
+    second_prompt = _build_component_prompt(
+        "mission",
+        block=second_tldr["mission"],
+        signals=second_signals,
+        tldr=second_tldr,
+        brand_name="Acme",
+        url="https://acme.example",
+    )
+
+    assert first_prompt == second_prompt
+
+    second.evidence_pack.evidence[1].content = "Acme now helps legal teams review contracts."
+    changed_tldr = detection_blocks_from_flow_candidate(second)
+    changed_prompt = _build_component_prompt(
+        "mission",
+        block=changed_tldr["mission"],
+        signals=second_signals,
+        tldr=changed_tldr,
+        brand_name="Acme",
+        url="https://acme.example",
+    )
+
+    assert changed_prompt != first_prompt
+
+
+def test_native_evaluator_reuses_components_when_only_provenance_refs_change() -> None:
+    first = _candidate()
+    second = _candidate()
+    second.evidence_pack.evidence[0].ref = "raw_inputs.9.text"
+    second.evidence_pack.evidence.reverse()
+    second.interpretation.evidence_refs["mission"] = ["raw_inputs.9.text", "features.0"]
+    llm = _PromptCachingTileLLM()
+    snapshot = {"raw_inputs": [], "features": []}
+
+    first_result = run_sv9_from_audit_snapshot(snapshot, llm=llm, sv9_flow_candidate=first)
+    provider_calls_after_first = llm.provider_calls
+    second_result = run_sv9_from_audit_snapshot(snapshot, llm=llm, sv9_flow_candidate=second)
+
+    assert provider_calls_after_first == 2  # mission + coherencia
+    assert llm.provider_calls == provider_calls_after_first
+    assert first_result.to_dict()["components"] == second_result.to_dict()["components"]
+
+    second.evidence_pack.evidence[1].content = "Acme now helps legal teams review contracts."
+    run_sv9_from_audit_snapshot(snapshot, llm=llm, sv9_flow_candidate=second)
+
+    assert llm.provider_calls == provider_calls_after_first + 1
 
 
 def test_ingress_demotes_detected_blocks_without_evidence_refs() -> None:
