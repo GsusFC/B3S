@@ -45,6 +45,30 @@ def build_success_result(
         clean_attempt_screenshot_path=str(metadata.get("clean_attempt_screenshot_path") or "") or None,
         secondary_screenshot_path=str(secondary_path) if secondary_path else None,
         secondary_capture_type=secondary_capture_type,
+        full_page_screenshot_path=str(metadata.get("full_page_screenshot_path") or "") or None,
+        section_capture_status=str(metadata.get("section_capture_status") or "") or None,
+        section_manifest=_coerce_dict_or_none(
+            metadata.get("section_manifest"),
+            field_name="section_manifest",
+        ),
+        lazy_content_hydration=_coerce_dict_or_none(
+            metadata.get("lazy_content_hydration"),
+            field_name="lazy_content_hydration",
+        ),
+        post_hydration_obstruction_check=_coerce_dict_or_none(
+            metadata.get("post_hydration_obstruction_check"),
+            field_name="post_hydration_obstruction_check",
+        ),
+        analysis_atlas_path=str(metadata.get("analysis_atlas_path") or "") or None,
+        analysis_atlas_status=str(metadata.get("analysis_atlas_status") or "") or None,
+        analysis_atlas_manifest=_coerce_dict_or_none(
+            metadata.get("analysis_atlas_manifest"),
+            field_name="analysis_atlas_manifest",
+        ),
+        structured_capture_errors=[
+            str(item)
+            for item in metadata.get("structured_capture_errors") or []
+        ],
         page_url=str(metadata.get("page_url") or website_url),
         width=_int_or_none(metadata.get("width")),
         height=_int_or_none(metadata.get("height")),

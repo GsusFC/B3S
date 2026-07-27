@@ -91,10 +91,16 @@ def extract_visual_signature(
         consistency=consistency,
     )
     screenshot_path = resolve_screenshot_path(screenshot_payload=screenshot_payload)
-    screenshot_for_semantics = (
-        screenshot_path
-        if screenshot_path and Path(screenshot_path).exists()
-        else None
+    analysis_atlas_path = str(
+        (screenshot_payload or {}).get("analysis_atlas_path") or ""
+    ).strip()
+    screenshot_for_semantics = next(
+        (
+            candidate
+            for candidate in (analysis_atlas_path, screenshot_path)
+            if candidate and Path(candidate).exists()
+        ),
+        None,
     )
     try:
         semantics = analyze_visual_semantics(
@@ -154,7 +160,8 @@ def _viewport_obstruction_for_selected_capture(
         else None
     )
     selected_variant = str((screenshot_payload or {}).get("selected_capture_variant") or "")
-    if payload_obstruction and selected_variant == "clean_attempt":
+    same_capture_observation = (screenshot_payload or {}).get("obstruction_observed_same_capture") is True
+    if payload_obstruction and (selected_variant == "clean_attempt" or same_capture_observation):
         return analyze_viewport_obstruction(
             dom_html="",
             existing_obstruction=payload_obstruction,

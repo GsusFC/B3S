@@ -18,7 +18,7 @@ VISUAL_INTERPRETATION_SCHEMA_VERSION = "visual-interpretation-v1"
 
 # --- Prompt versions (two distinct prompts, two distinct constants) ---
 ANNOTATION_PROMPT_VERSION = "visual-signature-annotation-prompt-1"
-MULTIMODAL_PROMPT_VERSION = "visual-signature-multimodal-v2"
+MULTIMODAL_PROMPT_VERSION = "visual-signature-multimodal-v3"
 
 # --- Reviewer viewer / workflow ---
 REVIEWER_VIEWER_SCHEMA_VERSION = "visual-signature-reviewer-viewer-1"

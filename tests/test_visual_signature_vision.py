@@ -7,6 +7,7 @@ from pathlib import Path
 
 from src.visual_signature.vision import enrich_visual_signature_with_vision
 from src.visual_signature.vision.screenshot_quality import load_raster_image
+from src.visual_signature.vision.viewport_obstruction import analyze_viewport_obstruction
 
 
 def _payload() -> dict:
@@ -727,10 +728,101 @@ def test_viewport_obstruction_resists_privacy_text_false_positive(tmp_path):
     assert obstruction["first_impression_valid"] is True
 
 
+def test_viewport_obstruction_resists_fixed_nav_with_footer_newsletter():
+    obstruction = analyze_viewport_obstruction(
+        dom_html="""
+        <html><body>
+          <nav style="position: fixed">Products · Company</nav>
+          <main><h1>Build better products</h1></main>
+          <footer><a href="/newsletter">Newsletter</a></footer>
+        </body></html>
+        """
+    ).to_dict()
+
+    assert obstruction["present"] is False
+    assert obstruction["first_impression_valid"] is True
+    assert "dom_keyword:newsletter" in obstruction["page_level_signals"]
+
+
+def test_viewport_obstruction_resists_signin_header_with_full_height_hero():
+    obstruction = analyze_viewport_obstruction(
+        dom_html="""
+        <html><body>
+          <header><a href="/signin">Sign in</a></header>
+          <main style="min-height: 100vh"><h1>Visible homepage hero</h1></main>
+        </body></html>
+        """
+    ).to_dict()
+
+    assert obstruction["present"] is False
+    assert obstruction["type"] == "none"
+    assert obstruction["first_impression_valid"] is True
+
+
+def test_viewport_obstruction_resists_sale_copy_below_sticky_header():
+    obstruction = analyze_viewport_obstruction(
+        dom_html="""
+        <html><body>
+          <header style="position: sticky">Brand</header>
+          <main><p>Our sale process helps companies grow.</p></main>
+        </body></html>
+        """
+    ).to_dict()
+
+    assert obstruction["present"] is False
+    assert obstruction["first_impression_valid"] is True
+    assert "dom_keyword:sale" in obstruction["page_level_signals"]
+
+
+def test_same_capture_clean_observation_overrides_unrelated_web_html(tmp_path):
+    width, height = 80, 60
+    pixels = [
+        (245, 245, 245) if (x + y) % 2 else (220, 220, 220)
+        for y in range(height)
+        for x in range(width)
+    ]
+    screenshot = tmp_path / "same-capture.png"
+    _write_png(screenshot, width, height, pixels)
+    payload = _payload()
+    payload["acquisition"] = {
+        "rendered_html": """
+        <div class="login-wall modal overlay" role="dialog" aria-modal="true"
+             style="position: fixed; inset: 0; z-index: 9999">
+          Sign in to continue. Create account.
+        </div>
+        """
+    }
+
+    enriched = enrich_visual_signature_with_vision(
+        visual_signature_payload=payload,
+        screenshot_path=str(screenshot),
+        screenshot_payload={
+            "capture_type": "viewport",
+            "viewport_width": width,
+            "viewport_height": height,
+            "selected_capture_variant": "raw_viewport",
+            "obstruction_observed_same_capture": True,
+            "viewport_obstruction": {
+                "present": False,
+                "type": "none",
+                "severity": "none",
+                "first_impression_valid": True,
+                "confidence": 0.8,
+                "signals": [],
+            },
+        },
+    )
+
+    obstruction = enriched["vision"]["viewport_obstruction"]
+    assert obstruction["type"] != "login_wall"
+    assert obstruction["severity"] not in {"major", "blocking"}
+    assert obstruction["first_impression_valid"] is True
+
+
 def test_multimodal_prompt_version_is_stable_constant():
     from src.visual_signature.vision.multimodal_analyzer import PROMPT_VERSION
 
-    assert PROMPT_VERSION == "visual-signature-multimodal-v2"
+    assert PROMPT_VERSION == "visual-signature-multimodal-v3"
 
 
 def test_build_multimodal_payload_uses_template_with_brand_name():
@@ -790,5 +882,6 @@ def test_playwright_capture_helpers_exports_runtime_api():
     assert helpers.DISMISSAL_TARGET_SELECTOR
     assert callable(helpers._attempt_obstruction_dismissal)
     assert callable(helpers._attempt_obstruction_dismissal_with_discovery)
+    assert callable(helpers._dismissal_successful)
     assert callable(helpers._discover_dismissal_targets)
     assert callable(helpers._prepare_perceptual_state_machine)

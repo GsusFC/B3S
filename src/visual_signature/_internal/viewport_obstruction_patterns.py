@@ -45,7 +45,7 @@ OVERLAY_CUES_RE = re.compile(
     r"position\s*:\s*fixed|fixed-bottom|bottom-0|inset-0|z-\[?\d{3,}\]?|z-50|sticky"
 )
 PAGE_CUES_RE = re.compile(
-    r"<(header|nav|footer)\b|site-header|site-nav|navbar|topbar|masthead|breadcrumb|menu|"
+    r"<(header|nav|main|section|article|footer)\b|site-header|site-nav|navbar|topbar|masthead|breadcrumb|menu|"
     r"utility-nav|primary-nav|secondary-nav|header__|nav__"
 )
 HEIGHT_VH_RE = re.compile(r"height\s*:\s*(\d+(?:\.\d+)?)(vh|%)")
@@ -58,13 +58,30 @@ def split_term_signals(text: str, terms: tuple[str, ...], *, signal_prefix: str)
     for term in terms:
         for context in term_contexts(text, term):
             signal = f"{signal_prefix}:{term}"
-            if context_has_page_level_cues(context):
-                page_level_signals.append(signal)
-            elif context_has_overlay_cues(context):
+            cue_kind = _nearest_cue_kind(context, term)
+            if cue_kind == "overlay":
                 overlay_level_signals.append(signal)
             else:
                 page_level_signals.append(signal)
     return page_level_signals, overlay_level_signals
+
+
+def _nearest_cue_kind(context: str, term: str) -> str:
+    term_index = context.find(term)
+    if term_index < 0:
+        term_index = len(context) // 2
+    overlay_distance = _nearest_match_distance(OVERLAY_CUES_RE, context, term_index)
+    page_distance = _nearest_match_distance(PAGE_CUES_RE, context, term_index)
+    if overlay_distance is not None and (page_distance is None or overlay_distance <= page_distance):
+        return "overlay"
+    if page_distance is not None:
+        return "page"
+    return "page"
+
+
+def _nearest_match_distance(pattern: re.Pattern[str], context: str, term_index: int) -> int | None:
+    distances = [abs(match.start() - term_index) for match in pattern.finditer(context)]
+    return min(distances) if distances else None
 
 
 def term_contexts(text: str, term: str, *, window: int = 220, limit: int = 3) -> list[str]:

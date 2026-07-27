@@ -31,6 +31,15 @@ class CaptureResult:
     clean_attempt_screenshot_path: str | None = None
     secondary_screenshot_path: str | None = None
     secondary_capture_type: str | None = None
+    full_page_screenshot_path: str | None = None
+    section_capture_status: str | None = None
+    section_manifest: dict[str, Any] | None = None
+    lazy_content_hydration: dict[str, Any] | None = None
+    post_hydration_obstruction_check: dict[str, Any] | None = None
+    analysis_atlas_path: str | None = None
+    analysis_atlas_status: str | None = None
+    analysis_atlas_manifest: dict[str, Any] | None = None
+    structured_capture_errors: list[str] = field(default_factory=list)
     page_url: str | None = None
     width: int | None = None
     height: int | None = None

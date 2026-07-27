@@ -8,14 +8,14 @@
 {{ tag(status, tone, true) }}
 {%- endmacro %}
 
-{% macro acquisition_status_tag(source, status, detail="") -%}
+{% macro acquisition_status_tag(source, status, evidence_status="", first_fold_evaluable=none) -%}
 {% set source_value = source|string %}
 {% set status_value = status|string|lower %}
-{% set detail_value = detail|string|lower %}
-{% if source_value == "visual_acquisition" and status_value in ["blocked", "limited", "not_interpretable"] %}
+{% set evidence_value = evidence_status|string|lower %}
+{% if source_value == "visual_acquisition" and (evidence_value in ["blocked", "limited", "missing", "not_interpretable", "unavailable"] or first_fold_evaluable is sameas false) %}
 {{ tag("limited", "warn", true) }}
-{% elif source_value == "visual_acquisition" and status_value == "completed" and "blocked" in detail_value %}
-{{ tag("limited", "warn", true) }}
+{% elif source_value == "visual_acquisition" and evidence_value %}
+{{ status_tag(evidence_value) }}
 {% else %}
 {{ status_tag(status) }}
 {% endif %}

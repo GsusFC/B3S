@@ -525,18 +525,21 @@ def _acquisition_view_model(report: dict[str, Any]) -> dict[str, Any]:
         kind = _clean_text(artifact.get("kind"))
         status = _clean_text(artifact.get("status"))
         provider = _clean_text(artifact.get("provider"))
+        label = _clean_text(artifact.get("label"))
         artifacts.append(
             {
                 "source": source,
                 "kind": kind,
                 "status": status,
                 "provider": provider,
+                "label": label,
                 "href": href,
                 "display_label": _artifact_label(
                     source=source,
                     kind=kind,
                     status=status,
                     provider=provider,
+                    label=label,
                 ),
                 "chip_class": _artifact_chip_class(artifact),
             }
@@ -616,8 +619,17 @@ def _source_fields_used(primary: dict[str, Any], support: dict[str, Any]) -> lis
     return fields
 
 
-def _artifact_label(*, source: str, kind: str, status: str, provider: str) -> str:
-    parts = [part for part in (source, kind, status) if part]
+def _artifact_label(
+    *,
+    source: str,
+    kind: str,
+    status: str,
+    provider: str,
+    label: str = "",
+) -> str:
+    parts = [part for part in (label, kind, status) if part]
+    if not parts:
+        parts = [source] if source else []
     label = " · ".join(parts) or "artefacto"
     if provider:
         label = f"{label} · {provider}"

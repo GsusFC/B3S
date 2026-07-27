@@ -48,6 +48,11 @@ def build_visual_signature_persistence_bundle(
     website_url: str | None = None,
     screenshot_path: str | Path | None = None,
     secondary_screenshot_path: str | Path | None = None,
+    full_page_screenshot_path: str | Path | None = None,
+    section_screenshot_paths: list[str] | None = None,
+    section_manifest: dict[str, Any] | None = None,
+    analysis_atlas_path: str | Path | None = None,
+    analysis_atlas_manifest: dict[str, Any] | None = None,
     manifest_path: str | Path | None = None,
     capture_type: str | None = None,
     secondary_capture_type: str | None = None,
@@ -70,7 +75,13 @@ def build_visual_signature_persistence_bundle(
         "acquisition_status": _acquisition_status(acquisition),
         "screenshot_available": bool((screenshot or {}).get("available")),
         "viewport_available": primary_capture_type == "viewport" or bool(vision.get("viewport_composition")),
-        "full_page_available": primary_capture_type == "full_page" or secondary_capture_type == "full_page",
+        "full_page_available": bool(full_page_screenshot_path)
+        or primary_capture_type == "full_page"
+        or secondary_capture_type == "full_page",
+        "section_capture_count": len(section_screenshot_paths or []),
+        "semantic_analysis_scope": "labeled_section_atlas"
+        if analysis_atlas_path
+        else "single_capture",
         "interpretation_status": str(
             (raw.get("interpretation_status") if isinstance(raw, dict) else None) or "unknown"
         ),
@@ -82,11 +93,20 @@ def build_visual_signature_persistence_bundle(
     artifact_refs = {
         "screenshot_path": str(screenshot_path) if screenshot_path else None,
         "secondary_screenshot_path": str(secondary_screenshot_path) if secondary_screenshot_path else None,
+        "full_page_screenshot_path": str(full_page_screenshot_path) if full_page_screenshot_path else None,
+        "section_screenshot_paths": list(section_screenshot_paths or []),
+        "section_manifest": dict(section_manifest or {}),
+        "analysis_atlas_path": str(analysis_atlas_path) if analysis_atlas_path else None,
+        "analysis_atlas_manifest": dict(analysis_atlas_manifest or {}),
         "manifest_path": str(manifest_path) if manifest_path else None,
         "capture_type": primary_capture_type,
         "secondary_capture_type": secondary_capture_type,
     }
-    artifact_refs = {key: value for key, value in artifact_refs.items() if value not in (None, "")}
+    artifact_refs = {
+        key: value
+        for key, value in artifact_refs.items()
+        if value not in (None, "", [], {})
+    }
     return VisualSignaturePersistenceBundle(
         run_id=run_id,
         brand_name=brand_name or (raw.get("brand_name") if isinstance(raw, dict) else None),
@@ -126,6 +146,25 @@ def persist_visual_signature_result(
         return
     vision = payload.get("vision") if isinstance(payload.get("vision"), dict) else None
     screenshot = (vision or {}).get("screenshot") if isinstance(vision, dict) else None
+    section_analysis = (vision or {}).get("section_analysis") if isinstance(vision, dict) else {}
+    sections = section_analysis.get("sections") if isinstance(section_analysis, dict) and isinstance(section_analysis.get("sections"), list) else []
+    section_paths = [
+        str(row.get("capture_path"))
+        for row in sections
+        if isinstance(row, dict) and str(row.get("capture_path") or "").strip()
+    ]
+    full_page_path = (
+        str(section_analysis.get("full_page_screenshot_path") or "")
+        if isinstance(section_analysis, dict)
+        else ""
+    )
+    semantic_input = (
+        section_analysis.get("semantic_analysis_input")
+        if isinstance(section_analysis, dict)
+        and isinstance(section_analysis.get("semantic_analysis_input"), dict)
+        else {}
+    )
+    atlas_path = str(semantic_input.get("path") or "") if semantic_input.get("type") == "labeled_section_atlas" else ""
     bundle = build_visual_signature_persistence_bundle(
         raw_visual_signature_payload=payload,
         vision_payload=vision,
@@ -134,10 +173,20 @@ def persist_visual_signature_result(
         brand_name=result.get("brand_name") or result.get("brand"),
         website_url=result.get("website_url") or result.get("url"),
         screenshot_path=(screenshot or {}).get("path") if isinstance(screenshot, dict) else None,
-        secondary_screenshot_path=(screenshot or {}).get("secondary_path") if isinstance(screenshot, dict) else None,
+        secondary_screenshot_path=full_page_path
+        or ((screenshot or {}).get("secondary_path") if isinstance(screenshot, dict) else None),
+        full_page_screenshot_path=full_page_path or None,
+        section_screenshot_paths=section_paths,
+        section_manifest=section_analysis if isinstance(section_analysis, dict) else None,
+        analysis_atlas_path=atlas_path or None,
+        analysis_atlas_manifest=semantic_input.get("manifest")
+        if isinstance(semantic_input.get("manifest"), dict)
+        else None,
         manifest_path=result.get("visual_signature_manifest_path"),
         capture_type=(screenshot or {}).get("capture_type") if isinstance(screenshot, dict) else None,
-        secondary_capture_type=(screenshot or {}).get("secondary_capture_type") if isinstance(screenshot, dict) else None,
+        secondary_capture_type="full_page"
+        if full_page_path
+        else ((screenshot or {}).get("secondary_capture_type") if isinstance(screenshot, dict) else None),
         visual_signature_scan=result.get("visual_signature_scan")
         if isinstance(result.get("visual_signature_scan"), dict)
         else None,

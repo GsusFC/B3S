@@ -469,16 +469,24 @@ def _build_acquisition_gate(
             )
         )
 
-    visual_status = _step_status(normalized.get("visual_acquisition"))
-    visual_detail = _step_detail(normalized.get("visual_acquisition")).lower()
-    if _is_failure_status(visual_status) or "blocked" in visual_detail or "not_interpretable" in visual_detail:
+    visual_step = normalized.get("visual_acquisition")
+    visual_status = _step_status(visual_step)
+    visual_evidence_status = _visual_evidence_status(visual_step)
+    visual_first_fold_evaluable = _visual_first_fold_evaluable(visual_step)
+    visual_state_missing = visual_status == "completed" and not visual_evidence_status
+    if (
+        _is_failure_status(visual_status)
+        or visual_evidence_status in {"blocked", "limited", "missing", "not_interpretable", "unavailable"}
+        or visual_first_fold_evaluable is False
+        or visual_state_missing
+    ):
         warnings.append(
             _issue(
                 source="visual_acquisition",
                 code="visual_acquisition_limited",
                 severity="warning",
                 message="Visual acquisition was unavailable or obstructed; visual evidence remains limited.",
-                step=normalized.get("visual_acquisition"),
+                step=visual_step,
             )
         )
 
@@ -556,6 +564,19 @@ def _step_status(step: Any) -> str:
     return str(step.get("status") or "").strip().lower()
 
 
+def _visual_evidence_status(step: Any) -> str:
+    if not isinstance(step, dict):
+        return ""
+    return str(step.get("evidence_status") or "").strip().lower()
+
+
+def _visual_first_fold_evaluable(step: Any) -> bool | None:
+    if not isinstance(step, dict):
+        return None
+    value = step.get("first_fold_evaluable")
+    return value if isinstance(value, bool) else None
+
+
 def _step_detail(step: Any) -> str:
     if not isinstance(step, dict):
         return ""
@@ -618,6 +639,11 @@ def _issue(
         "detail": _step_detail(step),
         "can_fallback": bool(can_fallback),
     }
+    if isinstance(step, dict):
+        for key in ("evidence_status", "screenshot_status", "first_fold_evaluable", "obstruction"):
+            value = step.get(key)
+            if value not in (None, "", {}):
+                payload[key] = value
     if fallback:
         payload["fallback"] = fallback
     return payload
@@ -699,6 +725,9 @@ def _capture_snapshot(scan_id: str, url: str, brand_name: str) -> dict[str, Any]
                 "source": "visual_acquisition",
                 "status": str(visual_step.get("status") or ""),
                 "detail": str((visual_step.get("details") or {}).get("reason") or ""),
+                "evidence_status": str(visual_step.get("evidence_status") or ""),
+                "screenshot_status": str(visual_step.get("screenshot_status") or ""),
+                "first_fold_evaluable": visual_step.get("first_fold_evaluable"),
             }
         )
     with _LOCK:
@@ -773,6 +802,10 @@ def _capture_visual_evidence(
     if not enabled:
         return [], {
             "status": "skipped",
+            "evidence_status": "skipped",
+            "screenshot_status": "skipped",
+            "first_fold_evaluable": None,
+            "obstruction": {},
             "details": {"reason": "visual_acquisition_disabled"},
         }
 
@@ -800,7 +833,14 @@ def _capture_visual_evidence(
                     "capture": screenshot_capture,
                 },
             }
-        ], {"status": "error", "details": {"reason": str(exc)}}
+        ], {
+            "status": "error",
+            "evidence_status": "unavailable",
+            "screenshot_status": str(screenshot_capture.get("status") or "unknown"),
+            "first_fold_evaluable": None,
+            "obstruction": {},
+            "details": {"reason": str(exc)},
+        }
     visual_evidence = result.get("visual_evidence_packet")
     rows: list[dict[str, Any]] = [
         {
@@ -840,6 +880,10 @@ def _capture_visual_evidence(
         )
 
     status = str(result.get("status") or "unknown")
+    visual_state = _structured_visual_state(
+        result=result,
+        screenshot_capture=screenshot_capture,
+    )
     details = {
         "reason": _visual_acquisition_detail(result=result, screenshot_capture=screenshot_capture),
     }
@@ -850,14 +894,18 @@ def _capture_visual_evidence(
     if cookie_snippet:
         details["cookie_banner_suspected"] = True
         details["cookie_banner_snippet"] = cookie_snippet
-    return rows, {"status": status, "details": details}
+    return rows, {
+        "status": status,
+        **visual_state,
+        "details": details,
+    }
 
 
 def _capture_screenshot(*, service: Any, url: str) -> dict[str, Any]:
     try:
         screenshot_data, limitation = service._take_screenshot_with_budget(
             url,
-            timeout_seconds=int(os.environ.get("BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS", "20")),
+            timeout_seconds=int(os.environ.get("BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS", "60")),
         )
         return service._screenshot_capture_diagnostic(
             attempted=True,
@@ -883,6 +931,37 @@ def _visual_acquisition_detail(*, result: dict[str, Any], screenshot_capture: di
     if not screenshot_capture.get("success"):
         return str(screenshot_capture.get("error_type") or screenshot_capture.get("error") or "screenshot_unavailable")
     return str(result.get("interpretation_status") or result.get("status") or "visual_acquisition_unavailable")
+
+
+def _structured_visual_state(
+    *,
+    result: dict[str, Any],
+    screenshot_capture: dict[str, Any],
+) -> dict[str, Any]:
+    evidence = result.get("visual_evidence_packet")
+    capture = evidence.get("capture") if isinstance(evidence, dict) and isinstance(evidence.get("capture"), dict) else {}
+    obstruction = capture.get("obstruction") if isinstance(capture.get("obstruction"), dict) else {}
+    evidence_status = str(capture.get("status") or "").strip().lower()
+    if not evidence_status:
+        evidence_status = "captured" if screenshot_capture.get("success") is True else "unavailable"
+    structured_obstruction = {
+        "present": obstruction.get("present") is True,
+        "type": str(obstruction.get("type") or ""),
+        "severity": str(obstruction.get("severity") or ""),
+        "confidence": obstruction.get("confidence"),
+        "coverage_ratio": obstruction.get("coverage_ratio"),
+        "signals": [str(item) for item in obstruction.get("signals") or []][:8],
+    }
+    return {
+        "evidence_status": evidence_status,
+        "screenshot_status": str(screenshot_capture.get("status") or "unknown").strip().lower(),
+        "first_fold_evaluable": (
+            capture.get("first_fold_evaluable")
+            if isinstance(capture.get("first_fold_evaluable"), bool)
+            else None
+        ),
+        "obstruction": structured_obstruction if obstruction else {},
+    }
 
 
 def _visual_obstruction_detail(result: dict[str, Any]) -> str:
@@ -925,7 +1004,7 @@ def _acquisition_artifacts_from_snapshot(snapshot: dict[str, Any]) -> list[dict[
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         if source == "screenshot_capture":
             capture = payload.get("capture") if isinstance(payload.get("capture"), dict) else {}
-            artifacts.append(_screenshot_artifact(capture))
+            artifacts.extend(_screenshot_artifacts(capture))
         elif source == "visual_acquisition":
             evidence = payload.get("visual_evidence_packet") if isinstance(payload.get("visual_evidence_packet"), dict) else {}
             capture = evidence.get("capture") if isinstance(evidence.get("capture"), dict) else {}
@@ -957,6 +1036,7 @@ def _screenshot_artifact(capture: dict[str, Any]) -> dict[str, Any]:
         "status": str(capture.get("status") or ""),
         "success": capture.get("success") is True,
         "provider": str(capture.get("source") or ""),
+        "label": "Primer viewport",
         "screenshot_url": screenshot_url,
         "screenshot_path": screenshot_path,
         "public_url": _public_screenshot_url(screenshot_path=screenshot_path, screenshot_url=screenshot_url),
@@ -965,9 +1045,85 @@ def _screenshot_artifact(capture: dict[str, Any]) -> dict[str, Any]:
     return artifact if screenshot_path or screenshot_url or artifact["status"] else {}
 
 
+def _screenshot_artifacts(capture: dict[str, Any]) -> list[dict[str, Any]]:
+    artifacts = [_screenshot_artifact(capture)]
+    metadata = capture.get("metadata") if isinstance(capture.get("metadata"), dict) else {}
+    full_page_path = str(metadata.get("full_page_screenshot_path") or "").strip()
+    if full_page_path:
+        artifacts.append(
+            {
+                "source": "screenshot_capture",
+                "kind": "full_page_screenshot",
+                "status": str(metadata.get("section_capture_status") or capture.get("status") or ""),
+                "success": True,
+                "provider": str(capture.get("source") or ""),
+                "label": "Página completa",
+                "screenshot_path": full_page_path,
+                "public_url": _public_screenshot_url(screenshot_path=full_page_path, screenshot_url=""),
+                "capture_variant": str(
+                    (metadata.get("section_manifest") or {}).get("capture_variant")
+                    if isinstance(metadata.get("section_manifest"), dict)
+                    else ""
+                ),
+            }
+        )
+
+    atlas_path = str(metadata.get("analysis_atlas_path") or "").strip()
+    if atlas_path:
+        atlas_manifest = (
+            metadata.get("analysis_atlas_manifest")
+            if isinstance(metadata.get("analysis_atlas_manifest"), dict)
+            else {}
+        )
+        artifacts.append(
+            {
+                "source": "screenshot_capture",
+                "kind": "visual_analysis_atlas",
+                "status": str(metadata.get("analysis_atlas_status") or ""),
+                "success": True,
+                "provider": str(capture.get("source") or ""),
+                "label": "Atlas usado por el análisis semántico",
+                "screenshot_path": atlas_path,
+                "public_url": _public_screenshot_url(
+                    screenshot_path=atlas_path,
+                    screenshot_url="",
+                ),
+                "panel_count": atlas_manifest.get("panel_count"),
+                "section_panel_count": atlas_manifest.get("section_panel_count"),
+            }
+        )
+
+    manifest = metadata.get("section_manifest") if isinstance(metadata.get("section_manifest"), dict) else {}
+    sections = manifest.get("sections") if isinstance(manifest.get("sections"), list) else []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        section_path = str(section.get("capture_path") or "").strip()
+        if not section_path:
+            continue
+        artifacts.append(
+            {
+                "source": "screenshot_capture",
+                "kind": "section_screenshot",
+                "status": "captured",
+                "success": True,
+                "provider": str(capture.get("source") or ""),
+                "section_id": str(section.get("id") or ""),
+                "label": str(section.get("label") or ""),
+                "section_kind": str(section.get("kind") or "section"),
+                "bbox": dict(section.get("bbox") or {}) if isinstance(section.get("bbox"), dict) else {},
+                "capture_variant": str(section.get("capture_variant") or manifest.get("capture_variant") or ""),
+                "screenshot_path": section_path,
+                "public_url": _public_screenshot_url(screenshot_path=section_path, screenshot_url=""),
+            }
+        )
+    return [artifact for artifact in artifacts if artifact]
+
+
 def _public_screenshot_url(*, screenshot_path: str, screenshot_url: str) -> str:
     from pathlib import Path
     from urllib.parse import urlparse
+    from src.config import BRAND3_SCREENSHOT_DIR
 
     candidate = screenshot_path
     if not candidate and screenshot_url.startswith("file://"):
@@ -976,7 +1132,7 @@ def _public_screenshot_url(*, screenshot_path: str, screenshot_url: str) -> str:
         return ""
     try:
         path = Path(candidate).resolve()
-        root = Path("data/screenshots").resolve()
+        root = Path(BRAND3_SCREENSHOT_DIR).resolve()
         path.relative_to(root)
     except Exception:
         return ""

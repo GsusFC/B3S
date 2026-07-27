@@ -77,7 +77,7 @@
           {% for row in scan.acquisition %}
           <tr>
             <td class="mono">{{ row.source }}</td>
-            <td>{{ ui.acquisition_status_tag(row.source, row.status, row.detail) }}</td>
+            <td>{{ ui.acquisition_status_tag(row.source, row.status, row.evidence_status|default(""), row.first_fold_evaluable|default(none)) }}</td>
             <td class="muted">{{ row.detail }}</td>
           </tr>
           {% endfor %}
@@ -124,31 +124,36 @@ function esc(value) {
   return div.innerHTML;
 }
 
-function visualAcquisitionIsLimited(source, status, detail) {
+function visualAcquisitionIsLimited(source, status, evidenceStatus, firstFoldEvaluable) {
   const normalizedSource = String(source || "");
   const normalizedStatus = String(status || "").toLowerCase();
-  const normalizedDetail = String(detail || "").toLowerCase();
+  const normalizedEvidenceStatus = String(evidenceStatus || "").toLowerCase();
   if (normalizedSource !== "visual_acquisition") return false;
-  if (["blocked", "limited", "not_interpretable"].includes(normalizedStatus)) return true;
-  return normalizedStatus === "completed" && normalizedDetail.includes("blocked");
+  if (["error", "failed", "timeout", "acquisition_failed"].includes(normalizedStatus)) return true;
+  if (["blocked", "limited", "missing", "not_interpretable", "unavailable"].includes(normalizedEvidenceStatus)) return true;
+  return firstFoldEvaluable === false;
 }
 
-function displayStatusValue(value, source, detail) {
-  return visualAcquisitionIsLimited(source, value, detail) ? "limited" : value;
+function displayStatusValue(value, source, evidenceStatus, firstFoldEvaluable) {
+  if (visualAcquisitionIsLimited(source, value, evidenceStatus, firstFoldEvaluable)) return "limited";
+  if (String(source || "") === "visual_acquisition" && evidenceStatus) return evidenceStatus;
+  return value;
 }
 
-function statusTone(value, source, detail) {
-  if (visualAcquisitionIsLimited(source, value, detail)) return "warn";
-  const normalized = String(value || "").toLowerCase();
+function statusTone(value, source, evidenceStatus, firstFoldEvaluable) {
+  if (visualAcquisitionIsLimited(source, value, evidenceStatus, firstFoldEvaluable)) return "warn";
+  const normalized = String(
+    String(source || "") === "visual_acquisition" && evidenceStatus ? evidenceStatus : value
+  ).toLowerCase();
   if (okStatuses.has(normalized)) return "ok";
   if (badStatuses.has(normalized)) return "bad";
   if (warnStatuses.has(normalized)) return "warn";
   return "neutral";
 }
 
-function statusTag(value, source = "", detail = "") {
-  const displayValue = displayStatusValue(value, source, detail);
-  const tone = statusTone(value, source, detail);
+function statusTag(value, source = "", evidenceStatus = "", firstFoldEvaluable = null) {
+  const displayValue = displayStatusValue(value, source, evidenceStatus, firstFoldEvaluable);
+  const tone = statusTone(value, source, evidenceStatus, firstFoldEvaluable);
   return `<span class="status-tag status-tag--${tone} status-tag--filled">${esc(displayValue)}</span>`;
 }
 
@@ -166,7 +171,7 @@ async function poll() {
   if (acquisition.length) {
     document.getElementById("acquisition").innerHTML = acquisition
       .map(row => `<tr><td class="mono">${esc(row.source)}</td>` +
-        `<td>${statusTag(row.status, row.source, row.detail)}</td>` +
+        `<td>${statusTag(row.status, row.source, row.evidence_status, row.first_fold_evaluable)}</td>` +
         `<td class="muted">${esc(row.detail)}</td></tr>`)
       .join("");
   }
@@ -224,7 +229,10 @@ function renderGate(gate, scanState) {
 
 function compactGateMessage(item) {
   if (item.source === "visual_acquisition") {
-    return "No se pudo validar la primera pantalla visual.";
+    if (item.first_fold_evaluable === false || item.evidence_status === "blocked") {
+      return "La primera pantalla visual está obstruida o no es evaluable.";
+    }
+    return "La captación visual no produjo evidencia utilizable.";
   }
   if (item.source === "web") {
     return "La captura web no produjo evidencia suficiente.";

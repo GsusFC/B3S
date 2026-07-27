@@ -56,6 +56,20 @@ def test_build_multimodal_payload_uses_openai_compatible_image_url_block():
     assert payload["response_format"] == {"type": "json_object"}
 
 
+def test_multimodal_atlas_prompt_separates_first_viewport_from_page_sections():
+    payload = multimodal_analyzer.build_multimodal_payload(
+        encoded_image="ZmFrZS1pbWFnZQ==",
+        mime_type="image/png",
+        brand_name="Example Brand",
+        analysis_scope="labeled_section_atlas",
+    )
+
+    prompt = payload["messages"][0]["content"][0]["text"]
+    assert "FIRST VIEWPORT is the only basis for first impression" in prompt
+    assert "SECTION panels are additional whole-page evidence" in prompt
+    assert "gray gutters are audit scaffolding" in prompt
+
+
 def test_analyze_visual_semantics_encodes_image_and_normalizes_success(tmp_path, monkeypatch):
     screenshot = tmp_path / "screen.png"
     screenshot.write_bytes(b"brand3 image bytes")
@@ -205,3 +219,64 @@ def test_extract_visual_signature_passes_resolved_local_screenshot(monkeypatch, 
     )
 
     assert result["semantics"] == expected
+
+
+def test_extract_visual_signature_prefers_section_atlas_for_semantics(monkeypatch, tmp_path):
+    extract_module = importlib.import_module("src.visual_signature.extract_visual_signature")
+    viewport = tmp_path / "screen.png"
+    atlas = tmp_path / "screen.analysis-atlas.png"
+    viewport.write_bytes(b"viewport")
+    atlas.write_bytes(b"atlas")
+    captured: dict[str, object] = {}
+
+    def fake_analyze_visual_semantics(*, screenshot_path, brand_name):
+        captured["screenshot_path"] = screenshot_path
+        captured["brand_name"] = brand_name
+        return multimodal_analyzer.fallback_semantics(None)
+
+    monkeypatch.setattr(extract_module, "analyze_visual_semantics", fake_analyze_visual_semantics)
+
+    extract_module.extract_visual_signature(
+        brand_name="Example Brand",
+        website_url="https://example.com",
+        screenshot_payload={
+            "path": str(viewport),
+            "analysis_atlas_path": str(atlas),
+        },
+        adapter=FixtureAdapter(),
+    )
+
+    assert captured == {
+        "screenshot_path": str(atlas),
+        "brand_name": "Example Brand",
+    }
+
+
+def test_atlas_semantics_reports_labeled_section_scope(tmp_path, monkeypatch):
+    atlas = tmp_path / "fixture.analysis-atlas.png"
+    atlas.write_bytes(b"atlas bytes")
+    monkeypatch.setattr(multimodal_analyzer, "BRAND3_LLM_API_KEY", "test-key")
+    monkeypatch.setattr(
+        multimodal_analyzer,
+        "_run_llm_http_call",
+        lambda **_kwargs: (
+            "ok",
+            json.dumps(
+                {
+                    "aesthetic_style": "editorial",
+                    "visual_mood": "confident",
+                    "visual_polish_score": 8,
+                    "visual_polish_rationale": "Consistent sections.",
+                }
+            ),
+        ),
+    )
+
+    result = multimodal_analyzer.analyze_visual_semantics(
+        screenshot_path=str(atlas),
+        brand_name="Example Brand",
+    )
+
+    assert result["status"] == "detected"
+    assert result["audit"]["analysis_scope"] == "labeled_section_atlas"
+    assert result["audit"]["input_kind"] == "labeled_atlas"

@@ -139,7 +139,7 @@ def _visible_obstruction_dom_snapshot(page: Any) -> str:
             if value not in (None, "")
         )
         text = str(row.get("text") or "")
-        parts.append(f"<visible-overlay {attrs}>{text}</visible-overlay>")
+        parts.append(f"<visible-candidate {attrs}>{text}</visible-candidate>")
     if parts:
         return "\n".join(parts)
     return ""

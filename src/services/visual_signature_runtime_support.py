@@ -64,6 +64,33 @@ def build_shadow_bundle(
 ) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
     vision = payload.get("vision") if isinstance(payload.get("vision"), dict) else None
     screenshot = (vision or {}).get("screenshot") if isinstance(vision, dict) else {}
+    section_manifest = (
+        screenshot_payload.get("section_manifest")
+        if isinstance(screenshot_payload, dict) and isinstance(screenshot_payload.get("section_manifest"), dict)
+        else {}
+    )
+    section_rows = (
+        section_manifest.get("sections")
+        if isinstance(section_manifest, dict) and isinstance(section_manifest.get("sections"), list)
+        else []
+    )
+    full_page_path = str(
+        (screenshot_payload or {}).get("full_page_screenshot_path")
+        or (section_manifest or {}).get("full_page_screenshot_path")
+        or ""
+    )
+    section_paths = [
+        str(row.get("capture_path"))
+        for row in section_rows
+        if isinstance(row, dict) and str(row.get("capture_path") or "").strip()
+    ]
+    atlas_path = str((screenshot_payload or {}).get("analysis_atlas_path") or "")
+    atlas_manifest = (
+        screenshot_payload.get("analysis_atlas_manifest")
+        if isinstance(screenshot_payload, dict)
+        and isinstance(screenshot_payload.get("analysis_atlas_manifest"), dict)
+        else {}
+    )
     visual_signature_scan = build_visual_signature_scan(payload)
     visual_signature_evidence = build_visual_signature_evidence_v1(
         payload,
@@ -78,7 +105,14 @@ def build_shadow_bundle(
         brand_name=brand_name,
         website_url=url,
         screenshot_path=(screenshot or {}).get("path") if isinstance(screenshot, dict) else (screenshot_payload or {}).get("path"),
+        secondary_screenshot_path=full_page_path or None,
+        full_page_screenshot_path=full_page_path or None,
+        section_screenshot_paths=section_paths,
+        section_manifest=section_manifest if isinstance(section_manifest, dict) else None,
+        analysis_atlas_path=atlas_path or None,
+        analysis_atlas_manifest=atlas_manifest,
         capture_type=(screenshot or {}).get("capture_type") if isinstance(screenshot, dict) else (screenshot_payload or {}).get("capture_type"),
+        secondary_capture_type="full_page" if full_page_path else None,
         visual_signature_evidence=visual_signature_evidence,
     )
     return vision, screenshot, {

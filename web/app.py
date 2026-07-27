@@ -646,9 +646,11 @@ def health() -> dict[str, str]:
 
 @app.get("/artifacts/screenshots/{filename}")
 def screenshot_artifact(filename: str):
+    from src.config import BRAND3_SCREENSHOT_DIR
+
     safe_name = Path(filename).name
-    path = (Path("data/screenshots") / safe_name).resolve()
-    root = Path("data/screenshots").resolve()
+    root = Path(BRAND3_SCREENSHOT_DIR).resolve()
+    path = (root / safe_name).resolve()
     try:
         path.relative_to(root)
     except ValueError:
@@ -743,8 +745,11 @@ def _scan_preview_status(variant: str) -> dict[str, Any]:
         {"source": "github", "status": "skipped", "detail": "no repository links observed on owned capture"},
         {
             "source": "visual_acquisition",
-            "status": "blocked" if normalized == "blocked" else "limited",
-            "detail": "visual evidence packet blocked by viewport obstruction" if normalized == "blocked" else "screenshot captured; visual semantics limited",
+            "status": "completed",
+            "evidence_status": "blocked" if normalized == "blocked" else "usable",
+            "screenshot_status": "captured",
+            "first_fold_evaluable": normalized != "blocked",
+            "detail": "visual evidence packet blocked by viewport obstruction" if normalized == "blocked" else "screenshot captured; visual evidence usable",
         },
     ]
     gate = {"state": "pass"} if normalized == "running" else {
@@ -756,6 +761,8 @@ def _scan_preview_status(variant: str) -> dict[str, Any]:
                 "code": "visual_acquisition_limited",
                 "severity": "blocker" if normalized == "blocked" else "warning",
                 "status": "blocked" if normalized == "blocked" else "limited",
+                "evidence_status": "blocked" if normalized == "blocked" else "usable",
+                "first_fold_evaluable": normalized != "blocked",
                 "message": "Visual acquisition could not produce a reliable first-fold reading.",
                 "detail": "visual_evidence_packet:blocked; obstruction:viewport_overlay" if normalized == "blocked" else "",
             }

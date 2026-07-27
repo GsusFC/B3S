@@ -57,34 +57,67 @@ Use not_detected for fields where the screenshot does not provide enough evidenc
 Use [] for list fields when there is insufficient evidence.
 Do not infer facts that are not visible in the image."""
 
+ATLAS_INSTRUCTIONS = """
+
+This input is a labeled analysis atlas, not one continuous screenshot.
+- The panel labeled FIRST VIEWPORT is the only basis for first impression,
+  above-the-fold hierarchy, initial CTA salience, and logo prominence.
+- The ordered SECTION panels are additional whole-page evidence for visual
+  coherence, consistency, trust signals, strengths, risks, and absences.
+- Atlas labels and gray gutters are audit scaffolding, not website design.
+- Do not count content repeated between FIRST VIEWPORT and SECTION panels twice.
+"""
+
 
 def analyze_visual_semantics(screenshot_path: str | None, brand_name: str) -> dict[str, Any]:
     """Analyze a local screenshot with Gemini Vision and always return a stable contract."""
+    analysis_scope = (
+        "labeled_section_atlas"
+        if screenshot_path
+        and "analysis-atlas" in Path(screenshot_path).name.lower()
+        else "single_capture"
+    )
     if BRAND3_VISUAL_SIGNATURE_SKIP_MULTIMODAL:
-        return fallback_semantics("multimodal_disabled")
+        return fallback_semantics(
+            "multimodal_disabled",
+            analysis_scope=analysis_scope,
+        )
 
     if not screenshot_path:
         return fallback_semantics("screenshot_path_missing")
 
     path = Path(screenshot_path)
     if not path.exists() or not path.is_file():
-        return fallback_semantics("screenshot_file_not_found")
+        return fallback_semantics(
+            "screenshot_file_not_found",
+            analysis_scope=analysis_scope,
+        )
 
     if not BRAND3_LLM_API_KEY:
-        return fallback_semantics("api_key_missing")
+        return fallback_semantics(
+            "api_key_missing",
+            analysis_scope=analysis_scope,
+        )
 
     try:
         encoded_image = encode_image_base64(path)
     except Exception:
-        return fallback_semantics("screenshot_unreadable")
+        return fallback_semantics(
+            "screenshot_unreadable",
+            analysis_scope=analysis_scope,
+        )
 
     if not encoded_image:
-        return fallback_semantics("screenshot_empty")
+        return fallback_semantics(
+            "screenshot_empty",
+            analysis_scope=analysis_scope,
+        )
 
     body = build_multimodal_payload(
         encoded_image=encoded_image,
         mime_type=_mime_type_for_path(path),
         brand_name=brand_name,
+        analysis_scope=analysis_scope,
     )
 
     try:
@@ -98,22 +131,22 @@ def analyze_visual_semantics(screenshot_path: str | None, brand_name: str) -> di
             timeout_seconds=_multimodal_effective_timeout(),
         )
     except Exception:
-        return fallback_semantics("llm_error")
+        return fallback_semantics("llm_error", analysis_scope=analysis_scope)
 
     if status != "ok":
         error_type = "llm_timeout" if status == "timeout" else "llm_error"
-        return fallback_semantics(error_type)
+        return fallback_semantics(error_type, analysis_scope=analysis_scope)
 
     if not content:
-        return fallback_semantics("empty_response")
+        return fallback_semantics("empty_response", analysis_scope=analysis_scope)
 
     try:
         parsed = json.loads(_strip_json_fence(content))
     except json.JSONDecodeError:
-        return fallback_semantics("json_parse_error")
+        return fallback_semantics("json_parse_error", analysis_scope=analysis_scope)
 
     if not isinstance(parsed, dict):
-        return fallback_semantics("invalid_response")
+        return fallback_semantics("invalid_response", analysis_scope=analysis_scope)
 
     data = normalize_semantics_data(parsed)
     return {
@@ -123,15 +156,22 @@ def analyze_visual_semantics(screenshot_path: str | None, brand_name: str) -> di
         "fallback_used": False,
         "error_type": None,
         "audit": {
-            "analysis_scope": "single_capture",
+            "analysis_scope": analysis_scope,
             "capture_count": 1,
+            "input_kind": "labeled_atlas"
+            if analysis_scope == "labeled_section_atlas"
+            else "screenshot",
             "response_normalized": True,
         },
         "data": data,
     }
 
 
-def fallback_semantics(error_type: str | None) -> dict[str, Any]:
+def fallback_semantics(
+    error_type: str | None,
+    *,
+    analysis_scope: str = "single_capture",
+) -> dict[str, Any]:
     return {
         "status": "unavailable",
         "model": BRAND3_VISUAL_SIGNATURE_MODEL,
@@ -139,8 +179,11 @@ def fallback_semantics(error_type: str | None) -> dict[str, Any]:
         "fallback_used": True,
         "error_type": error_type,
         "audit": {
-            "analysis_scope": "single_capture",
+            "analysis_scope": analysis_scope,
             "capture_count": 1,
+            "input_kind": "labeled_atlas"
+            if analysis_scope == "labeled_section_atlas"
+            else "screenshot",
             "response_normalized": True,
         },
         "data": {
@@ -168,12 +211,22 @@ def encode_image_base64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("utf-8")
 
 
-def build_multimodal_payload(*, encoded_image: str, mime_type: str, brand_name: str) -> dict[str, Any]:
+def build_multimodal_payload(
+    *,
+    encoded_image: str,
+    mime_type: str,
+    brand_name: str,
+    analysis_scope: str = "single_capture",
+) -> dict[str, Any]:
     return _build_multimodal_payload(
         encoded_image=encoded_image,
         mime_type=mime_type,
         brand_name=brand_name,
-        prompt_template=PROMPT_TEMPLATE,
+        prompt_template=(
+            PROMPT_TEMPLATE + ATLAS_INSTRUCTIONS
+            if analysis_scope == "labeled_section_atlas"
+            else PROMPT_TEMPLATE
+        ),
         system_preamble=SYSTEM_PREAMBLE,
     )
 
