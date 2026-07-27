@@ -4,6 +4,8 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CHECKOUT_V7_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+SETUP_PYTHON_V7_SHA = "5fda3b95a4ea91299a34e894583c3862153e4b97"
 
 
 def _read(relative_path: str) -> str:
@@ -37,6 +39,8 @@ def test_deploy_workflow_builds_and_verifies_the_exact_commit():
 def test_github_actions_are_pinned_to_immutable_commits():
     workflows = _read(".github/workflows/ci.yml") + _read(".github/workflows/fly-deploy.yml")
 
+    assert workflows.count(f"actions/checkout@{CHECKOUT_V7_SHA}") == 2
+    assert workflows.count(f"actions/setup-python@{SETUP_PYTHON_V7_SHA}") == 1
     assert "actions/checkout@v4" not in workflows
     assert "actions/setup-python@v5" not in workflows
     assert "setup-flyctl@master" not in workflows
