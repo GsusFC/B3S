@@ -49,10 +49,13 @@ class ExportMarkdownTests(unittest.TestCase):
         return result.to_dict()
 
     def test_header_carries_brand_score_and_model(self):
-        md = build_scan_markdown(self._scan())
+        scan = self._scan()
+        scan["pipeline_commit_sha"] = "e" * 40
+        md = build_scan_markdown(scan)
         self.assertIn("# Brand3 Scanner — Acme", md)
         self.assertIn("Brand3 Score", md)
         self.assertIn("Modelo: v3.1", md)
+        self.assertIn(f"Build: `{'e' * 40}`", md)
         self.assertIn("Confiabilidad:", md)
         self.assertIn("Canonicidad:", md)
 

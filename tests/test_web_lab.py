@@ -344,6 +344,37 @@ def test_brand_view_renders_profile_from_matching_reports(monkeypatch):
     assert "79" in response.text
 
 
+def test_brand_view_repeated_mode_keeps_selected_baseline_visible(monkeypatch):
+    from web.app import _brand_profile
+
+    older = {
+        "id": "baseline",
+        "brand_name": "Example",
+        "url": "https://example.com",
+        "created_at": "2026-07-01T00:00:00Z",
+        "score": 56,
+        "reliability_status": "shadow",
+        "components": [],
+        "raw": {},
+    }
+    newer = {
+        **older,
+        "id": "drifted",
+        "created_at": "2026-07-02T00:00:00Z",
+        "score": 40,
+        "components": [{"key": "value_proposition", "status": "scored", "score": 0}],
+    }
+    monkeypatch.setenv("B3S_CANONICAL_ENFORCEMENT_MODE", "repeated")
+    monkeypatch.setattr("web.app.list_reports_for_domain", lambda _domain: [newer, older])
+
+    profile = _brand_profile("example.com")
+
+    assert profile["current"]["id"] == "baseline"
+    assert profile["current"]["score"] == 56
+    assert profile["latest_attempt"]["id"] == "drifted"
+    assert profile["enforcement_mode"] == "repeated"
+
+
 def test_brand_view_prefers_component_editorial_message(monkeypatch):
     from web.app import app
 
@@ -637,6 +668,36 @@ def test_acquisition_gate_does_not_warn_when_exa_has_external_proof_with_profile
     assert gate["warnings"] == []
 
 
+def test_acquisition_gate_does_not_parse_blocked_reason_for_usable_visual_evidence():
+    from web.scan_runner import _build_acquisition_gate
+
+    gate = _build_acquisition_gate(
+        {
+            "web": {"status": "ok"},
+            "exa": {"status": "ok"},
+            "searchapi": {"status": "ok"},
+            "visual_acquisition": {
+                "status": "completed",
+                "evidence_status": "usable",
+                "screenshot_status": "captured",
+                "first_fold_evaluable": True,
+                "obstruction": {
+                    "present": True,
+                    "type": "unknown_overlay",
+                    "severity": "minor",
+                },
+                "details": {
+                    "reason": "visual_evidence_packet:usable",
+                    "blocked_reason": "obstruction:unknown_overlay; severity:minor",
+                },
+            },
+        }
+    )
+
+    assert gate["state"] == "pass"
+    assert gate["warnings"] == []
+
+
 def test_scan_control_endpoints_delegate_to_runner(monkeypatch):
     from web.app import app
 
@@ -699,7 +760,14 @@ def test_visual_acquisition_rows_include_evidence_packet(monkeypatch):
         content_web={"owned": True},
     )
 
-    assert step == {"status": "completed", "details": {"reason": "visual_evidence_packet:usable"}}
+    assert step == {
+        "status": "completed",
+        "evidence_status": "usable",
+        "screenshot_status": "unknown",
+        "first_fold_evaluable": True,
+        "obstruction": {},
+        "details": {"reason": "visual_evidence_packet:usable"},
+    }
     assert [row["source"] for row in rows] == ["screenshot_capture", "visual_acquisition"]
     assert rows[1]["payload"]["visual_evidence_packet"] == evidence
     assert rows[1]["payload"]["visual_signature_evidence"] == evidence
@@ -846,7 +914,7 @@ def test_acquisition_artifacts_include_screenshot_and_visual_obstruction(tmp_pat
     screenshot_dir.mkdir(parents=True)
     screenshot = screenshot_dir / "brand3-screenshot-test.png"
     screenshot.write_bytes(b"png")
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("src.config.BRAND3_SCREENSHOT_DIR", str(screenshot_dir))
 
     artifacts = _acquisition_artifacts_from_snapshot(
         {
@@ -889,6 +957,87 @@ def test_acquisition_artifacts_include_screenshot_and_visual_obstruction(tmp_pat
     assert artifacts[0]["metadata"]["title"] == "Stabolut"
     assert artifacts[1]["status"] == "blocked"
     assert artifacts[1]["obstruction"]["type"] == "cookie_modal"
+
+
+def test_acquisition_artifacts_include_full_page_and_section_captures(tmp_path, monkeypatch):
+    from web.scan_runner import _acquisition_artifacts_from_snapshot
+
+    screenshot_dir = tmp_path / "data" / "screenshots"
+    screenshot_dir.mkdir(parents=True)
+    viewport = screenshot_dir / "capture.png"
+    full_page = screenshot_dir / "capture.full-page.png"
+    section = screenshot_dir / "capture.section-01-hero.png"
+    atlas = screenshot_dir / "capture.analysis-atlas.png"
+    for path in (viewport, full_page, section, atlas):
+        path.write_bytes(b"png")
+    monkeypatch.setattr("src.config.BRAND3_SCREENSHOT_DIR", str(screenshot_dir))
+
+    artifacts = _acquisition_artifacts_from_snapshot(
+        {
+            "raw_inputs": [
+                {
+                    "source": "screenshot_capture",
+                    "payload": {
+                        "capture": {
+                            "status": "captured",
+                            "success": True,
+                            "source": "playwright",
+                            "screenshot_path": str(viewport),
+                            "screenshot_url": viewport.as_uri(),
+                            "metadata": {
+                                "full_page_screenshot_path": str(full_page),
+                                "section_capture_status": "complete",
+                                "section_manifest": {
+                                    "capture_variant": "raw_viewport",
+                                    "sections": [
+                                        {
+                                            "id": "section-01-hero",
+                                            "label": "Hero",
+                                            "kind": "hero",
+                                            "capture_variant": "raw_viewport",
+                                            "bbox": {"left": 0, "top": 0, "width": 1440, "height": 900},
+                                            "capture_path": str(section),
+                                        }
+                                    ],
+                                },
+                                "analysis_atlas_path": str(atlas),
+                                "analysis_atlas_status": "complete",
+                                "analysis_atlas_manifest": {
+                                    "panel_count": 2,
+                                    "section_panel_count": 1,
+                                },
+                            },
+                        }
+                    },
+                }
+            ]
+        }
+    )
+
+    assert [artifact["kind"] for artifact in artifacts] == [
+        "screenshot",
+        "full_page_screenshot",
+        "visual_analysis_atlas",
+        "section_screenshot",
+    ]
+    assert artifacts[1]["public_url"] == f"/artifacts/screenshots/{full_page.name}"
+    assert artifacts[2]["public_url"] == f"/artifacts/screenshots/{atlas.name}"
+    assert artifacts[2]["section_panel_count"] == 1
+    assert artifacts[3]["public_url"] == f"/artifacts/screenshots/{section.name}"
+    assert artifacts[3]["section_id"] == "section-01-hero"
+
+
+def test_screenshot_artifact_uses_configured_persistent_root(tmp_path, monkeypatch):
+    from web.app import app
+
+    screenshot = tmp_path / "brand3-screenshot-volume.png"
+    screenshot.write_bytes(b"png")
+    monkeypatch.setattr("src.config.BRAND3_SCREENSHOT_DIR", str(tmp_path))
+
+    response = TestClient(app).get(f"/artifacts/screenshots/{screenshot.name}")
+
+    assert response.status_code == 200
+    assert response.content == b"png"
 
 
 def test_capture_snapshot_adds_visual_acquisition_raw_input(monkeypatch):
@@ -1034,6 +1183,8 @@ def test_scan_view_marks_blocked_visual_packet_as_limited_warning(monkeypatch):
                 {
                     "source": "visual_acquisition",
                     "status": "completed",
+                    "evidence_status": "blocked",
+                    "first_fold_evaluable": False,
                     "detail": "visual_evidence_packet:blocked; blocked_reason: obstruction:cookie_modal",
                 }
             ],
@@ -1219,7 +1370,7 @@ def test_report_view_hides_automatic_verdict_from_card_without_tile_profile(monk
     assert "0/10 baldosas encendidas" not in response.text
 
 
-def test_compose_report_preserves_canonical_sv9_tile_profile():
+def test_compose_report_preserves_canonical_sv9_tile_profile(monkeypatch):
     from src.sv9.rubric import tile_ids
     from web.scan_runner import _compose_report
 
@@ -1280,9 +1431,11 @@ def test_compose_report_preserves_canonical_sv9_tile_profile():
         },
     }
 
+    monkeypatch.setenv("B3S_BUILD_SHA", "c" * 40)
     report = _compose_report("scan123", "https://optiak.com", "Optiak", payload)
     magnetism = next(component for component in report["components"] if component["key"] == "magnetism")
 
+    assert report["pipeline_commit_sha"] == "c" * 40
     assert len(magnetism["tile_profile"]) == 10
     assert magnetism["lit"] == 3
     assert magnetism["off"] == 1

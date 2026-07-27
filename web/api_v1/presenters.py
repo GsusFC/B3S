@@ -110,6 +110,16 @@ def result_payload(report: dict[str, Any]) -> dict[str, Any]:
     limitations = [item for item in limitations if item]
     not_detected = [_string_value(item) for item in report.get("not_detected") or []]
     not_detected = [item for item in not_detected if item]
+    insufficient_evidence = []
+    for component in report.get("components") or []:
+        if not isinstance(component, dict):
+            continue
+        block = component.get("block") if isinstance(component.get("block"), dict) else {}
+        if str(block.get("coverage_status") or "") != "insufficient_acquisition":
+            continue
+        key = str(component.get("key") or component.get("component") or "").strip()
+        if key and key not in insufficient_evidence:
+            insufficient_evidence.append(key)
     return {
         "object": "scan_result",
         "api_version": "v1",
@@ -128,6 +138,7 @@ def result_payload(report: dict[str, Any]) -> dict[str, Any]:
         "detected_count": int(report.get("detected_count") or 0),
         "component_count": len(components),
         "not_detected": not_detected,
+        "insufficient_evidence": insufficient_evidence,
         "limitations": limitations,
         "acquisition_summary": (
             dict(report.get("coverage_acquisition"))
@@ -137,9 +148,13 @@ def result_payload(report: dict[str, Any]) -> dict[str, Any]:
         "acquisition_gate": (
             dict(report.get("acquisition_gate")) if isinstance(report.get("acquisition_gate"), dict) else {}
         ),
+        "stability": (
+            dict(report.get("stability")) if isinstance(report.get("stability"), dict) else {}
+        ),
         "metadata": {
             "schema_version": "b3s-scanner-result-v1",
             "pipeline_schema_version": str(raw.get("schema_version") or "unknown"),
+            "pipeline_commit_sha": str(report.get("pipeline_commit_sha") or "unknown"),
             "rubric_version": str(sv9_result.get("rubric_version") or "unknown"),
             "prompt_version": str(debug.get("prompt_version") or "unknown"),
             "evaluator_model": evaluator_model or "unknown",

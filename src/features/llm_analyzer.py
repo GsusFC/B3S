@@ -106,7 +106,7 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
         if not self.api_key:
             return ""
 
-        cache_key = self._cache_key("text", system, user, max_tokens)
+        cache_key = self._cache_key("text", system, user, max_tokens, temperature=0.1)
         cached = self._cache_get(cache_key, "text")
         if cached is not None:
             self._clear_failure()
@@ -194,7 +194,17 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
             return {}
 
         normalized_schema_name = schema_name if json_schema else None
-        cache_key = self._cache_key("json", system, user, max_tokens, schema_name=normalized_schema_name)
+        effective_temperature = 0.1 if temperature is None else float(temperature)
+        cache_key = self._cache_key(
+            "json",
+            system,
+            user,
+            max_tokens,
+            schema_name=normalized_schema_name,
+            temperature=effective_temperature,
+            json_schema=json_schema,
+            strict_schema=strict_schema,
+        )
         cached = self._cache_get(cache_key, "json")
         if cached is not None:
             self._clear_failure()
@@ -215,7 +225,7 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
                 {"role": "user", "content": user},
             ],
             "max_tokens": max_tokens,
-            "temperature": 0.1 if temperature is None else temperature,
+            "temperature": effective_temperature,
             "response_format": _json_response_format(
                 json_schema=json_schema,
                 schema_name=schema_name,
@@ -370,6 +380,9 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
             user,
             max_tokens,
             schema_name=schema_name or "brand3_json_response",
+            temperature=0.0,
+            json_schema=json_schema,
+            strict_schema=True,
         )
         cached = self._cache_get(cache_key, "json")
         if cached is not None:

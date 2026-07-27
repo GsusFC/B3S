@@ -110,7 +110,10 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture() -> N
 
     repository = PostgresHistoryRepository(dsn)
     try:
-        assert repository.migrate() == ["001_history_v1.sql"]
+        assert repository.migrate() == [
+            "001_history_v1.sql",
+            "002_evidence_stability.sql",
+        ]
         assert repository.migrate() == []
 
         older = _report("scan-older", "2026-07-01T08:00:00Z", score=61)
@@ -149,6 +152,9 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture() -> N
             "component_evaluations": 2,
             "tile_verdicts": 2,
             "report_snapshots": 2,
+            "capture_fingerprints": 2,
+            "evaluation_comparisons": 2,
+            "brand_canonical_selections": 1,
         }
 
         concurrent = _report("scan-concurrent", "2026-07-03T08:00:00Z", score=79)

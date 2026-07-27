@@ -149,6 +149,9 @@ class _LLMAnalyzerRuntime:
         max_tokens: int,
         *,
         schema_name: str | None = None,
+        temperature: float = 0.1,
+        json_schema: dict[str, Any] | None = None,
+        strict_schema: bool = True,
     ) -> str:
         payload = {
             "prompt_version": PROMPT_VERSION,
@@ -158,7 +161,9 @@ class _LLMAnalyzerRuntime:
             "system": system,
             "user": user,
             "max_tokens": max_tokens,
-            "temperature": 0.1,
+            "temperature": float(temperature),
+            "json_schema": json_schema or {},
+            "strict_schema": bool(strict_schema),
         }
         return _llm_support._llm_cache_digest(payload)
 

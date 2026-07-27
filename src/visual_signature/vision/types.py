@@ -215,6 +215,7 @@ class VisionEvidence:
     viewport_composition: VisionCompositionEvidence | None = None
     viewport_confidence: VisionConfidence | None = None
     viewport_obstruction: dict[str, object] | None = None
+    section_analysis: dict[str, object] | None = None
     version: Literal["vision-enrichment-mvp-1"] = "vision-enrichment-mvp-1"
 
     def to_dict(self) -> dict:

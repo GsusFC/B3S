@@ -121,7 +121,16 @@ The result contract (`b3s-scanner-result-v1`) contains:
 - Tile summaries and per-tile outcomes.
 - Evidence references, not raw acquisition blobs.
 - Acquisition coverage, limitations, and gate state.
+- Scan-time evidence-stability classification and reason codes.
 - Pipeline, rubric, prompt, and evaluator metadata.
+
+When acquisition did not cover a component sufficiently, the result exposes
+that state explicitly in `insufficient_evidence` (for example,
+`["values"]`). This list is separate from `not_detected`: an item in
+`not_detected` means the available evidence did not support the component,
+whereas an item in `insufficient_evidence` means the scanner could not acquire
+enough reliable evidence to make that claim. The component drawer and
+`acquisition_summary` retain the detailed coverage status and diagnostics.
 
 Evidence is a separate resource because clients often need citations without
 the full editorial result. It exposes normalized references, verified absences,
@@ -134,7 +143,12 @@ GET /api/v1/brands/{domain}/scans?limit=20&offset=0
 ```
 
 This returns completed immutable reports for the normalized domain, newest
-first, with bounded offset pagination.
+first, with bounded offset pagination. Each item includes `reliability_status`,
+`canonical_status`, `stability_classification`, and
+`stability_reason_codes`. The list envelope includes
+`canonical_report_id`, `provisional_report_id`, and `selected_report_id`.
+Those fields are a current derived projection over immutable scans; they can
+change when a later scan supplies comparison evidence.
 
 ## Errors
 

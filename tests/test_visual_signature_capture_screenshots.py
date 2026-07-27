@@ -711,7 +711,7 @@ class _FakeSnapshotPage:
         return "<html>fallback cookie modal</html>"
 
 
-def test_visible_obstruction_dom_snapshot_serializes_visible_overlay_rows():
+def test_visible_obstruction_dom_snapshot_serializes_visible_candidate_rows():
     capturer = _load_capturer()
     page = _FakeSnapshotPage(
         [
@@ -735,7 +735,7 @@ def test_visible_obstruction_dom_snapshot_serializes_visible_overlay_rows():
 
     snapshot = capturer._visible_obstruction_dom_snapshot(page)
 
-    assert "visible-overlay" in snapshot
+    assert "visible-candidate" in snapshot
     assert "cookie-banner" in snapshot
     assert "Accept All Reject All" in snapshot
 

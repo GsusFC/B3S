@@ -14,6 +14,11 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from src.build_info import current_build_sha
+from src.services.scanner_evidence_comparison import (
+    canonical_enforcement_mode,
+    selected_report_for_display,
+)
 from web.api_v1 import install_scanner_api
 from web.report_store import domain_key, list_reports, list_reports_for_domain, load_report
 from web.report_view_model import build_report_view_model
@@ -68,9 +73,12 @@ def _component_display_text(component: dict[str, Any], *, prefer_summary: bool =
 
 
 def _brand_profile(domain: str) -> dict:
-    reports = list_reports_for_domain(domain)
-    reports = [_sanitize_report_language(report) for report in reports]
-    current = reports[0] if reports else None
+    raw_reports = list_reports_for_domain(domain)
+    selected, classified_reports, history_state = selected_report_for_display(raw_reports)
+    reports = [_sanitize_report_language(report) for report in classified_reports]
+    selected_id = str((selected or {}).get("id") or "")
+    current = next((report for report in reports if str(report.get("id") or "") == selected_id), None)
+    latest_attempt = reports[0] if reports else None
     normalized_domain = domain_key(domain) or domain
 
     components = list((current or {}).get("components") or [])
@@ -90,7 +98,10 @@ def _brand_profile(domain: str) -> dict:
         "display_name": (current or {}).get("brand_name") or normalized_domain,
         "url": (current or {}).get("url") or f"https://{normalized_domain}",
         "current": current,
+        "latest_attempt": latest_attempt,
         "reports": reports,
+        "history_state": history_state,
+        "enforcement_mode": canonical_enforcement_mode(),
         "summary": _component_display_text(purpose, prefer_summary=True) or _component_display_text(value, prefer_summary=True),
         "outcome": _component_display_text(value) or _component_display_text(purpose),
         "proof_urls": proof_urls[:6],
@@ -311,6 +322,7 @@ def _scan_payload_for_markdown(report: dict[str, Any]) -> dict[str, Any]:
     result.setdefault("brand_name", report.get("brand_name"))
     result.setdefault("url", report.get("url"))
     result.setdefault("brand3_score", report.get("score"))
+    result.setdefault("pipeline_commit_sha", report.get("pipeline_commit_sha") or "unknown")
     return result
 
 
@@ -631,14 +643,16 @@ def _overall_api_status(services: list[dict[str, Any]]) -> str:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "commit_sha": current_build_sha()}
 
 
 @app.get("/artifacts/screenshots/{filename}")
 def screenshot_artifact(filename: str):
+    from src.config import BRAND3_SCREENSHOT_DIR
+
     safe_name = Path(filename).name
-    path = (Path("data/screenshots") / safe_name).resolve()
-    root = Path("data/screenshots").resolve()
+    root = Path(BRAND3_SCREENSHOT_DIR).resolve()
+    path = (root / safe_name).resolve()
     try:
         path.relative_to(root)
     except ValueError:
@@ -733,8 +747,11 @@ def _scan_preview_status(variant: str) -> dict[str, Any]:
         {"source": "github", "status": "skipped", "detail": "no repository links observed on owned capture"},
         {
             "source": "visual_acquisition",
-            "status": "blocked" if normalized == "blocked" else "limited",
-            "detail": "visual evidence packet blocked by viewport obstruction" if normalized == "blocked" else "screenshot captured; visual semantics limited",
+            "status": "completed",
+            "evidence_status": "blocked" if normalized == "blocked" else "usable",
+            "screenshot_status": "captured",
+            "first_fold_evaluable": normalized != "blocked",
+            "detail": "visual evidence packet blocked by viewport obstruction" if normalized == "blocked" else "screenshot captured; visual evidence usable",
         },
     ]
     gate = {"state": "pass"} if normalized == "running" else {
@@ -746,6 +763,8 @@ def _scan_preview_status(variant: str) -> dict[str, Any]:
                 "code": "visual_acquisition_limited",
                 "severity": "blocker" if normalized == "blocked" else "warning",
                 "status": "blocked" if normalized == "blocked" else "limited",
+                "evidence_status": "blocked" if normalized == "blocked" else "usable",
+                "first_fold_evaluable": normalized != "blocked",
                 "message": "Visual acquisition could not produce a reliable first-fold reading.",
                 "detail": "visual_evidence_packet:blocked; obstruction:viewport_overlay" if normalized == "blocked" else "",
             }

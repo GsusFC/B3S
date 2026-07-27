@@ -18,6 +18,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from src.history.models import ReportConflictError
+from src.services.scanner_evidence_comparison import (
+    annotate_report_history,
+    selected_report_for_display,
+)
 
 
 _LOG = logging.getLogger(__name__)
@@ -181,6 +185,22 @@ def list_reports_for_domain(domain: str) -> list[dict[str, Any]]:
     matches = list(matches_by_id.values())
     matches.sort(key=lambda report: str(report.get("created_at") or ""), reverse=True)
     return matches
+
+
+def classified_reports_for_domain(domain: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Return immutable reports with a derived temporal-stability projection."""
+
+    return annotate_report_history(list_reports_for_domain(domain))
+
+
+def current_report_for_domain(
+    domain: str,
+    *,
+    mode: str | None = None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any]]:
+    """Select the visible canonical/provisional report for one brand."""
+
+    return selected_report_for_display(list_reports_for_domain(domain), mode=mode)
 
 
 def _summary_row(report: dict[str, Any], *, fallback_id: str = "") -> dict[str, Any]:

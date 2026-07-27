@@ -39,6 +39,15 @@ def test_api_key_pool_round_robin_is_thread_safe_and_redacted():
     assert "secret" not in repr(pool)
 
 
+def test_api_key_pool_skips_quarantined_provider_key():
+    pool = ApiKeyPool(("key-a", "key-b"))
+    pool.quarantine("key-a", cooldown_seconds=60)
+
+    assert pool.next_key() == "key-b"
+    pool.quarantine("key-b", cooldown_seconds=60)
+    assert pool.next_key() == ""
+
+
 def test_exa_retries_with_next_key(monkeypatch):
     used_keys: list[str] = []
 

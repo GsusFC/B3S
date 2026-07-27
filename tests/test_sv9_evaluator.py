@@ -580,6 +580,41 @@ class EvaluateCoherenciaTests(unittest.TestCase):
         self.assertIn("Síntesis automática", result.veredicto)
         self.assertIn("2/10 baldosas encendidas", result.veredicto)
 
+    def test_coherencia_preserves_valid_tiles_when_corrective_retry_is_invalid(self):
+        class ValidThenInvalidLLM(FakeLLM):
+            def __init__(self):
+                super().__init__(ok_up_to=6)
+                self.attempt = 0
+
+            def _call_json(self, system, user, max_tokens=8000, **kwargs):
+                self.calls.append({"user": user, "schema_name": kwargs.get("schema_name")})
+                self.attempt += 1
+                if self.attempt == 2:
+                    return {}
+                ids = self._tiles_for(kwargs.get("schema_name"))
+                return {
+                    "baldosas": [
+                        {
+                            "id": tile_id,
+                            "estado": "ok" if index < 6 else "sin_evidencia",
+                            "evidencia": "evidencia literal" if index < 6 else "",
+                            "motivo": "" if index < 6 else "captura insuficiente",
+                        }
+                        for index, tile_id in enumerate(ids)
+                    ]
+                }
+
+        llm = ValidThenInvalidLLM()
+        result = evaluate_coherencia(
+            components={}, tldr=full_tldr(), signals=[], brand_name="Acme", url="u", llm=llm
+        )
+
+        self.assertEqual(llm.attempt, 2)
+        self.assertEqual(result.status, STATUS_SCORED)
+        self.assertEqual(result.score, 6)
+        self.assertEqual(len(result.tile_profile), 10)
+        self.assertIn("Síntesis automática", result.veredicto)
+
 
 class EvaluateSnapshotComponentsTests(unittest.TestCase):
     def test_full_pass_yields_ten_components(self):

@@ -192,6 +192,27 @@ def test_evidence_worker_chunks_one_page_site_without_subpage_marker() -> None:
     assert any("We value direct evidence" in record.content for record in pack.evidence)
 
 
+def test_evidence_worker_prioritizes_late_homepage_values_section() -> None:
+    sections = ["# Hero\nOpening copy."]
+    sections.extend(f"## Product {index}\nProduct detail." for index in range(1, 12))
+    sections.append("## Valores\nAcreditamos en salud, consistencia y confianza.")
+    markdown = "\n\n".join(sections)
+
+    pack = build_evidence_pack_from_snapshot(
+        {
+            "run": {"brand_name": "Movyn", "url": "https://movyn.ai"},
+            "raw_inputs": [
+                {"source": "web", "payload": {"url": "https://movyn.ai", "markdown_content": markdown}}
+            ],
+        }
+    )
+
+    values = [record for record in pack.evidence if "Acreditamos en salud" in record.content]
+    assert values
+    assert not any(record.evidence_type == "acquisition.attempt.strategic_surfaces" for record in pack.evidence)
+    assert any(record.evidence_type == "acquisition.evidence_sampling" for record in pack.evidence)
+
+
 def test_evidence_worker_keeps_short_homepage_record_unchanged() -> None:
     pack = build_evidence_pack_from_snapshot(
         {

@@ -14,6 +14,11 @@ from psycopg.types.json import Jsonb
 
 from src.history.models import HistoricalReport, ImportOutcome, ReportConflictError
 from src.history.report_parser import canonical_json_bytes, normalize_domain, parse_report
+from src.services.scanner_evidence_comparison import (
+    CANONICAL_POLICY_VERSION,
+    annotate_report_history,
+    build_evidence_snapshot,
+)
 
 _ID_NAMESPACE = UUID("3ef1b80c-e7b7-4fb3-95ad-fb9e03c59d52")
 _SCHEMA = "b3s_history"
@@ -112,6 +117,11 @@ class PostgresHistoryRepository:
                     raise ReportConflictError(
                         f"report {parsed.source_report_id} already exists with different content"
                     )
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(%s)",
+                    (_advisory_lock_key(workspace_id, "brand", existing["brand_id"]),),
+                )
+                self._rebuild_brand_stability(conn, workspace_id, existing["brand_id"])
                 return ImportOutcome(
                     source_report_id=parsed.source_report_id,
                     status="unchanged",
@@ -122,6 +132,10 @@ class PostgresHistoryRepository:
                 )
 
             brand_id = self._upsert_brand(conn, workspace_id, parsed)
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_advisory_lock_key(workspace_id, "brand", brand_id),),
+            )
             scan_run_id = _stable_uuid(workspace_id, "scan", parsed.source_report_id)
             capture_id = _stable_uuid(scan_run_id, "capture")
             evaluation_run_id = _stable_uuid(capture_id, "evaluation", parsed.source_report_id)
@@ -150,6 +164,7 @@ class PostgresHistoryRepository:
                 evaluation_run_id,
                 parsed,
             )
+            self._rebuild_brand_stability(conn, workspace_id, brand_id)
             return ImportOutcome(
                 source_report_id=parsed.source_report_id,
                 status="imported",
@@ -375,6 +390,9 @@ class PostgresHistoryRepository:
             "component_evaluations",
             "tile_verdicts",
             "report_snapshots",
+            "capture_fingerprints",
+            "evaluation_comparisons",
+            "brand_canonical_selections",
         )
         with self._connect() as conn:
             return {
@@ -788,6 +806,144 @@ class PostgresHistoryRepository:
             )
 
     @staticmethod
+    def _rebuild_brand_stability(conn, workspace_id: UUID, brand_id: UUID) -> None:
+        """Recompute the derived canonical projection without mutating snapshots."""
+
+        rows = conn.execute(
+            f"""
+            SELECT report_snapshots.source_report_id,
+                   report_snapshots.payload,
+                   evaluation_runs.id AS evaluation_run_id,
+                   captures.id AS capture_id
+            FROM {_SCHEMA}.report_snapshots
+            JOIN {_SCHEMA}.evaluation_runs
+              ON evaluation_runs.id = report_snapshots.evaluation_run_id
+            JOIN {_SCHEMA}.captures
+              ON captures.id = evaluation_runs.capture_id
+            WHERE report_snapshots.workspace_id = %s
+              AND captures.brand_id = %s
+            ORDER BY report_snapshots.created_at, report_snapshots.source_report_id
+            """,
+            (workspace_id, brand_id),
+        ).fetchall()
+        reports = [dict(row["payload"]) for row in rows if isinstance(row["payload"], dict)]
+        if not reports:
+            conn.execute(
+                f"DELETE FROM {_SCHEMA}.brand_canonical_selections WHERE brand_id = %s",
+                (brand_id,),
+            )
+            return
+
+        _annotated, state = annotate_report_history(reports)
+        entry_by_id = {
+            str(entry.get("report_id") or ""): entry
+            for entry in state.get("entries") or []
+            if isinstance(entry, dict)
+        }
+        row_by_report_id = {str(row["source_report_id"]): row for row in rows}
+
+        for report in reports:
+            report_id = str(report.get("id") or "")
+            row = row_by_report_id.get(report_id)
+            entry = entry_by_id.get(report_id)
+            if row is None or entry is None:
+                continue
+            snapshot = build_evidence_snapshot(report)
+            snapshot_payload = snapshot.to_dict()
+            conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.capture_fingerprints (
+                    capture_id, schema_version, material_fingerprint,
+                    semantic_fingerprint, component_fingerprints,
+                    acquisition_profile, computed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, now())
+                ON CONFLICT (capture_id) DO UPDATE SET
+                    schema_version = EXCLUDED.schema_version,
+                    material_fingerprint = EXCLUDED.material_fingerprint,
+                    semantic_fingerprint = EXCLUDED.semantic_fingerprint,
+                    component_fingerprints = EXCLUDED.component_fingerprints,
+                    acquisition_profile = EXCLUDED.acquisition_profile,
+                    computed_at = now()
+                """,
+                (
+                    row["capture_id"],
+                    snapshot_payload["schema_version"],
+                    snapshot.fingerprint,
+                    snapshot.semantic_fingerprint,
+                    _jsonb(snapshot.component_fingerprints),
+                    _jsonb(
+                        {
+                            "counts": snapshot_payload["counts"],
+                            "acquisition": snapshot_payload["acquisition"],
+                            "reliability_status": snapshot.reliability_status,
+                            "invalid": snapshot.invalid,
+                        }
+                    ),
+                ),
+            )
+            baseline_id = _comparison_report_id(entry.get("baseline_comparison"), "baseline_report_id")
+            previous_id = _comparison_report_id(entry.get("previous_comparison"), "baseline_report_id")
+            conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evaluation_comparisons (
+                    evaluation_run_id, baseline_evaluation_run_id,
+                    previous_evaluation_run_id, schema_version, policy_version,
+                    classification, canonical_status, reason_codes, assessment,
+                    computed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                ON CONFLICT (evaluation_run_id) DO UPDATE SET
+                    baseline_evaluation_run_id = EXCLUDED.baseline_evaluation_run_id,
+                    previous_evaluation_run_id = EXCLUDED.previous_evaluation_run_id,
+                    schema_version = EXCLUDED.schema_version,
+                    policy_version = EXCLUDED.policy_version,
+                    classification = EXCLUDED.classification,
+                    canonical_status = EXCLUDED.canonical_status,
+                    reason_codes = EXCLUDED.reason_codes,
+                    assessment = EXCLUDED.assessment,
+                    computed_at = now()
+                """,
+                (
+                    row["evaluation_run_id"],
+                    _evaluation_id_for_report(row_by_report_id, baseline_id),
+                    _evaluation_id_for_report(row_by_report_id, previous_id),
+                    str(entry.get("schema_version") or snapshot_payload["schema_version"]),
+                    str(entry.get("policy_version") or CANONICAL_POLICY_VERSION),
+                    str(entry.get("classification") or "unknown"),
+                    str(entry.get("canonical_status") or "non_canonical"),
+                    _jsonb(entry.get("reason_codes") or []),
+                    _jsonb(entry),
+                ),
+            )
+
+        selected_report_id = str(state.get("selected_report_id") or "")
+        selected = row_by_report_id.get(selected_report_id)
+        if selected is None:
+            conn.execute(
+                f"DELETE FROM {_SCHEMA}.brand_canonical_selections WHERE brand_id = %s",
+                (brand_id,),
+            )
+            return
+        selection_status = "canonical" if state.get("canonical_report_id") else "provisional"
+        conn.execute(
+            f"""
+            INSERT INTO {_SCHEMA}.brand_canonical_selections (
+                brand_id, evaluation_run_id, status, policy_version, selected_at
+            ) VALUES (%s, %s, %s, %s, now())
+            ON CONFLICT (brand_id) DO UPDATE SET
+                evaluation_run_id = EXCLUDED.evaluation_run_id,
+                status = EXCLUDED.status,
+                policy_version = EXCLUDED.policy_version,
+                selected_at = now()
+            """,
+            (
+                brand_id,
+                selected["evaluation_run_id"],
+                selection_status,
+                CANONICAL_POLICY_VERSION,
+            ),
+        )
+
+    @staticmethod
     def _insert_report_snapshot(
         conn,
         workspace_id: UUID,
@@ -831,6 +987,15 @@ def _stable_uuid(*parts: Any) -> UUID:
 def _advisory_lock_key(*parts: Any) -> int:
     digest = hashlib.sha256(":".join(str(part) for part in parts).encode("utf-8")).digest()
     return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _comparison_report_id(value: Any, key: str) -> str:
+    return str(value.get(key) or "") if isinstance(value, dict) else ""
+
+
+def _evaluation_id_for_report(rows: dict[str, Any], report_id: str):
+    row = rows.get(str(report_id or ""))
+    return row["evaluation_run_id"] if row is not None else None
 
 
 def _literal_quote_verified(

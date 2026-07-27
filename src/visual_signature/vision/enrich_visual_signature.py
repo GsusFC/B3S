@@ -12,6 +12,7 @@ from src.visual_signature.vision.screenshot_quality import (
     resolve_screenshot_metadata,
     screenshot_evidence_for_path,
 )
+from src.visual_signature.vision.section_analysis import analyze_page_sections
 from src.visual_signature.vision.agreement import compare_dom_and_viewport
 from src.visual_signature.vision.types import RasterImage, VisionEvidence
 from src.visual_signature._internal.utils import (
@@ -75,11 +76,12 @@ def enrich_visual_signature_with_vision(
         if _should_use_payload_obstruction(
             payload_obstruction,
             selected_variant=selected_variant,
+            same_capture_observation=metadata.get("obstruction_observed_same_capture") is True,
         )
         else None
     )
     existing_obstruction = payload_override or acquisition_obstruction
-    dom_html = "" if payload_override and selected_variant == "clean_attempt" else (
+    dom_html = "" if payload_override else (
         str(acquisition.get("rendered_html") or acquisition.get("raw_html") or "") if isinstance(acquisition, dict) else ""
     )
     viewport_obstruction = analyze_viewport_obstruction(
@@ -87,6 +89,20 @@ def enrich_visual_signature_with_vision(
         viewport_image=viewport_image,
         existing_obstruction=existing_obstruction if isinstance(existing_obstruction, dict) else None,
     )
+    section_analysis = analyze_page_sections(
+        metadata.get("section_manifest") if isinstance(metadata.get("section_manifest"), dict) else None,
+        page_url=str(metadata.get("page_url") or ""),
+    )
+    section_analysis["semantic_analysis_input"] = {
+        "type": "labeled_section_atlas"
+        if str(metadata.get("analysis_atlas_path") or "").strip()
+        else "primary_screenshot",
+        "path": metadata.get("analysis_atlas_path") or resolved_path,
+        "status": str(metadata.get("analysis_atlas_status") or ""),
+        "manifest": metadata.get("analysis_atlas_manifest")
+        if isinstance(metadata.get("analysis_atlas_manifest"), dict)
+        else {},
+    }
     payload["vision"] = VisionEvidence(
         screenshot=screenshot,
         screenshot_palette=palette,
@@ -99,6 +115,7 @@ def enrich_visual_signature_with_vision(
         viewport_composition=viewport_composition,
         viewport_confidence=viewport_confidence,
         viewport_obstruction=viewport_obstruction.to_dict(),
+        section_analysis=section_analysis,
     ).to_dict()
     return payload
 
@@ -107,9 +124,12 @@ def _should_use_payload_obstruction(
     payload_obstruction: dict[str, Any] | None,
     *,
     selected_variant: str,
+    same_capture_observation: bool = False,
 ) -> bool:
     if not isinstance(payload_obstruction, dict):
         return False
+    if same_capture_observation and "present" in payload_obstruction:
+        return True
     if selected_variant == "clean_attempt":
         return True
     if payload_obstruction.get("present") is True:

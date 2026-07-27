@@ -9,6 +9,36 @@ from src.collectors.web_collector import WebData
 from src.services.legal_identity import derive_legal_name
 
 
+def test_exa_identity_matching_rejects_near_name_and_person_collisions():
+    collector = ExaCollector(api_key="test")
+
+    near_name = SimpleNamespace(
+        url="https://linkedin.com/company/movyng",
+        title="Movyng",
+        text="Automotive rental company.",
+        summary="",
+    )
+    person = SimpleNamespace(
+        url="https://www.linkedin.com/in/movyn",
+        title="Movyn John",
+        text="VP Expert Services at Fluent Commerce.",
+        summary="",
+    )
+
+    assert collector._should_accept_result(
+        result=near_name,
+        intent="external_profiles",
+        brand_name="Movyn",
+        brand_url="https://movyn.ai",
+    )[0] is False
+    assert collector._should_accept_result(
+        result=person,
+        intent="external_mentions",
+        brand_name="Movyn",
+        brand_url="https://movyn.ai",
+    )[0] is False
+
+
 class _FakeExaClient:
     def __init__(self):
         self.calls: list[dict] = []

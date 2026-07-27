@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from src.sv9_flow.calibration_terms import block_evidence_policy
 from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
+from src.sv9_flow.evidence_identity import canonical_evidence_id
 from src.sv9_flow.evidence_source import (
     SOURCE_CLASS_ACQUISITION_METADATA,
     SOURCE_CLASS_DERIVED_STRATEGY,
@@ -77,12 +78,12 @@ def build_block_evidence_shortlists(
 
 
 def _shortlist_for_block(block: str, evidence: list[EvidenceRecord], *, limit: int) -> list[str]:
-    scored: list[tuple[int, int, str]] = []
-    for index, record in enumerate(evidence):
+    scored: list[tuple[int, str, str]] = []
+    for record in evidence:
         score = _score_record(block, record)
         if score <= 0:
             continue
-        scored.append((-score, index, record.ref))
+        scored.append((-score, canonical_evidence_id(record), record.ref))
     scored.sort()
     refs: list[str] = []
     for _, _, ref in scored:
@@ -96,12 +97,13 @@ def _shortlist_for_block(block: str, evidence: list[EvidenceRecord], *, limit: i
 def _score_record(block: str, record: EvidenceRecord) -> int:
     terms = _BLOCK_TERMS.get(block, ())
     source_class = source_class_for_record(record)
+    stable_metadata = _stable_scoring_metadata(record)
     haystack = " ".join(
         (
             record.evidence_type,
-            record.source,
+            source_class,
             record.content,
-            " ".join(str(value) for value in record.metadata.values()),
+            stable_metadata,
         )
     ).lower()
     score = sum(3 for term in terms if term in haystack)
@@ -128,9 +130,28 @@ def _score_record(block: str, record: EvidenceRecord) -> int:
         score -= 20
     if record.ref.startswith("features."):
         score += sum(1 for term in _FEATURE_BONUS_TERMS if term in haystack)
-    if record.confidence == "high":
-        score += 1
     return score
+
+
+def _stable_scoring_metadata(record: EvidenceRecord) -> str:
+    """Keep shortlist scoring independent from provider rank and diagnostics."""
+
+    metadata = record.metadata if isinstance(record.metadata, dict) else {}
+    values: list[str] = []
+    for key in (
+        "source_class",
+        "intent",
+        "identity_match",
+        "relevant_blocks",
+        "stance",
+        "specificity",
+    ):
+        value = metadata.get(key)
+        if isinstance(value, list):
+            values.extend(str(item) for item in sorted(value, key=str))
+        elif value not in (None, ""):
+            values.append(str(value))
+    return " ".join(values)
 
 
 def _semantic_relevance_supports_block(record: EvidenceRecord, block: str) -> bool:

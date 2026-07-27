@@ -86,6 +86,14 @@ def analyze_viewport_obstruction(
     present = existing.present or dom.present or viewport.present
     obstruction_type = _choose_type(existing.type, dom.type, viewport.type)
     coverage_ratio = max(existing.coverage_ratio, dom.coverage_ratio, viewport.coverage_ratio)
+    viewport_only_unconfirmed = (
+        viewport.present
+        and not dom.present
+        and not existing.present
+    )
+    if viewport_only_unconfirmed:
+        obstruction_type = "unknown_overlay"
+        coverage_ratio = min(coverage_ratio, 0.12)
     dom_only_unconfirmed_by_viewport = _dom_only_unconfirmed_by_viewport(
         existing=existing,
         dom=dom,
@@ -102,6 +110,8 @@ def analyze_viewport_obstruction(
         limitations.append("weak_obstruction_signals_below_presence_threshold")
     if dom_only_unconfirmed_by_viewport:
         limitations.append("dom_only_obstruction_unconfirmed_by_viewport")
+    if viewport_only_unconfirmed:
+        limitations.append("viewport_only_obstruction_unconfirmed_by_dom")
     severity = _severity(coverage_ratio, obstruction_type, present)
     first_impression_valid = not (
         severity in {"major", "blocking"}
@@ -118,6 +128,8 @@ def analyze_viewport_obstruction(
         signal_count=len(signals),
     )
     if dom_only_unconfirmed_by_viewport:
+        confidence = min(confidence, 0.45)
+    if viewport_only_unconfirmed:
         confidence = min(confidence, 0.45)
     if viewport_image is None:
         limitations.append("viewport_pixels_unavailable_for_obstruction_analysis")
@@ -210,22 +222,22 @@ def _dom_obstruction(html: str) -> ViewportObstructionEvidence:
         visual_signals.append("dom_high_z_index_pattern")
 
     obstruction_type: ObstructionType = "none"
-    cookie_terms_present = bool(cookie_page_hits or cookie_overlay_hits)
-    newsletter_terms_present = bool(newsletter_page_hits or newsletter_overlay_hits)
     overlay_local_login = bool(login_overlay_hits)
-    promo_terms_present = bool(promo_page_hits or promo_overlay_hits)
     strong_overlay = _context_has_overlay_cues(text) or fixed_like or bottom_like or full_like or high_z
+    overlay_local_newsletter = bool(newsletter_overlay_hits)
+    overlay_local_promo = bool(promo_overlay_hits)
+    overlay_local_cookie = bool(cookie_overlay_hits)
     if overlay_local_login and strong_overlay:
         obstruction_type = "login_wall"
-    elif newsletter_terms_present and strong_overlay:
+    elif overlay_local_newsletter and strong_overlay:
         obstruction_type = "newsletter_modal"
-    elif promo_terms_present and strong_overlay:
+    elif overlay_local_promo and strong_overlay:
         obstruction_type = "promo_modal"
-    elif cookie_terms_present and strong_overlay:
+    elif overlay_local_cookie and strong_overlay:
         obstruction_type = "cookie_modal" if not bottom_like else "cookie_banner"
-    elif (overlay_level_signals or visual_signals) and (fixed_like or high_z or full_like or bottom_like):
+    elif overlay_level_signals and (fixed_like or high_z or full_like or bottom_like):
         obstruction_type = "unknown_overlay"
-    elif fixed_like and bottom_like:
+    elif fixed_like and bottom_like and high_z:
         obstruction_type = "unknown_overlay"
 
     present = obstruction_type != "none"
@@ -241,7 +253,7 @@ def _dom_obstruction(html: str) -> ViewportObstructionEvidence:
 
     limitations: list[str] = []
     if (cookie_page_hits or login_page_hits or newsletter_page_hits or promo_page_hits) and not present:
-        limitations.append("cookie_terms_without_overlay_or_fixed_position_pattern")
+        limitations.append("semantic_terms_without_local_overlay_pattern")
     return ViewportObstructionEvidence(
         present=present,
         type=obstruction_type if present else "none",

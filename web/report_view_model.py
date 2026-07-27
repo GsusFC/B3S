@@ -15,7 +15,7 @@ from web.report_store import domain_key
 
 from src.sv9.rubric import COMPONENTS as SV9_COMPONENTS
 
-SCHEMA_VERSION = "b3s_report_view_model_v0_1"
+SCHEMA_VERSION = "b3s_report_view_model_v0_2"
 
 COMPONENT_ROWS = (
     ("component-card--half", ("core_purpose", "magnetism")),
@@ -95,12 +95,18 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
     acquisition = _acquisition_view_model(report)
     score = report.get("score")
     editorial = report.get("editorial") if isinstance(report.get("editorial"), dict) else {}
+    insufficient_evidence = _coverage_limited_keys(report)
+    pipeline_commit_sha = str(report.get("pipeline_commit_sha") or "unknown")
     return {
         "schema_version": SCHEMA_VERSION,
         "id": str(report.get("id") or ""),
         "brand_name": str(report.get("brand_name") or ""),
         "url": str(report.get("url") or ""),
         "lang": "es",
+        "build": {
+            "commit_sha": pipeline_commit_sha,
+            "commit_short": pipeline_commit_sha[:12] if pipeline_commit_sha != "unknown" else "unknown",
+        },
         "score": score,
         "score_scale": 100,
         "score_width": score if score is not None else 0,
@@ -118,6 +124,7 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
             },
             "immediate_margin": report.get("immediate_margin"),
             "not_detected": [str(item) for item in report.get("not_detected") or []],
+            "insufficient_evidence": insufficient_evidence,
             "executive_reading": _clean_text(editorial.get("executive_reading") or report.get("executive_reading")),
         },
         "components": ordered_components,
@@ -136,6 +143,20 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
             "has_raw": isinstance(report.get("raw"), dict) and bool(report.get("raw")),
         },
     }
+
+
+def _coverage_limited_keys(report: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    for component in report.get("components") or []:
+        if not isinstance(component, dict):
+            continue
+        block = component.get("block") if isinstance(component.get("block"), dict) else {}
+        if str(block.get("coverage_status") or "") != "insufficient_acquisition":
+            continue
+        key = str(component.get("key") or component.get("component") or "").strip()
+        if key and key not in keys:
+            keys.append(key)
+    return keys
 
 
 def _component_view_model(component: dict[str, Any]) -> dict[str, Any]:
@@ -509,18 +530,21 @@ def _acquisition_view_model(report: dict[str, Any]) -> dict[str, Any]:
         kind = _clean_text(artifact.get("kind"))
         status = _clean_text(artifact.get("status"))
         provider = _clean_text(artifact.get("provider"))
+        label = _clean_text(artifact.get("label"))
         artifacts.append(
             {
                 "source": source,
                 "kind": kind,
                 "status": status,
                 "provider": provider,
+                "label": label,
                 "href": href,
                 "display_label": _artifact_label(
                     source=source,
                     kind=kind,
                     status=status,
                     provider=provider,
+                    label=label,
                 ),
                 "chip_class": _artifact_chip_class(artifact),
             }
@@ -600,8 +624,17 @@ def _source_fields_used(primary: dict[str, Any], support: dict[str, Any]) -> lis
     return fields
 
 
-def _artifact_label(*, source: str, kind: str, status: str, provider: str) -> str:
-    parts = [part for part in (source, kind, status) if part]
+def _artifact_label(
+    *,
+    source: str,
+    kind: str,
+    status: str,
+    provider: str,
+    label: str = "",
+) -> str:
+    parts = [part for part in (label, kind, status) if part]
+    if not parts:
+        parts = [source] if source else []
     label = " · ".join(parts) or "artefacto"
     if provider:
         label = f"{label} · {provider}"

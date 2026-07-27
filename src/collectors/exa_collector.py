@@ -248,6 +248,21 @@ class ExaCollector:
         return client
 
     @staticmethod
+    def _credential_failure_cooldown(exc: Exception) -> float | None:
+        message = str(exc).lower()
+        if any(marker in message for marker in ("status code 401", "status code 402", "status code 403")):
+            return 300.0
+        if "status code 429" in message or "rate limit" in message or "rate_limit" in message:
+            return 60.0
+        return None
+
+    @staticmethod
+    def _client_for_key(api_key: str):
+        from exa_py import Exa
+
+        return Exa(api_key=api_key)
+
+    @staticmethod
     def _domain_anchor(brand_url: str | None) -> str:
         if not brand_url:
             return ""
@@ -337,6 +352,22 @@ class ExaCollector:
         return re.sub(r"[^a-z0-9]+", "", (value or "").strip().lower())
 
     @classmethod
+    def _contains_alias(cls, value: str | None, alias: str) -> bool:
+        """Match an alias on token boundaries, including hyphenated phrases."""
+        tokens = re.findall(r"[a-z0-9]+", (value or "").casefold())
+        if alias in tokens:
+            return True
+        for start in range(len(tokens)):
+            compact = ""
+            for token in tokens[start:]:
+                compact += token
+                if compact == alias:
+                    return True
+                if len(compact) >= len(alias):
+                    break
+        return False
+
+    @classmethod
     def _brand_aliases(cls, brand_name: str, brand_url: str | None, legal_name: str | None = None) -> set[str]:
         aliases: set[str] = set()
         domain_anchor = cls._domain_anchor(brand_url)
@@ -365,20 +396,17 @@ class ExaCollector:
             return 0.0, "no_brand_alias"
 
         host = cls._host(getattr(result, "url", "") or "")
-        host_norm = cls._normalize_text(host)
-        title_norm = cls._normalize_text(getattr(result, "title", "") or "")
-        text_norm = cls._normalize_text(
-            ((getattr(result, "text", "") or "") + " " + (getattr(result, "summary", "") or ""))
-        )
+        title = str(getattr(result, "title", "") or "")
+        text = ((getattr(result, "text", "") or "") + " " + (getattr(result, "summary", "") or ""))
 
         for alias in aliases:
-            if alias and alias in host_norm:
+            if alias and cls._contains_alias(host, alias):
                 return 1.0, "alias_in_host"
         for alias in aliases:
-            if alias and alias in title_norm:
+            if alias and cls._contains_alias(title, alias):
                 return 0.95, "alias_in_title"
         for alias in aliases:
-            if alias and alias in text_norm:
+            if alias and cls._contains_alias(text, alias):
                 return 0.7, "alias_in_text"
         return 0.0, "no_alias_match"
 
@@ -412,7 +440,7 @@ class ExaCollector:
         if intent in {"external_profiles", "external_mentions", "news"}:
             if source_class == "owned":
                 return False, "owned_surface_excluded_from_external_intent", match_score
-            if source_class in {"technical_internal", "noise"}:
+            if source_class in {"technical_internal", "noise", "person_profile"}:
                 return False, "non_market_source_class", match_score
             if match_score >= 0.95:
                 return True, match_reason, match_score
@@ -469,6 +497,8 @@ class ExaCollector:
             return ("marketplace_listing", "external", "marketplace_listing_review_gated", True)
         if any(marker in haystack for marker in cls._NOISE_HOST_MARKERS):
             return ("noise", "external", "likely_noise_source", True)
+        if host == "linkedin.com" and any(path in haystack for path in ("/in/", "/posts/")):
+            return ("person_profile", "external", "person_surface", True)
         if brand_token and brand_token in host and root and brand_root and root != brand_root:
             return ("related_unresolved", "unresolved", "same_name_different_root_domain", True)
         return ("external", "external", "external_candidate", False)
@@ -568,13 +598,35 @@ class ExaCollector:
         if not self._api_keys:
             raise ValueError("EXA_API_KEY not set")
         attempts = max(_TRANSIENT_SEARCH_ATTEMPTS, self._api_keys.size)
+        attempted_keys: set[str] = set()
+        last_error: Exception | None = None
         for attempt in range(attempts):
+            api_key = self._api_keys.next_key(exclude=attempted_keys)
+            if not api_key:
+                break
+            attempted_keys.add(api_key)
             try:
-                return self.client.search(query, **params)
-            except Exception:
+                # A test double or single-key client may already be injected;
+                # pooled requests must instantiate the client for the key
+                # selected in this attempt so concurrent intents cannot retry
+                # the same exhausted credential accidentally.
+                client = (
+                    self._client
+                    if self._api_keys.size == 1 and self._client is not None
+                    else self._client_for_key(api_key)
+                )
+                return client.search(query, **params)
+            except Exception as exc:
+                last_error = exc
+                cooldown = self._credential_failure_cooldown(exc)
+                if cooldown is not None:
+                    self._api_keys.quarantine(api_key, cooldown_seconds=cooldown)
                 if attempt + 1 >= attempts:
                     raise
                 time.sleep(_TRANSIENT_SEARCH_DELAY_S)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No healthy Exa API key available")
 
     @staticmethod
     def _result_has_content(result) -> bool:

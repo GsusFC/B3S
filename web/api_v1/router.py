@@ -9,6 +9,8 @@ from fastapi import APIRouter, Header, Query, Request, Response, status
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from src.build_info import current_build_sha
+from src.services.scanner_evidence_comparison import annotate_report_history
 from web.report_store import domain_key, list_reports_for_domain
 from web.scan_runner import approve_degraded_scan, cancel_scan
 
@@ -42,7 +44,12 @@ _ERRORS = {
 
 @router.get("/health", include_in_schema=False)
 def api_health() -> dict[str, str]:
-    return {"status": "ok", "service": "b3s-scanner-api", "api_version": "v1"}
+    return {
+        "status": "ok",
+        "service": "b3s-scanner-api",
+        "api_version": "v1",
+        "commit_sha": current_build_sha(),
+    }
 
 
 @router.get("/openapi.json", include_in_schema=False)
@@ -242,7 +249,7 @@ def brand_scan_history(
     normalized = domain_key(domain)
     if not normalized:
         raise ApiError(400, "invalid_domain", "A valid brand domain is required.")
-    reports = list_reports_for_domain(normalized)
+    reports, history_state = annotate_report_history(list_reports_for_domain(normalized))
     page = reports[offset : offset + limit]
     items = [
         {
@@ -252,6 +259,14 @@ def brand_scan_history(
             "url": str(item.get("url") or ""),
             "score": item.get("score"),
             "created_at": item.get("created_at"),
+            "reliability_status": str(item.get("reliability_status") or "unknown"),
+            "canonical_status": str(item.get("canonical_status") or "unknown"),
+            "stability_classification": str(
+                (item.get("stability") or {}).get("classification") or "unknown"
+            ),
+            "stability_reason_codes": [
+                str(code) for code in (item.get("stability") or {}).get("reason_codes") or []
+            ],
             "result_url": f"/api/v1/scans/{item.get('id')}/result",
             "report_url": f"/report/{item.get('id')}",
         }
@@ -262,6 +277,9 @@ def brand_scan_history(
         "api_version": "v1",
         "domain": normalized,
         "items": items,
+        "canonical_report_id": history_state.get("canonical_report_id"),
+        "provisional_report_id": history_state.get("provisional_report_id"),
+        "selected_report_id": history_state.get("selected_report_id"),
         "pagination": {
             "limit": limit,
             "offset": offset,

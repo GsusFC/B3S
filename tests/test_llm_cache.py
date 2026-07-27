@@ -90,6 +90,59 @@ class LLMCacheTests(unittest.TestCase):
             self.assertEqual(second.cache_hits, 1)
             self.assertEqual(first.cache_writes, 1)
 
+    def test_call_json_cache_separates_temperature_and_schema_contract(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "brand3.sqlite3")
+            llm = LLMAnalyzer(api_key="key", base_url="https://llm.test", model="model-a")
+            schema_a = {
+                "type": "object",
+                "required": ["score"],
+                "properties": {"score": {"type": "number"}},
+            }
+            schema_b = {
+                "type": "object",
+                "required": ["score", "reason"],
+                "properties": {
+                    "score": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+            }
+            with patch("src.features.llm_analyzer.BRAND3_DB_PATH", db_path):
+                with patch(
+                    "src.features.llm_analyzer._run_llm_http_call",
+                    side_effect=[
+                        ("ok", json.dumps({"score": 1})),
+                        ("ok", json.dumps({"score": 2})),
+                        ("ok", json.dumps({"score": 3, "reason": "changed schema"})),
+                    ],
+                ) as llm_http:
+                    first = llm._call_json(
+                        "system",
+                        "user",
+                        json_schema=schema_a,
+                        schema_name="score",
+                        temperature=0.0,
+                    )
+                    warmer = llm._call_json(
+                        "system",
+                        "user",
+                        json_schema=schema_a,
+                        schema_name="score",
+                        temperature=0.1,
+                    )
+                    changed_schema = llm._call_json(
+                        "system",
+                        "user",
+                        json_schema=schema_b,
+                        schema_name="score",
+                        temperature=0.1,
+                    )
+
+        self.assertEqual(first["score"], 1)
+        self.assertEqual(warmer["score"], 2)
+        self.assertEqual(changed_schema["reason"], "changed schema")
+        self.assertEqual(llm_http.call_count, 3)
+
     def test_call_json_records_usage_observations_for_cache_and_provider(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "brand3.sqlite3")

@@ -24,7 +24,7 @@ def test_policy_versions_match_worker_constants() -> None:
     assert (
         block_evidence_policy()["version"]
         == BLOCK_EVIDENCE_SHORTLIST_VERSION
-        == "sv9-flow-block-evidence-shortlists-v4"
+        == "sv9-flow-block-evidence-shortlists-v5"
     )
 
 

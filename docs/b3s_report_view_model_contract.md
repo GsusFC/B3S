@@ -1,6 +1,6 @@
 # B3S report view-model contract
 
-Status: draft v0.1  
+Status: draft v0.2
 Scope: B3S `/report/{id}` UI, component drawer, markdown handoff  
 Last updated: 2026-07-08
 
@@ -54,7 +54,7 @@ or markdown/export detail if needed for traceability.
 
 ```json
 {
-  "schema_version": "b3s_report_view_model_v0_1",
+"schema_version": "b3s_report_view_model_v0_2",
   "id": "string",
   "brand_name": "string",
   "url": "string",
@@ -73,6 +73,8 @@ or markdown/export detail if needed for traceability.
       "label": "Magnetism"
     },
     "immediate_margin": 8,
+    "not_detected": ["string"],
+    "insufficient_evidence": ["string"],
     "executive_reading": "string | null"
   },
   "components": [],

@@ -21,8 +21,15 @@
     <span class="brand-profile-terminal-key">sv9</span>
     {% if brand.current %}
     <strong class="brand-profile-score">{{ brand.current.score if brand.current.score is not none else "—" }}</strong>
-    <span class="brand-profile-terminal-value">disponible / {{ (brand.current.created_at or "")[:10] }}</span>
+    <span class="brand-profile-terminal-value">
+      {{ brand.current.canonical_status or "sin_clasificar" }}
+      · {{ brand.current.reliability_status or "unknown" }}
+      / {{ (brand.current.created_at or "")[:10] }}
+    </span>
     <a class="source-link" href="/report/{{ brand.current.id }}">ver SV9</a>
+    {% if brand.latest_attempt and brand.latest_attempt.id != brand.current.id %}
+    <a class="source-link" href="/report/{{ brand.latest_attempt.id }}">último intento</a>
+    {% endif %}
     {% if brand.visual_module.available %}
     <a class="source-link" href="#modulo-visual">ver visual</a>
     {% endif %}
@@ -122,6 +129,8 @@
         <dt>componentes</dt><dd>{{ brand.detected_count }}/{{ brand.component_count }}</dd>
         <dt>faltan</dt><dd>{% if brand.not_detected %}{{ brand.not_detected | join(", ") }}{% else %}none{% endif %}</dd>
         {% if brand.current %}
+        <dt>referencia</dt><dd>{{ brand.current.canonical_status or "sin_clasificar" }}</dd>
+        <dt>comparador</dt><dd>{{ (brand.current.stability or {}).classification or "sin_datos" }}</dd>
         <dt>margen</dt><dd>+{{ brand.current.immediate_margin or 0 }} pts</dd>
         <dt>hueco</dt><dd>{{ brand.current.most_painful_gap_label or "—" }}</dd>
         {% endif %}
@@ -153,12 +162,14 @@
       </div>
       {% if brand.reports %}
       <table>
-        <thead><tr><th>fecha</th><th>score</th><th>run</th><th></th></tr></thead>
+        <thead><tr><th>fecha</th><th>score</th><th>estado</th><th>comparación</th><th>run</th><th></th></tr></thead>
         <tbody>
         {% for row in brand.reports %}
         <tr>
           <td class="muted mono">{{ (row.created_at or "")[:10] }}</td>
           <td class="mono">{{ row.score if row.score is not none else "—" }}</td>
+          <td class="muted mono">{{ row.canonical_status or "sin_clasificar" }}</td>
+          <td class="muted mono">{{ (row.stability or {}).classification or "sin_datos" }}</td>
           <td class="muted mono">{{ row.id }}</td>
           <td><a href="/report/{{ row.id }}">ver</a></td>
         </tr>

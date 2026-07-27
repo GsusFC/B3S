@@ -71,12 +71,23 @@ def resolve_screenshot_metadata(
         "fileSizeBytes",
         "selected_capture_variant",
         "viewport_obstruction",
+        "obstruction_observed_same_capture",
         "dismissal_attempted",
         "dismissal_successful",
         "dismissal_method",
         "dismissal_eligibility",
         "dismissal_block_reason",
         "evidence_integrity_notes",
+        "full_page_screenshot_path",
+        "section_capture_status",
+        "section_manifest",
+        "section_captures",
+        "lazy_content_hydration",
+        "post_hydration_obstruction_check",
+        "analysis_atlas_path",
+        "analysis_atlas_status",
+        "analysis_atlas_manifest",
+        "structured_capture_errors",
     ):
         if key in screenshot_payload and screenshot_payload.get(key) not in (None, ""):
             metadata[key] = screenshot_payload.get(key)
@@ -361,5 +372,3 @@ def _scale_ppm_value(value: int, max_value: int) -> int:
     if max_value == 255:
         return value
     return max(0, min(255, round(value * 255 / max_value)))
-
-

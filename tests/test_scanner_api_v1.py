@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from src.storage.sqlite_store import SQLiteStore
 from web import scan_runner
-from web.api_v1.presenters import status_payload
+from web.api_v1.presenters import result_payload, status_payload
 from web.app import app
 
 
@@ -40,6 +40,7 @@ def _report(scan_id: str = "scan123") -> dict:
         "brand_name": "Example",
         "url": "https://example.com",
         "created_at": "2026-07-20T10:05:00+00:00",
+        "pipeline_commit_sha": "a" * 40,
         "score": 72,
         "base_average": 7.2,
         "reliability_status": "reviewable",
@@ -94,12 +95,24 @@ def _report(scan_id: str = "scan123") -> dict:
     }
 
 
-def test_api_health_is_public():
+def test_api_health_is_public(monkeypatch):
+    monkeypatch.setenv("B3S_BUILD_SHA", "b" * 40)
+
     response = TestClient(app).get("/api/v1/health")
 
     assert response.status_code == 200
     assert response.json()["service"] == "b3s-scanner-api"
+    assert response.json()["commit_sha"] == "b" * 40
     assert response.headers["x-b3s-api-version"] == "v1"
+
+
+def test_app_health_exposes_current_commit(monkeypatch):
+    monkeypatch.setenv("B3S_BUILD_SHA", "c" * 40)
+
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "commit_sha": "c" * 40}
 
 
 def test_api_requires_bearer_token(monkeypatch):
@@ -194,6 +207,7 @@ def test_completed_result_has_stable_schema_and_etag(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["metadata"]["schema_version"] == "b3s-scanner-result-v1"
+    assert response.json()["metadata"]["pipeline_commit_sha"] == "a" * 40
     assert response.json()["metadata"]["prompt_version"] == "prompt-v1"
     assert response.json()["components"][0]["tile_summary"] == {
         "passed": 1,
@@ -207,6 +221,41 @@ def test_completed_result_has_stable_schema_and_etag(monkeypatch):
     cached = client.get("/api/v1/scans/scan123/result", headers={**AUTH, "If-None-Match": etag})
     assert cached.status_code == 304
     assert cached.content == b""
+
+
+def test_completed_result_exposes_insufficient_evidence_separately():
+    report = _report("scan-insufficient")
+    report["not_detected"] = ["values"]
+    report["components"].append(
+        {
+            "key": "values",
+            "label": "Valores",
+            "status": "not_detected",
+            "score": 0,
+            "scale": 5,
+            "block": {"coverage_status": "insufficient_acquisition", "refs": []},
+            "tile_profile": [],
+        }
+    )
+
+    payload = result_payload(report)
+
+    assert payload["not_detected"] == ["values"]
+    assert payload["insufficient_evidence"] == ["values"]
+
+
+def test_completed_result_exposes_scan_time_stability_assessment():
+    report = _report("scan-stability")
+    report["canonical_status"] = "non_canonical"
+    report["stability"] = {
+        "classification": "evaluation_drift",
+        "canonical_status": "non_canonical",
+        "reason_codes": ["evaluation_changed_without_material_evidence_delta"],
+    }
+
+    payload = result_payload(report)
+
+    assert payload["stability"] == report["stability"]
 
 
 def test_evidence_endpoint_separates_evidence_from_result(monkeypatch):
@@ -241,6 +290,11 @@ def test_brand_history_is_paginated(monkeypatch):
     assert response.status_code == 200
     assert response.json()["domain"] == "example.com"
     assert response.json()["pagination"] == {"limit": 1, "offset": 0, "count": 1, "has_more": True}
+    assert response.json()["selected_report_id"] == "one"
+    assert response.json()["provisional_report_id"] == "one"
+    assert response.json()["canonical_report_id"] is None
+    assert response.json()["items"][0]["canonical_status"] == "non_canonical"
+    assert response.json()["items"][0]["stability_classification"] == "stable"
 
 
 def test_failed_status_never_exposes_internal_exception_text():

@@ -16,8 +16,15 @@ from src.visual_signature.acquisition_contract import is_visual_acquisition_sour
 _RAW_INPUT_CONTENT_CHARS = 700
 _WEB_CHUNK_CHARS = 900
 _WEB_CHUNK_OVERLAP = 100
+_MAX_WEB_HOMEPAGE_CHUNKS = 12
 _MAX_WEB_SUBPAGE_CHUNKS = 6
 _BOILERPLATE_MIN_PAGES = 3
+_STRATEGIC_SECTION_MARKERS = (
+    "about", "company", "careers", "jobs", "culture", "values", "valores",
+    "value", "mission", "missão", "missao", "vision", "visão", "visao",
+    "manifesto", "principles", "principios", "princípios", "nosotros",
+    "cultura", "sobre-", "quienes", "quem somos",
+)
 _ABSENCE_BLOCK_TERMS: dict[str, tuple[str, ...]] = {
     "values": ("values", "valores", "principles", "principios", "culture", "cultura"),
     "vision": ("vision", "visión", "future", "futuro", "ambition", "ambición", "transform"),
@@ -596,7 +603,8 @@ def _evidence_from_web_payload(*, index: int, source: str, payload: dict[str, An
     subpages = _strip_cross_page_boilerplate(homepage, subpages)
     records: list[EvidenceRecord] = []
     if homepage:
-        for chunk_index, chunk in enumerate(_chunk_text_by_section(homepage), start=1):
+        homepage_chunks, homepage_total = _chunk_text_by_section(homepage, homepage=True)
+        for chunk_index, chunk in enumerate(homepage_chunks, start=1):
             records.append(
                 _raw_input_record(
                     index=index,
@@ -606,10 +614,23 @@ def _evidence_from_web_payload(*, index: int, source: str, payload: dict[str, An
                     ref=f"raw_inputs.{index}" if chunk_index == 1 else f"raw_inputs.{index}.chunk.{chunk_index}",
                 )
             )
+        if homepage_total > len(homepage_chunks):
+            records.append(
+                _evidence_sampling_record(
+                    index=index,
+                    source=source,
+                    url=url,
+                    total_chunks=homepage_total,
+                    selected_chunks=len(homepage_chunks),
+                    prioritized=True,
+                )
+            )
     owned_urls = [candidate for candidate in [url, *[subpage_url for subpage_url, _ in subpages]] if candidate]
     strategic_surface_found = any(_is_strategic_surface(candidate) for candidate in owned_urls)
+    strategic_surface_found = strategic_surface_found or _contains_strategic_surface_marker(homepage)
     for subpage_index, (subpage_url, subpage_text) in enumerate(subpages, start=1):
-        for chunk_index, chunk in enumerate(_chunk_text_by_section(subpage_text), start=1):
+        subpage_chunks, subpage_total = _chunk_text_by_section(subpage_text)
+        for chunk_index, chunk in enumerate(subpage_chunks, start=1):
             records.append(
                 _raw_input_record(
                     index=index,
@@ -618,6 +639,18 @@ def _evidence_from_web_payload(*, index: int, source: str, payload: dict[str, An
                     url=subpage_url or url,
                     ref=f"raw_inputs.{index}.subpage.{subpage_index}.chunk.{chunk_index}",
                     metadata={"subpage_url": subpage_url},
+                )
+            )
+        if subpage_total > len(subpage_chunks):
+            records.append(
+                _evidence_sampling_record(
+                    index=index,
+                    source=source,
+                    url=subpage_url or url,
+                    total_chunks=subpage_total,
+                    selected_chunks=len(subpage_chunks),
+                    prioritized=False,
+                    subpage_index=subpage_index,
                 )
             )
         records.extend(
@@ -669,6 +702,39 @@ def _strategic_surfaces_none_found_record(*, index: int, source: str, crawled_ur
             "intent": "strategic_surfaces",
             "status": "none_found",
             "crawled_url_count": crawled_url_count,
+        },
+    )
+
+
+def _evidence_sampling_record(
+    *,
+    index: int,
+    source: str,
+    url: str,
+    total_chunks: int,
+    selected_chunks: int,
+    prioritized: bool,
+    subpage_index: int | None = None,
+) -> EvidenceRecord:
+    suffix = f" subpage={subpage_index}" if subpage_index is not None else " homepage"
+    ref_suffix = f".subpage.{subpage_index}" if subpage_index is not None else ""
+    return EvidenceRecord(
+        ref=f"raw_inputs.{index}.diagnostics.sampling{ref_suffix}",
+        source=source,
+        evidence_type="acquisition.evidence_sampling",
+        content=(
+            f"Web evidence sampling{suffix}: selected {selected_chunks} of {total_chunks} chunks; "
+            f"strategic prioritization={'enabled' if prioritized else 'disabled'}."
+        )[:_RAW_INPUT_CONTENT_CHARS],
+        url=url,
+        confidence="low",
+        metadata={
+            "source_class": "acquisition_metadata",
+            "provider": "web",
+            "total_chunks": total_chunks,
+            "selected_chunks": selected_chunks,
+            "strategic_prioritization": prioritized,
+            "subpage_index": subpage_index,
         },
     )
 
@@ -876,19 +942,36 @@ def _is_not_found_page(text: str) -> bool:
     )
 
 
-def _chunk_text_by_section(text: str) -> list[str]:
+def _chunk_text_by_section(text: str, *, homepage: bool = False) -> tuple[list[str], int]:
     clean = str(text or "").strip()
     if not clean:
-        return []
+        return [], 0
     chunks: list[str] = []
     for section in _markdown_sections(clean):
         if len(section) <= _WEB_CHUNK_CHARS:
             chunks.append(section)
         else:
             chunks.extend(_fixed_size_chunks(section))
-        if len(chunks) >= _MAX_WEB_SUBPAGE_CHUNKS:
+    total_chunks = len(chunks)
+    limit = _MAX_WEB_HOMEPAGE_CHUNKS if homepage else _MAX_WEB_SUBPAGE_CHUNKS
+    if total_chunks <= limit:
+        return chunks, total_chunks
+    if not homepage:
+        return chunks[:limit], total_chunks
+
+    # Preserve the first-fold narrative while reserving slots for strategic
+    # sections that normally appear below long product copy.
+    selected_indexes: list[int] = []
+    for index, chunk in enumerate(chunks):
+        if index < 2 or _contains_strategic_surface_marker(chunk):
+            selected_indexes.append(index)
+    for index in range(total_chunks):
+        if index not in selected_indexes:
+            selected_indexes.append(index)
+        if len(selected_indexes) >= limit:
             break
-    return chunks[:_MAX_WEB_SUBPAGE_CHUNKS]
+    selected_indexes.sort()
+    return [chunks[index] for index in selected_indexes[:limit]], total_chunks
 
 
 def _fixed_size_chunks(text: str) -> list[str]:
@@ -916,6 +999,11 @@ def _markdown_sections(text: str) -> list[str]:
         sections.append(current)
     cleaned = ["\n".join(section).strip() for section in sections]
     return [section for section in cleaned if section]
+
+
+def _contains_strategic_surface_marker(text: str) -> bool:
+    normalized = " ".join(str(text or "").casefold().split())
+    return any(marker.casefold() in normalized for marker in _STRATEGIC_SECTION_MARKERS)
 
 
 def _absence_records_for_owned_page(

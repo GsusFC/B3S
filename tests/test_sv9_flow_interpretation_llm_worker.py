@@ -1,5 +1,7 @@
 from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
 from src.sv9_flow.evidence_coverage import block_coverage
+from src.sv9_flow.block_evidence_worker import build_block_evidence_shortlists
+from src.sv9_flow.evidence_identity import canonical_evidence_ref
 from src.sv9_flow.interpretation_llm_worker import (
     FLOW_INTERPRETATION_PROMPT_VERSION,
     block_interpretation_response_schema,
@@ -7,8 +9,117 @@ from src.sv9_flow.interpretation_llm_worker import (
     build_brand_interpretation_with_llm,
     normalize_llm_interpretation_response,
     _block_user_prompt,
+    _restore_interpretation_refs,
     _user_prompt,
 )
+
+
+def test_interpretation_prompts_are_invariant_to_ref_order_and_volatile_metadata() -> None:
+    def record(ref: str, content: str, url: str, *, score: float) -> EvidenceRecord:
+        return EvidenceRecord(
+            ref=ref,
+            source="exa",
+            evidence_type="external_proof.external_mentions",
+            content=content,
+            url=url,
+            confidence="high" if score > 0.5 else "low",
+            metadata={
+                "source_class": "external_proof",
+                "intent": "external_mentions",
+                "identity_match": "brand_name",
+                "identity_match_llm": "brand_name",
+                "relevant_blocks": ["value_proposition", "mission"],
+                "stance": "supports",
+                "specificity": "explicit",
+                "score": score,
+                "published_date": f"2026-07-{int(score * 10) + 10}",
+                "result_group": "mentions",
+            },
+        )
+
+    first = BrandEvidencePack(
+        "Acme",
+        "https://acme.example",
+        [
+            record(
+                "raw_inputs.2.exa.mentions.0",
+                "Acme helps teams close faster.",
+                "https://proof.example/acme",
+                score=0.1,
+            ),
+            record(
+                "raw_inputs.2.exa.mentions.1",
+                "Acme turns every close into verified savings.",
+                "https://proof.example/savings",
+                score=0.9,
+            ),
+        ],
+    )
+    second = BrandEvidencePack(
+        "Acme",
+        "https://acme.example",
+        [
+            record(
+                "raw_inputs.8.exa.news.4",
+                "Acme turns every close into verified savings.",
+                "https://proof.example/savings",
+                score=0.2,
+            ),
+            record(
+                "raw_inputs.8.exa.news.7",
+                "Acme helps teams close faster.",
+                "https://proof.example/acme",
+                score=0.8,
+            ),
+        ],
+    )
+    first_shortlists = build_block_evidence_shortlists(first)
+    second_shortlists = build_block_evidence_shortlists(second)
+
+    assert _user_prompt(
+        first,
+        block_evidence_shortlists=first_shortlists,
+    ) == _user_prompt(
+        second,
+        block_evidence_shortlists=second_shortlists,
+    )
+    assert _block_user_prompt(
+        first,
+        block="value_proposition",
+        evidence_refs=first_shortlists["value_proposition"],
+    ) == _block_user_prompt(
+        second,
+        block="value_proposition",
+        evidence_refs=second_shortlists["value_proposition"],
+    )
+
+
+def test_model_facing_aliases_restore_current_provenance_refs() -> None:
+    record = EvidenceRecord(
+        ref="raw_inputs.2.exa.mentions.4",
+        source="exa",
+        evidence_type="external_proof.external_mentions",
+        content="Acme helps teams close faster.",
+        url="https://proof.example/acme",
+        metadata={"source_class": "external_proof"},
+    )
+    pack = BrandEvidencePack("Acme", "https://acme.example", [record])
+    raw = {
+        "blocks": {
+            "mission": {
+                "detected": True,
+                "content": "Help teams close faster.",
+                "confidence": "high",
+                "evidence_refs": [canonical_evidence_ref(record)],
+                "rationale": "The evidence states the outcome.",
+            }
+        },
+        "limitations": [],
+    }
+
+    restored = _restore_interpretation_refs(raw, pack)
+
+    assert restored["blocks"]["mission"]["evidence_refs"] == [record.ref]
 
 
 def test_normalize_llm_interpretation_requires_valid_evidence_refs() -> None:

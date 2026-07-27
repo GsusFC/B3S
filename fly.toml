@@ -7,7 +7,7 @@ kill_timeout = "30s"
   dockerfile = "Dockerfile"
 
 [deploy]
-  release_command = "python scripts/import_b3s_reports_postgres.py --migrate-only"
+  release_command = "python scripts/verify_release_build.py && python scripts/import_b3s_reports_postgres.py --migrate-only"
   release_command_timeout = "5m"
 
 [env]
@@ -17,7 +17,11 @@ kill_timeout = "30s"
   BRAND3_SCREENSHOT_DIR = "/data/screenshots"
   B3S_REPORTS_DIR = "/data/reports"
   B3S_SCORING_DB_PATH = "/data/b3s_scoring.sqlite3"
+  # Keep single scans unchanged; repeated histories show the selected
+  # canonical/provisional baseline instead of blindly publishing the latest run.
+  B3S_CANONICAL_ENFORCEMENT_MODE = "repeated"
   SCREENSHOT_PROVIDER = "playwright"
+  BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS = "60"
 
 [[mounts]]
   source = "b3s_data"

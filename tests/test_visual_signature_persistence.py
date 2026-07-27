@@ -65,6 +65,20 @@ class VisualSignaturePersistenceTests(unittest.TestCase):
             website_url="https://example.com",
             screenshot_path=Path("/tmp/example-screenshot.png"),
             secondary_screenshot_path=Path("/tmp/example-screenshot.full-page.png"),
+            full_page_screenshot_path=Path("/tmp/example-screenshot.full-page.png"),
+            section_screenshot_paths=[
+                "/tmp/example-screenshot.section-01-hero.png",
+                "/tmp/example-screenshot.section-02-proof.png",
+            ],
+            section_manifest={
+                "schema_version": "rendered-page-section-manifest-v1",
+                "section_count": 2,
+            },
+            analysis_atlas_path=Path("/tmp/example-screenshot.analysis-atlas.png"),
+            analysis_atlas_manifest={
+                "schema_version": "visual-analysis-atlas-v1",
+                "panel_count": 3,
+            },
             manifest_path=Path("/tmp/capture_manifest.json"),
             capture_type="viewport",
             secondary_capture_type="full_page",
@@ -99,6 +113,20 @@ class VisualSignaturePersistenceTests(unittest.TestCase):
             "/tmp/example-screenshot.full-page.png",
         )
         self.assertEqual(payload["artifact_refs"]["manifest_path"], "/tmp/capture_manifest.json")
+        self.assertEqual(
+            payload["artifact_refs"]["full_page_screenshot_path"],
+            "/tmp/example-screenshot.full-page.png",
+        )
+        self.assertEqual(payload["run_metadata"]["section_capture_count"], 2)
+        self.assertEqual(payload["run_metadata"]["semantic_analysis_scope"], "labeled_section_atlas")
+        self.assertEqual(
+            payload["artifact_refs"]["section_manifest"]["schema_version"],
+            "rendered-page-section-manifest-v1",
+        )
+        self.assertEqual(
+            payload["artifact_refs"]["analysis_atlas_path"],
+            "/tmp/example-screenshot.analysis-atlas.png",
+        )
         self.assertEqual(payload["agreement_payload"]["agreement_level"], "medium")
         self.assertEqual(payload["vision_payload"]["viewport_composition"]["visual_density"], "balanced")
         self.assertEqual(payload["visual_signature_scan"]["schema_version"], "visual-signature-scan-v1")

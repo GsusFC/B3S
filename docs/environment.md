@@ -171,7 +171,7 @@ These variables are used by scoring, collection, learning, or calibration paths.
 | `BRAND3_PROMOTION_MAX_COMPOSITE_DROP` | `0` | Learning/promotion gate |
 | `BRAND3_PROMOTION_MAX_DIMENSION_DROPS` | built-in per-dimension defaults | JSON object override for dimension drop gates |
 | `BRAND3_SOCIAL_TIMEOUT_SECONDS` | `25` | Social collection timeout |
-| `BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS` | `20` | Visual screenshot timeout |
+| `BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS` | `60` | Hard budget for viewport, structural captures, atlas generation, and provider fallback |
 | `BRAND3_BLOCKED_DOMAINS` | empty | Optional comma-separated URL validation blocklist for the web app |
 
 Changing these can affect scoring behavior or local run behavior. Do not change defaults in code or shared docs without explicit review.

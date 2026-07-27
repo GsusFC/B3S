@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 
 _MAX_OWNED_SUBPAGES = 6
@@ -43,8 +43,14 @@ class WebCollectorLinkingSupport:
 
         candidates = []
         candidates.extend(re.findall(r"\[[^\]]*\]\(([^)]+)\)", markdown or ""))
+        # Only navigation anchors are crawl candidates. Framework preload and
+        # resource links also use href and must not consume the page budget.
         candidates.extend(
-            re.findall(r'href=["\']([^"\']+)["\']', html or "", flags=re.IGNORECASE)
+            re.findall(
+                r"<a\b[^>]*\bhref=[\"']([^\"']+)[\"']",
+                html or "",
+                flags=re.IGNORECASE,
+            )
         )
         candidates.extend(links or [])
 
@@ -70,9 +76,7 @@ class WebCollectorLinkingSupport:
                 if link_domain.startswith("www."):
                     link_domain = link_domain[4:]
 
-                if link_domain == base_domain and self._looks_like_page_link(
-                    parsed_link.path
-                ):
+                if link_domain == base_domain and self._looks_like_page_link(parsed_link):
                     normalized = parsed_link._replace(fragment="").geturl().rstrip("/")
                     base_normalized = base_url.rstrip("/")
                     if normalized not in seen and normalized != base_normalized:
@@ -84,8 +88,12 @@ class WebCollectorLinkingSupport:
         return internal_links
 
     @staticmethod
-    def _looks_like_page_link(path: str) -> bool:
-        lowered = (path or "").lower()
+    def _looks_like_page_link(parsed_link) -> bool:
+        path = str(getattr(parsed_link, "path", "") or "")
+        query = str(getattr(parsed_link, "query", "") or "")
+        lowered = path.lower()
+        if lowered.startswith(("/_next/", "/static/", "/assets/", "/images/", "/img/")):
+            return False
         blocked_extensions = (
             ".css",
             ".js",
@@ -102,8 +110,21 @@ class WebCollectorLinkingSupport:
             ".mp4",
             ".mov",
             ".webm",
+            ".woff",
+            ".woff2",
+            ".ttf",
+            ".otf",
         )
-        return not lowered.endswith(blocked_extensions)
+        if lowered.endswith(blocked_extensions):
+            return False
+        # Optimized image URLs can hide the real asset in ?url=... .
+        for value in parse_qs(query).get("url", []):
+            decoded = unquote(value).lower()
+            if decoded.startswith(("/_next/", "/static/", "/assets/")) or decoded.endswith(
+                blocked_extensions
+            ):
+                return False
+        return True
 
     def _score_internal_links(self, links: list[str], base_url: str) -> list[str]:
         """Score and sort internal links based on relevance keywords."""
