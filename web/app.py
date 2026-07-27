@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from src.build_info import current_build_sha
 from src.services.scanner_evidence_comparison import (
     canonical_enforcement_mode,
     selected_report_for_display,
@@ -321,6 +322,7 @@ def _scan_payload_for_markdown(report: dict[str, Any]) -> dict[str, Any]:
     result.setdefault("brand_name", report.get("brand_name"))
     result.setdefault("url", report.get("url"))
     result.setdefault("brand3_score", report.get("score"))
+    result.setdefault("pipeline_commit_sha", report.get("pipeline_commit_sha") or "unknown")
     return result
 
 
@@ -641,7 +643,7 @@ def _overall_api_status(services: list[dict[str, Any]]) -> str:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "commit_sha": current_build_sha()}
 
 
 @app.get("/artifacts/screenshots/{filename}")

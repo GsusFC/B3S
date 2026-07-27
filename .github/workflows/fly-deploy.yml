@@ -12,7 +12,7 @@ on:
 
 concurrency:
   group: fly-deploy-main
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -26,14 +26,21 @@ jobs:
     environment:
       name: production
       url: https://b3s.fly.dev
+    env:
+      DEPLOY_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Automatic runs deploy the exact CI-verified SHA. A manual run deploys
           # the selected branch SHA, which must remain main during guarded rollout.
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ env.DEPLOY_SHA }}
 
-      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Verify deployment source
+        run: |
+          test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
+          test -z "$(git status --porcelain)"
+
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # master pinned 2026-07-27
 
       - name: Validate Fly configuration
         run: flyctl config validate -a b3s
@@ -41,6 +48,21 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
       - name: Deploy to Fly
-        run: flyctl deploy --remote-only -a b3s
+        run: flyctl deploy --remote-only -a b3s --build-arg B3S_BUILD_SHA="$DEPLOY_SHA"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Verify deployed commit
+        run: |
+          observed=""
+          for attempt in $(seq 1 24); do
+            observed="$(curl --fail --silent --show-error https://b3s.fly.dev/health | python3 -c 'import json, sys; print(json.load(sys.stdin).get("commit_sha", ""))')" || observed=""
+            if [ "$observed" = "$DEPLOY_SHA" ]; then
+              echo "Verified production commit $DEPLOY_SHA"
+              exit 0
+            fi
+            echo "Waiting for production commit (attempt $attempt/24; observed: ${observed:-unavailable})"
+            sleep 5
+          done
+          echo "::error::Expected production commit $DEPLOY_SHA, observed ${observed:-unavailable}"
+          exit 1

@@ -96,12 +96,17 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
     score = report.get("score")
     editorial = report.get("editorial") if isinstance(report.get("editorial"), dict) else {}
     insufficient_evidence = _coverage_limited_keys(report)
+    pipeline_commit_sha = str(report.get("pipeline_commit_sha") or "unknown")
     return {
         "schema_version": SCHEMA_VERSION,
         "id": str(report.get("id") or ""),
         "brand_name": str(report.get("brand_name") or ""),
         "url": str(report.get("url") or ""),
         "lang": "es",
+        "build": {
+            "commit_sha": pipeline_commit_sha,
+            "commit_short": pipeline_commit_sha[:12] if pipeline_commit_sha != "unknown" else "unknown",
+        },
         "score": score,
         "score_scale": 100,
         "score_width": score if score is not None else 0,

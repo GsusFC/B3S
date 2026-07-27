@@ -7,6 +7,7 @@ def test_component_primary_prefers_message_and_keeps_detected_content_for_drawer
             "id": "r1",
             "brand_name": "Optiak",
             "url": "https://optiak.com",
+            "pipeline_commit_sha": "d" * 40,
             "score": 64,
             "components": [
                 {
@@ -26,6 +27,7 @@ def test_component_primary_prefers_message_and_keeps_detected_content_for_drawer
     )
 
     component = vm["components"][0]
+    assert vm["build"] == {"commit_sha": "d" * 40, "commit_short": "d" * 12}
     assert component["card"]["primary"]["text"] == "Diagnóstico editorial."
     assert component["card"]["primary"]["source"] == "message"
     assert component["card"]["support"]["text"] == "Oferta detectada."

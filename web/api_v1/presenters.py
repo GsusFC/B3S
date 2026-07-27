@@ -154,6 +154,7 @@ def result_payload(report: dict[str, Any]) -> dict[str, Any]:
         "metadata": {
             "schema_version": "b3s-scanner-result-v1",
             "pipeline_schema_version": str(raw.get("schema_version") or "unknown"),
+            "pipeline_commit_sha": str(report.get("pipeline_commit_sha") or "unknown"),
             "rubric_version": str(sv9_result.get("rubric_version") or "unknown"),
             "prompt_version": str(debug.get("prompt_version") or "unknown"),
             "evaluator_model": evaluator_model or "unknown",

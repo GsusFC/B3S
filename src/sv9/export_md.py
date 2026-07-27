@@ -59,6 +59,7 @@ def build_scan_markdown(scan: dict[str, Any], *, lang: str = "es") -> str:
         lines.append(f"- URL: {url}")
     lines.append(f"- Brand3 Score: **{scan.get('brand3_score', 0)}/100**")
     lines.append(f"- Modelo: {model}")
+    lines.append(f"- Build: `{scan.get('pipeline_commit_sha') or 'unknown'}`")
     if scan.get("reliability_status"):
         lines.append(f"- Confiabilidad: **{spanish_status_label(scan.get('reliability_status'))}**")
         reason_codes = scan.get("reliability_reason_codes") or []

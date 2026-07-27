@@ -40,6 +40,7 @@ def _report(scan_id: str = "scan123") -> dict:
         "brand_name": "Example",
         "url": "https://example.com",
         "created_at": "2026-07-20T10:05:00+00:00",
+        "pipeline_commit_sha": "a" * 40,
         "score": 72,
         "base_average": 7.2,
         "reliability_status": "reviewable",
@@ -94,12 +95,24 @@ def _report(scan_id: str = "scan123") -> dict:
     }
 
 
-def test_api_health_is_public():
+def test_api_health_is_public(monkeypatch):
+    monkeypatch.setenv("B3S_BUILD_SHA", "b" * 40)
+
     response = TestClient(app).get("/api/v1/health")
 
     assert response.status_code == 200
     assert response.json()["service"] == "b3s-scanner-api"
+    assert response.json()["commit_sha"] == "b" * 40
     assert response.headers["x-b3s-api-version"] == "v1"
+
+
+def test_app_health_exposes_current_commit(monkeypatch):
+    monkeypatch.setenv("B3S_BUILD_SHA", "c" * 40)
+
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "commit_sha": "c" * 40}
 
 
 def test_api_requires_bearer_token(monkeypatch):
@@ -194,6 +207,7 @@ def test_completed_result_has_stable_schema_and_etag(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["metadata"]["schema_version"] == "b3s-scanner-result-v1"
+    assert response.json()["metadata"]["pipeline_commit_sha"] == "a" * 40
     assert response.json()["metadata"]["prompt_version"] == "prompt-v1"
     assert response.json()["components"][0]["tile_summary"] == {
         "passed": 1,

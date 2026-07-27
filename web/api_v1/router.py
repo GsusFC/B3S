@@ -9,6 +9,7 @@ from fastapi import APIRouter, Header, Query, Request, Response, status
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from src.build_info import current_build_sha
 from src.services.scanner_evidence_comparison import annotate_report_history
 from web.report_store import domain_key, list_reports_for_domain
 from web.scan_runner import approve_degraded_scan, cancel_scan
@@ -43,7 +44,12 @@ _ERRORS = {
 
 @router.get("/health", include_in_schema=False)
 def api_health() -> dict[str, str]:
-    return {"status": "ok", "service": "b3s-scanner-api", "api_version": "v1"}
+    return {
+        "status": "ok",
+        "service": "b3s-scanner-api",
+        "api_version": "v1",
+        "commit_sha": current_build_sha(),
+    }
 
 
 @router.get("/openapi.json", include_in_schema=False)

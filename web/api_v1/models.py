@@ -118,6 +118,7 @@ class ScanScore(StrictModel):
 class ResultMetadata(StrictModel):
     schema_version: Literal["b3s-scanner-result-v1"] = "b3s-scanner-result-v1"
     pipeline_schema_version: str
+    pipeline_commit_sha: str = "unknown"
     rubric_version: str
     prompt_version: str
     evaluator_model: str

@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
+from src.build_info import current_build_sha
 from src.services.scanner_evidence_comparison import (
     EVIDENCE_COMPARISON_VERSION,
     annotate_candidate_report,
@@ -1580,6 +1581,7 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
         "brand_name": brand_name,
         "url": url,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "pipeline_commit_sha": current_build_sha(),
         "score": sv9.get("brand3_score"),
         "base_average": sv9.get("base_average"),
         "reliability_status": str(sv9.get("reliability_status") or "shadow"),

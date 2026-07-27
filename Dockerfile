@@ -1,10 +1,15 @@
 FROM python:3.11-slim
 
+ARG B3S_BUILD_SHA=unknown
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    B3S_BUILD_SHA=${B3S_BUILD_SHA}
+
+LABEL org.opencontainers.image.revision="${B3S_BUILD_SHA}"
 
 WORKDIR /app
 

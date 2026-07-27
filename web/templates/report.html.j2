@@ -285,4 +285,8 @@
 {% endif %}
 
 </section>
+<p class="muted mono type-caption">
+  report {{ report.id }} ·
+  <span title="{{ report.build.commit_sha }}">build {{ report.build.commit_short }}</span>
+</p>
 {% endblock %}

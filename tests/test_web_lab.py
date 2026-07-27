@@ -1370,7 +1370,7 @@ def test_report_view_hides_automatic_verdict_from_card_without_tile_profile(monk
     assert "0/10 baldosas encendidas" not in response.text
 
 
-def test_compose_report_preserves_canonical_sv9_tile_profile():
+def test_compose_report_preserves_canonical_sv9_tile_profile(monkeypatch):
     from src.sv9.rubric import tile_ids
     from web.scan_runner import _compose_report
 
@@ -1431,9 +1431,11 @@ def test_compose_report_preserves_canonical_sv9_tile_profile():
         },
     }
 
+    monkeypatch.setenv("B3S_BUILD_SHA", "c" * 40)
     report = _compose_report("scan123", "https://optiak.com", "Optiak", payload)
     magnetism = next(component for component in report["components"] if component["key"] == "magnetism")
 
+    assert report["pipeline_commit_sha"] == "c" * 40
     assert len(magnetism["tile_profile"]) == 10
     assert magnetism["lit"] == 3
     assert magnetism["off"] == 1
