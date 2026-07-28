@@ -185,6 +185,64 @@ PostgreSQL shadow tables and matches the current immutable history.
 PostgreSQL was unavailable or its projection had not caught up. Set
 `B3S_EVIDENCE_LEDGER_MODE=disabled` to stop computing and persisting entries.
 
+## Planned evolution: global scan inventory
+
+Status: **planned, not implemented**.
+
+The current API can list completed scans only when the caller already knows the
+brand domain:
+
+```text
+GET /api/v1/brands/{domain}/scans
+```
+
+It cannot enumerate every brand or scan in the production history. This blocks
+cross-brand drift audits, complete evidence-memory replay, controlled
+backfills, and operational inventory clients unless they connect directly to
+PostgreSQL or execute code inside the deployment.
+
+The preferred evolution is a bounded read API, not SQL or raw table access:
+
+```text
+GET /api/v1/scans?limit=100&cursor=...
+```
+
+Candidate filters:
+
+- `domain`
+- `created_from` / `created_to`
+- `reliability_status`
+- `canonical_status`
+- `stability_classification`
+- `pipeline_commit_sha`
+- `rubric_version`
+- `evaluator_version`
+
+The response should expose scan summaries and canonical resource links, using
+opaque cursor pagination with a maximum page size. It must not expose provider
+secrets, raw acquisition blobs, internal database identifiers, or arbitrary
+query execution.
+
+This inventory requires a separate least-privilege scope such as
+`scans:inventory`; possession of ordinary `scans:read` must not automatically
+grant global enumeration.
+
+For complete evidence-memory validation, prefer a server-side read-only audit
+job or export built from immutable report snapshots. Returning aggregate stress
+results is safer than widening the public result contract to include the raw
+evidence payload. Any export containing evidence content must be separately
+scoped, bounded, auditable, and short-lived.
+
+Acceptance conditions:
+
+- deterministic pagination with no duplicates or omissions;
+- snapshot-consistent inventory during concurrent scans;
+- explicit retention and redaction policy;
+- rate limits and audit logging;
+- no mutation of reports, canonical selection, ledger state, or scores;
+- the global stress harness can cover the complete corpus without direct
+  database credentials.
+
 ## Errors
 
 API errors use one envelope:
