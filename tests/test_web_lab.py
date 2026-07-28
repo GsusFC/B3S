@@ -553,9 +553,70 @@ def test_brand_view_embeds_visual_module_from_latest_report(monkeypatch):
     assert "data-moodboard-stage" in response.text
     assert "/static/brand3_cloud.js" in response.text
     assert "/static/moodboard.js" in response.text
+    assert "assets de marca seleccionados" in response.text
     assert '<div class="moodboard-strip"' not in response.text
     assert "https://stabolut.com/assets/card-overcollateralized.png" in response.text
     assert 'href="#modulo-visual"' in response.text
+
+
+def test_brand_view_prefers_structured_web_capture_for_visual_module(monkeypatch):
+    from web.app import app
+
+    monkeypatch.setattr(
+        "web.app.list_reports_for_domain",
+        lambda domain: [
+            {
+                "id": "report-rich-web",
+                "brand_name": "Acme",
+                "url": "https://acme.com",
+                "created_at": "2026-07-28T12:00:00+00:00",
+                "score": 79,
+                "components": [],
+                "blocks": [],
+                "raw": {
+                    "raw_inputs": [
+                        {
+                            "source": "web",
+                            "payload": {
+                                "url": "https://acme.com",
+                                "canonical_url": "https://www.acme.com",
+                                "html": (
+                                    '<section class="hero">'
+                                    '<img src="/brand-story.jpg" alt="Acme story" width="1200" height="800">'
+                                    "</section>"
+                                ),
+                                "markdown_content": (
+                                    "![Ignored investor]"
+                                    "(https://acme.com/investor-logo.svg)"
+                                ),
+                            },
+                        }
+                    ],
+                    "flow": {
+                        "candidate": {
+                            "evidence_pack": {
+                                "evidence": [
+                                    {
+                                        "source": "web",
+                                        "evidence_type": "raw_input",
+                                        "content": "![Legacy](https://acme.com/legacy-only.jpg)",
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                },
+            }
+        ],
+    )
+
+    response = TestClient(app).get("/brand/acme.com?lang=es")
+
+    assert response.status_code == 200
+    assert "https://www.acme.com/brand-story.jpg" in response.text
+    assert "https://acme.com/legacy-only.jpg" not in response.text
+    assert "https://acme.com/investor-logo.svg" not in response.text
+    assert "visual-assets-v2" in response.text
 
 
 def test_brand_view_handles_missing_scan(monkeypatch):

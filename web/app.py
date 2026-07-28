@@ -437,9 +437,32 @@ def _http_url(value: Any) -> str:
     return ""
 
 
-def _moodboard_web_payload(report: dict[str, Any]) -> dict[str, str]:
+def _moodboard_web_payload(report: dict[str, Any]) -> dict[str, Any]:
+    raw = report.get("raw") if isinstance(report.get("raw"), dict) else {}
+    for record in raw.get("raw_inputs") or []:
+        if not isinstance(record, dict) or str(record.get("source") or "") != "web":
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, str):
+            payload = _json_dict(payload)
+        if not isinstance(payload, dict):
+            continue
+        if not any(payload.get(key) for key in ("html", "images", "markdown_content")):
+            continue
+        rich_payload = dict(payload)
+        rich_payload.setdefault("url", str(report.get("url") or ""))
+        rich_payload.setdefault(
+            "canonical_url",
+            str(rich_payload.get("url") or report.get("url") or ""),
+        )
+        rich_payload.setdefault("brand_name", str(report.get("brand_name") or ""))
+        return rich_payload
+
+    # Compatibility path for reports created before the immutable web payload
+    # was exposed to the brand view. Evidence-pack Markdown has no DOM context
+    # or dimensions, so the visual selector deliberately treats it as fallback.
     evidence = (
-        ((report.get("raw") or {}).get("flow") or {})
+        (raw.get("flow") or {})
         .get("candidate", {})
         .get("evidence_pack", {})
         .get("evidence", [])
@@ -456,6 +479,7 @@ def _moodboard_web_payload(report: dict[str, Any]) -> dict[str, str]:
     return {
         "url": str(report.get("url") or ""),
         "canonical_url": str(report.get("url") or ""),
+        "brand_name": str(report.get("brand_name") or ""),
         "markdown_content": "\n\n".join(markdown_parts),
     }
 
