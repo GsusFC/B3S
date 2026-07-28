@@ -32,7 +32,7 @@ _TRACKING_QUERY_KEYS = {
     "ref_src",
 }
 _INVALID_RELIABILITY = {"broken", "invalid", "error", "failed"}
-_MATERIAL_SOURCE_CLASSES = {
+MATERIAL_SOURCE_CLASSES = {
     "owned_copy",
     "external_proof",
     "visual_signal",
@@ -52,6 +52,7 @@ class CanonicalEvidenceRecord:
     url: str
     content_hash: str
     normalized_content: str
+    identity_match: str
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -140,8 +141,8 @@ class EvidenceComparison:
 def build_evidence_snapshot(report: dict[str, Any]) -> EvidenceSnapshot:
     """Build an order- and ref-insensitive snapshot from one immutable report."""
 
-    records = _canonical_records(report)
-    material = tuple(record for record in records if record.source_class in _MATERIAL_SOURCE_CLASSES)
+    records = canonical_evidence_records(report)
+    material = tuple(record for record in records if record.source_class in MATERIAL_SOURCE_CLASSES)
     material_payload = [record.public_dict() for record in material]
     urls = sorted({record.url for record in material if record.url})
     owned = [record for record in material if record.source_class == "owned_copy"]
@@ -516,7 +517,11 @@ def render_history_dry_run(histories: dict[str, Iterable[dict[str, Any]]]) -> di
     }
 
 
-def _canonical_records(report: dict[str, Any]) -> tuple[CanonicalEvidenceRecord, ...]:
+def canonical_evidence_records(
+    report: dict[str, Any],
+) -> tuple[CanonicalEvidenceRecord, ...]:
+    """Return stable report evidence without exposing collector positions."""
+
     raw = report.get("raw") if isinstance(report.get("raw"), dict) else {}
     flow = raw.get("flow") if isinstance(raw.get("flow"), dict) else {}
     candidate = flow.get("candidate") if isinstance(flow.get("candidate"), dict) else {}
@@ -554,6 +559,11 @@ def _canonical_records(report: dict[str, Any]) -> tuple[CanonicalEvidenceRecord,
             url=url,
             content_hash=content_hash,
             normalized_content=normalized_content,
+            identity_match=str(
+                metadata.get("identity_match_llm")
+                or metadata.get("identity_match")
+                or ""
+            ).strip().lower(),
         )
         records[fingerprint] = record
     return tuple(sorted(records.values(), key=lambda item: (item.locator, item.fingerprint)))

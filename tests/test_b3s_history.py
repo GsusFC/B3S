@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from copy import deepcopy
 from threading import Barrier
+from uuid import uuid4
 
 import pytest
 
@@ -87,6 +89,35 @@ def test_repository_connections_use_a_bounded_timeout() -> None:
     assert captured["dsn"] == "postgresql://example.test/b3s"
 
 
+def test_shadow_ledger_failure_isolated_from_authoritative_import(monkeypatch) -> None:
+    from src.history.repository import PostgresHistoryRepository
+
+    class Connection:
+        savepoint_count = 0
+
+        @contextmanager
+        def transaction(self):
+            self.savepoint_count += 1
+            yield
+
+    repository = PostgresHistoryRepository("postgresql://example.test/b3s")
+    connection = Connection()
+    monkeypatch.setenv("B3S_EVIDENCE_LEDGER_MODE", "shadow")
+
+    def fail(*_args):
+        raise RuntimeError("experimental projection failed")
+
+    monkeypatch.setattr(repository, "_rebuild_evidence_ledger_shadow", fail)
+
+    repository._rebuild_evidence_ledger_shadow_safely(
+        connection,
+        uuid4(),
+        uuid4(),
+    )
+
+    assert connection.savepoint_count == 1
+
+
 def test_schema_drop_requires_explicit_opt_in(monkeypatch) -> None:
     monkeypatch.delenv("B3S_ALLOW_SCHEMA_DROP", raising=False)
 
@@ -98,12 +129,15 @@ def test_schema_drop_requires_explicit_opt_in(monkeypatch) -> None:
     not os.environ.get("B3S_TEST_DATABASE_URL"),
     reason="B3S_TEST_DATABASE_URL is required for PostgreSQL integration",
 )
-def test_postgres_history_import_is_idempotent_and_selects_latest_capture() -> None:
+def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
+    monkeypatch,
+) -> None:
     import psycopg
 
     from src.history.repository import PostgresHistoryRepository
 
     _require_schema_drop_opt_in()
+    monkeypatch.setenv("B3S_EVIDENCE_LEDGER_MODE", "shadow")
     dsn = os.environ["B3S_TEST_DATABASE_URL"]
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
@@ -113,6 +147,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture() -> N
         assert repository.migrate() == [
             "001_history_v1.sql",
             "002_evidence_stability.sql",
+            "003_evidence_ledger_shadow.sql",
         ]
         assert repository.migrate() == []
 
@@ -141,6 +176,11 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture() -> N
             "scan-older",
         ]
         assert len(repository.list_evaluation_revisions(old_outcome.capture_id)) == 1
+        ledger = repository.get_evidence_ledger_shadow("example.com")
+        assert ledger is not None
+        assert ledger["runtime_effect"] is False
+        assert ledger["summary"]["state_counts"] == {"validation_candidate": 1}
+        assert ledger["entries"][0]["observation_count"] == 2
         assert repository.storage_counts() == {
             "workspaces": 1,
             "brands": 1,
@@ -155,6 +195,9 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture() -> N
             "capture_fingerprints": 2,
             "evaluation_comparisons": 2,
             "brand_canonical_selections": 1,
+            "evidence_ledger_shadow_states": 1,
+            "evidence_ledger_shadow_entries": 1,
+            "evidence_ledger_shadow_observations": 2,
         }
 
         concurrent = _report("scan-concurrent", "2026-07-03T08:00:00Z", score=79)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from importlib import resources
+import logging
 from threading import Lock
 from typing import Any, Callable
 from uuid import UUID, uuid5
@@ -14,6 +15,10 @@ from psycopg.types.json import Jsonb
 
 from src.history.models import HistoricalReport, ImportOutcome, ReportConflictError
 from src.history.report_parser import canonical_json_bytes, normalize_domain, parse_report
+from src.services.evidence_ledger_shadow import (
+    build_evidence_ledger_shadow,
+    evidence_ledger_mode,
+)
 from src.services.scanner_evidence_comparison import (
     CANONICAL_POLICY_VERSION,
     annotate_report_history,
@@ -23,6 +28,7 @@ from src.services.scanner_evidence_comparison import (
 _ID_NAMESPACE = UUID("3ef1b80c-e7b7-4fb3-95ad-fb9e03c59d52")
 _SCHEMA = "b3s_history"
 _CONNECT_TIMEOUT_SECONDS = 5
+_LOG = logging.getLogger(__name__)
 
 
 class PostgresHistoryRepository:
@@ -122,6 +128,11 @@ class PostgresHistoryRepository:
                     (_advisory_lock_key(workspace_id, "brand", existing["brand_id"]),),
                 )
                 self._rebuild_brand_stability(conn, workspace_id, existing["brand_id"])
+                self._rebuild_evidence_ledger_shadow_safely(
+                    conn,
+                    workspace_id,
+                    existing["brand_id"],
+                )
                 return ImportOutcome(
                     source_report_id=parsed.source_report_id,
                     status="unchanged",
@@ -165,6 +176,11 @@ class PostgresHistoryRepository:
                 parsed,
             )
             self._rebuild_brand_stability(conn, workspace_id, brand_id)
+            self._rebuild_evidence_ledger_shadow_safely(
+                conn,
+                workspace_id,
+                brand_id,
+            )
             return ImportOutcome(
                 source_report_id=parsed.source_report_id,
                 status="imported",
@@ -335,6 +351,34 @@ class PostgresHistoryRepository:
             ).fetchall()
         return [dict(row["payload"]) for row in rows if isinstance(row["payload"], dict)]
 
+    def get_evidence_ledger_shadow(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        """Return the persisted shadow read model for one brand."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT evidence_ledger_shadow_states.payload
+                FROM {_SCHEMA}.evidence_ledger_shadow_states
+                JOIN {_SCHEMA}.brands
+                  ON brands.id = evidence_ledger_shadow_states.brand_id
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+        return dict(row["payload"]) if row and isinstance(row["payload"], dict) else None
+
     def list_brand_history(
         self,
         domain_or_url: str,
@@ -393,6 +437,9 @@ class PostgresHistoryRepository:
             "capture_fingerprints",
             "evaluation_comparisons",
             "brand_canonical_selections",
+            "evidence_ledger_shadow_states",
+            "evidence_ledger_shadow_entries",
+            "evidence_ledger_shadow_observations",
         )
         with self._connect() as conn:
             return {
@@ -804,6 +851,175 @@ class PostgresHistoryRepository:
                     _jsonb(artifact),
                 ),
             )
+
+    def _rebuild_evidence_ledger_shadow_safely(
+        self,
+        conn,
+        workspace_id: UUID,
+        brand_id: UUID,
+    ) -> None:
+        """Keep a shadow failure outside the authoritative import transaction."""
+
+        if evidence_ledger_mode() != "shadow":
+            return
+        try:
+            # Psycopg maps a nested transaction block to a SAVEPOINT. A broken
+            # experimental projection therefore rolls back only its own writes.
+            with conn.transaction():
+                self._rebuild_evidence_ledger_shadow(
+                    conn,
+                    workspace_id,
+                    brand_id,
+                )
+        except Exception:
+            _LOG.exception(
+                "failed to rebuild evidence ledger shadow",
+                extra={"brand_id": str(brand_id)},
+            )
+
+    @staticmethod
+    def _rebuild_evidence_ledger_shadow(
+        conn,
+        workspace_id: UUID,
+        brand_id: UUID,
+    ) -> None:
+        rows = conn.execute(
+            f"""
+            SELECT report_snapshots.source_report_id,
+                   report_snapshots.payload,
+                   captures.id AS capture_id
+            FROM {_SCHEMA}.report_snapshots
+            JOIN {_SCHEMA}.evaluation_runs
+              ON evaluation_runs.id = report_snapshots.evaluation_run_id
+            JOIN {_SCHEMA}.captures
+              ON captures.id = evaluation_runs.capture_id
+            WHERE report_snapshots.workspace_id = %s
+              AND captures.brand_id = %s
+            ORDER BY report_snapshots.created_at, report_snapshots.source_report_id
+            """,
+            (workspace_id, brand_id),
+        ).fetchall()
+        reports = [dict(row["payload"]) for row in rows if isinstance(row["payload"], dict)]
+        row_by_report_id = {str(row["source_report_id"]): row for row in rows}
+        conn.execute(
+            f"DELETE FROM {_SCHEMA}.evidence_ledger_shadow_entries WHERE brand_id = %s",
+            (brand_id,),
+        )
+        if not reports:
+            conn.execute(
+                f"DELETE FROM {_SCHEMA}.evidence_ledger_shadow_states WHERE brand_id = %s",
+                (brand_id,),
+            )
+            return
+
+        payload = build_evidence_ledger_shadow(reports, mode="shadow")
+        for entry in payload.get("entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            fingerprint = str(entry.get("evidence_fingerprint") or "")
+            entry_id = _stable_uuid(
+                brand_id,
+                "evidence-ledger-shadow",
+                fingerprint,
+            )
+            conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_ledger_shadow_entries (
+                    id, brand_id, evidence_fingerprint, locator_hash,
+                    source_class, evidence_type, canonical_url, source_domain,
+                    content_hash, state, reason_codes, first_seen_at,
+                    last_seen_at, age_days, ttl_days, observation_count,
+                    qualified_observation_count, present_in_latest,
+                    identity_matches, locator_variant_count, metadata
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    entry_id,
+                    brand_id,
+                    fingerprint,
+                    str(entry.get("locator_hash") or ""),
+                    str(entry.get("source_class") or "other"),
+                    str(entry.get("evidence_type") or "unknown"),
+                    str(entry.get("url") or ""),
+                    str(entry.get("source_domain") or ""),
+                    str(entry.get("content_hash") or ""),
+                    str(entry.get("state") or "observed"),
+                    _jsonb(entry.get("reason_codes") or []),
+                    entry.get("first_seen_at"),
+                    entry.get("last_seen_at"),
+                    int(entry.get("age_days") or 0),
+                    int(entry.get("ttl_days") or 1),
+                    int(entry.get("observation_count") or 1),
+                    int(entry.get("qualified_observation_count") or 0),
+                    bool(entry.get("present_in_latest")),
+                    _jsonb(entry.get("identity_matches") or []),
+                    int(entry.get("locator_variant_count") or 1),
+                    _jsonb(
+                        {
+                            "report_ids": entry.get("report_ids") or [],
+                            "shadow_only": True,
+                        }
+                    ),
+                ),
+            )
+            for observation in entry.get("observations") or []:
+                if not isinstance(observation, dict):
+                    continue
+                report_id = str(observation.get("report_id") or "")
+                report_row = row_by_report_id.get(report_id)
+                if report_row is None:
+                    continue
+                conn.execute(
+                    f"""
+                    INSERT INTO {_SCHEMA}.evidence_ledger_shadow_observations (
+                        ledger_entry_id, capture_id, source_report_id,
+                        observed_at, identity_match, acquisition_state, invalid
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        entry_id,
+                        report_row["capture_id"],
+                        report_id,
+                        observation.get("observed_at"),
+                        str(observation.get("identity_match") or ""),
+                        str(observation.get("acquisition_state") or "unknown"),
+                        bool(observation.get("invalid")),
+                    ),
+                )
+
+        latest_report_id = str(payload.get("latest_report_id") or "")
+        latest_row = row_by_report_id.get(latest_report_id)
+        conn.execute(
+            f"""
+            INSERT INTO {_SCHEMA}.evidence_ledger_shadow_states (
+                brand_id, latest_capture_id, schema_version, policy_version,
+                mode, runtime_effect, state_fingerprint, summary, payload,
+                computed_at
+            ) VALUES (%s, %s, %s, %s, 'shadow', false, %s, %s, %s, now())
+            ON CONFLICT (brand_id) DO UPDATE SET
+                latest_capture_id = EXCLUDED.latest_capture_id,
+                schema_version = EXCLUDED.schema_version,
+                policy_version = EXCLUDED.policy_version,
+                mode = EXCLUDED.mode,
+                runtime_effect = false,
+                state_fingerprint = EXCLUDED.state_fingerprint,
+                summary = EXCLUDED.summary,
+                payload = EXCLUDED.payload,
+                computed_at = now()
+            """,
+            (
+                brand_id,
+                latest_row["capture_id"] if latest_row is not None else None,
+                str(payload.get("schema_version") or ""),
+                str(payload.get("policy_version") or ""),
+                str(payload.get("state_fingerprint") or ""),
+                _jsonb(payload.get("summary") or {}),
+                _jsonb(payload),
+            ),
+        )
 
     @staticmethod
     def _rebuild_brand_stability(conn, workspace_id: UUID, brand_id: UUID) -> None:

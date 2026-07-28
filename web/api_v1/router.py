@@ -11,7 +11,11 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from src.build_info import current_build_sha
 from src.services.scanner_evidence_comparison import annotate_report_history
-from web.report_store import domain_key, list_reports_for_domain
+from web.report_store import (
+    domain_key,
+    evidence_ledger_shadow_for_domain,
+    list_reports_for_domain,
+)
 from web.scan_runner import approve_degraded_scan, cancel_scan
 
 from .auth import ReadPrincipal, WritePrincipal
@@ -20,6 +24,7 @@ from .models import (
     ApiCapabilitiesResponse,
     ApiErrorResponse,
     BrandScanHistoryResponse,
+    EvidenceLedgerShadowResponse,
     ScanCreateRequest,
     ScanEvidenceResponse,
     ScanResultResponse,
@@ -286,4 +291,25 @@ def brand_scan_history(
             "count": len(items),
             "has_more": offset + len(items) < len(reports),
         },
+    }
+
+
+@router.get(
+    "/brands/{domain}/evidence-ledger-shadow",
+    response_model=EvidenceLedgerShadowResponse,
+    operation_id="getBrandEvidenceLedgerShadow",
+    responses=_ERRORS,
+)
+def brand_evidence_ledger_shadow(
+    domain: str,
+    _principal: ReadPrincipal,
+) -> dict[str, Any]:
+    normalized = domain_key(domain)
+    if not normalized:
+        raise ApiError(400, "invalid_domain", "A valid brand domain is required.")
+    return {
+        "object": "evidence_ledger_shadow",
+        "api_version": "v1",
+        "domain": normalized,
+        **evidence_ledger_shadow_for_domain(normalized),
     }
