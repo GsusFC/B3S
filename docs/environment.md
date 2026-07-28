@@ -112,6 +112,12 @@ These values are safe to commit as placeholders or documented defaults, but not 
 | `BRAND3_EVIDENCE_LLM_MAX_ATTEMPTS` | `2` | Attempts per evidence classifier batch before returning a shadow error |
 | `BRAND3_EVIDENCE_LLM_NATIVE_STRUCTURED_OUTPUT` | `true` | Uses Gemini native structured output for the evidence classifier when the configured base URL is Google Gemini |
 
+## Historical Evidence Variables
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `B3S_EVIDENCE_LEDGER_MODE` | `disabled` | `shadow` computes and persists longitudinal evidence candidates without affecting scoring or canonical selection; any other value disables it |
+
 ## Screenshot Provider
 
 | Variable | Default | Purpose |

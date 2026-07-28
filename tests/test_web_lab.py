@@ -136,6 +136,97 @@ def test_report_store_merges_postgres_and_file_reports(tmp_path, monkeypatch):
     ]
 
 
+def test_evidence_ledger_shadow_prefers_matching_persisted_projection(
+    tmp_path,
+    monkeypatch,
+):
+    from src.services.evidence_ledger_shadow import build_evidence_ledger_shadow
+    from web import report_store
+
+    report = {
+        "id": "ledger-one",
+        "brand_name": "Example",
+        "url": "https://example.com",
+        "created_at": "2026-07-10T10:00:00+00:00",
+        "reliability_status": "usable",
+        "acquisition_gate": {"state": "pass"},
+        "components": [],
+        "raw": {
+            "flow": {
+                "candidate": {
+                    "evidence_pack": {
+                        "evidence": [
+                            {
+                                "ref": "web.home",
+                                "source": "web",
+                                "evidence_type": "owned_copy.homepage",
+                                "content": "Stable owned proof.",
+                                "url": "https://example.com",
+                                "confidence": "high",
+                                "metadata": {"source_class": "owned_copy"},
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    }
+    persisted = build_evidence_ledger_shadow([report], mode="shadow")
+    repository = SimpleNamespace(
+        list_report_payloads_for_domain=lambda domain, *, limit, offset: (
+            [report][offset : offset + limit] if domain == "example.com" else []
+        ),
+        get_evidence_ledger_shadow=lambda domain: (
+            persisted if domain == "example.com" else None
+        ),
+    )
+    monkeypatch.setenv("B3S_EVIDENCE_LEDGER_MODE", "shadow")
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+
+    result = report_store.evidence_ledger_shadow_for_domain("example.com")
+
+    assert result["state_fingerprint"] == persisted["state_fingerprint"]
+    assert result["runtime_effect"] is False
+    assert result["persistence"] == {"stored": True, "backend": "postgres"}
+
+
+def test_evidence_ledger_shadow_recomputes_when_persisted_projection_is_stale(
+    tmp_path,
+    monkeypatch,
+):
+    from web import report_store
+
+    report = {
+        "id": "ledger-latest",
+        "brand_name": "Example",
+        "url": "https://example.com",
+        "created_at": "2026-07-11T10:00:00+00:00",
+        "raw": {},
+    }
+    repository = SimpleNamespace(
+        list_report_payloads_for_domain=lambda domain, *, limit, offset: (
+            [report][offset : offset + limit] if domain == "example.com" else []
+        ),
+        get_evidence_ledger_shadow=lambda _domain: {
+            "state_fingerprint": "0" * 64,
+            "latest_report_id": "ledger-old",
+        },
+    )
+    monkeypatch.setenv("B3S_EVIDENCE_LEDGER_MODE", "shadow")
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+
+    result = report_store.evidence_ledger_shadow_for_domain("example.com")
+
+    assert result["latest_report_id"] == "ledger-latest"
+    assert result["runtime_effect"] is False
+    assert result["persistence"] == {
+        "stored": False,
+        "backend": "history_derived",
+    }
+
+
 def test_report_store_rejects_reused_file_id_with_different_content(tmp_path, monkeypatch):
     from web import report_store
 

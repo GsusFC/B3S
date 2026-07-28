@@ -194,6 +194,25 @@ class BrandScanHistoryResponse(StrictModel):
     pagination: Pagination
 
 
+class EvidenceLedgerShadowResponse(StrictModel):
+    object: Literal["evidence_ledger_shadow"] = "evidence_ledger_shadow"
+    api_version: Literal["v1"] = "v1"
+    domain: str
+    schema_version: str
+    policy_version: str
+    mode: Literal["disabled", "shadow"]
+    runtime_effect: Literal[False] = False
+    state_fingerprint: str
+    brand: dict[str, Any] = Field(default_factory=dict)
+    report_count: int = 0
+    latest_report_id: str | None = None
+    summary: dict[str, Any] = Field(default_factory=dict)
+    policy: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    entries: list[dict[str, Any]] = Field(default_factory=list)
+    persistence: dict[str, Any] = Field(default_factory=dict)
+
+
 class ApiCapabilitiesResponse(StrictModel):
     object: Literal["api_capabilities"] = "api_capabilities"
     api_version: Literal["v1"] = "v1"

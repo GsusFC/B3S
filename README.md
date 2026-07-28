@@ -57,6 +57,8 @@ POST /api/v1/scans
 GET  /api/v1/scans/{scan_id}
 GET  /api/v1/scans/{scan_id}/result
 GET  /api/v1/scans/{scan_id}/evidence
+GET  /api/v1/brands/{domain}/scans
+GET  /api/v1/brands/{domain}/evidence-ledger-shadow
 ```
 
 Bearer authentication uses `BRAND3_SCANNER_API_TOKEN`. Create requests support
@@ -95,6 +97,16 @@ Preview the policy globally without writes:
 ```
 
 `B3S_CANONICAL_ENFORCEMENT_MODE` controls publication: `observe` only classifies, `repeated` enforces the selected baseline for brands with at least two scans, and `all` also enforces single-scan histories. Fly starts with `repeated`; local development defaults to `observe`. The contract and rollback procedure are documented in [`docs/canonical_evidence_stability.md`](docs/canonical_evidence_stability.md).
+
+An additional evidence ledger can be enabled with
+`B3S_EVIDENCE_LEDGER_MODE=shadow`. It records exact evidence observations over
+time and proposes validation, change, and staleness candidates. It never marks
+evidence as validated, retired, or contradicted, and has no effect on scoring
+or canonical report selection. Inspect it through
+`GET /api/v1/brands/{domain}/evidence-ledger-shadow`; local development remains
+disabled by default while Fly runs it in shadow mode. The state model,
+evaluation questions, isolation boundary, and rollback are documented in
+[`docs/evidence_ledger_shadow.md`](docs/evidence_ledger_shadow.md).
 
 ## Deployment
 

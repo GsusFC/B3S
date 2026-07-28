@@ -18,6 +18,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from src.history.models import ReportConflictError
+from src.services.evidence_ledger_shadow import (
+    build_evidence_ledger_shadow,
+    evidence_ledger_mode,
+)
 from src.services.scanner_evidence_comparison import (
     annotate_report_history,
     selected_report_for_display,
@@ -191,6 +195,45 @@ def classified_reports_for_domain(domain: str) -> tuple[list[dict[str, Any]], di
     """Return immutable reports with a derived temporal-stability projection."""
 
     return annotate_report_history(list_reports_for_domain(domain))
+
+
+def evidence_ledger_shadow_for_domain(domain: str) -> dict[str, Any]:
+    """Return persisted shadow memory when current, otherwise derive it safely."""
+
+    mode = evidence_ledger_mode()
+    reports = list_reports_for_domain(domain)
+    derived = build_evidence_ledger_shadow(reports, mode=mode)
+    if mode != "shadow":
+        return {
+            **derived,
+            "persistence": {"stored": False, "backend": "disabled"},
+        }
+
+    repository = _postgres_repository()
+    if repository is not None:
+        try:
+            stored = repository.get_evidence_ledger_shadow(domain)
+            if (
+                isinstance(stored, dict)
+                and stored.get("state_fingerprint") == derived.get("state_fingerprint")
+                and stored.get("latest_report_id") == derived.get("latest_report_id")
+            ):
+                return {
+                    **stored,
+                    "persistence": {"stored": True, "backend": "postgres"},
+                }
+        except Exception:
+            _LOG.exception(
+                "failed to load evidence ledger shadow",
+                extra={"domain": domain_key(domain)},
+            )
+    return {
+        **derived,
+        "persistence": {
+            "stored": False,
+            "backend": "history_derived",
+        },
+    }
 
 
 def current_report_for_domain(

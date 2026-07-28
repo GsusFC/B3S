@@ -40,6 +40,11 @@ canonical/provisional reference are related but not interchangeable.
 - `capture_fingerprints`: normalized evidence identity and acquisition profile.
 - `evaluation_comparisons`: derived baseline/previous comparison and reason codes.
 - `brand_canonical_selections`: current canonical or provisional reference per brand.
+- `evidence_ledger_shadow_states`: current non-authoritative longitudinal
+  evidence projection per brand.
+- `evidence_ledger_shadow_entries`: exact evidence identities and proposed
+  shadow states.
+- `evidence_ledger_shadow_observations`: captures supporting each shadow entry.
 
 ## Invariants
 
@@ -51,6 +56,8 @@ canonical/provisional reference are related but not interchangeable.
 - A scan has one observed capture; a capture can have many evaluation revisions.
 - Historical records are deleted only through explicit parent deletion, never by routine import.
 - Stability recomputation updates only derived comparison/selection tables; immutable report payloads are returned exactly as imported.
+- Evidence-ledger rebuilds run inside a savepoint, never affect scoring or
+  canonical selection, and cannot abort an authoritative report import.
 
 PostgreSQL cannot represent NUL inside `text` or `jsonb`. Imported text replaces NUL with U+FFFD for querying, while `evidence_records.content_raw` and `report_snapshots.payload_raw` preserve canonical original bytes. Hashes are calculated from the unsanitized content.
 
