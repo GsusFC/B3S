@@ -136,6 +136,16 @@ Adjudication writes require a dedicated
 `B3S_EVIDENCE_REVIEWER_ID` rather than trusting a reviewer supplied by the
 client.
 
+Prepare and evaluate the versioned identity review set with:
+
+```bash
+.venv/bin/python scripts/evidence_identity_gold_set.py --format markdown
+```
+
+The committed candidates remain explicitly pending until the configured
+reviewer supplies a separate `reviews.jsonl`; see
+[`docs/evidence_identity_gold_set_v1.md`](docs/evidence_identity_gold_set_v1.md).
+
 ## Deployment
 
 Fly deploys use the GitHub `production` environment and its `FLY_API_TOKEN` secret. The `Fly Deploy` workflow is manual from `main` while the guarded rollout is active. Automatic deploys after successful CI remain disabled until the repository variable `AUTO_DEPLOY_ENABLED` is explicitly changed from `false` to `true`.

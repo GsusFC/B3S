@@ -30,13 +30,13 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
     probes = {probe["id"]: probe for probe in report["controlled_probes"]}
 
     poison = probes[
-        "identity_review_has_no_individual_authentication_or_gold_set"
+        "identity_gold_set_pending_human_review"
     ]
     syndication = probes["syndication_is_not_clustered"]
 
     assert poison["status"] == "blocked"
     assert "`validation_candidate`" in poison["observation"]
-    assert "authenticated reviewers" in poison["required_capability"]
+    assert "candidate reviews" in poison["required_capability"]
     assert syndication["status"] == "blocked"
     assert "2 validation candidates" in syndication["observation"]
     assert probes["identity_v2_weak_external_identity_is_not_eligible"][

@@ -613,17 +613,17 @@ def _controlled_probes() -> list[dict[str, Any]]:
             "Identity v2 surfaces a controlled stable-slot change as a proposed revision without accepting it.",
         ),
         {
-            "id": "identity_review_has_no_individual_authentication_or_gold_set",
+            "id": "identity_gold_set_pending_human_review",
             "kind": "promotion_blocker",
             "status": "blocked",
             "observation": (
                 f"In v1 a deliberately wrong external item reached `{poison_state}` because "
                 "brand-name identity metadata was trusted twice. V2 blocks eligibility and "
-                "stores reversible decisions, but its API actor is still a shared environment "
-                "token and no reviewed identity gold set exists."
+                "stores reversible decisions under a server-bound reviewer. A 14-case "
+                "versioned candidate set exists, but it has no human review decisions yet."
             ),
             "required_capability": (
-                "individually authenticated reviewers plus a reviewed adversarial identity set"
+                "complete the candidate reviews and satisfy the frozen gold-set thresholds"
             ),
         },
         {
