@@ -290,6 +290,11 @@ def test_external_mentions_accept_legal_name_exact_match():
 
     assert [item.url for item in results] == ["https://www.einforma.com/informacion-empresa/cofi-solutions"]
     assert results[0].metadata["entity_match_reason"] in {"alias_in_title", "alias_in_text", "alias_in_host"}
+    provenance = results[0].metadata["external_identity_provenance"]
+    assert provenance["subject_domain"] == "cofisolutions.com"
+    assert provenance["source_domain"] == "einforma.com"
+    assert provenance["matched_alias"] == "cofisolutionssl"
+    assert provenance["candidate_strength"] == "strong"
 
 
 def test_external_mentions_filters_collision_results_without_exact_entity_match():

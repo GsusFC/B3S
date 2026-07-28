@@ -22,6 +22,9 @@ from src.services.evidence_ledger_shadow import (
     build_evidence_ledger_shadow,
     evidence_ledger_mode,
 )
+from src.services.evidence_memory_identity_v2 import (
+    build_evidence_memory_identity_v2,
+)
 from src.services.scanner_evidence_comparison import (
     annotate_report_history,
     selected_report_for_display,
@@ -227,6 +230,22 @@ def evidence_ledger_shadow_for_domain(domain: str) -> dict[str, Any]:
                 "failed to load evidence ledger shadow",
                 extra={"domain": domain_key(domain)},
             )
+    return {
+        **derived,
+        "persistence": {
+            "stored": False,
+            "backend": "history_derived",
+        },
+    }
+
+
+def evidence_memory_identity_v2_for_domain(domain: str) -> dict[str, Any]:
+    """Derive the non-authoritative identity-v2 projection from history."""
+
+    derived = build_evidence_memory_identity_v2(
+        list_reports_for_domain(domain),
+        mode="shadow",
+    )
     return {
         **derived,
         "persistence": {

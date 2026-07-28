@@ -6,9 +6,13 @@ The evidence-memory direction is a falsifiable architecture hypothesis, not a
 validated scoring system yet.
 
 The current ledger supports a useful foundation: exact evidence identities
-survive acquisition loss and evaluator drift. It does not yet support safe
-promotion because it cannot adjudicate identity, cluster syndication, resolve
-claims, persist tile support, or evaluate a canonical memory version.
+survive acquisition loss and evaluator drift. Identity v2 also separates
+documents from passages, suppresses URL-only change candidates, and clusters
+exact syndication. New Exa captures also persist enough external-attribution
+provenance for v2 to reproduce a strong match instead of trusting its label.
+It does not yet support safe promotion because it cannot adjudicate claims,
+detect paraphrased syndication, persist tile support, or evaluate a canonical
+memory version.
 
 ## Read-only harness
 
@@ -51,13 +55,19 @@ The executable foundation must prove:
 3. evaluator-only changes cannot rewrite evidence identities;
 4. exact repetition cannot increase evidence breadth;
 5. changed content is surfaced but not silently interpreted as contradiction;
-6. TTL expiry cannot retire evidence automatically.
+6. TTL expiry cannot retire evidence automatically;
+7. several passages from one document are not temporal revisions;
+8. weak external identity does not become validation-eligible;
+9. a bare strong-looking upstream label does not become validation-eligible;
+10. persisted strong external attribution is independently reproducible;
+11. exact syndicated copies count as one independent cluster;
+12. a controlled stable-slot change is surfaced as a proposed revision.
 
 The adversarial probes deliberately expose:
 
 1. repeated false identity metadata can currently create a
    `validation_candidate`;
-2. syndicated copies are not clustered as one underlying source;
+2. v1 does not cluster syndicated copies and v2 only handles exact copies;
 3. old and new content have no canonical claim-resolution path;
 4. evidence has no persistent, versioned claim-to-tile mapping;
 5. no evaluator consumes a canonical memory version.
@@ -104,10 +114,25 @@ multi-variant locator can mean several chunks or claims from one page rather
 than temporal brand change. The v1 locator therefore cannot drive change
 authority.
 
+The v1/v2 comparison found:
+
+- 29 v1 `changed_candidate` entries;
+- 29/29 suppressed by v2 because no matching stable-slot revision existed;
+- 0 v2 real-history revision candidates;
+- 49 stable slots, all produced by `visual_tile` rather than semantic
+  `claim_id`;
+- a false bare strong label stayed unverified while a reproduced Exa
+  attribution reached `validation_candidate` in the controlled probes;
+- 185 current external passages grouped into 162 conservative independence
+  clusters.
+
 Verdict: `foundation_supported_promotion_blocked`.
 
-This result validates only the identity-memory foundation. It does not validate
-memory scoring or real-change detection.
+This result validates only the identity-memory foundation and the removal of a
+specific v1 false-change mechanism. The controlled explicit-claim probe proves
+that the revision mechanism exists, but the real corpus cannot measure
+semantic-change recall because it has no stable semantic claim IDs. It does not
+validate memory scoring or production real-change detection.
 
 ## Promotion gates
 
@@ -126,6 +151,10 @@ Current status: passed on the local baseline.
 Required before any claim can become canonical:
 
 - independent entity adjudication rather than trusting one LLM label;
+- persisted matched entity/domain data so a strong deterministic identity
+  decision can be reproduced instead of trusting its upstream label — now
+  implemented for new Exa captures and required before enabling any other
+  provider;
 - explicit `proposed`, `accepted`, `disputed`, `superseded`, `rejected`, and
   `revoked` states;
 - reversible decisions with policy and evaluator versions;

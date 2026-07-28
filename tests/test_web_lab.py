@@ -227,6 +227,60 @@ def test_evidence_ledger_shadow_recomputes_when_persisted_projection_is_stale(
     }
 
 
+def test_evidence_memory_identity_v2_is_derived_without_authority(
+    tmp_path,
+    monkeypatch,
+):
+    from web import report_store
+
+    report = {
+        "id": "memory-v2-one",
+        "brand_name": "Example",
+        "url": "https://example.com",
+        "created_at": "2026-07-11T10:00:00+00:00",
+        "reliability_status": "usable",
+        "acquisition_gate": {"state": "pass"},
+        "components": [],
+        "raw": {
+            "flow": {
+                "candidate": {
+                    "evidence_pack": {
+                        "evidence": [
+                            {
+                                "ref": "web.home",
+                                "source": "web",
+                                "evidence_type": "owned_copy.homepage",
+                                "content": "Stable owned proof.",
+                                "url": "https://example.com",
+                                "metadata": {"source_class": "owned_copy"},
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    }
+    repository = SimpleNamespace(
+        list_report_payloads_for_domain=lambda domain, *, limit, offset: (
+            [report][offset : offset + limit] if domain == "example.com" else []
+        ),
+    )
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+
+    result = report_store.evidence_memory_identity_v2_for_domain("example.com")
+
+    assert result["schema_version"] == "evidence-memory-identity-v2"
+    assert result["runtime_effect"] is False
+    assert result["authority"] is False
+    assert result["summary"]["document_count"] == 1
+    assert result["summary"]["passage_count"] == 1
+    assert result["persistence"] == {
+        "stored": False,
+        "backend": "history_derived",
+    }
+
+
 def test_report_store_rejects_reused_file_id_with_different_content(tmp_path, monkeypatch):
     from web import report_store
 
