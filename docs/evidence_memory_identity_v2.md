@@ -185,5 +185,5 @@ Identity v2 must remain non-authoritative until at least:
 2. paraphrased syndication and publisher ownership are addressed;
 3. evidence is mapped persistently through claim to tile;
 4. a reviewed dataset measures both false-change rate and real-change recall;
-5. adjudication authentication identifies individual reviewers rather than
-   relying on a shared environment-token actor plus a declared reviewer.
+5. a reviewed gold set measures both false identity acceptance and identity
+   recall on ambiguous real cases.

@@ -249,7 +249,6 @@ class EvidenceMemoryAdjudicationCreateRequest(StrictModel):
         ...,
         pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     )
-    reviewer: str = Field(min_length=1, max_length=200)
     reason_code: str = Field(
         min_length=1,
         max_length=100,
@@ -261,7 +260,6 @@ class EvidenceMemoryAdjudicationCreateRequest(StrictModel):
     @field_validator(
         "subject_id",
         "expected_current_event_id",
-        "reviewer",
         "reason_code",
         "rationale",
         "evaluator_version",

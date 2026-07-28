@@ -19,7 +19,7 @@ from web.report_store import (
 )
 from web.scan_runner import approve_degraded_scan, cancel_scan
 
-from .auth import ReadPrincipal, WritePrincipal
+from .auth import AdjudicationPrincipal, ReadPrincipal, WritePrincipal
 from .errors import ApiError
 from .models import (
     ApiCapabilitiesResponse,
@@ -358,7 +358,7 @@ def create_brand_evidence_memory_adjudication(
     domain: str,
     payload: EvidenceMemoryAdjudicationCreateRequest,
     response: Response,
-    principal: WritePrincipal,
+    principal: AdjudicationPrincipal,
     idempotency_key: Annotated[
         str | None,
         Header(alias="Idempotency-Key"),
@@ -371,6 +371,7 @@ def create_brand_evidence_memory_adjudication(
         normalized,
         payload.model_dump(),
         client_id=principal.client_id,
+        reviewer_id=principal.reviewer_id or "",
         idempotency_key=idempotency_key,
     )
     response.headers["Cache-Control"] = "no-store"

@@ -165,6 +165,7 @@ def create_evidence_memory_adjudication(
     request_payload: dict[str, Any],
     *,
     client_id: str,
+    reviewer_id: str,
     idempotency_key: str | None,
 ) -> tuple[dict[str, Any], bool]:
     """Append a versioned identity decision without changing runtime outputs."""
@@ -185,7 +186,7 @@ def create_evidence_memory_adjudication(
             if request_payload.get("expected_current_event_id")
             else None
         ),
-        "reviewer": str(request_payload.get("reviewer") or "").strip(),
+        "reviewer": str(reviewer_id or "").strip(),
         "reason_code": str(request_payload.get("reason_code") or "").strip().lower(),
         "rationale": str(request_payload.get("rationale") or "").strip(),
         "evaluator_version": str(

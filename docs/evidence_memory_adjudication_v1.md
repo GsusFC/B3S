@@ -18,7 +18,7 @@ Events are appended to
 - `accepted`, `disputed`, `rejected`, or `revoked`;
 - its per-subject sequence and predecessor event;
 - schema, policy, and evaluator versions;
-- declared reviewer and authenticated API actor;
+- server-derived reviewer and authenticated API actor;
 - reason code, rationale, and creation time;
 - idempotency-key hash and normalized request fingerprint;
 - `runtime_effect=false` and `authority=false`.
@@ -46,12 +46,16 @@ First decision:
   "subject_id": "<64-char evidence id>",
   "decision": "accepted",
   "expected_current_event_id": null,
-  "reviewer": "reviewer@example.com",
   "reason_code": "identity_confirmed",
   "rationale": "The source identifies the scanned brand unambiguously.",
   "evaluator_version": "manual-review-v1"
 }
 ```
+
+The Bearer token for this endpoint is configured separately as
+`B3S_EVIDENCE_ADJUDICATION_TOKEN`, and the server records
+`B3S_EVIDENCE_REVIEWER_ID` as both reviewer and actor. A request cannot declare
+or impersonate another reviewer.
 
 To change or revoke a decision, the caller must send the current event ID in
 `expected_current_event_id`. Reusing an idempotency key with the same normalized
@@ -75,8 +79,8 @@ them in its deterministic state fingerprint.
 
 ## Remaining safety limits
 
-- The current Bearer token identifies the actor as `environment-token`; the
-  reviewer field is declared by the caller, not independently authenticated.
+- The current deployment supports one server-configured reviewer rather than a
+  multi-user identity system.
 - Only evidence-to-brand identity is adjudicated.
 - Semantic claim replacement and claim truth are not adjudicated.
 - No adjudication affects scoring, report selection, or tiles.
