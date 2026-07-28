@@ -343,6 +343,64 @@ def test_evidence_ledger_shadow_endpoint_is_explicitly_non_authoritative(monkeyp
     }
 
 
+def test_evidence_memory_identity_v2_endpoint_is_non_authoritative(monkeypatch):
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    monkeypatch.setattr(
+        "web.api_v1.router.evidence_memory_identity_v2_for_domain",
+        lambda _domain: {
+            "schema_version": "evidence-memory-identity-v2",
+            "policy_version": "evidence-memory-identity-policy-v2",
+            "mode": "shadow",
+            "runtime_effect": False,
+            "authority": False,
+            "state_fingerprint": "a" * 64,
+            "brand": {"name": "Example", "domain": "example.com"},
+            "report_count": 2,
+            "latest_report_id": "two",
+            "summary": {
+                "document_count": 1,
+                "passage_count": 2,
+                "revision_candidate_count": 0,
+            },
+            "policy": {
+                "automatic_validation": False,
+                "url_equality_implies_revision": False,
+            },
+            "warnings": ["revision_requires_explicit_claim_slot"],
+            "entries": [
+                {
+                    "evidence_id": "b" * 64,
+                    "document_id": "c" * 64,
+                    "passage_id": "d" * 64,
+                    "state": "not_reacquired",
+                    "adjudication_state": "proposed",
+                }
+            ],
+            "persistence": {
+                "stored": False,
+                "backend": "history_derived",
+            },
+        },
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/evidence-memory-identity-v2-shadow",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["object"] == "evidence_memory_identity_v2_shadow"
+    assert response.json()["domain"] == "example.com"
+    assert response.json()["runtime_effect"] is False
+    assert response.json()["authority"] is False
+    assert response.json()["policy"]["url_equality_implies_revision"] is False
+    assert response.json()["entries"][0]["adjudication_state"] == "proposed"
+    assert response.json()["persistence"] == {
+        "stored": False,
+        "backend": "history_derived",
+    }
+
+
 def test_failed_status_never_exposes_internal_exception_text():
     status = _running_scan()
     status.update(
@@ -409,6 +467,10 @@ def test_openapi_is_dedicated_to_v1_routes():
     assert response.json()["info"]["title"] == "B3S Scanner API"
     assert "/api/v1/scans" in response.json()["paths"]
     assert "/api/v1/brands/{domain}/evidence-ledger-shadow" in response.json()["paths"]
+    assert (
+        "/api/v1/brands/{domain}/evidence-memory-identity-v2-shadow"
+        in response.json()["paths"]
+    )
     assert "/scan" not in response.json()["paths"]
     assert "B3SScannerBearer" in response.json()["components"]["securitySchemes"]
 

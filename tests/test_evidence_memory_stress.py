@@ -16,7 +16,7 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["verdict"] == "foundation_supported_promotion_blocked"
     assert report["promotion_ready"] is False
     assert report["executable_failures"] == []
-    assert report["summary"]["executable_invariant_count"] == 6
+    assert report["summary"]["executable_invariant_count"] == 12
     assert report["summary"]["promotion_blocker_count"] == 5
     assert all(
         probe["status"] == "pass"
@@ -37,6 +37,21 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
     assert "rejected/revoked" in poison["required_capability"]
     assert syndication["status"] == "blocked"
     assert "2 validation candidates" in syndication["observation"]
+    assert probes["identity_v2_weak_external_identity_is_not_eligible"][
+        "status"
+    ] == "pass"
+    assert probes["identity_v2_exact_syndication_is_one_independent_cluster"][
+        "status"
+    ] == "pass"
+    assert probes["identity_v2_stable_claim_slot_surfaces_revision"][
+        "status"
+    ] == "pass"
+    assert probes[
+        "identity_v2_bare_upstream_domain_label_is_not_eligible"
+    ]["status"] == "pass"
+    assert probes[
+        "identity_v2_reproduced_external_identity_is_eligible"
+    ]["status"] == "pass"
 
 
 def test_real_history_replay_checks_invariants_without_mutating_reports() -> None:
@@ -61,6 +76,10 @@ def test_real_history_replay_checks_invariants_without_mutating_reports() -> Non
     assert all(check["rate"] == 1.0 for check in replay["checks"])
     assert replay["histories"][0]["score_range"] == 19.0
     assert replay["histories"][0]["evidence_identity_count"] == 1
+    assert report["identity_v2_replay"]["summary"]["history_count"] == 1
+    assert report["identity_v2_replay"]["summary"][
+        "v2_revision_candidate_count"
+    ] == 0
 
 
 def test_histories_without_material_evidence_are_reported_but_not_used_as_proof() -> None:
@@ -96,6 +115,55 @@ def test_diagnostic_exposes_multiple_claims_sharing_one_coarse_locator() -> None
     assert "## Locator pressure" in render_evidence_memory_stress_markdown(result)
 
 
+def test_identity_v2_replay_removes_url_only_change_pressure() -> None:
+    first = _report(
+        "one",
+        "2026-01-01T00:00:00Z",
+        50,
+        [_evidence("web.0", "We serve finance teams.")],
+    )
+    second = _report(
+        "two",
+        "2026-01-02T00:00:00Z",
+        50,
+        [_evidence("web.0", "We serve operations teams.")],
+    )
+
+    result = run_evidence_memory_stress({"example.com": [first, second]})
+    comparison = result["identity_v2_replay"]["histories"][0]
+
+    assert comparison["v1_changed_candidate_count"] == 1
+    assert comparison["v2_revision_candidate_count"] == 0
+    assert comparison["removed_url_only_change_pressure_count"] == 1
+    assert comparison["retained_explicit_revision_count"] == 0
+    assert comparison["v2_claim_slot_count"] == 0
+
+
+def test_identity_v2_replay_only_retains_change_with_stable_slot() -> None:
+    old = _evidence("web.0", "We serve finance teams.")
+    old["metadata"]["claim_id"] = "audience-primary"
+    new = _evidence("web.0", "We serve operations teams.")
+    new["metadata"]["claim_id"] = "audience-primary"
+
+    result = run_evidence_memory_stress(
+        {
+            "example.com": [
+                _report("one", "2026-01-01T00:00:00Z", 50, [old]),
+                _report("two", "2026-01-02T00:00:00Z", 50, [new]),
+            ]
+        }
+    )
+    comparison = result["identity_v2_replay"]["histories"][0]
+
+    assert comparison["v1_changed_candidate_count"] == 1
+    assert comparison["v2_revision_candidate_count"] == 1
+    assert comparison["removed_url_only_change_pressure_count"] == 0
+    assert comparison["retained_explicit_revision_count"] == 1
+    assert comparison["v2_claim_slot_method_counts"] == {
+        "explicit_claim_id": 1
+    }
+
+
 def test_markdown_distinguishes_passes_from_promotion_blockers() -> None:
     rendered = render_evidence_memory_stress_markdown(
         run_evidence_memory_stress({})
@@ -104,6 +172,7 @@ def test_markdown_distinguishes_passes_from_promotion_blockers() -> None:
     assert "# Evidence memory stress report" in rendered
     assert "foundation_supported_promotion_blocked" in rendered
     assert "## Controlled probes" in rendered
+    assert "## Identity v2 comparison" in rendered
     assert "## Locator pressure" not in rendered
     assert "## Promotion blockers" in rendered
     assert "no_versioned_memory_evaluator" in rendered

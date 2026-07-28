@@ -12,11 +12,20 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping
 
+from src.evidence_identity import canonical_evidence_digest
+from src.external_identity_provenance import (
+    build_external_identity_provenance,
+)
+from src.services.evidence_memory_identity_v2 import (
+    build_evidence_memory_identity_v2,
+)
 from src.services.evidence_ledger_shadow import build_evidence_ledger_shadow
+from src.services.scanner_evidence_comparison import canonical_evidence_records
 
 
 EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v1"
 EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v1"
+_CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 
 
 def run_evidence_memory_stress(
@@ -31,6 +40,7 @@ def run_evidence_memory_stress(
     }
     controlled = _controlled_probes()
     replay = _replay_real_histories(normalized_histories)
+    identity_v2_replay = _replay_identity_v2(normalized_histories)
     executable_failures = [
         probe["id"]
         for probe in controlled
@@ -69,11 +79,21 @@ def run_evidence_memory_stress(
             "real_history_with_material_evidence_count": replay[
                 "history_with_material_evidence_count"
             ],
+            "v1_changed_candidate_count": identity_v2_replay["summary"][
+                "v1_changed_candidate_count"
+            ],
+            "v2_revision_candidate_count": identity_v2_replay["summary"][
+                "v2_revision_candidate_count"
+            ],
+            "v2_removed_url_only_change_pressure_count": identity_v2_replay[
+                "summary"
+            ]["removed_url_only_change_pressure_count"],
         },
         "executable_failures": executable_failures,
         "promotion_blockers": promotion_blockers,
         "controlled_probes": controlled,
         "real_history_replay": replay,
+        "identity_v2_replay": identity_v2_replay,
         "interpretation": {
             "supported": (
                 "Evidence identities can be remembered deterministically across "
@@ -179,6 +199,41 @@ def render_evidence_memory_stress_markdown(report: dict[str, Any]) -> str:
                 )
                 + " |"
             )
+    identity_v2 = report.get("identity_v2_replay") or {}
+    identity_v2_summary = identity_v2.get("summary") or {}
+    lines.extend(
+        [
+            "",
+            "## Identity v2 comparison",
+            "",
+            f"- V1 changed candidates: `{identity_v2_summary.get('v1_changed_candidate_count', 0)}`",
+            f"- V2 stable-slot revision candidates: `{identity_v2_summary.get('v2_revision_candidate_count', 0)}`",
+            f"- V1 locator-change candidates suppressed by v2: `{identity_v2_summary.get('removed_url_only_change_pressure_count', 0)}`",
+            f"- V1 candidates retained as stable-slot revisions: `{identity_v2_summary.get('retained_explicit_revision_count', 0)}`",
+            f"- V2 stable slots: `{identity_v2_summary.get('v2_claim_slot_count', 0)}`",
+            f"- V2 stable-slot methods: `{_format_counts(identity_v2_summary.get('v2_claim_slot_method_counts'))}`",
+            f"- Current external passages: `{identity_v2_summary.get('v2_current_external_passage_count', 0)}`",
+            f"- Current independent external clusters: `{identity_v2_summary.get('v2_current_independent_external_cluster_count', 0)}`",
+            "",
+            "| domain | v1 changed | v2 revisions | claim slots | external passages | independent clusters |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in identity_v2.get("histories") or []:
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    _md_cell(str(row.get("domain") or "")),
+                    str(row.get("v1_changed_candidate_count", 0)),
+                    str(row.get("v2_revision_candidate_count", 0)),
+                    str(row.get("v2_claim_slot_count", 0)),
+                    str(row.get("v2_current_external_passage_count", 0)),
+                    str(row.get("v2_current_independent_external_cluster_count", 0)),
+                )
+            )
+            + " |"
+        )
     if report.get("promotion_blockers"):
         lines.extend(["", "## Promotion blockers", ""])
         lines.extend(f"- `{blocker}`" for blocker in report["promotion_blockers"])
@@ -327,6 +382,95 @@ def _controlled_probes() -> list[dict[str, Any]]:
         for entry in syndicated_ledger["entries"]
         if entry["state"] == "validation_candidate"
     )
+    v2_poison = build_evidence_memory_identity_v2(
+        [
+            _report("poison-one", "2026-01-01T00:00:00Z", [poison]),
+            _report("poison-two", "2026-01-02T00:00:00Z", [deepcopy(poison)]),
+        ]
+    )
+    v2_poison_entry = v2_poison["entries"][0]
+    strong_label_poison = deepcopy(poison)
+    strong_label_poison["metadata"]["identity_match"] = "domain"
+    v2_strong_label_poison = build_evidence_memory_identity_v2(
+        [
+            _report(
+                "strong-poison-one",
+                "2026-01-01T00:00:00Z",
+                [strong_label_poison],
+            ),
+            _report(
+                "strong-poison-two",
+                "2026-01-02T00:00:00Z",
+                [deepcopy(strong_label_poison)],
+            ),
+        ]
+    )
+    v2_strong_label_poison_entry = v2_strong_label_poison["entries"][0]
+    reproducible_external = _evidence(
+        ref="exa.verified",
+        source="exa",
+        source_class="external_proof",
+        evidence_type="external_proof.external_mentions",
+        url="https://press.test/story",
+        content="Example launches a product.",
+        identity_match="brand_name",
+    )
+    reproducible_external["metadata"]["external_identity_provenance"] = (
+        build_external_identity_provenance(
+            provider="exa",
+            subject_url="https://example.com",
+            source_url="https://press.test/story",
+            matched_alias="Example",
+            match_method="alias_in_title",
+            match_score=0.95,
+            collector_source_class="external",
+            collector_relation="external",
+            requires_human_review=False,
+        )
+    )
+    v2_reproducible_external = build_evidence_memory_identity_v2(
+        [
+            _report(
+                "verified-one",
+                "2026-01-01T00:00:00Z",
+                [reproducible_external],
+            ),
+            _report(
+                "verified-two",
+                "2026-01-02T00:00:00Z",
+                [deepcopy(reproducible_external)],
+            ),
+        ]
+    )
+    v2_reproducible_external_entry = v2_reproducible_external["entries"][0]
+    v2_syndication = build_evidence_memory_identity_v2(
+        [
+            _report("wire-one", "2026-01-01T00:00:00Z", syndicated_rows),
+            _report("wire-two", "2026-01-02T00:00:00Z", deepcopy(syndicated_rows)),
+        ]
+    )
+    second_owned_passage = deepcopy(stable_owned)
+    second_owned_passage["ref"] = "web.0.chunk.2"
+    second_owned_passage["content"] = "We automate monthly reporting."
+    v2_multi_passage = build_evidence_memory_identity_v2(
+        [
+            _report(
+                "multi-passage",
+                "2026-01-01T00:00:00Z",
+                [stable_owned, second_owned_passage],
+            )
+        ]
+    )
+    old_claim = deepcopy(stable_owned)
+    old_claim["metadata"]["claim_id"] = "audience-primary"
+    new_claim = deepcopy(old_claim)
+    new_claim["content"] = "We help operations teams automate procurement."
+    v2_explicit_change = build_evidence_memory_identity_v2(
+        [
+            _report("claim-old", "2026-01-01T00:00:00Z", [old_claim]),
+            _report("claim-new", "2026-01-02T00:00:00Z", [new_claim]),
+        ]
+    )
 
     return [
         _probe(
@@ -359,13 +503,77 @@ def _controlled_probes() -> list[dict[str, Any]]:
             staleness_pass,
             "Elapsed TTL proposes staleness while retaining the historical evidence identity.",
         ),
+        _probe(
+            "identity_v2_same_document_passages_are_not_revisions",
+            (
+                v2_multi_passage["summary"]["document_count"] == 1
+                and v2_multi_passage["summary"]["passage_count"] == 2
+                and v2_multi_passage["summary"]["revision_candidate_count"] == 0
+            ),
+            "Identity v2 keeps two passages from one URL without inventing a temporal revision.",
+        ),
+        _probe(
+            "identity_v2_weak_external_identity_is_not_eligible",
+            (
+                v2_poison_entry["identity_status"] == "unverified"
+                and v2_poison_entry["qualified_observation_count"] == 0
+                and v2_poison_entry["state"] == "repeated"
+            ),
+            "Identity v2 remembers repeated brand-name-only evidence but does not validate it.",
+        ),
+        _probe(
+            "identity_v2_bare_upstream_domain_label_is_not_eligible",
+            (
+                v2_strong_label_poison_entry["identity_status"] == "unverified"
+                and v2_strong_label_poison_entry["qualified_observation_count"] == 0
+                and v2_strong_label_poison_entry["state"] == "repeated"
+            ),
+            "Identity v2 refuses a strong-looking upstream label without reproducible provenance.",
+        ),
+        _probe(
+            "identity_v2_reproduced_external_identity_is_eligible",
+            (
+                v2_reproducible_external_entry["identity_status"] == "eligible"
+                and v2_reproducible_external_entry[
+                    "qualified_observation_count"
+                ]
+                == 2
+                and v2_reproducible_external_entry["state"]
+                == "validation_candidate"
+            ),
+            "Identity v2 independently reproduces persisted external attribution before proposing validation.",
+        ),
+        _probe(
+            "identity_v2_exact_syndication_is_one_independent_cluster",
+            (
+                v2_syndication["summary"]["current_external_publisher_count"] == 2
+                and v2_syndication["summary"][
+                    "current_independent_external_cluster_count"
+                ]
+                == 1
+            ),
+            "Identity v2 collapses exact syndicated copies across two publishers into one cluster.",
+        ),
+        _probe(
+            "identity_v2_stable_claim_slot_surfaces_revision",
+            (
+                v2_explicit_change["summary"]["revision_candidate_count"] == 1
+                and any(
+                    entry["state"] == "revision_candidate"
+                    and entry["adjudication_state"] == "proposed"
+                    for entry in v2_explicit_change["entries"]
+                )
+            ),
+            "Identity v2 surfaces a controlled stable-slot change as a proposed revision without accepting it.",
+        ),
         {
             "id": "repeated_false_identity_can_become_validation_candidate",
             "kind": "promotion_blocker",
             "status": "blocked",
             "observation": (
-                f"A deliberately wrong external item reached `{poison_state}` because "
-                "identity metadata was trusted twice."
+                f"In v1 a deliberately wrong external item reached `{poison_state}` because "
+                "brand-name identity metadata was trusted twice. V2 shadow blocks eligibility, "
+                "but no adjudication store exists yet."
             ),
             "required_capability": "versioned identity adjudication plus rejected/revoked states",
         },
@@ -374,8 +582,9 @@ def _controlled_probes() -> list[dict[str, Any]]:
             "kind": "promotion_blocker",
             "status": "blocked",
             "observation": (
-                f"Two syndicated URLs produced {syndicated_candidates} validation candidates; "
-                "the ledger stores a warning but no independence cluster."
+                f"In v1 two syndicated URLs produced {syndicated_candidates} validation "
+                "candidates. V2 shadow clusters exact copies, but paraphrased syndication "
+                "and persistence remain unresolved."
             ),
             "required_capability": "deterministic source-independence and syndication clustering",
         },
@@ -541,6 +750,125 @@ def _replay_real_histories(
     }
 
 
+def _replay_identity_v2(
+    histories: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    metric_keys = (
+        "v1_changed_candidate_count",
+        "v2_revision_candidate_count",
+        "removed_url_only_change_pressure_count",
+        "retained_explicit_revision_count",
+        "v2_only_revision_candidate_count",
+        "v2_claim_slot_count",
+        "v2_current_external_passage_count",
+        "v2_current_external_publisher_count",
+        "v2_current_external_syndication_cluster_count",
+        "v2_current_independent_external_cluster_count",
+    )
+    rows: list[dict[str, Any]] = []
+    totals = Counter()
+    claim_slot_method_totals = Counter()
+    for domain, reports in sorted(histories.items()):
+        if not reports:
+            continue
+        v1 = build_evidence_ledger_shadow(reports, mode="shadow")
+        v2 = build_evidence_memory_identity_v2(reports)
+        v1_state_counts = Counter(
+            str(entry.get("state") or "")
+            for entry in v1.get("entries") or []
+        )
+        v2_state_counts = Counter(
+            str(entry.get("state") or "")
+            for entry in v2.get("entries") or []
+        )
+        v1_changed_fingerprints = {
+            str(entry.get("evidence_fingerprint") or "")
+            for entry in v1.get("entries") or []
+            if entry.get("state") == "changed_candidate"
+        }
+        v1_changed_ids = {
+            canonical_evidence_digest(
+                source_class=record.source_class,
+                evidence_type=record.evidence_type,
+                url=record.url,
+                content=record.normalized_content,
+            )
+            for report in reports
+            for record in canonical_evidence_records(report)
+            if record.fingerprint in v1_changed_fingerprints
+        }
+        v2_revision_ids = {
+            str(entry.get("evidence_id") or "")
+            for entry in v2.get("entries") or []
+            if entry.get("state") == "revision_candidate"
+        }
+        v2_current_external = [
+            entry
+            for entry in v2.get("entries") or []
+            if entry.get("source_class") == "external_proof"
+            and entry.get("state") in _CURRENT_STATES
+        ]
+        row = {
+            "domain": domain,
+            "report_count": len(reports),
+            "v1_changed_candidate_count": v1_state_counts.get(
+                "changed_candidate",
+                0,
+            ),
+            "v2_revision_candidate_count": v2_state_counts.get(
+                "revision_candidate",
+                0,
+            ),
+            "v2_document_count": int(v2["summary"]["document_count"]),
+            "v2_passage_count": int(v2["summary"]["passage_count"]),
+            "v2_multi_passage_document_count": int(
+                v2["summary"]["multi_passage_document_count"]
+            ),
+            "v2_claim_slot_count": int(v2["summary"]["claim_slot_count"]),
+            "v2_current_external_passage_count": len(v2_current_external),
+            "v2_current_external_publisher_count": int(
+                v2["summary"]["current_external_publisher_count"]
+            ),
+            "v2_current_external_syndication_cluster_count": int(
+                v2["summary"]["current_external_syndication_cluster_count"]
+            ),
+            "v2_current_independent_external_cluster_count": int(
+                v2["summary"]["current_independent_external_cluster_count"]
+            ),
+            "v2_identity_status_counts": dict(
+                v2["summary"]["identity_status_counts"]
+            ),
+            "v2_claim_slot_method_counts": dict(
+                v2["summary"]["claim_slot_method_counts"]
+            ),
+        }
+        row["removed_url_only_change_pressure_count"] = len(
+            v1_changed_ids - v2_revision_ids
+        )
+        row["retained_explicit_revision_count"] = len(
+            v1_changed_ids & v2_revision_ids
+        )
+        row["v2_only_revision_candidate_count"] = len(
+            v2_revision_ids - v1_changed_ids
+        )
+        rows.append(row)
+        for key in metric_keys:
+            totals[key] += int(row[key])
+        claim_slot_method_totals.update(row["v2_claim_slot_method_counts"])
+    return {
+        "schema_version": "evidence-memory-identity-v2-replay-v1",
+        "runtime_effect": False,
+        "summary": {
+            "history_count": len(rows),
+            **{key: int(totals.get(key, 0)) for key in metric_keys},
+            "v2_claim_slot_method_counts": dict(
+                sorted(claim_slot_method_totals.items())
+            ),
+        },
+        "histories": rows,
+    }
+
+
 def _probe(probe_id: str, passed: bool, observation: str) -> dict[str, Any]:
     return {
         "id": probe_id,
@@ -548,6 +876,15 @@ def _probe(probe_id: str, passed: bool, observation: str) -> dict[str, Any]:
         "status": "pass" if passed else "fail",
         "observation": observation,
     }
+
+
+def _format_counts(value: Any) -> str:
+    if not isinstance(value, dict) or not value:
+        return "none"
+    return ", ".join(
+        f"{key}={int(count)}"
+        for key, count in sorted(value.items())
+    )
 
 
 def _identity_set(ledger: dict[str, Any]) -> set[str]:

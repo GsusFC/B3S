@@ -59,6 +59,7 @@ GET  /api/v1/scans/{scan_id}/result
 GET  /api/v1/scans/{scan_id}/evidence
 GET  /api/v1/brands/{domain}/scans
 GET  /api/v1/brands/{domain}/evidence-ledger-shadow
+GET  /api/v1/brands/{domain}/evidence-memory-identity-v2-shadow
 ```
 
 Bearer authentication uses `BRAND3_SCANNER_API_TOKEN`. Create requests support
@@ -108,6 +109,25 @@ disabled by default while Fly runs it in shadow mode. The state model,
 evaluation questions, isolation boundary, and rollback are documented in
 [`docs/evidence_ledger_shadow.md`](docs/evidence_ledger_shadow.md).
 
+The next identity projection is also available for adversarial, read-only
+replay. It separates documents, passages, and optional stable slots so several
+chunks from one URL cannot masquerade as temporal brand change:
+
+```bash
+.venv/bin/python scripts/evidence_memory_stress.py \
+  --reports-dir data/reports \
+  --format markdown
+```
+
+Identity v2 is not persisted or used by scoring. The authenticated
+`GET /api/v1/brands/{domain}/evidence-memory-identity-v2-shadow` endpoint
+recomputes it from immutable history for observation. Its contract and current
+replay evidence are documented in
+[`docs/evidence_memory_identity_v2.md`](docs/evidence_memory_identity_v2.md)
+and [`docs/evidence_memory_stress.md`](docs/evidence_memory_stress.md). New Exa
+captures persist reproducible external-identity provenance; bare summary labels
+and older evidence without that contract remain validation-ineligible.
+
 ## Deployment
 
 Fly deploys use the GitHub `production` environment and its `FLY_API_TOKEN` secret. The `Fly Deploy` workflow is manual from `main` while the guarded rollout is active. Automatic deploys after successful CI remain disabled until the repository variable `AUTO_DEPLOY_ENABLED` is explicitly changed from `false` to `true`.
@@ -118,4 +138,6 @@ Every deploy validates `fly.toml`, builds the committed Dockerfile and runs the 
 
 Experimental. Scoring runs shadow-only. Contracts and policies are expected to change; policy changes must carry a changelog entry justified by a real captured case.
 
-Known failures, kept visible on purpose: the inherited Visual Signature review/calibration tooling broke upstream during a module split (a syntax error and a lost re-export hid 14 tests behind collection errors; this fork surfaced them — `thresholds_for_scope()` call sites drifted and need repair, or the tooling gets removed). One legacy magnetism extractor test and one order-dependent worker test also fail.
+The full local test suite is currently green. One environment-dependent test is
+skipped, and FastAPI's test client emits an upstream Starlette deprecation
+warning.

@@ -270,6 +270,18 @@ def _evidence_from_exa_payload(
                 "score": result.get("score"),
                 "published_date": result.get("published_date") or "",
             }
+            collector_metadata = (
+                result.get("metadata")
+                if isinstance(result.get("metadata"), dict)
+                else {}
+            )
+            identity_provenance = collector_metadata.get(
+                "external_identity_provenance"
+            )
+            if isinstance(identity_provenance, dict):
+                metadata["external_identity_provenance"] = dict(
+                    identity_provenance
+                )
             if intent == "owned_confirmation" and identity_match != "domain":
                 metadata["intent_demoted"] = "owned_confirmation_without_domain_match"
             records.append(

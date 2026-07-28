@@ -493,6 +493,22 @@ def test_evidence_worker_exposes_exa_results_as_citable_external_proof() -> None
                                 "text": "Customers praise Acme's active community and adoption.",
                                 "score": 0.82,
                                 "intent": "external_mentions",
+                                "metadata": {
+                                    "external_identity_provenance": {
+                                        "schema_version": "external-identity-provenance-v1",
+                                        "policy_version": "external-identity-policy-v1",
+                                        "provider": "exa",
+                                        "subject_domain": "acme.example",
+                                        "source_domain": "review.example",
+                                        "matched_alias": "acme",
+                                        "match_method": "alias_in_title",
+                                        "match_score": 0.95,
+                                        "collector_source_class": "external",
+                                        "collector_relation": "external",
+                                        "requires_human_review": False,
+                                        "candidate_strength": "strong",
+                                    }
+                                },
                             }
                         ],
                         "news": [
@@ -523,6 +539,7 @@ def test_evidence_worker_exposes_exa_results_as_citable_external_proof() -> None
     assert mention.confidence == "high"
     assert mention.metadata["source_class"] == "external_proof"
     assert mention.metadata["identity_match"] == "brand_name"
+    assert mention.metadata["external_identity_provenance"]["matched_alias"] == "acme"
     assert "active community" in mention.content
     assert refs["raw_inputs.0.exa.news.0"].metadata["intent"] == "news"
 

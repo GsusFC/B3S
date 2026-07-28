@@ -185,6 +185,37 @@ PostgreSQL shadow tables and matches the current immutable history.
 PostgreSQL was unavailable or its projection had not caught up. Set
 `B3S_EVIDENCE_LEDGER_MODE=disabled` to stop computing and persisting entries.
 
+## Evidence memory identity v2 shadow
+
+```text
+GET /api/v1/brands/{domain}/evidence-memory-identity-v2-shadow
+```
+
+This authenticated experimental projection fixes one specific v1 ambiguity:
+several passages from one URL are not treated as temporal revisions. It
+separates document, passage, optional stable slot, and proposed adjudication.
+
+Its safety boundary is explicit:
+
+- `runtime_effect` and `authority` are always `false`;
+- URL equality never implies revision;
+- revision proposals require a stable slot;
+- weak external identity remains unverified;
+- a bare upstream identity label remains unverified, while eligible external
+  identity requires reproducible persisted attribution provenance;
+- exact syndication and same-publisher evidence share a conservative
+  independence cluster;
+- no state changes scores, reports, canonical selection, or v1 ledger rows.
+
+`persistence.stored` is always `false` in this phase. The API recomputes the v2
+projection from immutable brand history so every later scan is observable
+without adding another authoritative store. Entries contain hashes and
+provenance but no raw evidence text.
+
+The resource is not proof that real brand changes are detected. The current
+local corpus contains visual stable slots but no stable semantic `claim_id`
+history, so semantic-change recall remains unmeasured.
+
 ## Errors
 
 API errors use one envelope:

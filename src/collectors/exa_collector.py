@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 from src.api_key_pool import ApiKeySource, shared_api_key_pool
 from src.config import EXA_API_KEYS
+from src.external_identity_provenance import build_external_identity_provenance
 from src.services.legal_identity import legal_name_aliases
 
 _TRANSIENT_SEARCH_ATTEMPTS = 2
@@ -391,7 +392,11 @@ class ExaCollector:
         brand_url: str | None,
         legal_name: str | None = None,
     ) -> tuple[float, str]:
-        aliases = cls._brand_aliases(brand_name, brand_url, legal_name=legal_name)
+        aliases = cls._ordered_brand_aliases(
+            brand_name,
+            brand_url,
+            legal_name=legal_name,
+        )
         if not aliases:
             return 0.0, "no_brand_alias"
 
@@ -409,6 +414,58 @@ class ExaCollector:
             if alias and cls._contains_alias(text, alias):
                 return 0.7, "alias_in_text"
         return 0.0, "no_alias_match"
+
+    @classmethod
+    def _ordered_brand_aliases(
+        cls,
+        brand_name: str,
+        brand_url: str | None,
+        *,
+        legal_name: str | None = None,
+    ) -> list[str]:
+        return sorted(
+            cls._brand_aliases(
+                brand_name,
+                brand_url,
+                legal_name=legal_name,
+            ),
+            key=lambda alias: (-len(alias), alias),
+        )
+
+    @classmethod
+    def _matched_alias(
+        cls,
+        *,
+        result,
+        match_method: str,
+        brand_name: str,
+        brand_url: str | None,
+        legal_name: str | None = None,
+    ) -> str:
+        if match_method == "alias_in_host":
+            value = cls._host(getattr(result, "url", "") or "")
+        elif match_method == "alias_in_title":
+            value = str(getattr(result, "title", "") or "")
+        elif match_method == "alias_in_text":
+            value = (
+                (getattr(result, "text", "") or "")
+                + " "
+                + (getattr(result, "summary", "") or "")
+            )
+        else:
+            return ""
+        return next(
+            (
+                alias
+                for alias in cls._ordered_brand_aliases(
+                    brand_name,
+                    brand_url,
+                    legal_name=legal_name,
+                )
+                if cls._contains_alias(value, alias)
+            ),
+            "",
+        )
 
     @classmethod
     def _should_accept_result(
@@ -706,6 +763,31 @@ class ExaCollector:
             if not accepted:
                 filtered_irrelevant_count += 1
                 continue
+            matched_alias = self._matched_alias(
+                result=r,
+                match_method=acceptance_reason,
+                brand_name=brand_name,
+                brand_url=brand_url,
+                legal_name=legal_name,
+            )
+            result_metadata = {
+                "entity_match_score": match_score,
+                "entity_match_reason": acceptance_reason,
+            }
+            if source_class != "owned":
+                result_metadata["external_identity_provenance"] = (
+                    build_external_identity_provenance(
+                        provider="exa",
+                        subject_url=brand_url or "",
+                        source_url=getattr(r, "url", "") or "",
+                        matched_alias=matched_alias,
+                        match_method=acceptance_reason,
+                        match_score=match_score,
+                        collector_source_class=source_class,
+                        collector_relation=relation,
+                        requires_human_review=requires_review,
+                    )
+                )
             raw_score = getattr(r, "score", None)
             results.append(ExaResult(
                 url=r.url,
@@ -721,10 +803,7 @@ class ExaCollector:
                 classification_reason=reason,
                 requires_human_review=requires_review,
                 score_is_missing=raw_score is None,
-                metadata={
-                    "entity_match_score": match_score,
-                    "entity_match_reason": acceptance_reason,
-                },
+                metadata=result_metadata,
             ))
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         self._record_event(
