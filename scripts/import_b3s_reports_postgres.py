@@ -27,13 +27,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--workspace-name", default="B3S")
     parser.add_argument("--dry-run", action="store_true", help="Validate and summarize without connecting")
     parser.add_argument("--migrate-only", action="store_true", help="Apply schema migrations without importing")
+    parser.add_argument(
+        "--rebuild-evidence-ledger-shadow",
+        action="store_true",
+        help="Backfill the non-authoritative evidence ledger from PostgreSQL history",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.migrate_only and args.dry_run:
-        raise SystemExit("--migrate-only and --dry-run are mutually exclusive")
+    if args.dry_run and (args.migrate_only or args.rebuild_evidence_ledger_shadow):
+        raise SystemExit(
+            "--dry-run cannot be combined with --migrate-only or "
+            "--rebuild-evidence-ledger-shadow"
+        )
 
     reports, failures = load_reports(Path(args.reports_dir))
     if failures:
@@ -57,9 +65,21 @@ def main(argv: list[str] | None = None) -> int:
     repository = PostgresHistoryRepository(args.database_url)
     applied_migrations = repository.migrate()
     if args.migrate_only:
+        backfill = (
+            _run_evidence_ledger_shadow_backfill(
+                repository,
+                workspace_slug=args.workspace_slug,
+            )
+            if args.rebuild_evidence_ledger_shadow
+            else None
+        )
         print(
             json.dumps(
-                {"status": "ok", "applied_migrations": applied_migrations},
+                {
+                    "status": "ok",
+                    "applied_migrations": applied_migrations,
+                    "evidence_ledger_shadow_backfill": backfill,
+                },
                 ensure_ascii=False,
                 indent=2,
             )
@@ -96,6 +116,11 @@ def main(argv: list[str] | None = None) -> int:
         "applied_migrations": applied_migrations,
         "storage_counts": repository.storage_counts(),
     }
+    if args.rebuild_evidence_ledger_shadow:
+        payload["evidence_ledger_shadow_backfill"] = _run_evidence_ledger_shadow_backfill(
+            repository,
+            workspace_slug=args.workspace_slug,
+        )
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str))
     return 1 if import_failures else 0
 
@@ -127,6 +152,27 @@ def dry_run_summary(reports: list[HistoricalReport]) -> dict[str, Any]:
         "pipeline_versions": sorted({report.pipeline_version for report in reports}),
         "rubric_versions": sorted({report.rubric_version for report in reports}),
     }
+
+
+def _run_evidence_ledger_shadow_backfill(
+    repository,
+    *,
+    workspace_slug: str,
+) -> dict[str, Any]:
+    """Report shadow failures without turning them into release failures."""
+
+    try:
+        return repository.rebuild_evidence_ledger_shadows(
+            workspace_slug=workspace_slug,
+        )
+    except Exception as exc:
+        return {
+            "mode": "shadow",
+            "runtime_effect": False,
+            "workspace_slug": workspace_slug,
+            "status": "failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def _tile_count(report: HistoricalReport) -> int:

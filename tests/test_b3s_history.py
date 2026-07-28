@@ -9,7 +9,10 @@ from uuid import uuid4
 
 import pytest
 
-from scripts.import_b3s_reports_postgres import dry_run_summary
+from scripts.import_b3s_reports_postgres import (
+    _run_evidence_ledger_shadow_backfill,
+    dry_run_summary,
+)
 from src.history.models import ReportConflictError, ReportImportError
 from src.history.report_parser import canonical_json_hash, normalize_domain, parse_report
 
@@ -89,6 +92,51 @@ def test_repository_connections_use_a_bounded_timeout() -> None:
     assert captured["dsn"] == "postgresql://example.test/b3s"
 
 
+def test_evidence_ledger_backfill_is_a_noop_when_shadow_is_disabled(monkeypatch) -> None:
+    from src.history.repository import PostgresHistoryRepository
+
+    def connect(*_args, **_kwargs):
+        raise AssertionError("disabled shadow must not connect")
+
+    repository = PostgresHistoryRepository(
+        "postgresql://example.test/b3s",
+        connect=connect,
+    )
+    monkeypatch.setenv("B3S_EVIDENCE_LEDGER_MODE", "disabled")
+
+    result = repository.rebuild_evidence_ledger_shadows()
+
+    assert result == {
+        "mode": "disabled",
+        "runtime_effect": False,
+        "workspace_slug": "b3s",
+        "brands_discovered": 0,
+        "rebuilt": 0,
+        "failed": 0,
+        "failed_domains": [],
+    }
+
+
+def test_evidence_ledger_backfill_failure_cannot_fail_a_release() -> None:
+    class Repository:
+        @staticmethod
+        def rebuild_evidence_ledger_shadows(*, workspace_slug):
+            raise RuntimeError(f"unavailable:{workspace_slug}")
+
+    result = _run_evidence_ledger_shadow_backfill(
+        Repository(),
+        workspace_slug="b3s",
+    )
+
+    assert result == {
+        "mode": "shadow",
+        "runtime_effect": False,
+        "workspace_slug": "b3s",
+        "status": "failed",
+        "error": "RuntimeError: unavailable:b3s",
+    }
+
+
 def test_shadow_ledger_failure_isolated_from_authoritative_import(monkeypatch) -> None:
     from src.history.repository import PostgresHistoryRepository
 
@@ -109,13 +157,12 @@ def test_shadow_ledger_failure_isolated_from_authoritative_import(monkeypatch) -
 
     monkeypatch.setattr(repository, "_rebuild_evidence_ledger_shadow", fail)
 
-    repository._rebuild_evidence_ledger_shadow_safely(
-        connection,
-        uuid4(),
-        uuid4(),
+    rebuilt = repository._rebuild_evidence_ledger_shadow_safely(
+        connection, uuid4(), uuid4()
     )
 
     assert connection.savepoint_count == 1
+    assert rebuilt is False
 
 
 def test_schema_drop_requires_explicit_opt_in(monkeypatch) -> None:
@@ -199,6 +246,26 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "evidence_ledger_shadow_entries": 1,
             "evidence_ledger_shadow_observations": 2,
         }
+
+        with psycopg.connect(dsn) as conn:
+            conn.execute("DELETE FROM b3s_history.evidence_ledger_shadow_entries")
+            conn.execute("DELETE FROM b3s_history.evidence_ledger_shadow_states")
+        assert repository.get_evidence_ledger_shadow("example.com") is None
+
+        backfill = repository.rebuild_evidence_ledger_shadows()
+
+        assert backfill == {
+            "mode": "shadow",
+            "runtime_effect": False,
+            "workspace_slug": "b3s",
+            "brands_discovered": 1,
+            "rebuilt": 1,
+            "failed": 0,
+            "failed_domains": [],
+        }
+        rebuilt_ledger = repository.get_evidence_ledger_shadow("example.com")
+        assert rebuilt_ledger is not None
+        assert rebuilt_ledger["state_fingerprint"] == ledger["state_fingerprint"]
 
         concurrent = _report("scan-concurrent", "2026-07-03T08:00:00Z", score=79)
         barrier = Barrier(2)
