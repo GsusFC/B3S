@@ -19,8 +19,14 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from src.services.scanner_api_stability import (
+    DEFAULT_DEPLOY_ORIGIN,
+    configured_scanner_api_url,
+    scanner_api_origin,
+)
 
-DEFAULT_BASE_URL = "https://brand3.fly.dev"
+
+DEFAULT_BASE_URL = DEFAULT_DEPLOY_ORIGIN
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -72,7 +78,11 @@ def main(argv: list[str] | None = None) -> int:
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_ids", nargs="*", type=int, help="Brand Audit run IDs to inspect.")
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Brand3 base URL.")
+    parser.add_argument(
+        "--base-url",
+        default=scanner_api_origin(configured_scanner_api_url()),
+        help="B3S web origin; defaults to the origin derived from B3S_SCANNER_API_URL.",
+    )
     parser.add_argument(
         "--latest-from-index",
         type=int,

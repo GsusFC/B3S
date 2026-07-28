@@ -84,7 +84,7 @@ En otra terminal, sin token:
   --mode web \
   --url https://www.sklum.com \
   --local-base http://127.0.0.1:8000 \
-  --deploy-base https://brand3.fly.dev
+  --deploy-base https://b3s.fly.dev
 ```
 
 Con token de Scanner API:
@@ -96,7 +96,7 @@ export BRAND3_SCANNER_API_TOKEN=...
   --mode api \
   --url https://www.sklum.com \
   --local-base http://127.0.0.1:8000 \
-  --deploy-base https://brand3.fly.dev
+  --deploy-base https://b3s.fly.dev
 ```
 
 Salida:

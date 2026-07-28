@@ -8,7 +8,10 @@ import urllib.request
 from typing import Any
 
 
-DEFAULT_DEPLOY_BASE = "https://brand3.fly.dev"
+DEFAULT_DEPLOY_ORIGIN = "https://b3s.fly.dev"
+DEFAULT_SCANNER_API_URL = f"{DEFAULT_DEPLOY_ORIGIN}/api/v1"
+# Backwards-compatible alias for callers that still expect an origin.
+DEFAULT_DEPLOY_BASE = DEFAULT_DEPLOY_ORIGIN
 CRITICAL_STABILITY_FIELDS = (
     "magnetism_score",
     "coherence_score",
@@ -32,6 +35,40 @@ def read_env_value(name: str, *, env_path: str = ".env") -> str:
     except FileNotFoundError:
         return ""
     return ""
+
+
+def normalize_scanner_api_url(value: str | None) -> str:
+    """Return one canonical v1 base while accepting a legacy origin input."""
+
+    candidate = str(value or DEFAULT_SCANNER_API_URL).strip().rstrip("/")
+    if candidate.endswith("/api/v1"):
+        return candidate
+    return f"{candidate}/api/v1"
+
+
+def configured_scanner_api_url(
+    value: str | None = None,
+    *,
+    env_path: str = ".env",
+) -> str:
+    """Resolve explicit value, environment/.env configuration, then production."""
+
+    configured = str(value or "").strip() or read_env_value(
+        "B3S_SCANNER_API_URL",
+        env_path=env_path,
+    )
+    return normalize_scanner_api_url(configured)
+
+
+def scanner_api_origin(value: str | None) -> str:
+    """Return the web origin for consumers that also call non-API routes."""
+
+    api_url = normalize_scanner_api_url(value)
+    return api_url[: -len("/api/v1")]
+
+
+def scanner_api_endpoint(base_url: str, path: str) -> str:
+    return f"{normalize_scanner_api_url(base_url)}/{path.lstrip('/')}"
 
 
 def request_json(
@@ -67,7 +104,7 @@ def create_scan(
     timeout: int,
 ) -> dict[str, Any]:
     return request_json(
-        f"{base_url.rstrip('/')}/api/v1/scanner",
+        scanner_api_endpoint(base_url, "scanner"),
         method="POST",
         token=token,
         payload={"url": url, "lang": lang},
@@ -89,7 +126,7 @@ def poll_scan_ready(
     last_status: dict[str, Any] = {}
     while time.time() < deadline:
         last_status = request_json(
-            f"{base_url.rstrip('/')}/api/v1/scanner/{scan_id}?lang={lang}",
+            scanner_api_endpoint(base_url, f"scanner/{scan_id}?lang={lang}"),
             token=token,
             timeout=timeout,
         )
@@ -110,11 +147,18 @@ def fetch_scan_bundle(
     token: str,
     timeout: int,
 ) -> dict[str, Any]:
-    base = base_url.rstrip("/")
-    status = request_json(f"{base}/api/v1/scanner/{scan_id}", token=token, timeout=timeout)
-    result = request_json(f"{base}/api/v1/scanner/{scan_id}/result?full=true", token=token, timeout=timeout)
+    status = request_json(
+        scanner_api_endpoint(base_url, f"scanner/{scan_id}"),
+        token=token,
+        timeout=timeout,
+    )
+    result = request_json(
+        scanner_api_endpoint(base_url, f"scanner/{scan_id}/result?full=true"),
+        token=token,
+        timeout=timeout,
+    )
     audit_snapshot = request_json(
-        f"{base}/api/v1/scanner/{scan_id}/audit-snapshot?full=true",
+        scanner_api_endpoint(base_url, f"scanner/{scan_id}/audit-snapshot?full=true"),
         token=token,
         timeout=timeout,
     )

@@ -13,6 +13,12 @@ Local base URL:
 http://127.0.0.1:8000/api/v1
 ```
 
+Production client configuration:
+
+```text
+B3S_SCANNER_API_URL=https://b3s.fly.dev/api/v1
+```
+
 Interactive documentation and the dedicated OpenAPI document:
 
 ```text
@@ -20,9 +26,11 @@ GET /api/v1/docs
 GET /api/v1/openapi.json
 ```
 
-The hostname is deployment configuration. Clients should read it from an
-environment variable such as `B3S_SCANNER_API_URL`; they must not hard-code the
-current Fly hostname.
+`B3S_SCANNER_API_URL` is the canonical API v1 base and includes `/api/v1`.
+Clients must read it from configuration rather than hard-code the Fly hostname.
+The repository's diagnostic scripts still accept a bare origin such as
+`https://b3s.fly.dev` for backwards compatibility and normalize it to the same
+v1 base.
 
 ## Authentication
 
