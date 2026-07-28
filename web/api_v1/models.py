@@ -243,6 +243,30 @@ class EvidenceMemoryIdentityV2ShadowResponse(StrictModel):
     persistence: dict[str, Any] = Field(default_factory=dict)
 
 
+class EvidenceClaimMemoryShadowResponse(StrictModel):
+    object: Literal["evidence_claim_memory_shadow"] = (
+        "evidence_claim_memory_shadow"
+    )
+    api_version: Literal["v1"] = "v1"
+    domain: str
+    schema_version: str
+    policy_version: str
+    mode: Literal["disabled", "shadow"]
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    state_fingerprint: str
+    brand: dict[str, Any] = Field(default_factory=dict)
+    report_count: int = 0
+    latest_report_id: str | None = None
+    summary: dict[str, Any] = Field(default_factory=dict)
+    policy: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    slots: list[dict[str, Any]] = Field(default_factory=list)
+    variants: list[dict[str, Any]] = Field(default_factory=list)
+    occurrences: list[dict[str, Any]] = Field(default_factory=list)
+    persistence: dict[str, Any] = Field(default_factory=dict)
+
+
 class EvidenceMemoryAdjudicationCreateRequest(StrictModel):
     subject_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     decision: EvidenceAdjudicationDecision

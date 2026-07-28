@@ -287,6 +287,71 @@ def test_evidence_memory_identity_v2_is_derived_without_authority(
     }
 
 
+def test_evidence_claim_memory_is_derived_without_authority(
+    tmp_path,
+    monkeypatch,
+):
+    from web import report_store
+
+    report = {
+        "id": "claim-memory-one",
+        "brand_name": "Example",
+        "url": "https://example.com",
+        "created_at": "2026-07-11T10:00:00+00:00",
+        "reliability_status": "usable",
+        "acquisition_gate": {"state": "pass"},
+        "components": [],
+        "raw": {
+            "flow": {
+                "candidate": {
+                    "evidence_pack": {
+                        "evidence": [
+                            {
+                                "ref": "web.home",
+                                "source": "web",
+                                "evidence_type": "owned_copy.homepage",
+                                "content": "Stable owned proof.",
+                                "url": "https://example.com",
+                                "metadata": {
+                                    "source_class": "owned_copy",
+                                    "claim_slot_key": "promise.primary",
+                                    "claim_type": "promise",
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    }
+    repository = SimpleNamespace(
+        list_report_payloads_for_domain=lambda domain, *, limit, offset: (
+            [report][offset : offset + limit] if domain == "example.com" else []
+        ),
+        list_current_evidence_memory_adjudications=lambda domain: [],
+    )
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+
+    result = report_store.evidence_claim_memory_for_domain("example.com")
+
+    assert result["schema_version"] == "evidence-claim-memory-v1"
+    assert result["runtime_effect"] is False
+    assert result["authority"] is False
+    assert result["summary"]["claim_slot_count"] == 1
+    assert result["summary"]["claim_variant_count"] == 1
+    assert result["summary"]["claim_occurrence_count"] == 1
+    assert result["persistence"] == {
+        "stored": False,
+        "backend": "history_derived",
+        "adjudications": {
+            "stored": True,
+            "backend": "postgres",
+            "event_count": 0,
+        },
+    }
+
+
 def test_evidence_adjudication_write_rejects_unknown_projected_subject(
     tmp_path,
     monkeypatch,

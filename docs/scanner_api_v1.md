@@ -227,6 +227,34 @@ The resource is not proof that real brand changes are detected. The current
 local corpus contains visual stable slots but no stable semantic `claim_id`
 history, so semantic-change recall remains unmeasured.
 
+## Evidence Claim Memory v1 shadow
+
+```text
+GET /api/v1/brands/{domain}/evidence-claim-memory-shadow
+```
+
+This authenticated, read-only projection separates three identities:
+
+- `claim_slot_id`: the stable semantic subject for a brand/entity scope;
+- `claim_variant_id`: one normalized content variant in that slot;
+- `claim_occurrence_id`: one variant observation in one immutable report.
+
+A slot requires `metadata.claim_slot_key`, or a legacy `metadata.claim_id`
+explicitly declared with `metadata.claim_id_semantics=stable_slot`. Bare claim
+IDs, visual tiles, and `checked_block` metadata are reported as ignored rather
+than promoted into semantic claim identity.
+
+Sequential variants may produce a `replacement_candidate`; variants present
+in the same report may produce a `coexistence_candidate`. Both remain
+`adjudication_state=proposed`, `runtime_effect=false`, and `authority=false`.
+The API never chooses a canonical claim, changes a score, or returns raw claim
+text.
+
+`persistence.stored` is always `false` in v1. The projection is rebuilt from
+immutable history; existing evidence-identity adjudications are overlaid only
+as provenance on variants. Claim-relation decisions do not yet have a durable
+journal.
+
 ## Errors
 
 API errors use one envelope:

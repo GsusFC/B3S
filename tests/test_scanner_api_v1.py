@@ -417,6 +417,92 @@ def test_evidence_memory_identity_v2_endpoint_is_non_authoritative(monkeypatch):
     }
 
 
+def test_evidence_claim_memory_endpoint_is_non_authoritative(monkeypatch):
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    monkeypatch.setattr(
+        "web.api_v1.router.evidence_claim_memory_for_domain",
+        lambda _domain: {
+            "schema_version": "evidence-claim-memory-v1",
+            "policy_version": "evidence-claim-memory-policy-v1",
+            "mode": "shadow",
+            "runtime_effect": False,
+            "authority": False,
+            "state_fingerprint": "a" * 64,
+            "brand": {"name": "Example", "domain": "example.com"},
+            "report_count": 2,
+            "latest_report_id": "two",
+            "summary": {
+                "claim_slot_count": 1,
+                "claim_variant_count": 2,
+                "relation_candidate_counts": {
+                    "replacement_candidate": 1,
+                },
+            },
+            "policy": {
+                "automatic_claim_replacement": False,
+                "explicit_stable_slot_declaration_required": True,
+            },
+            "warnings": ["claim_relation_candidates_are_not_adjudications"],
+            "slots": [
+                {
+                    "claim_slot_id": "b" * 64,
+                    "claim_slot_key": "promise.primary",
+                    "relation_candidates": [
+                        {
+                            "relation": "replacement_candidate",
+                            "adjudication_state": "proposed",
+                            "runtime_effect": False,
+                            "authority": False,
+                        }
+                    ],
+                }
+            ],
+            "variants": [
+                {
+                    "claim_variant_id": "c" * 64,
+                    "claim_slot_id": "b" * 64,
+                    "state": "not_reacquired",
+                },
+                {
+                    "claim_variant_id": "d" * 64,
+                    "claim_slot_id": "b" * 64,
+                    "state": "observed",
+                },
+            ],
+            "occurrences": [
+                {
+                    "claim_occurrence_id": "e" * 64,
+                    "claim_variant_id": "d" * 64,
+                    "claim_slot_id": "b" * 64,
+                }
+            ],
+            "persistence": {
+                "stored": False,
+                "backend": "history_derived",
+            },
+        },
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/evidence-claim-memory-shadow",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["object"] == "evidence_claim_memory_shadow"
+    assert payload["domain"] == "example.com"
+    assert payload["runtime_effect"] is False
+    assert payload["authority"] is False
+    assert payload["policy"]["automatic_claim_replacement"] is False
+    assert payload["summary"]["claim_slot_count"] == 1
+    assert payload["slots"][0]["relation_candidates"][0]["authority"] is False
+    assert payload["persistence"] == {
+        "stored": False,
+        "backend": "history_derived",
+    }
+
+
 def test_create_evidence_memory_adjudication_is_idempotent_and_non_authoritative(
     monkeypatch,
 ):
@@ -866,6 +952,10 @@ def test_openapi_is_dedicated_to_v1_routes():
     assert "/api/v1/brands/{domain}/evidence-ledger-shadow" in response.json()["paths"]
     assert (
         "/api/v1/brands/{domain}/evidence-memory-identity-v2-shadow"
+        in response.json()["paths"]
+    )
+    assert (
+        "/api/v1/brands/{domain}/evidence-claim-memory-shadow"
         in response.json()["paths"]
     )
     assert "/scan" not in response.json()["paths"]

@@ -60,6 +60,7 @@ GET  /api/v1/scans/{scan_id}/evidence
 GET  /api/v1/brands/{domain}/scans
 GET  /api/v1/brands/{domain}/evidence-ledger-shadow
 GET  /api/v1/brands/{domain}/evidence-memory-identity-v2-shadow
+GET  /api/v1/brands/{domain}/evidence-claim-memory-shadow
 GET  /api/v1/brands/{domain}/evidence-memory-adjudications
 POST /api/v1/brands/{domain}/evidence-memory-adjudications
 ```
@@ -139,6 +140,15 @@ reviewed publisher groups, explicit lineage, and high shingle similarity.
 Unknown ownership and source review fail closed and never count as independent;
 the full shadow contract is documented in
 [`docs/evidence_source_independence_v3.md`](docs/evidence_source_independence_v3.md).
+
+Claim Memory v1 adds a stricter semantic projection above evidence identity.
+It keeps `claim_slot_id`, `claim_variant_id`, and `claim_occurrence_id`
+separate, accepts only an explicit semantic slot declaration, and exposes
+coexistence or replacement candidates without deciding either. It is rebuilt
+from immutable history, contains no raw claim text, and cannot affect runtime
+selection or scoring. Inspect it through
+`GET /api/v1/brands/{domain}/evidence-claim-memory-shadow`; see
+[`docs/evidence_claim_memory_v1.md`](docs/evidence_claim_memory_v1.md).
 
 Prepare and evaluate the versioned identity review set with:
 

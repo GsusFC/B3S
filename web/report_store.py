@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from src.history.models import ReportConflictError
+from src.services.evidence_claim_memory import build_evidence_claim_memory
 from src.services.evidence_memory_adjudication import (
     EvidenceMemoryAdjudicationCommand,
     EvidenceMemoryAdjudicationError,
@@ -276,6 +277,47 @@ def evidence_memory_identity_v2_for_domain(domain: str) -> dict[str, Any]:
         list_reports_for_domain(domain),
         mode="shadow",
         adjudications=events,
+    )
+    return {
+        **derived,
+        "persistence": {
+            "stored": False,
+            "backend": "history_derived",
+            "adjudications": adjudication_persistence,
+        },
+    }
+
+
+def evidence_claim_memory_for_domain(domain: str) -> dict[str, Any]:
+    """Derive non-authoritative claim memory over immutable report history."""
+
+    events: list[dict[str, Any]] = []
+    adjudication_persistence: dict[str, Any] = {
+        "stored": False,
+        "backend": "not_configured",
+        "event_count": 0,
+    }
+    repository = _postgres_repository()
+    if repository is not None:
+        try:
+            events = repository.list_current_evidence_memory_adjudications(
+                domain
+            )
+            adjudication_persistence = {
+                "stored": True,
+                "backend": "postgres",
+                "event_count": len(events),
+            }
+        except Exception:
+            _LOG.exception(
+                "failed to load evidence memory adjudications for claim memory",
+                extra={"domain": domain_key(domain)},
+            )
+            adjudication_persistence["backend"] = "unavailable"
+    derived = build_evidence_claim_memory(
+        list_reports_for_domain(domain),
+        mode="shadow",
+        evidence_adjudications=events,
     )
     return {
         **derived,

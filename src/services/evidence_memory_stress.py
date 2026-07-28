@@ -17,6 +17,7 @@ from src.evidence_identity import canonical_evidence_digest
 from src.external_identity_provenance import (
     build_external_identity_provenance,
 )
+from src.services.evidence_claim_memory import build_evidence_claim_memory
 from src.services.evidence_memory_identity_v2 import (
     build_evidence_memory_identity_v2,
 )
@@ -24,8 +25,8 @@ from src.services.evidence_ledger_shadow import build_evidence_ledger_shadow
 from src.services.scanner_evidence_comparison import canonical_evidence_records
 
 
-EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v1"
-EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v1"
+EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v2"
+EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v2"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 
 
@@ -42,6 +43,7 @@ def run_evidence_memory_stress(
     controlled = _controlled_probes()
     replay = _replay_real_histories(normalized_histories)
     identity_v2_replay = _replay_identity_v2(normalized_histories)
+    claim_memory_replay = _replay_claim_memory(normalized_histories)
     executable_failures = [
         probe["id"]
         for probe in controlled
@@ -89,21 +91,32 @@ def run_evidence_memory_stress(
             "v2_removed_url_only_change_pressure_count": identity_v2_replay[
                 "summary"
             ]["removed_url_only_change_pressure_count"],
+            "claim_slot_count": claim_memory_replay["summary"][
+                "claim_slot_count"
+            ],
+            "claim_variant_count": claim_memory_replay["summary"][
+                "claim_variant_count"
+            ],
+            "claim_relation_candidate_count": claim_memory_replay["summary"][
+                "relation_candidate_count"
+            ],
         },
         "executable_failures": executable_failures,
         "promotion_blockers": promotion_blockers,
         "controlled_probes": controlled,
         "real_history_replay": replay,
         "identity_v2_replay": identity_v2_replay,
+        "claim_memory_replay": claim_memory_replay,
         "interpretation": {
             "supported": (
                 "Evidence identities can be remembered deterministically across "
                 "acquisition loss, evaluator drift, ordering changes, and exact repeats."
             ),
             "not_yet_supported": (
-                "The current ledger cannot decide which claim is current, map stable "
-                "evidence to tiles, complete its pending human identity reviews, or "
-                "produce a versioned memory score."
+                "Claim Memory can only propose coexistence or replacement relations; "
+                "it cannot adjudicate a canonical claim, map stable evidence to tiles, "
+                "complete pending human identity reviews, or produce a versioned "
+                "memory score."
             ),
         },
     }
@@ -234,6 +247,40 @@ def render_evidence_memory_stress_markdown(report: dict[str, Any]) -> str:
                     str(row.get("v2_current_external_passage_count", 0)),
                     str(row.get("v2_current_external_cluster_count", 0)),
                     str(row.get("v2_current_independent_external_cluster_count", 0)),
+                )
+            )
+            + " |"
+        )
+    claim_memory = report.get("claim_memory_replay") or {}
+    claim_summary = claim_memory.get("summary") or {}
+    lines.extend(
+        [
+            "",
+            "## Claim Memory v1 replay",
+            "",
+            f"- Semantic claim slots: `{claim_summary.get('claim_slot_count', 0)}`",
+            f"- Claim variants: `{claim_summary.get('claim_variant_count', 0)}`",
+            f"- Claim occurrences: `{claim_summary.get('claim_occurrence_count', 0)}`",
+            f"- Proposed relations: `{claim_summary.get('relation_candidate_count', 0)}`",
+            f"- Ignored bare claim IDs: `{claim_summary.get('ignored_bare_claim_id_count', 0)}`",
+            f"- Ignored structural metadata rows: `{claim_summary.get('ignored_claim_metadata_count', 0)}`",
+            "",
+            "| domain | reports | slots | variants | occurrences | relations | ignored metadata |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in claim_memory.get("histories") or []:
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    _md_cell(str(row.get("domain") or "")),
+                    str(row.get("report_count", 0)),
+                    str(row.get("claim_slot_count", 0)),
+                    str(row.get("claim_variant_count", 0)),
+                    str(row.get("claim_occurrence_count", 0)),
+                    str(row.get("relation_candidate_count", 0)),
+                    str(row.get("ignored_claim_metadata_count", 0)),
                 )
             )
             + " |"
@@ -521,6 +568,50 @@ def _controlled_probes() -> list[dict[str, Any]]:
             _report("claim-new", "2026-01-02T00:00:00Z", [new_claim]),
         ]
     )
+    bare_claim_memory = build_evidence_claim_memory(
+        [
+            _report("claim-old", "2026-01-01T00:00:00Z", [old_claim]),
+            _report("claim-new", "2026-01-02T00:00:00Z", [new_claim]),
+        ]
+    )
+    semantic_old_claim = deepcopy(stable_owned)
+    semantic_old_claim["metadata"].update(
+        {
+            "claim_slot_key": "audience.primary",
+            "claim_type": "audience",
+        }
+    )
+    semantic_new_claim = deepcopy(semantic_old_claim)
+    semantic_new_claim["content"] = (
+        "We help operations teams automate procurement."
+    )
+    semantic_claim_history = [
+        _report(
+            "semantic-claim-old",
+            "2026-01-01T00:00:00Z",
+            [semantic_old_claim],
+        ),
+        _report(
+            "semantic-claim-new",
+            "2026-01-02T00:00:00Z",
+            [semantic_new_claim],
+        ),
+    ]
+    semantic_claim_memory = build_evidence_claim_memory(
+        semantic_claim_history
+    )
+    simultaneous_claim_memory = build_evidence_claim_memory(
+        [
+            _report(
+                "semantic-claim-simultaneous",
+                "2026-01-01T00:00:00Z",
+                [semantic_old_claim, semantic_new_claim],
+            )
+        ]
+    )
+    reordered_claim_memory = build_evidence_claim_memory(
+        list(reversed(semantic_claim_history))
+    )
 
     return [
         _probe(
@@ -665,6 +756,58 @@ def _controlled_probes() -> list[dict[str, Any]]:
             ),
             "Identity v2 surfaces a controlled stable-slot change as a proposed revision without accepting it.",
         ),
+        _probe(
+            "claim_memory_rejects_bare_content_derived_claim_id",
+            (
+                bare_claim_memory["summary"]["claim_slot_count"] == 0
+                and bare_claim_memory["summary"][
+                    "ignored_bare_claim_id_count"
+                ]
+                == 1
+            ),
+            "Claim Memory refuses to treat a bare text-derived claim ID as a longitudinal slot.",
+        ),
+        _probe(
+            "claim_memory_separates_slot_variant_and_occurrence",
+            (
+                semantic_claim_memory["summary"]["claim_slot_count"] == 1
+                and semantic_claim_memory["summary"]["claim_variant_count"]
+                == 2
+                and semantic_claim_memory["summary"][
+                    "claim_occurrence_count"
+                ]
+                == 2
+                and semantic_claim_memory["summary"][
+                    "relation_candidate_counts"
+                ]
+                == {"replacement_candidate": 1}
+                and semantic_claim_memory["runtime_effect"] is False
+                and semantic_claim_memory["authority"] is False
+            ),
+            "Claim Memory keeps semantic slot, content variant, and report occurrence identities separate.",
+        ),
+        _probe(
+            "claim_memory_simultaneous_variants_are_coexistence_candidates",
+            (
+                simultaneous_claim_memory["summary"][
+                    "relation_candidate_counts"
+                ]
+                == {"coexistence_candidate": 1}
+                and simultaneous_claim_memory["slots"][0][
+                    "latest_variant_count"
+                ]
+                == 2
+            ),
+            "Two variants observed together are proposed as coexistence, never replacement.",
+        ),
+        _probe(
+            "claim_memory_report_order_invariance",
+            (
+                reordered_claim_memory["state_fingerprint"]
+                == semantic_claim_memory["state_fingerprint"]
+            ),
+            "Claim Memory is deterministic when immutable reports arrive in a different order.",
+        ),
         {
             "id": "identity_gold_set_pending_human_review",
             "kind": "promotion_blocker",
@@ -699,10 +842,14 @@ def _controlled_probes() -> list[dict[str, Any]]:
             "kind": "promotion_blocker",
             "status": "blocked",
             "observation": (
-                "Old and new content coexist, but neither claim variant can be semantically "
-                "accepted, superseded, contradicted, or reversed."
+                "Claim Memory v1 now separates slots, variants, and occurrences and "
+                "proposes coexistence or replacement without authority. It still cannot "
+                "durably accept, supersede, contradict, or reverse those relations."
             ),
-            "required_capability": "versioned claim reconciliation with an appeal path",
+            "required_capability": (
+                "append-only versioned claim reconciliation with revocation and an "
+                "appeal path"
+            ),
         },
         {
             "id": "stable_evidence_has_no_tile_mapping",
@@ -985,6 +1132,74 @@ def _replay_identity_v2(
             ),
             "v2_current_external_independence_cluster_status_counts": dict(
                 sorted(independence_cluster_status_totals.items())
+            ),
+        },
+        "histories": rows,
+    }
+
+
+def _replay_claim_memory(
+    histories: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    metric_keys = (
+        "claim_slot_count",
+        "claim_variant_count",
+        "claim_occurrence_count",
+        "current_claim_variant_count",
+        "multi_variant_slot_count",
+        "claim_type_conflict_count",
+        "relation_candidate_count",
+        "ignored_claim_metadata_count",
+        "ignored_bare_claim_id_count",
+    )
+    rows: list[dict[str, Any]] = []
+    totals = Counter()
+    relation_totals = Counter()
+    ignored_reason_totals = Counter()
+    slot_method_totals = Counter()
+    for domain, reports in sorted(histories.items()):
+        if not reports:
+            continue
+        memory = build_evidence_claim_memory(reports)
+        summary = memory["summary"]
+        row = {
+            "domain": domain,
+            "report_count": len(reports),
+            **{
+                key: int(summary.get(key, 0))
+                for key in metric_keys
+            },
+            "relation_candidate_counts": dict(
+                summary["relation_candidate_counts"]
+            ),
+            "ignored_claim_reason_counts": dict(
+                summary["ignored_claim_reason_counts"]
+            ),
+            "claim_slot_method_counts": dict(
+                summary["claim_slot_method_counts"]
+            ),
+        }
+        rows.append(row)
+        for key in metric_keys:
+            totals[key] += int(row[key])
+        relation_totals.update(row["relation_candidate_counts"])
+        ignored_reason_totals.update(row["ignored_claim_reason_counts"])
+        slot_method_totals.update(row["claim_slot_method_counts"])
+    return {
+        "schema_version": "evidence-claim-memory-v1-replay-v1",
+        "runtime_effect": False,
+        "authority": False,
+        "summary": {
+            "history_count": len(rows),
+            **{key: int(totals.get(key, 0)) for key in metric_keys},
+            "relation_candidate_counts": dict(
+                sorted(relation_totals.items())
+            ),
+            "ignored_claim_reason_counts": dict(
+                sorted(ignored_reason_totals.items())
+            ),
+            "claim_slot_method_counts": dict(
+                sorted(slot_method_totals.items())
             ),
         },
         "histories": rows,
