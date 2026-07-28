@@ -1,4 +1,65 @@
-from src.services.scanner_api_stability import compare_probe_summaries, extract_probe_summary
+from src.services import scanner_api_stability
+from src.services.scanner_api_stability import (
+    compare_probe_summaries,
+    configured_scanner_api_url,
+    create_scan,
+    extract_probe_summary,
+    normalize_scanner_api_url,
+    scanner_api_origin,
+)
+
+
+def test_scanner_api_url_contract_accepts_v1_base_and_legacy_origin():
+    assert normalize_scanner_api_url("https://b3s.fly.dev/api/v1") == (
+        "https://b3s.fly.dev/api/v1"
+    )
+    assert normalize_scanner_api_url("https://b3s.fly.dev/") == (
+        "https://b3s.fly.dev/api/v1"
+    )
+    assert scanner_api_origin("https://b3s.fly.dev/api/v1") == "https://b3s.fly.dev"
+
+
+def test_configured_scanner_api_url_reads_env_file_and_environment(
+    tmp_path,
+    monkeypatch,
+):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "B3S_SCANNER_API_URL=https://file.example/api/v1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("B3S_SCANNER_API_URL", raising=False)
+
+    assert configured_scanner_api_url(env_path=str(env_path)) == (
+        "https://file.example/api/v1"
+    )
+
+    monkeypatch.setenv("B3S_SCANNER_API_URL", "https://environment.example")
+    assert configured_scanner_api_url(env_path=str(env_path)) == (
+        "https://environment.example/api/v1"
+    )
+
+
+def test_create_scan_does_not_duplicate_api_prefix(monkeypatch):
+    captured = {}
+
+    def fake_request_json(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return {"id": 123}
+
+    monkeypatch.setattr(scanner_api_stability, "request_json", fake_request_json)
+
+    result = create_scan(
+        base_url="https://b3s.fly.dev/api/v1",
+        url="https://example.com",
+        lang="es",
+        token="secret",
+        timeout=30,
+    )
+
+    assert result == {"id": 123}
+    assert captured["url"] == "https://b3s.fly.dev/api/v1/scanner"
 
 
 def test_extract_probe_summary_reads_persisted_fields():

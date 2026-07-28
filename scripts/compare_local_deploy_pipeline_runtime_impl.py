@@ -24,9 +24,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.services.scanner_api_stability import (
+    DEFAULT_DEPLOY_ORIGIN,
+    configured_scanner_api_url,
+    scanner_api_origin,
+)
+
 
 DEFAULT_LOCAL_BASE = "http://127.0.0.1:8000"
-DEFAULT_DEPLOY_BASE = "https://brand3.fly.dev"
+DEFAULT_DEPLOY_BASE = DEFAULT_DEPLOY_ORIGIN
 DEFAULT_OUT_DIR = Path("scratch/local_vs_deploy_pipeline_compare")
 TLDR_KEYS = (
     "value_proposition",
@@ -58,12 +64,16 @@ class HttpResult:
 
 
 def main() -> int:
+    deploy_base = scanner_api_origin(
+        os.environ.get("BRAND3_COMPARE_DEPLOY_BASE")
+        or configured_scanner_api_url()
+    )
     parser = argparse.ArgumentParser(
         description="Run the same Brand3 Scanner/Audit case in local and deploy, then compare normalized outputs."
     )
     parser.add_argument("--url", action="append", required=True, help="Brand URL to compare. Repeatable.")
     parser.add_argument("--local-base", default=os.environ.get("BRAND3_COMPARE_LOCAL_BASE", DEFAULT_LOCAL_BASE))
-    parser.add_argument("--deploy-base", default=os.environ.get("BRAND3_COMPARE_DEPLOY_BASE", DEFAULT_DEPLOY_BASE))
+    parser.add_argument("--deploy-base", default=deploy_base)
     parser.add_argument("--scanner-token", default=os.environ.get("BRAND3_SCANNER_API_TOKEN") or read_env_value("BRAND3_SCANNER_API_TOKEN"))
     parser.add_argument("--mode", choices=("auto", "api", "web"), default="auto")
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))

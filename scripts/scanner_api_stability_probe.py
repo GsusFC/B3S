@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.services.scanner_api_stability import (
-    DEFAULT_DEPLOY_BASE,
     compare_probe_summaries,
+    configured_scanner_api_url,
     create_scan,
     extract_probe_summary,
     fetch_scan_bundle,
@@ -23,7 +23,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True)
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--base-url", default=DEFAULT_DEPLOY_BASE)
+    parser.add_argument(
+        "--base-url",
+        default=configured_scanner_api_url(),
+        help=(
+            "Scanner API v1 base. Accepts https://host/api/v1 or a legacy "
+            "https://host origin; defaults to B3S_SCANNER_API_URL."
+        ),
+    )
     parser.add_argument("--lang", default="es", choices=("es", "en"))
     parser.add_argument("--scanner-token", default=read_env_value("BRAND3_SCANNER_API_TOKEN"))
     parser.add_argument("--poll-interval", type=float, default=5.0)

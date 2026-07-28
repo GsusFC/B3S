@@ -6,6 +6,6 @@
 # Python process, a background analysis queue, and persistent SQLite storage.
 [[redirects]]
   from = "/*"
-  to = "https://brand3.fly.dev/:splat"
+  to = "https://b3s.fly.dev/:splat"
   status = 200
   force = true
