@@ -70,6 +70,13 @@ GET /api/v1/brands/{domain}/evidence-ledger-shadow
 current immutable history. Otherwise the API returns a safe in-memory
 recomputation with `backend=history_derived`.
 
+After Fly verifies the deployed commit, the deployment workflow backfills every
+existing brand directly from PostgreSQL report snapshots. Each brand uses the
+same advisory lock and savepoint isolation as a normal report import. The step
+has a five-minute timeout and `continue-on-error`; backfill failures are
+reported but cannot fail the deployment because the projection has no runtime
+authority.
+
 ## Shadow evaluation
 
 The first evaluation period should answer these questions with reviewed

@@ -33,6 +33,10 @@ def test_deploy_workflow_builds_and_verifies_the_exact_commit():
     assert '--build-arg B3S_BUILD_SHA="$DEPLOY_SHA"' in workflow
     assert 'https://b3s.fly.dev/health' in workflow
     assert 'if [ "$observed" = "$DEPLOY_SHA" ]' in workflow
+    assert "Backfill evidence ledger shadow" in workflow
+    assert "--migrate-only --rebuild-evidence-ledger-shadow" in workflow
+    assert "continue-on-error: true" in workflow
+    assert "timeout-minutes: 5" in workflow
     assert "setup-flyctl@master" not in workflow
 
 

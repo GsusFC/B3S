@@ -379,6 +379,84 @@ class PostgresHistoryRepository:
             ).fetchone()
         return dict(row["payload"]) if row and isinstance(row["payload"], dict) else None
 
+    def rebuild_evidence_ledger_shadows(
+        self,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any]:
+        """Backfill every existing brand without affecting authoritative state."""
+
+        mode = evidence_ledger_mode()
+        if mode != "shadow":
+            return {
+                "mode": mode,
+                "runtime_effect": False,
+                "workspace_slug": workspace_slug,
+                "brands_discovered": 0,
+                "rebuilt": 0,
+                "failed": 0,
+                "failed_domains": [],
+            }
+
+        self._ensure_migrated()
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT workspaces.id AS workspace_id,
+                                brands.id,
+                                brands.canonical_domain
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                JOIN {_SCHEMA}.captures
+                  ON captures.brand_id = brands.id
+                JOIN {_SCHEMA}.evaluation_runs
+                  ON evaluation_runs.capture_id = captures.id
+                JOIN {_SCHEMA}.report_snapshots
+                  ON report_snapshots.evaluation_run_id = evaluation_runs.id
+                WHERE workspaces.slug = %s
+                ORDER BY brands.canonical_domain
+                """,
+                (workspace_slug,),
+            ).fetchall()
+
+        rebuilt = 0
+        failed_domains: list[str] = []
+        for row in rows:
+            workspace_id = UUID(str(row["workspace_id"]))
+            brand_id = row["id"]
+            domain = str(row["canonical_domain"])
+            try:
+                with self._connect() as conn:
+                    conn.execute(
+                        "SELECT pg_advisory_xact_lock(%s)",
+                        (_advisory_lock_key(workspace_id, "brand", brand_id),),
+                    )
+                    if self._rebuild_evidence_ledger_shadow_safely(
+                        conn,
+                        workspace_id,
+                        UUID(str(brand_id)),
+                    ):
+                        rebuilt += 1
+                    else:
+                        failed_domains.append(domain)
+            except Exception:
+                failed_domains.append(domain)
+                _LOG.exception(
+                    "failed to backfill evidence ledger shadow",
+                    extra={"brand_id": str(brand_id), "domain": domain},
+                )
+
+        return {
+            "mode": mode,
+            "runtime_effect": False,
+            "workspace_slug": workspace_slug,
+            "brands_discovered": len(rows),
+            "rebuilt": rebuilt,
+            "failed": len(failed_domains),
+            "failed_domains": failed_domains,
+        }
+
     def list_brand_history(
         self,
         domain_or_url: str,
@@ -857,11 +935,11 @@ class PostgresHistoryRepository:
         conn,
         workspace_id: UUID,
         brand_id: UUID,
-    ) -> None:
+    ) -> bool:
         """Keep a shadow failure outside the authoritative import transaction."""
 
         if evidence_ledger_mode() != "shadow":
-            return
+            return False
         try:
             # Psycopg maps a nested transaction block to a SAVEPOINT. A broken
             # experimental projection therefore rolls back only its own writes.
@@ -871,11 +949,13 @@ class PostgresHistoryRepository:
                     workspace_id,
                     brand_id,
                 )
+            return True
         except Exception:
             _LOG.exception(
                 "failed to rebuild evidence ledger shadow",
                 extra={"brand_id": str(brand_id)},
             )
+            return False
 
     @staticmethod
     def _rebuild_evidence_ledger_shadow(

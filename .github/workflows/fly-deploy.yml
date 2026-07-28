@@ -66,3 +66,13 @@ jobs:
           done
           echo "::error::Expected production commit $DEPLOY_SHA, observed ${observed:-unavailable}"
           exit 1
+
+      - name: Backfill evidence ledger shadow
+        continue-on-error: true
+        timeout-minutes: 5
+        run: >-
+          flyctl ssh console -a b3s
+          -C "python /app/scripts/import_b3s_reports_postgres.py
+          --migrate-only --rebuild-evidence-ledger-shadow"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
