@@ -8,11 +8,12 @@ validated scoring system yet.
 The current ledger supports a useful foundation: exact evidence identities
 survive acquisition loss and evaluator drift. Identity v2 also separates
 documents from passages, suppresses URL-only change candidates, and clusters
-exact syndication. New Exa captures also persist enough external-attribution
-provenance for v2 to reproduce a strong match instead of trusting its label.
-It does not yet support safe promotion because it cannot adjudicate claims,
-detect paraphrased syndication, persist tile support, or evaluate a canonical
-memory version.
+exact copies and light lexical paraphrases under source-independence policy v3.
+New Exa captures also persist enough external-attribution provenance for v2 to
+reproduce a strong match instead of trusting its label. It does not yet support
+safe promotion because the identity set and production source registry have not
+been reviewed, and it cannot adjudicate claims, persist tile support, or
+evaluate a canonical memory version.
 
 ## Read-only harness
 
@@ -60,16 +61,19 @@ The executable foundation must prove:
 8. weak external identity does not become validation-eligible;
 9. a bare strong-looking upstream label does not become validation-eligible;
 10. persisted strong external attribution is independently reproducible;
-11. exact syndicated copies count as one independent cluster;
+11. exact syndicated copies share a cluster and do not count as independent;
 12. a controlled stable-slot change is surfaced as a proposed revision;
 13. even a deliberately false manual identity acceptance cannot affect
-    eligibility, scoring, or canonical selection.
+    eligibility, scoring, or canonical selection;
+14. lightly paraphrased copies share a cluster and do not count as independent;
+15. unknown publisher ownership cannot count as independence.
 
 The adversarial probes deliberately expose:
 
 1. repeated false identity metadata can create a v1 `validation_candidate`,
    while v2 still lacks a reviewed identity gold set;
-2. v1 does not cluster syndicated copies and v2 only handles exact copies;
+2. source-independence v3 has no production-reviewed source decisions or
+   measured semantic-paraphrase recall;
 3. old and new content have no canonical claim-resolution path;
 4. evidence has no persistent, versioned claim-to-tile mapping;
 5. no evaluator consumes a canonical memory version.
@@ -125,8 +129,10 @@ The v1/v2 comparison found:
   `claim_id`;
 - a false bare strong label stayed unverified while a reproduced Exa
   attribution reached `validation_candidate` in the controlled probes;
-- 185 current external passages grouped into 162 conservative independence
-  clusters.
+- 185 current external passages grouped into 160 structural source clusters;
+- 19 `same_cluster`, 12 `disputed`, and 129 `unknown` clusters;
+- 0 real clusters marked `confirmed_independent`, because the registry has no
+  production-reviewed source URLs.
 
 Verdict: `foundation_supported_promotion_blocked`.
 
@@ -172,8 +178,11 @@ versioned `accepted`, `disputed`, `rejected`, `superseded`, and `revoked`
 decisions with idempotency and optimistic concurrency. A controlled false
 acceptance remains `runtime_effect=false`, `authority=false`, `unverified`, and
 `repeated`. The single reviewer is now bound server-side to a dedicated
-credential. Gate 1 is still blocked by paraphrased/source-owner independence
-and the missing reviewed gold set.
+credential. Source-independence policy v3 now fails closed on unknown ownership,
+clusters exact and light lexical copies, respects explicit lineage, and disputes
+ambiguous similarity. Gate 1 is still blocked by the missing human identity
+reviews, the absence of production source reviews, and unmeasured semantic
+paraphrase recall.
 
 ### Gate 2 — tile evidence ledger
 

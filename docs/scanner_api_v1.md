@@ -205,14 +205,23 @@ Its safety boundary is explicit:
 - weak external identity remains unverified;
 - a bare upstream identity label remains unverified, while eligible external
   identity requires reproducible persisted attribution provenance;
-- exact syndication and same-publisher evidence share a conservative
-  independence cluster;
+- exact copies, reviewed publisher groups, explicit source lineage, and high
+  deterministic shingle similarity share a conservative source cluster;
+- ambiguous similarity is `disputed`, missing ownership/source review is
+  `unknown`, and only `confirmed_independent` may appear in the prospective
+  independence count;
 - no state changes scores, reports, canonical selection, or v1 ledger rows.
 
 `persistence.stored` is always `false` in this phase. The API recomputes the v2
 projection from immutable brand history so every later scan is observable
 without adding another authoritative store. Entries contain hashes and
 provenance but no raw evidence text.
+
+The top-level `source_independence` object pins the v3 policy, publisher
+registry fingerprint, thresholds, and `runtime_effect=false` boundary. Internal
+shingle hashes are not returned. The committed registry contains no
+production-reviewed source URLs, so real evidence fails closed rather than
+gaining independence from missing relationship data.
 
 The resource is not proof that real brand changes are detected. The current
 local corpus contains visual stable slots but no stable semantic `claim_id`

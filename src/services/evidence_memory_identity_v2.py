@@ -26,6 +26,12 @@ from src.external_identity_provenance import (
 from src.services.evidence_memory_adjudication import (
     apply_evidence_memory_adjudications,
 )
+from src.services.evidence_source_independence import (
+    assign_external_source_independence,
+    content_shingle_hashes,
+    normalize_distribution_types,
+    source_independence_contract,
+)
 from src.services.scanner_evidence_comparison import (
     MATERIAL_SOURCE_CLASSES,
     build_evidence_snapshot,
@@ -33,7 +39,7 @@ from src.services.scanner_evidence_comparison import (
 
 
 EVIDENCE_MEMORY_IDENTITY_V2_VERSION = "evidence-memory-identity-v2"
-EVIDENCE_MEMORY_IDENTITY_V2_POLICY_VERSION = "evidence-memory-identity-policy-v2"
+EVIDENCE_MEMORY_IDENTITY_V2_POLICY_VERSION = "evidence-memory-identity-policy-v3"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 _GOOD_ACQUISITION_STATES = {"pass", "warning"}
 _TTL_DAYS = {
@@ -71,6 +77,7 @@ def build_evidence_memory_identity_v2(
         },
         "report_count": len(ordered),
         "latest_report_id": latest_report_id or None,
+        "source_independence": source_independence_contract(),
         "policy": {
             "automatic_validation": False,
             "automatic_rejection": False,
@@ -82,6 +89,11 @@ def build_evidence_memory_identity_v2(
             "reproducible_external_identity_is_eligible": True,
             "exact_syndication_clustering": True,
             "same_publisher_is_one_independence_cluster": True,
+            "same_publisher_group_is_one_independence_cluster": True,
+            "canonical_source_lineage_clustering": True,
+            "deterministic_shingle_similarity_clustering": True,
+            "unknown_source_relationship_is_not_independence": True,
+            "confirmed_independence_required_for_future_corroboration": True,
         },
         "warnings": [
             "shadow_only_no_scoring_or_selection_effect",
@@ -89,7 +101,9 @@ def build_evidence_memory_identity_v2(
             "revision_requires_explicit_claim_slot",
             "external_brand_name_match_requires_adjudication",
             "external_identity_requires_reproducible_provenance",
-            "exact_syndication_does_not_detect_paraphrases",
+            "unreviewed_publisher_ownership_remains_unknown",
+            "ambiguous_source_independence_requires_human_review",
+            "source_independence_has_no_current_corroboration_or_scoring_effect",
             "adjudications_do_not_change_scoring_or_canonical_selection",
         ],
         "summary": _empty_summary(),
@@ -119,7 +133,9 @@ def build_evidence_memory_identity_v2(
             if atom is None:
                 continue
             evidence_id = str(atom["evidence_id"])
-            atoms.setdefault(evidence_id, atom)
+            existing_atom = atoms.setdefault(evidence_id, atom)
+            if existing_atom is not atom:
+                _merge_source_independence_metadata(existing_atom, atom)
             group = grouped.setdefault(
                 evidence_id,
                 {
@@ -267,7 +283,7 @@ def build_evidence_memory_identity_v2(
     current_entries = [
         entry for entry in entries if str(entry["state"]) in _CURRENT_STATES
     ]
-    _assign_external_independence_clusters(
+    independence_summary = assign_external_source_independence(
         entries,
         current_evidence_ids={
             str(entry["evidence_id"])
@@ -318,13 +334,12 @@ def build_evidence_memory_identity_v2(
                 if str(entry.get("syndication_cluster_id") or "")
             }
         ),
-        "current_independent_external_cluster_count": len(
-            {
-                str(entry["independence_cluster_id"])
-                for entry in current_external
-                if str(entry.get("independence_cluster_id") or "")
-            }
+        "current_independent_external_cluster_count": int(
+            independence_summary[
+                "current_confirmed_independent_external_cluster_count"
+            ]
         ),
+        **independence_summary,
     }
     result = apply_evidence_memory_adjudications(result, adjudications)
     result["state_fingerprint"] = _state_fingerprint(result)
@@ -388,6 +403,27 @@ def _atom_from_row(
         evidence_type=evidence_type,
     )
     source_domain = _domain(url)
+    canonical_urls = _normalized_urls(
+        (
+            url,
+            metadata.get("canonical_url"),
+            metadata.get("canonical_source_url"),
+        )
+    )
+    original_source_urls = _normalized_urls(
+        (
+            metadata.get("original_source_url"),
+            metadata.get("syndication_source_url"),
+            metadata.get("origin_url"),
+        )
+    )
+    distribution_types = normalize_distribution_types(
+        (
+            metadata.get("distribution_type"),
+            metadata.get("source_type"),
+            metadata.get("syndication_type"),
+        )
+    )
     publisher_id = (
         stable_artifact_digest(
             "evidence-memory-publisher-v2",
@@ -419,6 +455,10 @@ def _atom_from_row(
         "content_hash": content_hash,
         "publisher_id": publisher_id,
         "syndication_cluster_id": syndication_cluster_id,
+        "canonical_urls": canonical_urls,
+        "original_source_urls": original_source_urls,
+        "distribution_types": distribution_types,
+        "_source_independence_shingles": content_shingle_hashes(content),
     }
 
 
@@ -612,70 +652,6 @@ def _entry_state(
     ]
 
 
-def _assign_external_independence_clusters(
-    entries: list[dict[str, Any]],
-    *,
-    current_evidence_ids: set[str],
-) -> None:
-    external_ids = [
-        str(entry["evidence_id"])
-        for entry in entries
-        if entry["source_class"] == "external_proof"
-        and str(entry["evidence_id"]) in current_evidence_ids
-    ]
-    parent = {evidence_id: evidence_id for evidence_id in external_ids}
-
-    def find(value: str) -> str:
-        while parent[value] != value:
-            parent[value] = parent[parent[value]]
-            value = parent[value]
-        return value
-
-    def union(left: str, right: str) -> None:
-        left_root = find(left)
-        right_root = find(right)
-        if left_root != right_root:
-            parent[max(left_root, right_root)] = min(left_root, right_root)
-
-    first_by_publisher: dict[str, str] = {}
-    first_by_syndication: dict[str, str] = {}
-    for entry in entries:
-        if (
-            entry["source_class"] != "external_proof"
-            or str(entry["evidence_id"]) not in current_evidence_ids
-        ):
-            continue
-        evidence_id = str(entry["evidence_id"])
-        for key, index in (
-            (str(entry.get("publisher_id") or ""), first_by_publisher),
-            (
-                str(entry.get("syndication_cluster_id") or ""),
-                first_by_syndication,
-            ),
-        ):
-            if not key:
-                continue
-            prior = index.setdefault(key, evidence_id)
-            union(prior, evidence_id)
-
-    members_by_root: dict[str, list[str]] = defaultdict(list)
-    for evidence_id in external_ids:
-        members_by_root[find(evidence_id)].append(evidence_id)
-    cluster_by_evidence: dict[str, tuple[str, int]] = {}
-    for members in members_by_root.values():
-        sorted_members = sorted(members)
-        cluster_id = stable_artifact_digest(
-            "evidence-memory-independence-cluster-v2",
-            {"members": sorted_members},
-        )
-        for evidence_id in sorted_members:
-            cluster_by_evidence[evidence_id] = (cluster_id, len(sorted_members))
-    for entry in entries:
-        cluster = cluster_by_evidence.get(str(entry["evidence_id"]))
-        entry["independence_cluster_id"] = cluster[0] if cluster else ""
-        entry["independence_cluster_member_count"] = cluster[1] if cluster else 0
-
-
 def _evidence_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
     raw = report.get("raw") if isinstance(report.get("raw"), dict) else {}
     flow = raw.get("flow") if isinstance(raw.get("flow"), dict) else {}
@@ -740,6 +716,38 @@ def _domain(value: str) -> str:
     return str(parsed.hostname or "").strip(".").lower().removeprefix("www.")
 
 
+def _normalized_urls(values: Iterable[Any]) -> list[str]:
+    return sorted(
+        {
+            normalized
+            for value in values
+            if (normalized := normalize_evidence_url(value))
+        }
+    )
+
+
+def _merge_source_independence_metadata(
+    target: dict[str, Any],
+    candidate: dict[str, Any],
+) -> None:
+    for key in (
+        "canonical_urls",
+        "original_source_urls",
+        "distribution_types",
+        "_source_independence_shingles",
+    ):
+        target[key] = sorted(
+            {
+                str(value)
+                for value in (
+                    list(target.get(key) or [])
+                    + list(candidate.get(key) or [])
+                )
+                if str(value)
+            }
+        )
+
+
 def _empty_summary() -> dict[str, Any]:
     return {
         "entry_count": 0,
@@ -756,6 +764,10 @@ def _empty_summary() -> dict[str, Any]:
         "current_external_publisher_count": 0,
         "current_external_syndication_cluster_count": 0,
         "current_independent_external_cluster_count": 0,
+        "current_external_cluster_count": 0,
+        "current_confirmed_independent_external_cluster_count": 0,
+        "current_external_independence_status_counts": {},
+        "current_external_independence_cluster_status_counts": {},
         "adjudicated_entry_count": 0,
         "adjudication_state_counts": {},
     }
@@ -782,6 +794,7 @@ def _state_fingerprint(payload: dict[str, Any]) -> str:
             "mode": payload["mode"],
             "brand": payload["brand"],
             "latest_report_id": payload["latest_report_id"],
+            "source_independence": payload["source_independence"],
             "summary": payload["summary"],
             "entries": payload["entries"],
         },

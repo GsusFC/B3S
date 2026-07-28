@@ -16,7 +16,7 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["verdict"] == "foundation_supported_promotion_blocked"
     assert report["promotion_ready"] is False
     assert report["executable_failures"] == []
-    assert report["summary"]["executable_invariant_count"] == 13
+    assert report["summary"]["executable_invariant_count"] == 15
     assert report["summary"]["promotion_blocker_count"] == 5
     assert all(
         probe["status"] == "pass"
@@ -32,22 +32,29 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
     poison = probes[
         "identity_gold_set_pending_human_review"
     ]
-    syndication = probes["syndication_is_not_clustered"]
-
+    source_independence = probes[
+        "source_independence_pending_production_review"
+    ]
     assert poison["status"] == "blocked"
     assert "`validation_candidate`" in poison["observation"]
     assert "candidate reviews" in poison["required_capability"]
-    assert syndication["status"] == "blocked"
-    assert "2 validation candidates" in syndication["observation"]
+    assert source_independence["status"] == "blocked"
+    assert "no production-reviewed source" in source_independence["observation"]
     assert probes["identity_v2_weak_external_identity_is_not_eligible"][
         "status"
     ] == "pass"
     assert probes["accepted_identity_never_grants_runtime_authority"][
         "status"
     ] == "pass"
-    assert probes["identity_v2_exact_syndication_is_one_independent_cluster"][
+    assert probes["identity_v3_exact_syndication_is_one_source_cluster"][
         "status"
     ] == "pass"
+    assert probes[
+        "identity_v3_paraphrased_syndication_is_not_independent"
+    ]["status"] == "pass"
+    assert probes[
+        "identity_v3_unknown_ownership_never_counts_as_independent"
+    ]["status"] == "pass"
     assert probes["identity_v2_stable_claim_slot_surfaces_revision"][
         "status"
     ] == "pass"

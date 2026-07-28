@@ -134,7 +134,11 @@ and older evidence without that contract remain validation-ineligible.
 Adjudication writes require a dedicated
 `B3S_EVIDENCE_ADJUDICATION_TOKEN`; the server binds every decision to
 `B3S_EVIDENCE_REVIEWER_ID` rather than trusting a reviewer supplied by the
-client.
+client. Source-independence policy v3 additionally collapses exact copies,
+reviewed publisher groups, explicit lineage, and high shingle similarity.
+Unknown ownership and source review fail closed and never count as independent;
+the full shadow contract is documented in
+[`docs/evidence_source_independence_v3.md`](docs/evidence_source_independence_v3.md).
 
 Prepare and evaluate the versioned identity review set with:
 

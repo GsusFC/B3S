@@ -101,9 +101,9 @@ def run_evidence_memory_stress(
                 "acquisition loss, evaluator drift, ordering changes, and exact repeats."
             ),
             "not_yet_supported": (
-                "The current ledger cannot decide which claim is current, authenticate "
-                "individual reviewers, map stable evidence to tiles, or produce a "
-                "versioned memory score."
+                "The current ledger cannot decide which claim is current, map stable "
+                "evidence to tiles, complete its pending human identity reviews, or "
+                "produce a versioned memory score."
             ),
         },
     }
@@ -215,10 +215,11 @@ def render_evidence_memory_stress_markdown(report: dict[str, Any]) -> str:
             f"- V2 stable slots: `{identity_v2_summary.get('v2_claim_slot_count', 0)}`",
             f"- V2 stable-slot methods: `{_format_counts(identity_v2_summary.get('v2_claim_slot_method_counts'))}`",
             f"- Current external passages: `{identity_v2_summary.get('v2_current_external_passage_count', 0)}`",
-            f"- Current independent external clusters: `{identity_v2_summary.get('v2_current_independent_external_cluster_count', 0)}`",
+            f"- Current external source clusters: `{identity_v2_summary.get('v2_current_external_cluster_count', 0)}`",
+            f"- Confirmed independent external clusters: `{identity_v2_summary.get('v2_current_independent_external_cluster_count', 0)}`",
             "",
-            "| domain | v1 changed | v2 revisions | claim slots | external passages | independent clusters |",
-            "| --- | ---: | ---: | ---: | ---: | ---: |",
+            "| domain | v1 changed | v2 revisions | claim slots | external passages | source clusters | confirmed independent |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for row in identity_v2.get("histories") or []:
@@ -231,6 +232,7 @@ def render_evidence_memory_stress_markdown(report: dict[str, Any]) -> str:
                     str(row.get("v2_revision_candidate_count", 0)),
                     str(row.get("v2_claim_slot_count", 0)),
                     str(row.get("v2_current_external_passage_count", 0)),
+                    str(row.get("v2_current_external_cluster_count", 0)),
                     str(row.get("v2_current_independent_external_cluster_count", 0)),
                 )
             )
@@ -372,18 +374,6 @@ def _controlled_probes() -> list[dict[str, Any]]:
             identity_match="domain",
         ),
     ]
-    syndicated_ledger = build_evidence_ledger_shadow(
-        [
-            _report("wire-one", "2026-01-01T00:00:00Z", syndicated_rows),
-            _report("wire-two", "2026-01-02T00:00:00Z", deepcopy(syndicated_rows)),
-        ],
-        mode="shadow",
-    )
-    syndicated_candidates = sum(
-        1
-        for entry in syndicated_ledger["entries"]
-        if entry["state"] == "validation_candidate"
-    )
     v2_poison = build_evidence_memory_identity_v2(
         [
             _report("poison-one", "2026-01-01T00:00:00Z", [poison]),
@@ -481,6 +471,33 @@ def _controlled_probes() -> list[dict[str, Any]]:
             _report("wire-one", "2026-01-01T00:00:00Z", syndicated_rows),
             _report("wire-two", "2026-01-02T00:00:00Z", deepcopy(syndicated_rows)),
         ]
+    )
+    paraphrased_rows = [
+        _evidence(
+            ref="exa.paraphrase.1",
+            source="exa",
+            source_class="external_proof",
+            evidence_type="external_proof.external_mentions",
+            url="https://publisher-one.test/story",
+            content=(
+                "Example announced a new platform that helps finance teams close "
+                "monthly books faster with automated reporting across every subsidiary."
+            ),
+        ),
+        _evidence(
+            ref="exa.paraphrase.2",
+            source="exa",
+            source_class="external_proof",
+            evidence_type="external_proof.external_mentions",
+            url="https://publisher-two.test/copy",
+            content=(
+                "Example announced a new platform that helps finance teams close "
+                "monthly books faster using automated reporting across every subsidiary."
+            ),
+        ),
+    ]
+    v2_paraphrase = build_evidence_memory_identity_v2(
+        [_report("paraphrase", "2026-01-01T00:00:00Z", paraphrased_rows)]
     )
     second_owned_passage = deepcopy(stable_owned)
     second_owned_passage["ref"] = "web.0.chunk.2"
@@ -590,15 +607,51 @@ def _controlled_probes() -> list[dict[str, Any]]:
             "Identity v2 independently reproduces persisted external attribution before proposing validation.",
         ),
         _probe(
-            "identity_v2_exact_syndication_is_one_independent_cluster",
+            "identity_v3_exact_syndication_is_one_source_cluster",
             (
                 v2_syndication["summary"]["current_external_publisher_count"] == 2
                 and v2_syndication["summary"][
-                    "current_independent_external_cluster_count"
+                    "current_external_cluster_count"
                 ]
                 == 1
+                and v2_syndication["summary"][
+                    "current_independent_external_cluster_count"
+                ]
+                == 0
+                and {
+                    entry["independence_status"]
+                    for entry in v2_syndication["entries"]
+                }
+                == {"same_cluster"}
             ),
-            "Identity v2 collapses exact syndicated copies across two publishers into one cluster.",
+            "Identity policy v3 collapses exact syndicated copies without granting independent corroboration.",
+        ),
+        _probe(
+            "identity_v3_paraphrased_syndication_is_not_independent",
+            (
+                v2_paraphrase["summary"]["current_external_cluster_count"] == 1
+                and v2_paraphrase["summary"][
+                    "current_independent_external_cluster_count"
+                ]
+                == 0
+                and {
+                    entry["independence_status"]
+                    for entry in v2_paraphrase["entries"]
+                }
+                == {"same_cluster"}
+            ),
+            "Deterministic shingle similarity collapses lightly paraphrased copies without granting corroboration.",
+        ),
+        _probe(
+            "identity_v3_unknown_ownership_never_counts_as_independent",
+            (
+                v2_reproducible_external_entry["independence_status"] == "unknown"
+                and v2_reproducible_external["summary"][
+                    "current_independent_external_cluster_count"
+                ]
+                == 0
+            ),
+            "Reproducible brand identity does not imply source independence when publisher ownership is unreviewed.",
         ),
         _probe(
             "identity_v2_stable_claim_slot_surfaces_revision",
@@ -627,15 +680,19 @@ def _controlled_probes() -> list[dict[str, Any]]:
             ),
         },
         {
-            "id": "syndication_is_not_clustered",
+            "id": "source_independence_pending_production_review",
             "kind": "promotion_blocker",
             "status": "blocked",
             "observation": (
-                f"In v1 two syndicated URLs produced {syndicated_candidates} validation "
-                "candidates. V2 shadow clusters exact copies, but paraphrased syndication "
-                "and persistence remain unresolved."
+                "Source-independence policy v3 fails closed and passes controlled "
+                "exact-copy, light-paraphrase, ownership, lineage, and ambiguity "
+                "probes. The versioned registry has no production-reviewed source "
+                "URLs, so real clusters cannot be confirmed independent."
             ),
-            "required_capability": "deterministic source-independence and syndication clustering",
+            "required_capability": (
+                "attributable reversible production source reviews plus measured "
+                "semantic-paraphrase recall"
+            ),
         },
         {
             "id": "changed_claim_has_no_canonical_resolution",
@@ -812,11 +869,13 @@ def _replay_identity_v2(
         "v2_current_external_passage_count",
         "v2_current_external_publisher_count",
         "v2_current_external_syndication_cluster_count",
+        "v2_current_external_cluster_count",
         "v2_current_independent_external_cluster_count",
     )
     rows: list[dict[str, Any]] = []
     totals = Counter()
     claim_slot_method_totals = Counter()
+    independence_cluster_status_totals = Counter()
     for domain, reports in sorted(histories.items()):
         if not reports:
             continue
@@ -881,8 +940,16 @@ def _replay_identity_v2(
             "v2_current_external_syndication_cluster_count": int(
                 v2["summary"]["current_external_syndication_cluster_count"]
             ),
+            "v2_current_external_cluster_count": int(
+                v2["summary"]["current_external_cluster_count"]
+            ),
             "v2_current_independent_external_cluster_count": int(
                 v2["summary"]["current_independent_external_cluster_count"]
+            ),
+            "v2_current_external_independence_cluster_status_counts": dict(
+                v2["summary"][
+                    "current_external_independence_cluster_status_counts"
+                ]
             ),
             "v2_identity_status_counts": dict(
                 v2["summary"]["identity_status_counts"]
@@ -904,14 +971,20 @@ def _replay_identity_v2(
         for key in metric_keys:
             totals[key] += int(row[key])
         claim_slot_method_totals.update(row["v2_claim_slot_method_counts"])
+        independence_cluster_status_totals.update(
+            row["v2_current_external_independence_cluster_status_counts"]
+        )
     return {
-        "schema_version": "evidence-memory-identity-v2-replay-v1",
+        "schema_version": "evidence-memory-identity-v2-replay-v2",
         "runtime_effect": False,
         "summary": {
             "history_count": len(rows),
             **{key: int(totals.get(key, 0)) for key in metric_keys},
             "v2_claim_slot_method_counts": dict(
                 sorted(claim_slot_method_totals.items())
+            ),
+            "v2_current_external_independence_cluster_status_counts": dict(
+                sorted(independence_cluster_status_totals.items())
             ),
         },
         "histories": rows,
