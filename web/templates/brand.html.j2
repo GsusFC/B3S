@@ -50,7 +50,7 @@
   <section class="brand-profile-block brand-profile-visual" id="modulo-visual">
     <div class="section-head">
       <span class="label">módulo_visual</span>
-      <span class="tag">// {{ brand.visual_module.image_count }} assets propios desde evidencia</span>
+      <span class="tag">// {{ brand.visual_module.image_count }} assets de marca seleccionados</span>
     </div>
     {% if brand.visual_module.images %}
     <div class="moodboard-stage moodboard-stage--brand cloud-stage" data-moodboard-stage aria-label="Moodboard visual de {{ brand.display_name }}">
@@ -86,16 +86,18 @@
     {% if brand.visual_module.images %}
     <div class="section-head">
       <span class="label">inventario</span>
-      <span class="tag">// assets capturados y su rol</span>
+      <span class="tag">// selección {{ brand.visual_module.selection_version }}</span>
     </div>
     <div class="overflow panel" style="padding:0">
       <table>
-        <thead><tr><th>url</th><th>rol</th><th>texto alt</th></tr></thead>
+        <thead><tr><th>url</th><th>rol</th><th>origen</th><th>selección</th><th>texto alt</th></tr></thead>
         <tbody>
         {% for image in brand.visual_module.images %}
         <tr>
           <td class="mono muted"><a href="{{ image.url }}" target="_blank" rel="noopener noreferrer">{{ image.url }}</a></td>
           <td><span class="chip">{{ image.role }}</span></td>
+          <td class="muted">{{ image.source or "—" }}</td>
+          <td class="muted">{{ image.selection_reason or "—" }}</td>
           <td class="muted">{{ image.alt or "—" }}</td>
         </tr>
         {% endfor %}
