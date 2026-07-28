@@ -297,6 +297,52 @@ def test_brand_history_is_paginated(monkeypatch):
     assert response.json()["items"][0]["stability_classification"] == "stable"
 
 
+def test_evidence_ledger_shadow_endpoint_is_explicitly_non_authoritative(monkeypatch):
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    monkeypatch.setattr(
+        "web.api_v1.router.evidence_ledger_shadow_for_domain",
+        lambda _domain: {
+            "schema_version": "evidence-ledger-shadow-v1",
+            "policy_version": "evidence-ledger-shadow-policy-v1",
+            "mode": "shadow",
+            "runtime_effect": False,
+            "state_fingerprint": "a" * 64,
+            "brand": {"name": "Example", "domain": "example.com"},
+            "report_count": 2,
+            "latest_report_id": "two",
+            "summary": {
+                "entry_count": 1,
+                "state_counts": {"validation_candidate": 1},
+            },
+            "policy": {"automatic_validation": False},
+            "warnings": ["validation_candidates_are_not_validated_facts"],
+            "entries": [
+                {
+                    "evidence_fingerprint": "b" * 64,
+                    "state": "validation_candidate",
+                }
+            ],
+            "persistence": {"stored": True, "backend": "postgres"},
+        },
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/evidence-ledger-shadow",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["object"] == "evidence_ledger_shadow"
+    assert response.json()["domain"] == "example.com"
+    assert response.json()["runtime_effect"] is False
+    assert response.json()["policy"]["automatic_validation"] is False
+    assert response.json()["entries"][0]["state"] == "validation_candidate"
+    assert response.json()["persistence"] == {
+        "stored": True,
+        "backend": "postgres",
+    }
+
+
 def test_failed_status_never_exposes_internal_exception_text():
     status = _running_scan()
     status.update(
@@ -362,6 +408,7 @@ def test_openapi_is_dedicated_to_v1_routes():
     assert response.status_code == 200
     assert response.json()["info"]["title"] == "B3S Scanner API"
     assert "/api/v1/scans" in response.json()["paths"]
+    assert "/api/v1/brands/{domain}/evidence-ledger-shadow" in response.json()["paths"]
     assert "/scan" not in response.json()["paths"]
     assert "B3SScannerBearer" in response.json()["components"]["securitySchemes"]
 

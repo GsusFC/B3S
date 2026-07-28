@@ -150,6 +150,33 @@ first, with bounded offset pagination. Each item includes `reliability_status`,
 Those fields are a current derived projection over immutable scans; they can
 change when a later scan supplies comparison evidence.
 
+## Evidence ledger shadow
+
+```text
+GET /api/v1/brands/{domain}/evidence-ledger-shadow
+```
+
+This experimental read-only resource compares exact normalized evidence across
+the complete immutable history for a brand. It reports proposals such as
+`observed`, `repeated`, `validation_candidate`, `not_reacquired`,
+`changed_candidate`, and `stale_candidate`.
+
+The resource is deliberately non-authoritative:
+
+- `runtime_effect` is always `false`.
+- A `validation_candidate` is not a validated fact.
+- One missing acquisition never retires earlier evidence.
+- Changed content at the same locator is not treated as a semantic
+  contradiction.
+- Repetition of syndicated external content is not independent corroboration.
+- No ledger state changes a scan score, report content, or canonical selection.
+
+`persistence.stored=true` means the returned projection was loaded from the
+PostgreSQL shadow tables and matches the current immutable history.
+`history_derived` means it was recomputed for the response, usually because
+PostgreSQL was unavailable or its projection had not caught up. Set
+`B3S_EVIDENCE_LEDGER_MODE=disabled` to stop computing and persisting entries.
+
 ## Errors
 
 API errors use one envelope:
