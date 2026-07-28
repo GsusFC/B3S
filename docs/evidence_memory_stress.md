@@ -61,12 +61,15 @@ The executable foundation must prove:
 9. a bare strong-looking upstream label does not become validation-eligible;
 10. persisted strong external attribution is independently reproducible;
 11. exact syndicated copies count as one independent cluster;
-12. a controlled stable-slot change is surfaced as a proposed revision.
+12. a controlled stable-slot change is surfaced as a proposed revision;
+13. even a deliberately false manual identity acceptance cannot affect
+    eligibility, scoring, or canonical selection.
 
 The adversarial probes deliberately expose:
 
-1. repeated false identity metadata can currently create a
-   `validation_candidate`;
+1. repeated false identity metadata can create a v1 `validation_candidate`,
+   while v2 still lacks individually authenticated reviewers and a reviewed
+   identity gold set;
 2. v1 does not cluster syndicated copies and v2 only handles exact copies;
 3. old and new content have no canonical claim-resolution path;
 4. evidence has no persistent, versioned claim-to-tile mapping;
@@ -164,6 +167,13 @@ Required before any claim can become canonical:
 
 Automatic authority must remain disabled if a deliberately false repeated item
 can become accepted.
+
+Current status: the PostgreSQL identity-adjudication journal now provides
+versioned `accepted`, `disputed`, `rejected`, `superseded`, and `revoked`
+decisions with idempotency and optimistic concurrency. A controlled false
+acceptance remains `runtime_effect=false`, `authority=false`, `unverified`, and
+`repeated`. Gate 1 is still blocked by shared-token reviewer attribution,
+paraphrased/source-owner independence, and the missing reviewed gold set.
 
 ### Gate 2 — tile evidence ledger
 

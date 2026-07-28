@@ -26,6 +26,9 @@ from .models import (
     ApiErrorResponse,
     BrandScanHistoryResponse,
     EvidenceLedgerShadowResponse,
+    EvidenceMemoryAdjudicationCreateRequest,
+    EvidenceMemoryAdjudicationCreateResponse,
+    EvidenceMemoryAdjudicationJournalResponse,
     EvidenceMemoryIdentityV2ShadowResponse,
     ScanCreateRequest,
     ScanEvidenceResponse,
@@ -33,7 +36,13 @@ from .models import (
     ScanStatusResponse,
 )
 from .presenters import evidence_payload, report_etag, result_payload, status_payload
-from .service import create_scan_job, get_completed_report, get_scan
+from .service import (
+    create_evidence_memory_adjudication,
+    create_scan_job,
+    get_completed_report,
+    get_evidence_memory_adjudications,
+    get_scan,
+)
 
 
 router = APIRouter(prefix="/api/v1", tags=["B3S Scanner API"])
@@ -335,4 +344,91 @@ def brand_evidence_memory_identity_v2_shadow(
         "api_version": "v1",
         "domain": normalized,
         **evidence_memory_identity_v2_for_domain(normalized),
+    }
+
+
+@router.post(
+    "/brands/{domain}/evidence-memory-adjudications",
+    response_model=EvidenceMemoryAdjudicationCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="createBrandEvidenceMemoryAdjudication",
+    responses=_ERRORS,
+)
+def create_brand_evidence_memory_adjudication(
+    domain: str,
+    payload: EvidenceMemoryAdjudicationCreateRequest,
+    response: Response,
+    principal: WritePrincipal,
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
+) -> dict[str, Any]:
+    normalized = domain_key(domain)
+    if not normalized:
+        raise ApiError(400, "invalid_domain", "A valid brand domain is required.")
+    event, replayed = create_evidence_memory_adjudication(
+        normalized,
+        payload.model_dump(),
+        client_id=principal.client_id,
+        idempotency_key=idempotency_key,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Location"] = (
+        f"/api/v1/brands/{normalized}/evidence-memory-adjudications"
+        f"?subject_id={event['subject_id']}"
+    )
+    if replayed:
+        response.headers["Idempotent-Replayed"] = "true"
+    return {
+        "object": "evidence_memory_adjudication",
+        "api_version": "v1",
+        "domain": normalized,
+        "replayed": replayed,
+        "runtime_effect": False,
+        "authority": False,
+        "event": event,
+    }
+
+
+@router.get(
+    "/brands/{domain}/evidence-memory-adjudications",
+    response_model=EvidenceMemoryAdjudicationJournalResponse,
+    operation_id="listBrandEvidenceMemoryAdjudications",
+    responses=_ERRORS,
+)
+def list_brand_evidence_memory_adjudications(
+    domain: str,
+    _principal: ReadPrincipal,
+    subject_id: Annotated[
+        str | None,
+        Query(pattern=r"^[0-9a-f]{64}$"),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, Any]:
+    normalized = domain_key(domain)
+    if not normalized:
+        raise ApiError(400, "invalid_domain", "A valid brand domain is required.")
+    journal = get_evidence_memory_adjudications(
+        normalized,
+        subject_id=subject_id,
+        limit=limit,
+        offset=offset,
+    )
+    events = journal["events"]
+    return {
+        "object": "evidence_memory_adjudication_list",
+        "api_version": "v1",
+        "domain": normalized,
+        "runtime_effect": False,
+        "authority": False,
+        "events": events,
+        "current": journal["current"],
+        "pagination": {
+            "limit": journal["limit"],
+            "offset": journal["offset"],
+            "count": len(events),
+            "has_more": journal["offset"] + len(events) < journal["total"],
+        },
     }

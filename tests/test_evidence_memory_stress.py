@@ -16,7 +16,7 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["verdict"] == "foundation_supported_promotion_blocked"
     assert report["promotion_ready"] is False
     assert report["executable_failures"] == []
-    assert report["summary"]["executable_invariant_count"] == 12
+    assert report["summary"]["executable_invariant_count"] == 13
     assert report["summary"]["promotion_blocker_count"] == 5
     assert all(
         probe["status"] == "pass"
@@ -29,15 +29,20 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
     report = run_evidence_memory_stress({})
     probes = {probe["id"]: probe for probe in report["controlled_probes"]}
 
-    poison = probes["repeated_false_identity_can_become_validation_candidate"]
+    poison = probes[
+        "identity_review_has_no_individual_authentication_or_gold_set"
+    ]
     syndication = probes["syndication_is_not_clustered"]
 
     assert poison["status"] == "blocked"
     assert "`validation_candidate`" in poison["observation"]
-    assert "rejected/revoked" in poison["required_capability"]
+    assert "authenticated reviewers" in poison["required_capability"]
     assert syndication["status"] == "blocked"
     assert "2 validation candidates" in syndication["observation"]
     assert probes["identity_v2_weak_external_identity_is_not_eligible"][
+        "status"
+    ] == "pass"
+    assert probes["accepted_identity_never_grants_runtime_authority"][
         "status"
     ] == "pass"
     assert probes["identity_v2_exact_syndication_is_one_independent_cluster"][

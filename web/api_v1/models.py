@@ -9,6 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Language = Literal["es"]
 ScanStatus = Literal["running", "blocked", "completed", "failed", "cancelled"]
+EvidenceAdjudicationDecision = Literal[
+    "accepted",
+    "disputed",
+    "rejected",
+    "revoked",
+]
 
 
 class StrictModel(BaseModel):
@@ -232,7 +238,89 @@ class EvidenceMemoryIdentityV2ShadowResponse(StrictModel):
     policy: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     entries: list[dict[str, Any]] = Field(default_factory=list)
+    adjudication: dict[str, Any] = Field(default_factory=dict)
     persistence: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvidenceMemoryAdjudicationCreateRequest(StrictModel):
+    subject_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    decision: EvidenceAdjudicationDecision
+    expected_current_event_id: str | None = Field(
+        ...,
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    )
+    reviewer: str = Field(min_length=1, max_length=200)
+    reason_code: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[a-z0-9][a-z0-9_]*$",
+    )
+    rationale: str = Field(min_length=1, max_length=2000)
+    evaluator_version: str = Field(min_length=1, max_length=200)
+
+    @field_validator(
+        "subject_id",
+        "expected_current_event_id",
+        "reviewer",
+        "reason_code",
+        "rationale",
+        "evaluator_version",
+        mode="before",
+    )
+    @classmethod
+    def strip_adjudication_strings(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class EvidenceMemoryAdjudicationEvent(StrictModel):
+    id: str
+    subject_type: Literal["evidence"] = "evidence"
+    subject_id: str
+    sequence: int = Field(ge=1)
+    decision: EvidenceAdjudicationDecision
+    effective_state: Literal[
+        "accepted",
+        "disputed",
+        "rejected",
+        "revoked",
+        "superseded",
+    ]
+    supersedes_event_id: str | None = None
+    schema_version: str
+    policy_version: str
+    evaluator_version: str
+    reviewer: str
+    actor_id: str
+    reason_code: str
+    rationale: str
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    created_at: str
+
+
+class EvidenceMemoryAdjudicationCreateResponse(StrictModel):
+    object: Literal["evidence_memory_adjudication"] = (
+        "evidence_memory_adjudication"
+    )
+    api_version: Literal["v1"] = "v1"
+    domain: str
+    replayed: bool
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    event: EvidenceMemoryAdjudicationEvent
+
+
+class EvidenceMemoryAdjudicationJournalResponse(StrictModel):
+    object: Literal["evidence_memory_adjudication_list"] = (
+        "evidence_memory_adjudication_list"
+    )
+    api_version: Literal["v1"] = "v1"
+    domain: str
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    events: list[EvidenceMemoryAdjudicationEvent] = Field(default_factory=list)
+    current: list[EvidenceMemoryAdjudicationEvent] = Field(default_factory=list)
+    pagination: Pagination
 
 
 class ApiCapabilitiesResponse(StrictModel):

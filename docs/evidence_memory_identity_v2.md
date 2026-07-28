@@ -8,7 +8,7 @@ it is not a canonical evidence store and has no scoring authority.
 The projection separates:
 
 ```text
-document → passage → optional stable claim slot → proposed adjudication
+document → passage → optional stable claim slot → identity adjudication
 ```
 
 Several passages from one page are therefore several passages, not several
@@ -23,21 +23,27 @@ means brand change.
 
 - `runtime_effect=false`;
 - `authority=false`;
-- every adjudication remains `proposed`;
+- an entry remains `proposed` until a durable identity decision is overlaid;
+- `accepted` means only that a reviewer accepted the evidence-to-brand
+  association, not that the passage is true or scoring-eligible;
 - it never changes report selection, report content, tiles, or scores;
 - immutable reports remain the source of record;
 - the returned projection contains hashes and provenance, not raw evidence
   content.
 
 The current implementation is exercised by the adversarial replay harness and
-is exposed as an authenticated, read-only API projection:
+is exposed as an authenticated API projection:
 
 ```text
 GET /api/v1/brands/{domain}/evidence-memory-identity-v2-shadow
+GET /api/v1/brands/{domain}/evidence-memory-adjudications
+POST /api/v1/brands/{domain}/evidence-memory-adjudications
 ```
 
-It is recomputed from immutable history and is not persisted. New scans become
-visible through the projection without creating a second source of record.
+Identity v2 is recomputed from immutable history. Adjudication events are held
+in a separate append-only PostgreSQL journal and overlaid on the projection.
+New scans therefore become visible without creating a second evidence source
+of record, while human decisions remain durable and reviewable.
 
 ## Identity layers
 
@@ -74,11 +80,29 @@ variants of?
 
 ### Adjudication
 
-Identity v2 proposes states but accepts nothing. It has no `accepted`,
-`rejected`, `superseded`, `disputed`, or `revoked` decision store yet.
+Identity adjudication v1 supports:
 
-The adjudication layer must eventually answer: which claim is considered
-current, why, under which policy version, and how can the decision be reversed?
+- `proposed`: no current journal decision exists;
+- `accepted`: a reviewer accepts that the evidence refers to the scanned
+  brand;
+- `disputed`: the association has unresolved conflicting signals;
+- `rejected`: a reviewer rejects the association;
+- `superseded`: an older journal event was replaced by a later decision;
+- `revoked`: the current reviewer decision was explicitly withdrawn.
+
+Each event records the policy version, evaluator version, reviewer, API actor,
+reason code, rationale, predecessor, and timestamp. Writes require both an
+`Idempotency-Key` and the exact `expected_current_event_id`; `null` explicitly
+means that the caller expects no current decision. This prevents silent lost
+updates and makes retries deterministic.
+
+The journal is PostgreSQL-only. A write fails closed with `503` when durable
+storage is unavailable; it never falls back to mutable JSON files. Events can
+be superseded or revoked but are not updated or deleted by the application.
+
+This only resolves evidence-to-brand identity review. Claim truth, semantic
+replacement, canonical claim selection, and tile support remain outside Gate
+1 and cannot be inferred from `accepted`.
 
 ## State semantics
 
@@ -158,7 +182,8 @@ contains no stable semantic claim IDs.
 Identity v2 must remain non-authoritative until at least:
 
 1. stable semantic claim IDs are emitted by acquisition;
-2. adjudication decisions are versioned, reversible, and reviewable;
-3. paraphrased syndication and publisher ownership are addressed;
-4. evidence is mapped persistently through claim to tile;
-5. a reviewed dataset measures both false-change rate and real-change recall.
+2. paraphrased syndication and publisher ownership are addressed;
+3. evidence is mapped persistently through claim to tile;
+4. a reviewed dataset measures both false-change rate and real-change recall;
+5. adjudication authentication identifies individual reviewers rather than
+   relying on a shared environment-token actor plus a declared reviewer.

@@ -8,8 +8,20 @@ import re
 from typing import Any
 
 from src.config import BRAND3_DB_PATH
+from src.services.evidence_memory_adjudication import (
+    EvidenceMemoryAdjudicationCommand,
+    EvidenceMemoryAdjudicationConflictError,
+    EvidenceMemoryAdjudicationInvalidTransitionError,
+    EvidenceMemoryAdjudicationNotFoundError,
+    EvidenceMemoryAdjudicationUnavailableError,
+)
 from src.storage.sqlite_store import SQLiteStore
-from web.report_store import load_report, new_scan_id
+from web.report_store import (
+    append_evidence_memory_adjudication_for_domain,
+    list_evidence_memory_adjudications_for_domain,
+    load_report,
+    new_scan_id,
+)
 from web.scan_runner import default_brand_name, normalize_url, scan_status, start_scan
 
 from .errors import ApiError
@@ -146,6 +158,114 @@ def get_completed_report(scan_id: str) -> dict[str, Any]:
         details={"scan_id": str(scan_id), "state": str(status.get("state") or "unknown")},
         headers={"Retry-After": "5"},
     )
+
+
+def create_evidence_memory_adjudication(
+    domain: str,
+    request_payload: dict[str, Any],
+    *,
+    client_id: str,
+    idempotency_key: str | None,
+) -> tuple[dict[str, Any], bool]:
+    """Append a versioned identity decision without changing runtime outputs."""
+
+    key_hash = _idempotency_key_hash(idempotency_key)
+    if key_hash is None:
+        raise ApiError(
+            400,
+            "idempotency_key_required",
+            "Idempotency-Key is required for evidence adjudications.",
+        )
+    normalized = {
+        "domain": str(domain).strip().lower(),
+        "subject_id": str(request_payload.get("subject_id") or "").strip().lower(),
+        "decision": str(request_payload.get("decision") or "").strip().lower(),
+        "expected_current_event_id": (
+            str(request_payload["expected_current_event_id"]).strip().lower()
+            if request_payload.get("expected_current_event_id")
+            else None
+        ),
+        "reviewer": str(request_payload.get("reviewer") or "").strip(),
+        "reason_code": str(request_payload.get("reason_code") or "").strip().lower(),
+        "rationale": str(request_payload.get("rationale") or "").strip(),
+        "evaluator_version": str(
+            request_payload.get("evaluator_version") or ""
+        ).strip(),
+        "actor_id": str(client_id or "").strip(),
+    }
+    command = EvidenceMemoryAdjudicationCommand(
+        subject_id=normalized["subject_id"],
+        decision=normalized["decision"],
+        expected_current_event_id=normalized["expected_current_event_id"],
+        reviewer=normalized["reviewer"],
+        reason_code=normalized["reason_code"],
+        rationale=normalized["rationale"],
+        evaluator_version=normalized["evaluator_version"],
+        actor_id=normalized["actor_id"],
+        idempotency_key_hash=key_hash,
+        request_fingerprint=_request_fingerprint(normalized),
+    )
+    try:
+        return append_evidence_memory_adjudication_for_domain(domain, command)
+    except EvidenceMemoryAdjudicationNotFoundError as exc:
+        raise ApiError(
+            404,
+            "evidence_subject_not_found",
+            str(exc),
+            details={"subject_id": command.subject_id},
+        ) from exc
+    except EvidenceMemoryAdjudicationConflictError as exc:
+        if exc.existing_event_id:
+            raise ApiError(
+                409,
+                "idempotency_key_reused",
+                str(exc),
+                details={"existing_event_id": exc.existing_event_id},
+            ) from exc
+        raise ApiError(
+            409,
+            "adjudication_precondition_failed",
+            str(exc),
+            details={"current_event_id": exc.current_event_id},
+        ) from exc
+    except EvidenceMemoryAdjudicationInvalidTransitionError as exc:
+        raise ApiError(
+            409,
+            "invalid_adjudication_transition",
+            str(exc),
+        ) from exc
+    except EvidenceMemoryAdjudicationUnavailableError as exc:
+        raise ApiError(
+            503,
+            "evidence_adjudication_store_unavailable",
+            "The durable evidence adjudication journal is temporarily unavailable.",
+        ) from exc
+
+
+def get_evidence_memory_adjudications(
+    domain: str,
+    *,
+    subject_id: str | None,
+    limit: int,
+    offset: int,
+) -> dict[str, Any]:
+    """Read a page from the durable evidence identity decision journal."""
+
+    try:
+        return list_evidence_memory_adjudications_for_domain(
+            domain,
+            subject_id=subject_id,
+            limit=limit,
+            offset=offset,
+        )
+    except EvidenceMemoryAdjudicationNotFoundError as exc:
+        raise ApiError(404, "brand_not_found", str(exc)) from exc
+    except EvidenceMemoryAdjudicationUnavailableError as exc:
+        raise ApiError(
+            503,
+            "evidence_adjudication_store_unavailable",
+            "The durable evidence adjudication journal is temporarily unavailable.",
+        ) from exc
 
 
 def _idempotency_key_hash(value: str | None) -> str | None:

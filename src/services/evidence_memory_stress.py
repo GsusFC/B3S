@@ -2,7 +2,8 @@
 
 The harness is deliberately read-only. It tests properties that the current
 evidence ledger can already guarantee and reports explicit promotion blockers
-for claims, tiles, adjudication, and memory-based scoring that do not exist yet.
+for claims, reviewer identity, tiles, and memory-based scoring that do not
+exist yet.
 """
 
 from __future__ import annotations
@@ -100,8 +101,9 @@ def run_evidence_memory_stress(
                 "acquisition loss, evaluator drift, ordering changes, and exact repeats."
             ),
             "not_yet_supported": (
-                "The current ledger cannot decide which claim is current, reject poisoned "
-                "evidence, map stable evidence to tiles, or produce a versioned memory score."
+                "The current ledger cannot decide which claim is current, authenticate "
+                "individual reviewers, map stable evidence to tiles, or produce a "
+                "versioned memory score."
             ),
         },
     }
@@ -389,6 +391,37 @@ def _controlled_probes() -> list[dict[str, Any]]:
         ]
     )
     v2_poison_entry = v2_poison["entries"][0]
+    v2_manually_accepted_poison = build_evidence_memory_identity_v2(
+        [
+            _report("poison-one", "2026-01-01T00:00:00Z", [poison]),
+            _report("poison-two", "2026-01-02T00:00:00Z", [deepcopy(poison)]),
+        ],
+        adjudications=[
+            {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "subject_type": "evidence",
+                "subject_id": v2_poison_entry["evidence_id"],
+                "sequence": 1,
+                "decision": "accepted",
+                "effective_state": "accepted",
+                "schema_version": "evidence-memory-adjudication-v1",
+                "policy_version": (
+                    "evidence-memory-identity-adjudication-policy-v1"
+                ),
+                "evaluator_version": "adversarial-manual-review-v1",
+                "reviewer": "adversarial-reviewer",
+                "actor_id": "stress-harness",
+                "reason_code": "deliberately_false_acceptance",
+                "rationale": "Controlled poisoning probe.",
+                "runtime_effect": False,
+                "authority": False,
+                "created_at": "2026-01-03T00:00:00+00:00",
+            }
+        ],
+    )
+    v2_manually_accepted_poison_entry = v2_manually_accepted_poison[
+        "entries"
+    ][0]
     strong_label_poison = deepcopy(poison)
     strong_label_poison["metadata"]["identity_match"] = "domain"
     v2_strong_label_poison = build_evidence_memory_identity_v2(
@@ -522,6 +555,19 @@ def _controlled_probes() -> list[dict[str, Any]]:
             "Identity v2 remembers repeated brand-name-only evidence but does not validate it.",
         ),
         _probe(
+            "accepted_identity_never_grants_runtime_authority",
+            (
+                v2_manually_accepted_poison_entry["adjudication_state"]
+                == "accepted"
+                and v2_manually_accepted_poison_entry["identity_status"]
+                == "unverified"
+                and v2_manually_accepted_poison_entry["state"] == "repeated"
+                and v2_manually_accepted_poison["runtime_effect"] is False
+                and v2_manually_accepted_poison["authority"] is False
+            ),
+            "Even a deliberately false manual acceptance changes only identity adjudication metadata.",
+        ),
+        _probe(
             "identity_v2_bare_upstream_domain_label_is_not_eligible",
             (
                 v2_strong_label_poison_entry["identity_status"] == "unverified"
@@ -567,15 +613,18 @@ def _controlled_probes() -> list[dict[str, Any]]:
             "Identity v2 surfaces a controlled stable-slot change as a proposed revision without accepting it.",
         ),
         {
-            "id": "repeated_false_identity_can_become_validation_candidate",
+            "id": "identity_review_has_no_individual_authentication_or_gold_set",
             "kind": "promotion_blocker",
             "status": "blocked",
             "observation": (
                 f"In v1 a deliberately wrong external item reached `{poison_state}` because "
-                "brand-name identity metadata was trusted twice. V2 shadow blocks eligibility, "
-                "but no adjudication store exists yet."
+                "brand-name identity metadata was trusted twice. V2 blocks eligibility and "
+                "stores reversible decisions, but its API actor is still a shared environment "
+                "token and no reviewed identity gold set exists."
             ),
-            "required_capability": "versioned identity adjudication plus rejected/revoked states",
+            "required_capability": (
+                "individually authenticated reviewers plus a reviewed adversarial identity set"
+            ),
         },
         {
             "id": "syndication_is_not_clustered",
@@ -593,8 +642,8 @@ def _controlled_probes() -> list[dict[str, Any]]:
             "kind": "promotion_blocker",
             "status": "blocked",
             "observation": (
-                "Old and new content coexist, but neither can be accepted, superseded, "
-                "contradicted, or reversed."
+                "Old and new content coexist, but neither claim variant can be semantically "
+                "accepted, superseded, contradicted, or reversed."
             ),
             "required_capability": "versioned claim reconciliation with an appeal path",
         },

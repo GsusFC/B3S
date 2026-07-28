@@ -15,6 +15,16 @@ from psycopg.types.json import Jsonb
 
 from src.history.models import HistoricalReport, ImportOutcome, ReportConflictError
 from src.history.report_parser import canonical_json_bytes, normalize_domain, parse_report
+from src.services.evidence_memory_adjudication import (
+    ADJUDICATION_DECISIONS,
+    ADJUDICATION_SUBJECT_TYPE,
+    EVIDENCE_MEMORY_ADJUDICATION_POLICY_VERSION,
+    EVIDENCE_MEMORY_ADJUDICATION_VERSION,
+    EvidenceMemoryAdjudicationCommand,
+    EvidenceMemoryAdjudicationConflictError,
+    EvidenceMemoryAdjudicationInvalidTransitionError,
+    EvidenceMemoryAdjudicationNotFoundError,
+)
 from src.services.evidence_ledger_shadow import (
     build_evidence_ledger_shadow,
     evidence_ledger_mode,
@@ -379,6 +389,304 @@ class PostgresHistoryRepository:
             ).fetchone()
         return dict(row["payload"]) if row and isinstance(row["payload"], dict) else None
 
+    def append_evidence_memory_adjudication(
+        self,
+        domain_or_url: str,
+        command: EvidenceMemoryAdjudicationCommand,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Append one identity decision with idempotency and optimistic locking."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceMemoryAdjudicationNotFoundError(
+                "The brand domain does not exist in durable history."
+            )
+        _validate_adjudication_command(command)
+
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceMemoryAdjudicationNotFoundError(
+                    "The brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        "evidence-memory-adjudication-idempotency",
+                        command.idempotency_key_hash,
+                    ),
+                ),
+            )
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        ADJUDICATION_SUBJECT_TYPE,
+                        command.subject_id,
+                    ),
+                ),
+            )
+            existing = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_memory_adjudication_events
+                WHERE brand_id = %s
+                  AND idempotency_key_hash = %s
+                """,
+                (brand_id, command.idempotency_key_hash),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["request_fingerprint"]) != command.request_fingerprint:
+                    raise EvidenceMemoryAdjudicationConflictError(
+                        "The Idempotency-Key was already used for a different adjudication.",
+                        existing_event_id=str(existing["id"]),
+                    )
+                latest = conn.execute(
+                    f"""
+                    SELECT id
+                    FROM {_SCHEMA}.evidence_memory_adjudication_events
+                    WHERE brand_id = %s
+                      AND subject_type = %s
+                      AND subject_id = %s
+                    ORDER BY sequence DESC
+                    LIMIT 1
+                    """,
+                    (
+                        brand_id,
+                        ADJUDICATION_SUBJECT_TYPE,
+                        command.subject_id,
+                    ),
+                ).fetchone()
+                effective_state = (
+                    str(existing["decision"])
+                    if latest is not None and latest["id"] == existing["id"]
+                    else "superseded"
+                )
+                return _adjudication_event(
+                    existing,
+                    effective_state=effective_state,
+                ), True
+
+            current = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_memory_adjudication_events
+                WHERE brand_id = %s
+                  AND subject_type = %s
+                  AND subject_id = %s
+                ORDER BY sequence DESC
+                LIMIT 1
+                """,
+                (brand_id, ADJUDICATION_SUBJECT_TYPE, command.subject_id),
+            ).fetchone()
+            current_id = str(current["id"]) if current is not None else None
+            if command.expected_current_event_id != current_id:
+                raise EvidenceMemoryAdjudicationConflictError(
+                    "The evidence adjudication changed after it was read.",
+                    current_event_id=current_id,
+                )
+            if command.decision == "revoked" and (
+                current is None or str(current["decision"]) == "revoked"
+            ):
+                raise EvidenceMemoryAdjudicationInvalidTransitionError(
+                    "Only a current accepted, disputed, or rejected decision can be revoked."
+                )
+
+            sequence = int(current["sequence"]) + 1 if current is not None else 1
+            event_id = _stable_uuid(
+                brand_id,
+                "evidence-memory-adjudication",
+                command.idempotency_key_hash,
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_memory_adjudication_events (
+                    id, brand_id, subject_type, subject_id, sequence, decision,
+                    supersedes_event_id, schema_version, policy_version,
+                    evaluator_version, reviewer, actor_id, reason_code,
+                    rationale, idempotency_key_hash, request_fingerprint,
+                    runtime_effect, authority
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, false, false
+                )
+                RETURNING *
+                """,
+                (
+                    event_id,
+                    brand_id,
+                    ADJUDICATION_SUBJECT_TYPE,
+                    command.subject_id,
+                    sequence,
+                    command.decision,
+                    current["id"] if current is not None else None,
+                    EVIDENCE_MEMORY_ADJUDICATION_VERSION,
+                    EVIDENCE_MEMORY_ADJUDICATION_POLICY_VERSION,
+                    command.evaluator_version,
+                    command.reviewer,
+                    command.actor_id,
+                    command.reason_code,
+                    command.rationale,
+                    command.idempotency_key_hash,
+                    command.request_fingerprint,
+                ),
+            ).fetchone()
+        return _adjudication_event(inserted), False
+
+    def list_current_evidence_memory_adjudications(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> list[dict[str, Any]]:
+        """Return the latest identity decision for each evidence subject."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT ON (
+                    evidence_memory_adjudication_events.subject_type,
+                    evidence_memory_adjudication_events.subject_id
+                ) evidence_memory_adjudication_events.*
+                FROM {_SCHEMA}.evidence_memory_adjudication_events
+                JOIN {_SCHEMA}.brands
+                  ON brands.id = evidence_memory_adjudication_events.brand_id
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                ORDER BY evidence_memory_adjudication_events.subject_type,
+                         evidence_memory_adjudication_events.subject_id,
+                         evidence_memory_adjudication_events.sequence DESC
+                """,
+                (workspace_slug, domain),
+            ).fetchall()
+        return [_adjudication_event(row) for row in rows]
+
+    def list_evidence_memory_adjudications(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+        subject_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Return a reviewable journal page and the current decision set."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceMemoryAdjudicationNotFoundError(
+                "The brand domain does not exist in durable history."
+            )
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
+        normalized_subject_id = (
+            str(subject_id or "").strip().lower() or None
+        )
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceMemoryAdjudicationNotFoundError(
+                    "The brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            rows = conn.execute(
+                f"""
+                WITH ranked AS (
+                    SELECT events.*,
+                           max(sequence) OVER (
+                               PARTITION BY subject_type, subject_id
+                           ) AS current_sequence
+                    FROM {_SCHEMA}.evidence_memory_adjudication_events AS events
+                    WHERE brand_id = %s
+                      AND (%s::text IS NULL OR subject_id = %s)
+                )
+                SELECT *
+                FROM ranked
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s OFFSET %s
+                """,
+                (
+                    brand_id,
+                    normalized_subject_id,
+                    normalized_subject_id,
+                    limit,
+                    offset,
+                ),
+            ).fetchall()
+            total_row = conn.execute(
+                f"""
+                SELECT count(*) AS count
+                FROM {_SCHEMA}.evidence_memory_adjudication_events
+                WHERE brand_id = %s
+                  AND (%s::text IS NULL OR subject_id = %s)
+                """,
+                (brand_id, normalized_subject_id, normalized_subject_id),
+            ).fetchone()
+            current_rows = conn.execute(
+                f"""
+                SELECT DISTINCT ON (subject_type, subject_id) *
+                FROM {_SCHEMA}.evidence_memory_adjudication_events
+                WHERE brand_id = %s
+                  AND (%s::text IS NULL OR subject_id = %s)
+                ORDER BY subject_type, subject_id, sequence DESC
+                """,
+                (brand_id, normalized_subject_id, normalized_subject_id),
+            ).fetchall()
+
+        events = [
+            _adjudication_event(
+                row,
+                effective_state=(
+                    str(row["decision"])
+                    if int(row["sequence"]) == int(row["current_sequence"])
+                    else "superseded"
+                ),
+            )
+            for row in rows
+        ]
+        total = int(total_row["count"])
+        return {
+            "events": events,
+            "current": [_adjudication_event(row) for row in current_rows],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+
     def rebuild_evidence_ledger_shadows(
         self,
         *,
@@ -518,6 +826,7 @@ class PostgresHistoryRepository:
             "evidence_ledger_shadow_states",
             "evidence_ledger_shadow_entries",
             "evidence_ledger_shadow_observations",
+            "evidence_memory_adjudication_events",
         )
         with self._connect() as conn:
             return {
@@ -1283,6 +1592,80 @@ def _stable_uuid(*parts: Any) -> UUID:
 def _advisory_lock_key(*parts: Any) -> int:
     digest = hashlib.sha256(":".join(str(part) for part in parts).encode("utf-8")).digest()
     return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _validate_adjudication_command(
+    command: EvidenceMemoryAdjudicationCommand,
+) -> None:
+    if command.decision not in ADJUDICATION_DECISIONS:
+        raise ValueError("unsupported evidence memory adjudication decision")
+    if (
+        len(command.subject_id) != 64
+        or any(character not in "0123456789abcdef" for character in command.subject_id)
+    ):
+        raise ValueError("evidence adjudication subject_id must be a lowercase SHA-256 digest")
+    for field, value, maximum in (
+        ("reviewer", command.reviewer, 200),
+        ("actor_id", command.actor_id, 200),
+        ("evaluator_version", command.evaluator_version, 200),
+        ("rationale", command.rationale, 2000),
+    ):
+        if not value or len(value) > maximum or "\x00" in value:
+            raise ValueError(f"invalid evidence adjudication {field}")
+    if (
+        not command.reason_code
+        or len(command.reason_code) > 100
+        or not command.reason_code[0].isalnum()
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789_"
+            for character in command.reason_code
+        )
+    ):
+        raise ValueError("invalid evidence adjudication reason_code")
+    for field, value in (
+        ("idempotency_key_hash", command.idempotency_key_hash),
+        ("request_fingerprint", command.request_fingerprint),
+    ):
+        if (
+            len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError(f"invalid evidence adjudication {field}")
+
+
+def _adjudication_event(
+    row: Any,
+    *,
+    effective_state: str | None = None,
+) -> dict[str, Any]:
+    created_at = row["created_at"]
+    return {
+        "id": str(row["id"]),
+        "subject_type": str(row["subject_type"]),
+        "subject_id": str(row["subject_id"]),
+        "sequence": int(row["sequence"]),
+        "decision": str(row["decision"]),
+        "effective_state": effective_state or str(row["decision"]),
+        "supersedes_event_id": (
+            str(row["supersedes_event_id"])
+            if row["supersedes_event_id"] is not None
+            else None
+        ),
+        "schema_version": str(row["schema_version"]),
+        "policy_version": str(row["policy_version"]),
+        "evaluator_version": str(row["evaluator_version"]),
+        "reviewer": str(row["reviewer"]),
+        "actor_id": str(row["actor_id"]),
+        "reason_code": str(row["reason_code"]),
+        "rationale": str(row["rationale"]),
+        "runtime_effect": False,
+        "authority": False,
+        "created_at": (
+            created_at.isoformat()
+            if hasattr(created_at, "isoformat")
+            else str(created_at)
+        ),
+    }
 
 
 def _comparison_report_id(value: Any, key: str) -> str:

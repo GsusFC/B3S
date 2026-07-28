@@ -401,6 +401,218 @@ def test_evidence_memory_identity_v2_endpoint_is_non_authoritative(monkeypatch):
     }
 
 
+def test_create_evidence_memory_adjudication_is_idempotent_and_non_authoritative(
+    monkeypatch,
+):
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    captured = {}
+    event = _adjudication_event()
+
+    def fake_create(domain, payload, *, client_id, idempotency_key):
+        captured.update(
+            domain=domain,
+            payload=payload,
+            client_id=client_id,
+            idempotency_key=idempotency_key,
+        )
+        return event, True
+
+    monkeypatch.setattr(
+        "web.api_v1.router.create_evidence_memory_adjudication",
+        fake_create,
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-memory-adjudications",
+        headers={**AUTH, "Idempotency-Key": "review-example-proof-1"},
+        json={
+            "subject_id": "a" * 64,
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reviewer": "reviewer@example.com",
+            "reason_code": "identity_confirmed",
+            "rationale": "The source identifies the scanned brand.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.headers["idempotent-replayed"] == "true"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["runtime_effect"] is False
+    assert response.json()["authority"] is False
+    assert response.json()["event"]["decision"] == "accepted"
+    assert captured["client_id"] == "environment-token"
+    assert captured["idempotency_key"] == "review-example-proof-1"
+    assert captured["payload"]["expected_current_event_id"] is None
+
+
+def test_create_evidence_memory_adjudication_requires_explicit_precondition(
+    monkeypatch,
+):
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-memory-adjudications",
+        headers={**AUTH, "Idempotency-Key": "review-example-proof-2"},
+        json={
+            "subject_id": "a" * 64,
+            "decision": "accepted",
+            "reviewer": "reviewer@example.com",
+            "reason_code": "identity_confirmed",
+            "rationale": "The source identifies the scanned brand.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "request_validation_failed"
+    assert response.json()["error"]["details"]["fields"][0]["field"] == (
+        "expected_current_event_id"
+    )
+
+
+def test_create_evidence_memory_adjudication_requires_idempotency_key(
+    monkeypatch,
+):
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-memory-adjudications",
+        headers=AUTH,
+        json={
+            "subject_id": "a" * 64,
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reviewer": "reviewer@example.com",
+            "reason_code": "identity_confirmed",
+            "rationale": "The source identifies the scanned brand.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "idempotency_key_required"
+
+
+def test_evidence_memory_adjudication_write_fails_closed_without_durable_store(
+    monkeypatch,
+):
+    from src.services.evidence_memory_adjudication import (
+        EvidenceMemoryAdjudicationUnavailableError,
+    )
+
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+
+    def unavailable(*_args, **_kwargs):
+        raise EvidenceMemoryAdjudicationUnavailableError("not configured")
+
+    monkeypatch.setattr(
+        "web.api_v1.service.append_evidence_memory_adjudication_for_domain",
+        unavailable,
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-memory-adjudications",
+        headers={**AUTH, "Idempotency-Key": "review-example-proof-3"},
+        json={
+            "subject_id": "a" * 64,
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reviewer": "reviewer@example.com",
+            "reason_code": "identity_confirmed",
+            "rationale": "The source identifies the scanned brand.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == (
+        "evidence_adjudication_store_unavailable"
+    )
+
+
+def test_evidence_memory_adjudication_rejects_stale_current_event(
+    monkeypatch,
+):
+    from src.services.evidence_memory_adjudication import (
+        EvidenceMemoryAdjudicationConflictError,
+    )
+
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    current_event_id = "00000000-0000-0000-0000-000000000009"
+
+    def conflict(*_args, **_kwargs):
+        raise EvidenceMemoryAdjudicationConflictError(
+            "The evidence adjudication changed after it was read.",
+            current_event_id=current_event_id,
+        )
+
+    monkeypatch.setattr(
+        "web.api_v1.service.append_evidence_memory_adjudication_for_domain",
+        conflict,
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-memory-adjudications",
+        headers={**AUTH, "Idempotency-Key": "review-example-proof-stale"},
+        json={
+            "subject_id": "a" * 64,
+            "decision": "disputed",
+            "expected_current_event_id": None,
+            "reviewer": "reviewer@example.com",
+            "reason_code": "identity_conflict",
+            "rationale": "A concurrent review already changed this subject.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == (
+        "adjudication_precondition_failed"
+    )
+    assert response.json()["error"]["details"]["current_event_id"] == (
+        current_event_id
+    )
+
+
+def test_evidence_memory_adjudication_journal_exposes_superseded_events(
+    monkeypatch,
+):
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    current = _adjudication_event()
+    superseded = {
+        **current,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "effective_state": "superseded",
+    }
+    monkeypatch.setattr(
+        "web.api_v1.router.get_evidence_memory_adjudications",
+        lambda domain, **_kwargs: {
+            "events": [current, superseded],
+            "current": [current],
+            "total": 2,
+            "limit": 100,
+            "offset": 0,
+        },
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/evidence-memory-adjudications",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["runtime_effect"] is False
+    assert response.json()["authority"] is False
+    assert [item["effective_state"] for item in response.json()["events"]] == [
+        "accepted",
+        "superseded",
+    ]
+    assert response.json()["current"] == [current]
+    assert response.json()["pagination"]["has_more"] is False
+
+
 def test_failed_status_never_exposes_internal_exception_text():
     status = _running_scan()
     status.update(
@@ -417,6 +629,28 @@ def test_failed_status_never_exposes_internal_exception_text():
         "retryable": False,
     }
     assert "top-secret-token" not in str(public)
+
+
+def _adjudication_event() -> dict:
+    return {
+        "id": "00000000-0000-0000-0000-000000000001",
+        "subject_type": "evidence",
+        "subject_id": "a" * 64,
+        "sequence": 1,
+        "decision": "accepted",
+        "effective_state": "accepted",
+        "supersedes_event_id": None,
+        "schema_version": "evidence-memory-adjudication-v1",
+        "policy_version": "evidence-memory-identity-adjudication-policy-v1",
+        "evaluator_version": "manual-review-v1",
+        "reviewer": "reviewer@example.com",
+        "actor_id": "environment-token",
+        "reason_code": "identity_confirmed",
+        "rationale": "The source identifies the scanned brand.",
+        "runtime_effect": False,
+        "authority": False,
+        "created_at": "2026-07-28T10:00:00+00:00",
+    }
 
 
 def test_cancelled_scan_cannot_publish_or_transition_to_completed(monkeypatch):
