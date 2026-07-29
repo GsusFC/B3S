@@ -33,6 +33,7 @@ from src.services.evidence_scoring_recovery_review import (
     EvidenceScoringRecoveryReviewCommand,
     EvidenceScoringRecoveryReviewConflictError,
 )
+from src.sv9.rubric import COMPONENTS, component_points
 
 
 def test_report_parser_preserves_observed_and_evaluation_history() -> None:
@@ -920,6 +921,131 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
 
 
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL"),
+    reason="B3S_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
+def test_postgres_scoring_recovery_survives_restart_and_revocation() -> None:
+    import psycopg
+
+    from src.history.repository import PostgresHistoryRepository
+
+    _require_schema_drop_opt_in()
+    dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+
+    repository = PostgresHistoryRepository(dsn)
+    try:
+        repository.migrate()
+        repository.import_report(
+            _scoring_recovery_report(
+                "recovery-older",
+                "2026-07-04T08:00:00Z",
+                target_state="ok",
+            )
+        )
+        repository.import_report(
+            _scoring_recovery_report(
+                "recovery-newer",
+                "2026-07-05T08:00:00Z",
+                target_state="sin_evidencia",
+            )
+        )
+        recovery_preview = (
+            repository.get_evidence_scoring_memory_preview(
+                "memory.example"
+            )
+        )
+        assert recovery_preview is not None
+        assert recovery_preview["scoring"]["score_delta"] > 0
+        assert (
+            recovery_preview["reviewed_shadow"]["scoring"][
+                "score_delta"
+            ]
+            == 0
+        )
+        recovery_candidate = recovery_preview[
+            "recovery_review_candidates"
+        ][0]
+        recovery_event, replayed = (
+            repository.append_evidence_scoring_recovery_review(
+                "memory.example",
+                _scoring_recovery_review_command(
+                    recovery_candidate["candidate_fingerprint"],
+                    case_id=recovery_candidate["case_id"],
+                    decision="accepted",
+                    expected_current_event_id=None,
+                    key_hash="4" * 64,
+                    fingerprint="5" * 64,
+                ),
+            )
+        )
+        assert replayed is False
+        assert recovery_event["automatic_scoring_effect"] is False
+
+        restarted_repository = PostgresHistoryRepository(dsn)
+        restarted_preview = (
+            restarted_repository.get_evidence_scoring_memory_preview(
+                "memory.example"
+            )
+        )
+        assert restarted_preview is not None
+        assert (
+            restarted_preview["reviewed_shadow"]["scoring"][
+                "score_delta"
+            ]
+            == recovery_preview["scoring"]["score_delta"]
+        )
+        assert restarted_preview["recovery_review"]["summary"][
+            "accepted_count"
+        ] == 1
+
+        revoked_recovery, replayed = (
+            restarted_repository.append_evidence_scoring_recovery_review(
+                "memory.example",
+                _scoring_recovery_review_command(
+                    recovery_candidate["candidate_fingerprint"],
+                    case_id=recovery_candidate["case_id"],
+                    decision="revoked",
+                    expected_current_event_id=recovery_event["id"],
+                    key_hash="6" * 64,
+                    fingerprint="7" * 64,
+                ),
+            )
+        )
+        assert replayed is False
+        assert revoked_recovery["sequence"] == 2
+
+        revoked_preview = PostgresHistoryRepository(
+            dsn
+        ).get_evidence_scoring_memory_preview("memory.example")
+        assert revoked_preview is not None
+        assert (
+            revoked_preview["reviewed_shadow"]["scoring"][
+                "score_delta"
+            ]
+            == 0
+        )
+        assert revoked_preview["recovery_review"]["summary"][
+            "revoked_count"
+        ] == 1
+        recovery_journal = (
+            restarted_repository.list_evidence_scoring_recovery_reviews(
+                "memory.example"
+            )
+        )
+        assert recovery_journal["total"] == 2
+        assert [
+            event["effective_state"]
+            for event in recovery_journal["events"]
+        ] == ["revoked", "superseded"]
+        assert recovery_journal["current"] == [revoked_recovery]
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+
+
 def _require_schema_drop_opt_in() -> None:
     if os.environ.get("B3S_ALLOW_SCHEMA_DROP") != "1":
         raise RuntimeError(
@@ -1183,6 +1309,143 @@ class _ScoringRecoveryReviewConnection:
             if matching
             else None
         )
+
+
+def _scoring_recovery_report(
+    report_id: str,
+    created_at: str,
+    *,
+    target_state: str,
+) -> dict:
+    quote = "A distinctive promise that customers remember."
+    evidence_record = {
+        "ref": "web.home.0",
+        "source": "web",
+        "evidence_type": "owned_copy.homepage",
+        "content": quote,
+        "url": "https://memory.example",
+        "confidence": "high",
+        "metadata": {"source_class": "owned_copy"},
+    }
+    raw_components: dict[str, dict] = {}
+    public_components: list[dict] = []
+    current_score = 0
+    for component_key, spec in COMPONENTS.items():
+        profile = []
+        for tile in spec["tiles"]:
+            state = (
+                target_state
+                if component_key == "magnetism"
+                and tile["id"] == "MG1"
+                else "no"
+            )
+            profile.append(
+                {
+                    "id": tile["id"],
+                    "estado": state,
+                    "evidencia": quote if state == "ok" else "",
+                    "motivo": (
+                        "" if state == "ok" else "not observed"
+                    ),
+                    "contexto_requerido": "",
+                }
+            )
+        lit = sum(
+            1 for verdict in profile if verdict["estado"] == "ok"
+        )
+        points = component_points(component_key, lit)
+        current_score += points
+        raw_components[component_key] = {
+            "component": component_key,
+            "status": "scored",
+            "score": lit,
+            "scale": int(spec["scale"]),
+            "points": points,
+            "confidence": "high",
+            "detected_content": quote if lit else "",
+            "detection_mode": "sv9_flow",
+            "detection_limitations": [],
+            "evidence_source_summary": {"owned_copy": 1, "total": 1},
+            "tile_profile": profile,
+        }
+        public_components.append(
+            {
+                "key": component_key,
+                "label": str(spec["label"]),
+                "status": "scored",
+                "score": lit,
+                "scale": int(spec["scale"]),
+                "points": points,
+                "confidence": "high",
+                "resumen": quote if lit else "",
+                "veredicto": "Synthetic durable-history fixture.",
+                "message": "Synthetic durable-history fixture.",
+                "tile_profile": profile,
+            }
+        )
+    return {
+        "id": report_id,
+        "brand_name": "Memory Example",
+        "url": "https://memory.example",
+        "created_at": created_at,
+        "score": current_score,
+        "base_average": 0,
+        "reliability_status": "usable",
+        "not_detected": [],
+        "limitations": [],
+        "acquisition_gate": {"state": "pass"},
+        "attempts": [],
+        "acquisition_artifacts": [],
+        "blocks": [
+            {
+                "name": "magnetism",
+                "detected": target_state == "ok",
+                "content": quote if target_state == "ok" else "",
+                "confidence": "high",
+                "coverage_status": (
+                    "evidence"
+                    if target_state == "ok"
+                    else "insufficient"
+                ),
+                "provenance_source": "llm_and_gate",
+                "refs": [
+                    {
+                        "ref": "web.home.0",
+                        "url": evidence_record["url"],
+                        "snippet": quote,
+                    }
+                ],
+            }
+        ],
+        "components": public_components,
+        "raw": {
+            "schema_version": "sv9-flow-sv9-shadow-eval-v1",
+            "source_run_id": 456,
+            "flow": {
+                "candidate": {
+                    "evidence_pack": {"evidence": [evidence_record]},
+                    "interpretation": {"blocks": {}},
+                },
+                "interpretation_debug": {
+                    "prompt_version": (
+                        "sv9-flow-brand-interpretation-v1"
+                    ),
+                    "gate_authority": "veto_only",
+                },
+            },
+            "sv9": {
+                "brand3_score": current_score,
+                "base_average": 0,
+                "reliability_status": "usable",
+                "result": {
+                    "rubric_version": "baldosas-v3-1",
+                    "model": "v3.1",
+                    "evaluator_model": "test-model",
+                    "components": raw_components,
+                },
+            },
+        },
+    }
 
 
 def _report(

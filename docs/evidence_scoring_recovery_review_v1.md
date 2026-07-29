@@ -83,6 +83,39 @@ la rúbrica o de la evidencia cambia el candidato, el evento anterior se
 conserva en el journal pero aparece como obsoleto y no modifica ni siquiera el
 score revisado de sombra.
 
+## Prueba PostgreSQL de durabilidad
+
+La integración
+`test_postgres_scoring_recovery_survives_restart_and_revocation` ejecuta el
+ciclo completo contra una base PostgreSQL real:
+
+1. aplica todas las migraciones, incluida la `007`;
+2. persiste dos informes de una marca, con evidencia `MG1` en el primero y un
+   punto ciego en el segundo;
+3. reconstruye el candidato de recuperación y confirma que sigue pendiente;
+4. añade un evento `accepted`;
+5. crea otra instancia de `PostgresHistoryRepository` y confirma que el delta
+   revisado se reconstruye desde informes y journal;
+6. añade `revoked`;
+7. crea una tercera instancia y confirma que el delta revisado vuelve a cero,
+   mientras ambos eventos permanecen en el journal.
+
+La prueba solo se habilita contra una base desechable porque elimina el esquema
+aislado `b3s_history` al empezar y al terminar:
+
+```bash
+B3S_TEST_DATABASE_URL=postgresql://... \
+B3S_ALLOW_SCHEMA_DROP=1 \
+./.venv/bin/python -m pytest \
+  tests/test_b3s_history.py::test_postgres_scoring_recovery_survives_restart_and_revocation \
+  -q
+```
+
+El 29 de julio de 2026 se ejecutó correctamente sobre un clúster temporal
+PostgreSQL 14: `1 passed`. Esto demuestra el contrato de persistencia y
+reconstrucción sobre PostgreSQL, pero no sustituye la evidencia del
+`release_command` y PostgreSQL 16 del entorno de despliegue.
+
 ## Flujo de archivo para lotes históricos
 
 Generar una plantilla sin firma desde el archivo histórico:
