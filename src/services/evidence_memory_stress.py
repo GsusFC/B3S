@@ -44,6 +44,17 @@ from src.services.evidence_identity_gold_set import (
 from src.services.evidence_memory_identity_v2 import (
     build_evidence_memory_identity_v2,
 )
+from src.services.evidence_source_review_set import (
+    DEFAULT_REVIEW_ROOT as SOURCE_REVIEW_ROOT,
+    EVIDENCE_SOURCE_REVIEW_DATASET_VERSION,
+    EVIDENCE_SOURCE_REVIEW_EVENT_SCHEMA_VERSION,
+    EVIDENCE_SOURCE_REVIEW_SCHEMA_VERSION,
+    EvidenceSourceReviewSetError,
+    evaluate_source_review_set,
+    load_review_candidates as load_source_review_candidates,
+    load_review_events as load_source_review_events,
+    load_review_manifest as load_source_review_manifest,
+)
 from src.services.evidence_ledger_shadow import build_evidence_ledger_shadow
 from src.services.scanner_evidence_comparison import canonical_evidence_records
 from src.sv9_flow.claim_slot_producer import build_claim_memory_evidence
@@ -55,7 +66,7 @@ from src.sv9_flow.contracts import (
 
 
 EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v2"
-EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v8"
+EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v9"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 
 
@@ -71,9 +82,11 @@ def run_evidence_memory_stress(
     }
     identity_gold_set = _identity_gold_set_status()
     claim_relation_gold_set = _claim_relation_gold_set_status()
+    source_review_set = _source_review_set_status()
     controlled = _controlled_probes(
         identity_gold_set=identity_gold_set,
-        claim_relation_gold_set=claim_relation_gold_set
+        claim_relation_gold_set=claim_relation_gold_set,
+        source_review_set=source_review_set,
     )
     replay = _replay_real_histories(normalized_histories)
     identity_v2_replay = _replay_identity_v2(normalized_histories)
@@ -182,6 +195,20 @@ def run_evidence_memory_stress(
                     "critical_false_accept_count"
                 ]
             ),
+            "source_review_candidate_count": (
+                source_review_set["summary"]["candidate_count"]
+            ),
+            "source_review_active_count": (
+                source_review_set["summary"]["active_review_count"]
+            ),
+            "source_review_claim_scoped_count": (
+                source_review_set["summary"]["claim_scoped_review_count"]
+            ),
+            "source_review_claim_level_required_count": (
+                source_review_set["summary"][
+                    "claim_level_review_required_count"
+                ]
+            ),
         },
         "executable_failures": executable_failures,
         "promotion_blockers": promotion_blockers,
@@ -192,6 +219,7 @@ def run_evidence_memory_stress(
         "claim_tile_ledger_replay": claim_tile_replay,
         "identity_gold_set": identity_gold_set,
         "claim_relation_gold_set": claim_relation_gold_set,
+        "source_review_set": source_review_set,
         "interpretation": {
             "supported": (
                 "Evidence identities can be remembered deterministically across "
@@ -201,9 +229,11 @@ def run_evidence_memory_stress(
                 "Claim Memory can only propose coexistence or replacement relations; "
                 "it cannot adjudicate a canonical claim. The versioned claim-to-tile "
                 "ledger remains shadow-only and has no reviewed promotion policy. "
-                "Identity review is complete but exact agreement misses its frozen "
-                "threshold. Source review is incomplete, real replacement recall is "
-                "unvalidated, and no versioned memory score exists."
+                "Identity review is complete and its frozen controlled threshold "
+                "passes. Publisher independence has been reviewed separately from "
+                "claim corroboration, but claim-scoped corroboration and semantic "
+                "paraphrase recall remain unvalidated. Real replacement recall is "
+                "also unvalidated, and no versioned memory score exists."
             ),
         },
     }
@@ -284,6 +314,50 @@ def _claim_relation_gold_set_status() -> dict[str, Any]:
                 "exact_agreement_rate": None,
             },
             "pending_case_ids": [],
+            "evaluated": [],
+        }
+
+
+def _source_review_set_status() -> dict[str, Any]:
+    try:
+        return evaluate_source_review_set(
+            load_source_review_candidates(),
+            load_source_review_events(
+                SOURCE_REVIEW_ROOT / "review_events.jsonl"
+            ),
+            manifest=load_source_review_manifest(),
+        )
+    except EvidenceSourceReviewSetError:
+        return {
+            "schema_version": EVIDENCE_SOURCE_REVIEW_SCHEMA_VERSION,
+            "review_event_schema_version": (
+                EVIDENCE_SOURCE_REVIEW_EVENT_SCHEMA_VERSION
+            ),
+            "dataset_version": EVIDENCE_SOURCE_REVIEW_DATASET_VERSION,
+            "runtime_effect": False,
+            "authority": False,
+            "promotion_ready": False,
+            "identity_gate_ready": False,
+            "publisher_independence_gate_ready": False,
+            "claim_corroboration_gate_ready": False,
+            "promotion_blockers": [
+                "source_review_set_unavailable"
+            ],
+            "summary": {
+                "candidate_count": 0,
+                "review_event_count": 0,
+                "active_review_count": 0,
+                "pending_count": 0,
+                "revoked_case_count": 0,
+                "claim_scoped_review_count": 0,
+                "claim_level_review_required_count": 0,
+                "identity_decision_counts": {},
+                "publisher_independence_decision_counts": {},
+                "claim_corroboration_decision_counts": {},
+            },
+            "pending_case_ids": [],
+            "revoked_case_ids": [],
+            "claim_level_review_required_case_ids": [],
             "evaluated": [],
         }
 
@@ -504,6 +578,27 @@ def render_evidence_memory_stress_markdown(report: dict[str, Any]) -> str:
             f"- Blockers: `{_format_counts(Counter(identity_gold.get('promotion_blockers') or []))}`",
         ]
     )
+    source_review = report.get("source_review_set") or {}
+    source_review_summary = source_review.get("summary") or {}
+    lines.extend(
+        [
+            "",
+            "## Source review set",
+            "",
+            f"- Dataset: `{source_review.get('dataset_version', 'unknown')}`",
+            f"- Promotion ready: `{str(bool(source_review.get('promotion_ready'))).lower()}`",
+            f"- Identity gate ready: `{str(bool(source_review.get('identity_gate_ready'))).lower()}`",
+            f"- Publisher gate ready: `{str(bool(source_review.get('publisher_independence_gate_ready'))).lower()}`",
+            f"- Claim corroboration gate ready: `{str(bool(source_review.get('claim_corroboration_gate_ready'))).lower()}`",
+            f"- Candidates: `{source_review_summary.get('candidate_count', 0)}`",
+            f"- Active reviews: `{source_review_summary.get('active_review_count', 0)}`",
+            f"- Claim-scoped reviews: `{source_review_summary.get('claim_scoped_review_count', 0)}`",
+            f"- Sources requiring claim review: `{source_review_summary.get('claim_level_review_required_count', 0)}`",
+            f"- Publisher decisions: `{_format_counts(source_review_summary.get('publisher_independence_decision_counts'))}`",
+            f"- Corroboration decisions: `{_format_counts(source_review_summary.get('claim_corroboration_decision_counts'))}`",
+            f"- Blockers: `{_format_counts(Counter(source_review.get('promotion_blockers') or []))}`",
+        ]
+    )
     claim_relation_gold = report.get("claim_relation_gold_set") or {}
     claim_relation_gold_summary = claim_relation_gold.get("summary") or {}
     lines.extend(
@@ -533,6 +628,7 @@ def _controlled_probes(
     *,
     identity_gold_set: dict[str, Any],
     claim_relation_gold_set: dict[str, Any],
+    source_review_set: dict[str, Any],
 ) -> list[dict[str, Any]]:
     stable_owned = _evidence(
         ref="web.0",
@@ -1326,19 +1422,59 @@ def _controlled_probes(
                 "critical false accepts, while remaining shadow-only."
             ),
         ),
+        _probe(
+            "source_review_axes_are_separate_and_shadow_only",
+            (
+                source_review_set["runtime_effect"] is False
+                and source_review_set["authority"] is False
+                and source_review_set["identity_gate_ready"] is True
+                and source_review_set[
+                    "publisher_independence_gate_ready"
+                ]
+                is True
+                and source_review_set["claim_corroboration_gate_ready"]
+                is False
+                and source_review_set["summary"]["candidate_count"] == 6
+                and source_review_set["summary"]["active_review_count"] == 6
+                and source_review_set["summary"][
+                    "claim_scoped_review_count"
+                ]
+                == 0
+                and source_review_set["summary"][
+                    "publisher_independence_decision_counts"
+                ]
+                == {"confirmed_independent": 5, "excluded": 1}
+                and source_review_set["summary"][
+                    "claim_corroboration_decision_counts"
+                ]
+                == {"disputed": 1, "excluded": 1, "mixed": 4}
+            ),
+            (
+                "Six attributable Vercel source reviews keep publisher "
+                "independence separate from claim corroboration; the publisher "
+                "gate passes while zero source-global decisions gain "
+                "corroboration authority."
+            ),
+        ),
         {
-            "id": "source_independence_pending_production_review",
+            "id": "source_corroboration_pending_claim_level_review",
             "kind": "promotion_blocker",
             "status": "blocked",
             "observation": (
                 "Source-independence policy v3 fails closed and passes controlled "
                 "exact-copy, light-paraphrase, ownership, lineage, and ambiguity "
-                "probes. The versioned registry has no production-reviewed source "
-                "URLs, so real clusters cannot be confirmed independent."
+                "probes. The offline dataset now has "
+                f"{source_review_set['summary']['active_review_count']} attributable "
+                "production source reviews and separates publisher independence "
+                "from claim corroboration. The operational registry intentionally "
+                "still has no production-reviewed URLs because its single-axis "
+                "schema cannot preserve that distinction. There are "
+                f"{source_review_set['summary']['claim_scoped_review_count']} "
+                "claim-scoped reviews."
             ),
             "required_capability": (
-                "attributable reversible production source reviews plus measured "
-                "semantic-paraphrase recall"
+                "claim_id-scoped corroboration reviews, a compatible operational "
+                "two-axis contract, and measured semantic-paraphrase recall"
             ),
         },
         {

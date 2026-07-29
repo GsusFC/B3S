@@ -13,8 +13,10 @@ New Exa captures also persist enough external-attribution provenance for v2 to
 reproduce a strong match instead of trusting its label. Identity policy v4 now
 matches all 14 unchanged human decisions and passes the frozen controlled gate.
 It does not yet support safe production promotion because that small fixture
-does not demonstrate generalization and the production source registry has not
-been reviewed.
+does not demonstrate generalization. Six production sources have now been
+reviewed offline, but their result proves that publisher independence and
+claim corroboration require separate axes. The operational registry cannot
+represent that distinction and remains unchanged.
 Claim Memory v1 can now separate semantic slots, variants, and occurrences,
 while its journal can reversibly adjudicate proposed relations. Its frozen
 13-case relation set is fully reviewed and passes the controlled replacement
@@ -93,11 +95,14 @@ The executable foundation must prove:
 24. identity policy v4 matches all 14 unchanged human decisions with exact
     agreement `1.0`, accepted precision/recall `1.0`, and zero critical false
     accepts.
+25. six attributable production-source reviews preserve publisher
+    independence separately from claim corroboration and remain shadow-only.
 
 The adversarial probes deliberately expose:
 
-1. source-independence v3 has no production-reviewed source decisions or
-   measured semantic-paraphrase recall;
+1. the offline set has six production-source decisions, but zero claim-scoped
+   corroboration reviews; the operational single-axis registry remains empty
+   and semantic-paraphrase recall is unmeasured;
 2. the 13 reviewed claim-relation cases have no real replacement examples, and
    reviewed relations still have no canonical-promotion path;
 3. the persistent claim-to-tile mapping has no reviewed real coverage or
@@ -169,8 +174,8 @@ Claim Memory v1 replayed the same 12 histories and found:
 - 0 relation candidates;
 - 184 structural metadata rows correctly ignored as semantic identity:
   168 visual-tile rows and 16 `checked_block` rows;
-- 24/24 controlled executable invariants passed, including identity policy v4,
-  Claim Memory,
+- 25/25 controlled executable invariants passed, including identity policy v4,
+  the two-axis production-source review set, Claim Memory,
   reconciliation, claim-slot producer, historical backfill, and the versioned
   evidence-to-claim-to-tile ledger.
 
@@ -209,6 +214,17 @@ The separate identity review set contains:
 - 0 critical false accepts;
 - exact agreement `1.0`;
 - no blocker in the controlled identity set.
+
+The separate production-source review set contains:
+
+- 6 attributable Vercel source reviews and 0 pending;
+- 6 accepted identity decisions;
+- 5 `confirmed_independent` publishers and 1 excluded wire source;
+- 4 `mixed`, 1 `disputed`, and 1 `excluded` corroboration decisions;
+- 0 claim-scoped reviews and 5 sources requiring claim-level review;
+- a passed publisher gate but blocked claim-corroboration gate;
+- append-only decision/revocation chains with frozen fingerprints;
+- no runtime or canonical authority.
 
 The 14 labels and the frozen `0.8` exact-agreement threshold were not changed.
 Passing this set does not establish accuracy on production brands; the policy
@@ -265,9 +281,11 @@ credential. Source-independence policy v3 now fails closed on unknown ownership,
 clusters exact and light lexical copies, respects explicit lineage, and disputes
 ambiguous similarity. The controlled identity sub-gate now passes all 14
 attributable decisions with zero critical false accepts and exact agreement
-`1.0`. Gate 1 remains blocked for canonical use by the absence of production
-source reviews, unmeasured semantic-paraphrase recall, and the missing
-canonical-claim policy.
+`1.0`. The offline production set additionally resolves publisher independence
+for six Vercel sources, but deliberately leaves five source cases pending
+claim-level review. Gate 1 remains blocked for canonical use by zero
+claim-scoped corroboration decisions, an operational single-axis registry,
+unmeasured semantic-paraphrase recall, and the missing canonical-claim policy.
 
 The separate claim-reconciliation journal now provides the same append-only,
 idempotent, optimistic-concurrency and revocation guarantees for stable
