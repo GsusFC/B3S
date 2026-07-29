@@ -79,6 +79,12 @@ Evaluate completed reviews:
 Unsigned templates and deterministic `proposed_review` values are not human
 labels.
 
+Every template row carries the manifest's `candidate_fingerprint`. Evaluation
+recomputes that fingerprint from `candidates.jsonl`, rejects mixed or stale
+review rows, and still joins semantic context exclusively through `case_id`.
+Claims, quotes, mappings, and tile contracts remain single-sourced in the
+frozen candidate file.
+
 Completed decisions can now be recorded in the append-only PostgreSQL journal:
 
 ```text

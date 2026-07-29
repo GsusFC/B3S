@@ -187,7 +187,10 @@ def test_independent_claim_cannot_attach_to_excluded_publisher() -> None:
     )
 
     claim_candidates = load_claim_review_candidates()
-    claim_event = build_claim_review_template(claim_candidates)[0]
+    claim_event = build_claim_review_template(
+        claim_candidates,
+        manifest=load_claim_review_manifest(),
+    )[0]
     claim_event.update(
         {
             "event_id": "incompatible-claim-review-001",

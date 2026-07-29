@@ -56,6 +56,10 @@ def load_review_manifest(path: Path | None = None) -> dict[str, Any]:
         raise EvidenceClaimTileReviewSetError(
             "unsupported claim-tile review dataset version"
         )
+    _required_sha256(
+        payload.get("candidate_fingerprint"),
+        field="candidate_fingerprint",
+    )
     return payload
 
 
@@ -82,6 +86,7 @@ def load_reviews(path: Path | None = None) -> list[dict[str, Any]]:
         return []
     rows = _load_jsonl(target, label="claim-tile review")
     seen: set[str] = set()
+    candidate_fingerprints: set[str] = set()
     for row in rows:
         _validate_review(row)
         case_id = str(row["case_id"])
@@ -90,14 +95,27 @@ def load_reviews(path: Path | None = None) -> list[dict[str, Any]]:
                 f"duplicate claim-tile review case_id: {case_id}"
             )
         seen.add(case_id)
+        candidate_fingerprints.add(
+            str(row["candidate_fingerprint"])
+        )
+    if len(candidate_fingerprints) > 1:
+        raise EvidenceClaimTileReviewSetError(
+            "claim-tile reviews mix candidate fingerprints"
+        )
     return sorted(rows, key=lambda row: str(row["case_id"]))
 
 
 def build_review_template(
     candidates: Iterable[dict[str, Any]],
+    *,
+    manifest: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Return unsigned rows; deterministic mapping proposals are not labels."""
 
+    candidate_rows = [dict(row) for row in candidates]
+    candidate_fingerprint = _validate_candidate_fingerprint(
+        manifest, candidate_rows
+    )
     return [
         {
             "schema_version": (
@@ -107,13 +125,14 @@ def build_review_template(
                 EVIDENCE_CLAIM_TILE_REVIEW_DATASET_VERSION
             ),
             "case_id": str(candidate["case_id"]),
+            "candidate_fingerprint": candidate_fingerprint,
             "decision": None,
             "reviewer_id": None,
             "rationale": None,
             "reviewed_at": None,
         }
         for candidate in sorted(
-            (dict(row) for row in candidates),
+            candidate_rows,
             key=lambda row: str(row["case_id"]),
         )
     ]
@@ -138,11 +157,13 @@ def evaluate_claim_tile_review_set(
         label="candidate",
     )
     reviews_by_id = _unique_by_case_id(review_rows, label="review")
-    fingerprint = review_candidate_fingerprint(candidate_rows)
-    if str(manifest.get("candidate_fingerprint") or "") != fingerprint:
-        raise EvidenceClaimTileReviewSetError(
-            "claim-tile candidate fingerprint does not match manifest"
-        )
+    candidate_fingerprint = _validate_candidate_fingerprint(
+        manifest, candidate_rows
+    )
+    _validate_candidate_fingerprint_bindings(
+        review_rows,
+        expected=candidate_fingerprint,
+    )
     unknown_reviews = sorted(set(reviews_by_id) - set(candidates_by_id))
     if unknown_reviews:
         raise EvidenceClaimTileReviewSetError(
@@ -251,7 +272,7 @@ def evaluate_claim_tile_review_set(
     return {
         "schema_version": EVIDENCE_CLAIM_TILE_REVIEW_SCHEMA_VERSION,
         "dataset_version": EVIDENCE_CLAIM_TILE_REVIEW_DATASET_VERSION,
-        "dataset_fingerprint": fingerprint,
+        "dataset_fingerprint": candidate_fingerprint,
         "runtime_effect": False,
         "authority": False,
         "review_gate_ready": review_gate_ready,
@@ -537,6 +558,7 @@ def _validate_review(row: dict[str, Any]) -> None:
         "schema_version",
         "dataset_version",
         "case_id",
+        "candidate_fingerprint",
         "decision",
         "reviewer_id",
         "rationale",
@@ -565,11 +587,20 @@ def _validate_review(row: dict[str, Any]) -> None:
         raise EvidenceClaimTileReviewSetError(
             "claim-tile review decision is invalid"
         )
-    for field in ("case_id", "reviewer_id", "rationale", "reviewed_at"):
+    for field in (
+        "case_id",
+        "reviewer_id",
+        "rationale",
+        "reviewed_at",
+    ):
         if not str(row.get(field) or "").strip():
             raise EvidenceClaimTileReviewSetError(
                 f"claim-tile review {field} is required"
             )
+    _required_sha256(
+        row.get("candidate_fingerprint"),
+        field="candidate_fingerprint",
+    )
     try:
         datetime.fromisoformat(
             str(row["reviewed_at"]).replace("Z", "+00:00")
@@ -578,6 +609,51 @@ def _validate_review(row: dict[str, Any]) -> None:
         raise EvidenceClaimTileReviewSetError(
             "claim-tile review reviewed_at must be ISO-8601"
         ) from exc
+
+
+def _validate_candidate_fingerprint(
+    manifest: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> str:
+    candidate_fingerprint = review_candidate_fingerprint(candidates)
+    if (
+        str(manifest.get("candidate_fingerprint") or "")
+        != candidate_fingerprint
+    ):
+        raise EvidenceClaimTileReviewSetError(
+            "claim-tile candidate fingerprint does not match manifest"
+        )
+    return candidate_fingerprint
+
+
+def _validate_candidate_fingerprint_bindings(
+    reviews: Iterable[dict[str, Any]],
+    *,
+    expected: str,
+) -> None:
+    fingerprints = {
+        str(row.get("candidate_fingerprint") or "")
+        for row in reviews
+    }
+    if len(fingerprints) > 1:
+        raise EvidenceClaimTileReviewSetError(
+            "claim-tile reviews mix candidate fingerprints"
+        )
+    if fingerprints and fingerprints != {expected}:
+        raise EvidenceClaimTileReviewSetError(
+            "claim-tile review candidate fingerprint mismatch"
+        )
+
+
+def _required_sha256(value: Any, *, field: str) -> str:
+    text = str(value or "").strip().lower()
+    if len(text) != 64 or any(
+        character not in "0123456789abcdef" for character in text
+    ):
+        raise EvidenceClaimTileReviewSetError(
+            f"claim-tile {field} must be sha256"
+        )
+    return text
 
 
 def _unique_by_case_id(

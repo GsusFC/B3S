@@ -37,7 +37,10 @@ fixtures/vercel/vercel_fresh_capture_envelope.json
 
 The set deliberately excludes PR Newswire V6. Its source-level decision is
 already `excluded`, so it cannot become independent corroboration by attaching
-a claim ID.
+a claim ID. The corroboration manifest records that skipped generation in
+`upstream_coverage`, bound to the stable upstream event
+`vercel-v6-pr-newswire-review-001`; the exclusion is therefore distinguishable
+from a candidate lost by the pipeline.
 
 ## Coverage
 
@@ -80,10 +83,17 @@ unresolved
 Every decision requires reviewer ID, rationale, timestamp, version, and an
 append-only event ID. Decisions can be revoked without editing history.
 
-While the queue is pending, an external review file can be evaluated without a
-manifest fingerprint. This remains non-authoritative. When the completed
-reviews are accepted into a dataset version, their exact fingerprint must be
-frozen in the manifest.
+Each generated decision row also carries the frozen
+`candidate_fingerprint`. Loading fails closed if rows mix fingerprints, if the
+fingerprint differs from the manifest, or if the manifest fingerprint no
+longer matches the canonical candidate content. The reviewer signs decisions
+for that exact candidate set, never an isolated JSONL file.
+
+While the queue is pending, an external review file can be evaluated while
+`review_event_fingerprint` remains unfrozen in the manifest. The
+`candidate_fingerprint` is still mandatory. This remains non-authoritative.
+When the completed reviews are accepted into a dataset version, their exact
+event fingerprint must be frozen in the manifest.
 
 ## Prepare the review file
 

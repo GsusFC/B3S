@@ -175,6 +175,7 @@ def load_review_events(
         return []
     rows = _load_jsonl(target, label="claim-corroboration event")
     seen: set[str] = set()
+    candidate_fingerprints: set[str] = set()
     for row in rows:
         _validate_event_shape(row)
         event_id = str(row["event_id"])
@@ -183,6 +184,13 @@ def load_review_events(
                 f"duplicate claim-corroboration event: {event_id}"
             )
         seen.add(event_id)
+        candidate_fingerprints.add(
+            str(row["candidate_fingerprint"])
+        )
+    if len(candidate_fingerprints) > 1:
+        raise EvidenceClaimCorroborationReviewSetError(
+            "claim-corroboration events mix candidate fingerprints"
+        )
     return sorted(
         rows,
         key=lambda row: (str(row["case_id"]), int(row["sequence"])),
@@ -412,9 +420,15 @@ def verify_frozen_candidate_provenance(
 
 def build_review_template(
     candidates: Iterable[dict[str, Any]],
+    *,
+    manifest: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Return unsigned decision events; candidates are never labels."""
 
+    candidate_rows = [dict(row) for row in candidates]
+    candidate_fingerprint = _validate_candidate_fingerprint(
+        manifest, candidate_rows
+    )
     return [
         {
             "schema_version": (
@@ -423,6 +437,7 @@ def build_review_template(
             "dataset_version": (
                 EVIDENCE_CLAIM_CORROBORATION_REVIEW_DATASET_VERSION
             ),
+            "candidate_fingerprint": candidate_fingerprint,
             "event_id": None,
             "case_id": str(candidate["case_id"]),
             "sequence": 1,
@@ -437,7 +452,7 @@ def build_review_template(
             "authority": False,
         }
         for candidate in sorted(
-            (dict(row) for row in candidates),
+            candidate_rows,
             key=lambda row: str(row["case_id"]),
         )
     ]
@@ -461,12 +476,15 @@ def evaluate_claim_corroboration_review_set(
         candidate_rows,
         label="candidate",
     )
+    candidate_fingerprint = _validate_candidate_fingerprint(
+        manifest, candidate_rows
+    )
+    _validate_candidate_fingerprint_bindings(
+        event_rows,
+        expected=candidate_fingerprint,
+    )
     fingerprint = review_set_fingerprint(candidate_rows)
     event_fingerprint = review_set_fingerprint(event_rows)
-    if str(manifest.get("candidate_fingerprint") or "") != fingerprint:
-        raise EvidenceClaimCorroborationReviewSetError(
-            "claim-corroboration candidate fingerprint mismatch"
-        )
     expected_event_fingerprint = str(
         manifest.get("review_event_fingerprint") or ""
     )
@@ -912,6 +930,7 @@ def _validate_event_shape(row: dict[str, Any]) -> None:
     required = {
         "schema_version",
         "dataset_version",
+        "candidate_fingerprint",
         "event_id",
         "case_id",
         "sequence",
@@ -937,6 +956,10 @@ def _validate_event_shape(row: dict[str, Any]) -> None:
         raise EvidenceClaimCorroborationReviewSetError(
             "claim review event version mismatch"
         )
+    _required_sha256(
+        row.get("candidate_fingerprint"),
+        field="candidate_fingerprint",
+    )
     if row["event_type"] not in {"decision", "revocation"}:
         raise EvidenceClaimCorroborationReviewSetError(
             "claim review event_type is invalid"
@@ -963,6 +986,40 @@ def _validate_event_shape(row: dict[str, Any]) -> None:
     if row["runtime_effect"] is not False or row["authority"] is not False:
         raise EvidenceClaimCorroborationReviewSetError(
             "claim review events must remain non-authoritative"
+        )
+
+
+def _validate_candidate_fingerprint(
+    manifest: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> str:
+    candidate_fingerprint = review_set_fingerprint(candidates)
+    if (
+        str(manifest.get("candidate_fingerprint") or "")
+        != candidate_fingerprint
+    ):
+        raise EvidenceClaimCorroborationReviewSetError(
+            "claim-corroboration candidate fingerprint mismatch"
+        )
+    return candidate_fingerprint
+
+
+def _validate_candidate_fingerprint_bindings(
+    events: Iterable[dict[str, Any]],
+    *,
+    expected: str,
+) -> None:
+    fingerprints = {
+        str(row.get("candidate_fingerprint") or "")
+        for row in events
+    }
+    if len(fingerprints) > 1:
+        raise EvidenceClaimCorroborationReviewSetError(
+            "claim-corroboration events mix candidate fingerprints"
+        )
+    if fingerprints and fingerprints != {expected}:
+        raise EvidenceClaimCorroborationReviewSetError(
+            "claim-corroboration review candidate fingerprint mismatch"
         )
 
 

@@ -165,9 +165,16 @@ def test_candidates_expose_tile_contract_not_only_literal_quote() -> None:
 
 
 def test_review_template_is_unsigned() -> None:
-    rows = build_review_template(load_review_candidates())
+    manifest = load_review_manifest()
+    rows = build_review_template(
+        load_review_candidates(),
+        manifest=manifest,
+    )
 
     assert len(rows) == 8
+    assert {
+        row["candidate_fingerprint"] for row in rows
+    } == {manifest["candidate_fingerprint"]}
     assert all(row["decision"] is None for row in rows)
     assert all(row["reviewer_id"] is None for row in rows)
     assert all(row["reviewed_at"] is None for row in rows)
@@ -207,6 +214,38 @@ def test_duplicate_review_is_rejected() -> None:
         )
 
 
+def test_review_fingerprint_must_match_candidates_and_be_uniform() -> None:
+    candidates = load_review_candidates()
+    manifest = load_review_manifest()
+    mismatched = [_review(candidates[0]["case_id"], "accepted")]
+    mismatched[0]["candidate_fingerprint"] = "0" * 64
+
+    with pytest.raises(
+        EvidenceClaimTileReviewSetError,
+        match="candidate fingerprint mismatch",
+    ):
+        evaluate_claim_tile_review_set(
+            candidates,
+            mismatched,
+            manifest=manifest,
+        )
+
+    mixed = [
+        _review(candidates[0]["case_id"], "accepted"),
+        _review(candidates[1]["case_id"], "accepted"),
+    ]
+    mixed[1]["candidate_fingerprint"] = "0" * 64
+    with pytest.raises(
+        EvidenceClaimTileReviewSetError,
+        match="mix candidate fingerprints",
+    ):
+        evaluate_claim_tile_review_set(
+            candidates,
+            mixed,
+            manifest=manifest,
+        )
+
+
 def test_markdown_reports_pending_review_and_coverage() -> None:
     rendered = render_claim_tile_review_set_markdown(
         evaluate_claim_tile_review_set(
@@ -228,6 +267,9 @@ def _review(case_id: str, decision: str) -> dict:
         "schema_version": EVIDENCE_CLAIM_TILE_REVIEW_SCHEMA_VERSION,
         "dataset_version": EVIDENCE_CLAIM_TILE_REVIEW_DATASET_VERSION,
         "case_id": case_id,
+        "candidate_fingerprint": load_review_manifest()[
+            "candidate_fingerprint"
+        ],
         "decision": decision,
         "reviewer_id": "gsus",
         "rationale": "Manual mapping review.",

@@ -64,7 +64,10 @@ def main() -> int:
             parents=True,
             exist_ok=True,
         )
-        rows = build_review_template(candidates)
+        rows = build_review_template(
+            candidates,
+            manifest=manifest,
+        )
         args.write_review_template.write_text(
             "\n".join(
                 json.dumps(row, ensure_ascii=False, sort_keys=True)
