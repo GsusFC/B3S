@@ -18,6 +18,9 @@ from src.services.evidence_identity_gold_set import (
 from src.services.evidence_source_review_set import (
     EvidenceSourceReviewSetError,
 )
+from src.services.evidence_source_claim_registry import (
+    EvidenceSourceClaimRegistryError,
+)
 from src.services.evidence_memory_stress import (
     render_evidence_memory_stress_markdown,
     run_evidence_memory_stress,
@@ -33,8 +36,8 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["promotion_ready"] is False
     assert report["executable_failures"] == []
     assert report["schema_version"] == "evidence-memory-stress-v2"
-    assert report["policy_version"] == "evidence-memory-stress-policy-v12"
-    assert report["summary"]["executable_invariant_count"] == 28
+    assert report["policy_version"] == "evidence-memory-stress-policy-v13"
+    assert report["summary"]["executable_invariant_count"] == 29
     assert report["summary"]["promotion_blocker_count"] == 4
     assert report["summary"]["claim_relation_gold_candidate_count"] == 13
     assert report["summary"]["claim_relation_gold_reviewed_count"] == 13
@@ -68,6 +71,18 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["summary"]["claim_corroboration_candidate_claim_count"] == 10
     assert report["summary"]["claim_corroboration_reviewed_count"] == 0
     assert report["summary"]["claim_corroboration_pending_count"] == 10
+    assert report["summary"]["source_claim_registry_source_count"] == 6
+    assert (
+        report["summary"]["source_claim_registry_publisher_reviewed_count"]
+        == 6
+    )
+    assert report["summary"]["source_claim_registry_claim_record_count"] == 10
+    assert report["summary"]["source_claim_registry_claim_reviewed_count"] == 0
+    assert report["summary"]["source_claim_registry_claim_pending_count"] == 10
+    assert (
+        report["summary"]["source_claim_registry_global_corroboration_count"]
+        == 0
+    )
     assert report["summary"]["claim_tile_review_candidate_count"] == 8
     assert report["summary"]["claim_tile_review_reviewed_count"] == 0
     assert report["summary"]["claim_tile_review_pending_count"] == 8
@@ -109,6 +124,9 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
     ] == "pass"
     assert probes[
         "claim_corroboration_review_set_is_literal_and_shadow_only"
+    ]["status"] == "pass"
+    assert probes[
+        "source_claim_registry_v2_preserves_two_axes_shadow_only"
     ]["status"] == "pass"
     assert probes["identity_v4_explicit_other_entity_is_rejected"][
         "status"
@@ -286,6 +304,25 @@ def test_missing_claim_corroboration_fixture_fails_closed(
     ]
 
 
+def test_missing_source_claim_registry_fails_closed(monkeypatch) -> None:
+    def _missing_registry() -> dict:
+        raise EvidenceSourceClaimRegistryError("missing fixture")
+
+    monkeypatch.setattr(
+        stress_module,
+        "build_evidence_source_claim_registry",
+        _missing_registry,
+    )
+
+    report = run_evidence_memory_stress({})
+
+    assert report["summary"]["source_claim_registry_source_count"] == 0
+    assert report["source_claim_registry"]["shadow_contract_ready"] is False
+    assert report["source_claim_registry"]["promotion_blockers"] == [
+        "source_claim_registry_unavailable"
+    ]
+
+
 def test_real_history_replay_checks_invariants_without_mutating_reports() -> None:
     row = _evidence("web.0", "A stable owned claim.")
     first = _report("one", "2026-01-01T00:00:00Z", 53, [row])
@@ -451,6 +488,7 @@ def test_markdown_distinguishes_passes_from_promotion_blockers() -> None:
     assert "## Identity review set" in rendered
     assert "## Source review set" in rendered
     assert "## Claim corroboration review set" in rendered
+    assert "## Source/claim registry v2" in rendered
     assert "## Claim relation review set" in rendered
     assert "## Claim-to-tile review set" in rendered
     assert "Candidates: `13`" in rendered

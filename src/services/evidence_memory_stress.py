@@ -80,6 +80,12 @@ from src.services.evidence_source_review_set import (
     load_review_events as load_source_review_events,
     load_review_manifest as load_source_review_manifest,
 )
+from src.services.evidence_source_claim_registry import (
+    EVIDENCE_SOURCE_CLAIM_REGISTRY_POLICY_VERSION,
+    EVIDENCE_SOURCE_CLAIM_REGISTRY_SCHEMA_VERSION,
+    EvidenceSourceClaimRegistryError,
+    build_evidence_source_claim_registry,
+)
 from src.services.evidence_ledger_shadow import build_evidence_ledger_shadow
 from src.services.scanner_evidence_comparison import canonical_evidence_records
 from src.sv9_flow.claim_slot_producer import build_claim_memory_evidence
@@ -91,7 +97,7 @@ from src.sv9_flow.contracts import (
 
 
 EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v2"
-EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v12"
+EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v13"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 
 
@@ -109,12 +115,14 @@ def run_evidence_memory_stress(
     claim_relation_gold_set = _claim_relation_gold_set_status()
     source_review_set = _source_review_set_status()
     claim_corroboration_review_set = _claim_corroboration_review_set_status()
+    source_claim_registry = _source_claim_registry_status()
     claim_tile_review_set = _claim_tile_review_set_status()
     controlled = _controlled_probes(
         identity_gold_set=identity_gold_set,
         claim_relation_gold_set=claim_relation_gold_set,
         source_review_set=source_review_set,
         claim_corroboration_review_set=claim_corroboration_review_set,
+        source_claim_registry=source_claim_registry,
         claim_tile_review_set=claim_tile_review_set,
     )
     replay = _replay_real_histories(normalized_histories)
@@ -255,6 +263,26 @@ def run_evidence_memory_stress(
             "claim_corroboration_pending_count": (
                 claim_corroboration_review_set["summary"]["pending_count"]
             ),
+            "source_claim_registry_source_count": (
+                source_claim_registry["summary"]["source_count"]
+            ),
+            "source_claim_registry_publisher_reviewed_count": (
+                source_claim_registry["summary"]["publisher_reviewed_count"]
+            ),
+            "source_claim_registry_claim_record_count": (
+                source_claim_registry["summary"]["claim_record_count"]
+            ),
+            "source_claim_registry_claim_reviewed_count": (
+                source_claim_registry["summary"]["claim_reviewed_count"]
+            ),
+            "source_claim_registry_claim_pending_count": (
+                source_claim_registry["summary"]["claim_pending_count"]
+            ),
+            "source_claim_registry_global_corroboration_count": (
+                source_claim_registry["summary"][
+                    "source_global_claim_corroboration_decision_count"
+                ]
+            ),
             "claim_tile_review_candidate_count": (
                 claim_tile_review_set["summary"]["candidate_count"]
             ),
@@ -286,6 +314,7 @@ def run_evidence_memory_stress(
         "claim_relation_gold_set": claim_relation_gold_set,
         "source_review_set": source_review_set,
         "claim_corroboration_review_set": claim_corroboration_review_set,
+        "source_claim_registry": source_claim_registry,
         "claim_tile_review_set": claim_tile_review_set,
         "interpretation": {
             "supported": (
@@ -302,7 +331,9 @@ def run_evidence_memory_stress(
                 "Identity review is complete and its frozen controlled threshold "
                 "passes. Publisher independence has been reviewed separately from "
                 "claim corroboration. Ten literal claim-scoped cases now form a "
-                "reproducible review queue, but none has a human decision and "
+                "reproducible review queue, and a two-axis v2 shadow registry "
+                "projects them without source-global decisions. None has a human "
+                "claim decision, operational adoption remains disabled, and "
                 "semantic paraphrase recall remains unvalidated. Real replacement "
                 "recall is also unvalidated."
             ),
@@ -480,6 +511,44 @@ def _claim_corroboration_review_set_status() -> dict[str, Any]:
             "pending_case_ids": [],
             "revoked_case_ids": [],
             "evaluated": [],
+        }
+
+
+def _source_claim_registry_status() -> dict[str, Any]:
+    try:
+        return build_evidence_source_claim_registry()
+    except EvidenceSourceClaimRegistryError:
+        return {
+            "schema_version": EVIDENCE_SOURCE_CLAIM_REGISTRY_SCHEMA_VERSION,
+            "policy_version": EVIDENCE_SOURCE_CLAIM_REGISTRY_POLICY_VERSION,
+            "registry_fingerprint": "",
+            "runtime_effect": False,
+            "authority": False,
+            "shadow_contract_ready": False,
+            "operational_adoption_ready": False,
+            "promotion_ready": False,
+            "policy": {
+                "publisher_independence_implies_claim_corroboration": False,
+                "source_global_claim_corroboration_allowed": False,
+                "claim_id_required_for_corroboration": True,
+            },
+            "summary": {
+                "source_count": 0,
+                "publisher_reviewed_count": 0,
+                "publisher_decision_counts": {},
+                "source_global_claim_corroboration_decision_count": 0,
+                "claim_record_count": 0,
+                "claim_source_count": 0,
+                "claim_id_count": 0,
+                "claim_reviewed_count": 0,
+                "claim_pending_count": 0,
+                "claim_decision_counts": {},
+            },
+            "promotion_blockers": [
+                "source_claim_registry_unavailable"
+            ],
+            "sources": [],
+            "claims": [],
         }
 
 
@@ -788,6 +857,28 @@ def render_evidence_memory_stress_markdown(report: dict[str, Any]) -> str:
             f"- Blockers: `{_format_counts(Counter(claim_corroboration.get('promotion_blockers') or []))}`",
         ]
     )
+    source_claim_registry = report.get("source_claim_registry") or {}
+    source_claim_registry_summary = (
+        source_claim_registry.get("summary") or {}
+    )
+    lines.extend(
+        [
+            "",
+            "## Source/claim registry v2",
+            "",
+            f"- Schema: `{source_claim_registry.get('schema_version', 'unknown')}`",
+            f"- Fingerprint: `{source_claim_registry.get('registry_fingerprint', '')}`",
+            f"- Shadow contract ready: `{str(bool(source_claim_registry.get('shadow_contract_ready'))).lower()}`",
+            f"- Operational adoption ready: `{str(bool(source_claim_registry.get('operational_adoption_ready'))).lower()}`",
+            f"- Sources: `{source_claim_registry_summary.get('source_count', 0)}`",
+            f"- Publisher reviewed: `{source_claim_registry_summary.get('publisher_reviewed_count', 0)}`",
+            f"- Claim records: `{source_claim_registry_summary.get('claim_record_count', 0)}`",
+            f"- Claims reviewed: `{source_claim_registry_summary.get('claim_reviewed_count', 0)}`",
+            f"- Claims pending: `{source_claim_registry_summary.get('claim_pending_count', 0)}`",
+            f"- Source-global corroboration decisions: `{source_claim_registry_summary.get('source_global_claim_corroboration_decision_count', 0)}`",
+            f"- Blockers: `{_format_counts(Counter(source_claim_registry.get('promotion_blockers') or []))}`",
+        ]
+    )
     claim_relation_gold = report.get("claim_relation_gold_set") or {}
     claim_relation_gold_summary = claim_relation_gold.get("summary") or {}
     lines.extend(
@@ -841,6 +932,7 @@ def _controlled_probes(
     claim_relation_gold_set: dict[str, Any],
     source_review_set: dict[str, Any],
     claim_corroboration_review_set: dict[str, Any],
+    source_claim_registry: dict[str, Any],
     claim_tile_review_set: dict[str, Any],
 ) -> list[dict[str, Any]]:
     stable_owned = _evidence(
@@ -1808,6 +1900,49 @@ def _controlled_probes(
             ),
         ),
         _probe(
+            "source_claim_registry_v2_preserves_two_axes_shadow_only",
+            (
+                source_claim_registry["runtime_effect"] is False
+                and source_claim_registry["authority"] is False
+                and source_claim_registry["shadow_contract_ready"] is True
+                and source_claim_registry["operational_adoption_ready"] is False
+                and source_claim_registry["promotion_ready"] is False
+                and source_claim_registry["policy"][
+                    "publisher_independence_implies_claim_corroboration"
+                ]
+                is False
+                and source_claim_registry["policy"][
+                    "source_global_claim_corroboration_allowed"
+                ]
+                is False
+                and source_claim_registry["policy"][
+                    "claim_id_required_for_corroboration"
+                ]
+                is True
+                and source_claim_registry["summary"]["source_count"] == 6
+                and source_claim_registry["summary"][
+                    "publisher_reviewed_count"
+                ]
+                == 6
+                and source_claim_registry["summary"]["claim_record_count"]
+                == 10
+                and source_claim_registry["summary"]["claim_reviewed_count"]
+                == 0
+                and source_claim_registry["summary"]["claim_pending_count"]
+                == 10
+                and source_claim_registry["summary"][
+                    "source_global_claim_corroboration_decision_count"
+                ]
+                == 0
+            ),
+            (
+                "Registry v2 projects six reviewed publisher decisions and "
+                "ten claim-scoped records on separate axes. Pending claims "
+                "inherit no corroboration decision and the projection remains "
+                "shadow-only."
+            ),
+        ),
+        _probe(
             "claim_tile_review_set_freezes_real_mappings_without_authority",
             (
                 claim_tile_review_set["runtime_effect"] is False
@@ -1862,12 +1997,15 @@ def _controlled_probes(
                 f"{claim_corroboration_review_set['summary']['reviewed_count']} "
                 "reviewed and "
                 f"{claim_corroboration_review_set['summary']['pending_count']} "
-                "pending."
+                "pending. A two-axis v2 shadow registry now represents these "
+                "records without source-global corroboration, but the active "
+                "identity projection still consumes the fixture-only v1 "
+                "registry."
             ),
             "required_capability": (
                 "review the ten frozen claim cases, expand cross-brand coverage, "
-                "adopt a compatible operational two-axis contract, and measure "
-                "semantic-paraphrase recall"
+                "measure semantic-paraphrase recall, and authorize operational "
+                "adoption of the v2 contract only after those gates pass"
             ),
         },
         {
