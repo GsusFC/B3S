@@ -36,9 +36,12 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["promotion_ready"] is False
     assert report["executable_failures"] == []
     assert report["schema_version"] == "evidence-memory-stress-v2"
-    assert report["policy_version"] == "evidence-memory-stress-policy-v13"
-    assert report["summary"]["executable_invariant_count"] == 29
+    assert report["policy_version"] == "evidence-memory-stress-policy-v14"
+    assert report["summary"]["executable_invariant_count"] == 30
     assert report["summary"]["promotion_blocker_count"] == 4
+    assert probes[
+        "accepted_evidence_memory_adds_without_silent_replacement"
+    ]["status"] == "pass"
     assert report["summary"]["claim_relation_gold_candidate_count"] == 13
     assert report["summary"]["claim_relation_gold_reviewed_count"] == 13
     assert report["summary"]["claim_relation_gold_pending_count"] == 0
