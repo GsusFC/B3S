@@ -94,7 +94,8 @@ The PostgreSQL integration test:
    acceptance;
 7. verifies that the ledger fingerprint did not change.
 
-CI is configured to run the same test against PostgreSQL 16. A local isolated
-PostgreSQL 14 run on 2026-07-29 passed. This proves migration, restart
-durability, revocation, and separation from the ledger on that local database;
-it does not yet prove the pending CI run or a production Fly release.
+PR #29 ran the same test against PostgreSQL 16 and completed with
+`2298 passed, 1 skipped`. A local isolated PostgreSQL 14 run on 2026-07-29 also
+passed. Together they prove migration, restart durability, revocation, and
+separation from the ledger on both database majors; they do not prove a
+production Fly release.
