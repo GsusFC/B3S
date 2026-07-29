@@ -8,7 +8,7 @@ from typing import Any, Literal
 BRAND_EVIDENCE_PACK_VERSION = "brand-evidence-pack-v1"
 BRAND_INTERPRETATION_VERSION = "brand-interpretation-v1"
 SV9_TILE_SIGNALS_VERSION = "sv9-tile-signals-v1"
-SV9_FLOW_CANDIDATE_VERSION = "sv9-flow-candidate-v1"
+SV9_FLOW_CANDIDATE_VERSION = "sv9-flow-candidate-v2"
 
 EvidenceConfidence = Literal["low", "medium", "high"]
 TileEffect = Literal[
@@ -108,6 +108,7 @@ class Sv9FlowCandidate:
     tile_signals: list[TileSignal] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
     schema_version: str = SV9_FLOW_CANDIDATE_VERSION
+    claim_memory_evidence: list[EvidenceRecord] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -115,5 +116,8 @@ class Sv9FlowCandidate:
             "evidence_pack": self.evidence_pack.to_dict(),
             "interpretation": self.interpretation.to_dict(),
             "tile_signals": [signal.to_dict() for signal in self.tile_signals],
+            "claim_memory_evidence": [
+                record.to_dict() for record in self.claim_memory_evidence
+            ],
             "limitations": list(self.limitations),
         }

@@ -106,16 +106,23 @@ It is rebuilt deterministically from immutable report history. In v1:
 
 The read-only stress harness replayed 12 local brand histories:
 
-- 0 semantic claim slots;
-- 0 claim variants or occurrences;
+- 32 immutable `sv9-flow-candidate-v1` reports were eligible for historical
+  backfill;
+- 3 explicit `mission.primary` slots, 3 variants, and 3 occurrences were
+  recovered from Liminal, Robin, and Vercel;
+- Robin's duplicate web/Exa capture collapsed to one occurrence;
+- 2 variants are current, while the older Vercel variant is
+  `not_reacquired`;
 - 0 relation candidates;
 - 184 rows ignored as non-semantic structural metadata: 168 visual-tile rows
   and 16 `checked_block` rows;
-- 20 controlled executable invariants passed with 0 failures.
+- 22 controlled executable invariants passed with 0 failures, including
+  immutable historical backfill.
 
-This is expected: the historical acquisition contract did not emit
-`claim_slot_key`. The replay demonstrates fail-closed behavior, not real-world
-semantic-change recall.
+No historical report was edited. The replay proves that explicit historical
+evidence can be reused without becoming runtime or canonical authority. It
+still does not measure semantic-change recall: none of the three recovered
+slots contains more than one historical content variant.
 
 ## Durable reconciliation boundary
 
@@ -131,8 +138,28 @@ evaluator are later, separate gates.
 
 ## Producer migration
 
-Future acquisition code should emit a stable, human-readable
-`claim_slot_key` only where the semantic subject is known, for example
-`mission.primary` or `audience.finance_team`. It must not retrofit keys from
-claim text, URL position, tile ID, or `checked_block`; doing so would recreate
-the identity error this layer is designed to prevent.
+`sv9-flow-candidate-v2` now persists a separate
+`candidate.claim_memory_evidence` lane. Producer v2 emits only explicit owned
+`mission.primary` and `vision.primary` declarations. The lane is excluded from
+the evidence pack used by interpretation and scoring, and Claim Memory policy
+v4 reads it only for the shadow projection.
+
+Unscoped declarations are limited to the homepage and unambiguous corporate
+surfaces. Product pages require explicit `entity_scope`; external proof,
+values, audiences, offers, generic strategic language, and inferred
+mission/vision language fail closed.
+
+Historical `sv9-flow-candidate-v1` reports remain unchanged. When their
+persisted candidate has no claim-memory field, policy v4 may deterministically
+derive the same narrow explicit-claim records from the immutable evidence pack
+at read time. A persisted lane always wins, including an intentionally empty
+list. A v2 or unknown-schema report with a missing lane fails closed instead of
+being reinterpreted.
+
+The system still must not retrofit keys from generic claim text, URL position,
+tile ID, `checked_block`, or EvidenceGraph's text-derived `claim_id`; doing so
+would recreate the identity error this layer is designed to prevent.
+
+See [`evidence_claim_slot_producer_v2.md`](evidence_claim_slot_producer_v2.md)
+and
+[`evidence_claim_historical_backfill_v1.md`](evidence_claim_historical_backfill_v1.md).

@@ -14,8 +14,10 @@ reproduce a strong match instead of trusting its label. It does not yet support
 safe promotion because the identity set and production source registry have not
 been reviewed. Claim Memory v1 can now separate semantic slots, variants, and
 occurrences, while its journal can reversibly adjudicate proposed relations.
-It still cannot promote a canonical claim, persist tile support, or evaluate a
-canonical memory version.
+Its frozen 13-case relation set can now measure false and missed replacement
+once reviewed, but the set has no attributable human decisions or real
+replacement examples. Claim Memory still cannot promote a canonical claim,
+persist tile support, or evaluate a canonical memory version.
 
 ## Read-only harness
 
@@ -75,6 +77,10 @@ The executable foundation must prove:
 18. simultaneous variants become coexistence candidates, not replacements;
 19. report order cannot change Claim Memory v1;
 20. accepting a relation cannot grant canonical or runtime authority.
+21. the slot producer accepts an explicit corporate mission, rejects an
+    unscoped product mission, and stays outside runtime authority.
+22. historical v1 evidence can produce claim slots without mutating the
+    immutable candidate or gaining runtime authority.
 
 The adversarial probes deliberately expose:
 
@@ -82,7 +88,8 @@ The adversarial probes deliberately expose:
    while v2 still lacks a reviewed identity gold set;
 2. source-independence v3 has no production-reviewed source decisions or
    measured semantic-paraphrase recall;
-3. reviewed claim relations have no canonical-promotion path;
+3. the 13 claim-relation cases have no attributable reviews or real replacement
+   examples, and reviewed relations still have no canonical-promotion path;
 4. evidence has no persistent, versioned claim-to-tile mapping;
 5. no evaluator consumes a canonical memory version.
 
@@ -144,20 +151,37 @@ The v1/v2 comparison found:
 
 Claim Memory v1 replayed the same 12 histories and found:
 
-- 0 semantic claim slots, variants, occurrences, or relation candidates;
+- 3 explicit mission slots, 3 variants, and 3 occurrences recovered from 3 of
+  32 eligible immutable v1 reports;
+- Robin's duplicate web/Exa capture collapsed to one occurrence;
+- 2 current variants and one older Vercel variant marked `not_reacquired`;
+- 0 relation candidates;
 - 184 structural metadata rows correctly ignored as semantic identity:
   168 visual-tile rows and 16 `checked_block` rows;
-- 20/20 controlled executable invariants passed, including the Claim Memory
-  and reconciliation invariants.
+- 22/22 controlled executable invariants passed, including the Claim Memory,
+  reconciliation, claim-slot producer, and historical-backfill invariants.
+
+The separate claim-relation review set contains:
+
+- 13 frozen cases: 10 controlled and 3 derived from immutable history;
+- 0 attributable human reviews and 13 pending reviews;
+- 3 predicted replacement cases, 2 predicted coexistence cases, and 8
+  predicted no-relation cases;
+- 3 real-history cases but 0 observed real replacements;
+- enforced metrics for false replacement, missed replacement, precision,
+  recall, and exact agreement;
+- a fail-closed promotion result even if controlled cases pass, until reviewed
+  real replacements are added under a new dataset version.
 
 Verdict: `foundation_supported_promotion_blocked`.
 
-This result validates only the identity-memory foundation and the removal of a
-specific v1 false-change mechanism. The controlled explicit-claim probe proves
-that the relation-proposal mechanism exists, but the real corpus cannot measure
-semantic-change recall because it has no stable semantic claim slots. It does
-does not validate canonical claim promotion, memory scoring, or production
-real-change detection.
+This result validates only the identity-memory foundation, explicit evidence
+reuse, and the removal of a specific v1 false-change mechanism. The controlled
+explicit-claim probe proves that the relation-proposal mechanism exists, but
+the real corpus still cannot measure semantic-change recall because none of
+its three recovered slots contains multiple historical variants. It does not
+validate canonical claim promotion, memory scoring, or production real-change
+detection.
 
 ## Promotion gates
 
@@ -204,8 +228,9 @@ paraphrase recall.
 The separate claim-reconciliation journal now provides the same append-only,
 idempotent, optimistic-concurrency and revocation guarantees for stable
 relation candidates. Controlled acceptance remains non-authoritative. Claim
-promotion is still blocked because no reviewed policy or real semantic-slot
-corpus establishes acceptable false-replacement and missed-change rates.
+promotion is still blocked. The frozen relation set makes false-replacement
+and missed-change metrics executable, but no decisions are attributable and
+the corpus contains no real replacement examples.
 
 ### Gate 2 — tile evidence ledger
 

@@ -36,6 +36,9 @@ from src.services.scanner_evidence_comparison import (
     MATERIAL_SOURCE_CLASSES,
     build_evidence_snapshot,
 )
+from src.sv9_flow.claim_slot_producer import (
+    resolve_candidate_claim_memory_evidence,
+)
 
 
 EVIDENCE_MEMORY_IDENTITY_V2_VERSION = "evidence-memory-identity-v2"
@@ -657,8 +660,20 @@ def _evidence_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
     flow = raw.get("flow") if isinstance(raw.get("flow"), dict) else {}
     candidate = flow.get("candidate") if isinstance(flow.get("candidate"), dict) else {}
     pack = candidate.get("evidence_pack") if isinstance(candidate.get("evidence_pack"), dict) else {}
-    rows = pack.get("evidence") if isinstance(pack.get("evidence"), list) else []
-    return [row for row in rows if isinstance(row, dict)]
+    evidence_rows = (
+        pack.get("evidence")
+        if isinstance(pack.get("evidence"), list)
+        else []
+    )
+    resolution = resolve_candidate_claim_memory_evidence(candidate)
+    claim_rows = resolution.get("records")
+    if not isinstance(claim_rows, list):
+        claim_rows = []
+    return [
+        row
+        for row in [*evidence_rows, *claim_rows]
+        if isinstance(row, dict)
+    ]
 
 
 def _infer_source_class(source: str, evidence_type: str) -> str:

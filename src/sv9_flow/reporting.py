@@ -26,6 +26,9 @@ def build_flow_report(candidate: Sv9FlowCandidate) -> dict[str, Any]:
         "url": candidate.evidence_pack.url,
         "counts": {
             "evidence_records": len(candidate.evidence_pack.evidence),
+            "claim_memory_evidence_records": len(
+                candidate.claim_memory_evidence
+            ),
             "interpretation_blocks": len(candidate.interpretation.blocks),
             "tile_signals": len(signals),
             "limitations": len(candidate.limitations),

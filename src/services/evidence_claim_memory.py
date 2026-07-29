@@ -24,10 +24,14 @@ from src.services.evidence_memory_identity_v2 import (
     build_evidence_memory_identity_v2,
 )
 from src.services.scanner_evidence_comparison import MATERIAL_SOURCE_CLASSES
+from src.sv9_flow.claim_slot_producer import (
+    HISTORICAL_CLAIM_BACKFILL_VERSION,
+    resolve_candidate_claim_memory_evidence,
+)
 
 
 EVIDENCE_CLAIM_MEMORY_VERSION = "evidence-claim-memory-v1"
-EVIDENCE_CLAIM_MEMORY_POLICY_VERSION = "evidence-claim-memory-policy-v2"
+EVIDENCE_CLAIM_MEMORY_POLICY_VERSION = "evidence-claim-memory-policy-v4"
 _SLOT_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,199}$")
 
 
@@ -68,6 +72,9 @@ def build_evidence_claim_memory(
             "checked_block_is_semantic_claim_slot": False,
             "explicit_stable_slot_declaration_required": True,
             "legacy_claim_id_requires_stable_semantics": True,
+            "shadow_producer_lane_affects_runtime": False,
+            "historical_backfill_mutates_reports": False,
+            "persisted_claim_lane_precedes_backfill": True,
         },
         "warnings": [
             "shadow_only_no_scoring_or_selection_effect",
@@ -76,7 +83,20 @@ def build_evidence_claim_memory(
             "accepted_relation_does_not_choose_a_canonical_claim",
             "bare_claim_id_is_not_a_longitudinal_slot",
             "raw_claim_text_is_not_returned",
+            "historical_backfill_is_derived_not_persisted",
         ],
+        "claim_slot_producer": {
+            "historical_backfill_version": (
+                HISTORICAL_CLAIM_BACKFILL_VERSION
+            ),
+            "eligible_legacy_candidate_schema_versions": [
+                "sv9-flow-candidate-v1"
+            ],
+            "resolution_mode_counts": {},
+            "mutates_reports": False,
+            "runtime_effect": False,
+            "authority": False,
+        },
         "summary": _empty_summary(),
         "slots": [],
         "variants": [],
@@ -106,11 +126,25 @@ def build_evidence_claim_memory(
     slot_accumulators: dict[str, dict[str, Any]] = {}
     ignored_reason_counts: Counter[str] = Counter()
     ignored_bare_claim_ids: set[str] = set()
+    derivation_mode_counts: Counter[str] = Counter()
+    producer_version_counts: Counter[str] = Counter()
+    resolution_mode_counts: Counter[str] = Counter()
+    historical_backfill_report_count = 0
+    historical_backfill_report_with_claims_count = 0
 
     for report in ordered:
         report_id = str(report.get("id") or "")
         observed_at = _timestamp(report.get("created_at")).isoformat()
-        for row in _evidence_rows(report):
+        evidence_rows, resolution = _evidence_rows(report)
+        resolution_mode = str(
+            resolution.get("derivation_mode") or "unknown"
+        )
+        resolution_mode_counts[resolution_mode] += 1
+        if resolution_mode == "historical_backfill":
+            historical_backfill_report_count += 1
+            if int(resolution.get("record_count") or 0) > 0:
+                historical_backfill_report_with_claims_count += 1
+        for row in evidence_rows:
             metadata = (
                 row.get("metadata")
                 if isinstance(row.get("metadata"), dict)
@@ -172,6 +206,16 @@ def build_evidence_claim_memory(
             if evidence_entry is None:
                 ignored_reason_counts["evidence_identity_not_projected"] += 1
                 continue
+            derivation_mode = str(
+                metadata.get("claim_slot_derivation_mode")
+                or "upstream_explicit"
+            )
+            producer_version = str(
+                metadata.get("claim_slot_producer_version")
+                or "upstream_unknown"
+            )
+            derivation_mode_counts[derivation_mode] += 1
+            producer_version_counts[producer_version] += 1
             entity_scope = _entity_scope(metadata, brand_domain=brand_domain)
             claim_type = _claim_type(metadata)
             claim_slot_id = stable_artifact_digest(
@@ -209,6 +253,11 @@ def build_evidence_claim_memory(
                     "observed_at": observed_at,
                     "present_in_latest": report_id == latest_report_id,
                     "duplicate_ref_count": 0,
+                    "claim_slot_derivation_mode": derivation_mode,
+                    "claim_slot_producer_version": producer_version,
+                    "source_evidence_ref": str(
+                        metadata.get("source_evidence_ref") or ""
+                    ),
                 },
             )
             occurrence["duplicate_ref_count"] += 1
@@ -226,6 +275,8 @@ def build_evidence_claim_memory(
                     "identity_statuses": set(),
                     "adjudication_states": set(),
                     "source_classes": set(),
+                    "claim_slot_derivation_modes": set(),
+                    "claim_slot_producer_versions": set(),
                 },
             )
             variant["evidence_ids"].add(evidence_id)
@@ -239,6 +290,8 @@ def build_evidence_claim_memory(
                 str(evidence_entry.get("adjudication_state") or "proposed")
             )
             variant["source_classes"].add(source_class)
+            variant["claim_slot_derivation_modes"].add(derivation_mode)
+            variant["claim_slot_producer_versions"].add(producer_version)
 
             slot_accumulator = slot_accumulators.setdefault(
                 claim_slot_id,
@@ -252,6 +305,8 @@ def build_evidence_claim_memory(
                     "report_ids": set(),
                     "variant_ids_by_report": defaultdict(set),
                     "observed_at_by_report": {},
+                    "claim_slot_derivation_modes": set(),
+                    "claim_slot_producer_versions": set(),
                 },
             )
             slot_accumulator["claim_types"].add(claim_type)
@@ -261,6 +316,12 @@ def build_evidence_claim_memory(
                 claim_variant_id
             )
             slot_accumulator["observed_at_by_report"][report_id] = observed_at
+            slot_accumulator["claim_slot_derivation_modes"].add(
+                derivation_mode
+            )
+            slot_accumulator["claim_slot_producer_versions"].add(
+                producer_version
+            )
 
     variants = _finalize_variants(
         variant_accumulators,
@@ -294,6 +355,9 @@ def build_evidence_claim_memory(
     result["slots"] = slots
     result["variants"] = variants
     result["occurrences"] = occurrences
+    result["claim_slot_producer"]["resolution_mode_counts"] = dict(
+        sorted(resolution_mode_counts.items())
+    )
     result["summary"] = {
         "claim_slot_count": len(slots),
         "claim_variant_count": len(variants),
@@ -322,6 +386,21 @@ def build_evidence_claim_memory(
                     for slot in slots
                 ).items()
             )
+        ),
+        "claim_slot_derivation_mode_counts": dict(
+            sorted(derivation_mode_counts.items())
+        ),
+        "claim_slot_producer_version_counts": dict(
+            sorted(producer_version_counts.items())
+        ),
+        "historical_backfill_report_count": (
+            historical_backfill_report_count
+        ),
+        "historical_backfill_report_with_claims_count": (
+            historical_backfill_report_with_claims_count
+        ),
+        "historical_backfill_claim_record_count": (
+            derivation_mode_counts.get("historical_backfill", 0)
         ),
     }
     result = apply_evidence_claim_reconciliations(
@@ -368,6 +447,12 @@ def _finalize_variants(
                     accumulator["adjudication_states"]
                 ),
                 "source_classes": sorted(accumulator["source_classes"]),
+                "claim_slot_derivation_modes": sorted(
+                    accumulator["claim_slot_derivation_modes"]
+                ),
+                "claim_slot_producer_versions": sorted(
+                    accumulator["claim_slot_producer_versions"]
+                ),
                 "runtime_effect": False,
                 "authority": False,
             }
@@ -428,6 +513,12 @@ def _finalize_slots(
                 "report_ids": sorted(accumulator["report_ids"]),
                 "variant_timeline": variant_timeline,
                 "relation_candidates": relation_candidates,
+                "claim_slot_derivation_modes": sorted(
+                    accumulator["claim_slot_derivation_modes"]
+                ),
+                "claim_slot_producer_versions": sorted(
+                    accumulator["claim_slot_producer_versions"]
+                ),
                 "requires_human_review": (
                     bool(relation_candidates) or claim_type_conflict
                 ),
@@ -567,7 +658,9 @@ def _claim_type(metadata: dict[str, Any]) -> str:
     return value[:100] if value else "unknown"
 
 
-def _evidence_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
+def _evidence_rows(
+    report: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     raw = report.get("raw") if isinstance(report.get("raw"), dict) else {}
     flow = raw.get("flow") if isinstance(raw.get("flow"), dict) else {}
     candidate = (
@@ -580,12 +673,23 @@ def _evidence_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(candidate.get("evidence_pack"), dict)
         else {}
     )
-    rows = (
+    evidence_rows = (
         pack.get("evidence")
         if isinstance(pack.get("evidence"), list)
         else []
     )
-    return [row for row in rows if isinstance(row, dict)]
+    resolution = resolve_candidate_claim_memory_evidence(candidate)
+    claim_rows = resolution.get("records")
+    if not isinstance(claim_rows, list):
+        claim_rows = []
+    return (
+        [
+            row
+            for row in [*evidence_rows, *claim_rows]
+            if isinstance(row, dict)
+        ],
+        resolution,
+    )
 
 
 def _infer_source_class(source: str, evidence_type: str) -> str:
@@ -660,6 +764,11 @@ def _empty_summary() -> dict[str, Any]:
         "ignored_claim_reason_counts": {},
         "ignored_bare_claim_id_count": 0,
         "claim_slot_method_counts": {},
+        "claim_slot_derivation_mode_counts": {},
+        "claim_slot_producer_version_counts": {},
+        "historical_backfill_report_count": 0,
+        "historical_backfill_report_with_claims_count": 0,
+        "historical_backfill_claim_record_count": 0,
     }
 
 
@@ -671,6 +780,7 @@ def _state_fingerprint(payload: dict[str, Any]) -> str:
             "mode": payload["mode"],
             "brand": payload["brand"],
             "latest_report_id": payload["latest_report_id"],
+            "claim_slot_producer": payload["claim_slot_producer"],
             "claim_reconciliation": payload["claim_reconciliation"],
             "summary": payload["summary"],
             "slots": payload["slots"],

@@ -18,15 +18,27 @@ from src.external_identity_provenance import (
     build_external_identity_provenance,
 )
 from src.services.evidence_claim_memory import build_evidence_claim_memory
+from src.services.evidence_claim_relation_gold_set import (
+    DEFAULT_GOLD_ROOT as CLAIM_RELATION_GOLD_ROOT,
+    EVIDENCE_CLAIM_RELATION_GOLD_DATASET_VERSION,
+    EVIDENCE_CLAIM_RELATION_GOLD_SCHEMA_VERSION,
+    EvidenceClaimRelationGoldSetError,
+    evaluate_claim_relation_gold_set,
+    load_gold_candidates as load_claim_relation_gold_candidates,
+    load_gold_manifest as load_claim_relation_gold_manifest,
+    load_gold_reviews as load_claim_relation_gold_reviews,
+)
 from src.services.evidence_memory_identity_v2 import (
     build_evidence_memory_identity_v2,
 )
 from src.services.evidence_ledger_shadow import build_evidence_ledger_shadow
 from src.services.scanner_evidence_comparison import canonical_evidence_records
+from src.sv9_flow.claim_slot_producer import build_claim_memory_evidence
+from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
 
 
 EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v2"
-EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v3"
+EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v6"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 
 
@@ -40,7 +52,10 @@ def run_evidence_memory_stress(
         for domain, reports in (histories or {}).items()
         if str(domain).strip()
     }
-    controlled = _controlled_probes()
+    claim_relation_gold_set = _claim_relation_gold_set_status()
+    controlled = _controlled_probes(
+        claim_relation_gold_set=claim_relation_gold_set
+    )
     replay = _replay_real_histories(normalized_histories)
     identity_v2_replay = _replay_identity_v2(normalized_histories)
     claim_memory_replay = _replay_claim_memory(normalized_histories)
@@ -100,6 +115,25 @@ def run_evidence_memory_stress(
             "claim_relation_candidate_count": claim_memory_replay["summary"][
                 "relation_candidate_count"
             ],
+            "historical_backfill_claim_record_count": (
+                claim_memory_replay["summary"][
+                    "historical_backfill_claim_record_count"
+                ]
+            ),
+            "claim_relation_gold_candidate_count": (
+                claim_relation_gold_set["summary"]["candidate_count"]
+            ),
+            "claim_relation_gold_reviewed_count": (
+                claim_relation_gold_set["summary"]["reviewed_count"]
+            ),
+            "claim_relation_gold_pending_count": (
+                claim_relation_gold_set["summary"]["pending_count"]
+            ),
+            "claim_relation_gold_reviewed_real_replacement_count": (
+                claim_relation_gold_set["summary"][
+                    "reviewed_real_replacement_count"
+                ]
+            ),
         },
         "executable_failures": executable_failures,
         "promotion_blockers": promotion_blockers,
@@ -107,6 +141,7 @@ def run_evidence_memory_stress(
         "real_history_replay": replay,
         "identity_v2_replay": identity_v2_replay,
         "claim_memory_replay": claim_memory_replay,
+        "claim_relation_gold_set": claim_relation_gold_set,
         "interpretation": {
             "supported": (
                 "Evidence identities can be remembered deterministically across "
@@ -115,11 +150,50 @@ def run_evidence_memory_stress(
             "not_yet_supported": (
                 "Claim Memory can only propose coexistence or replacement relations; "
                 "it cannot adjudicate a canonical claim, map stable evidence to tiles, "
-                "complete pending human identity reviews, or produce a versioned "
-                "memory score."
+                "complete pending identity and claim-relation reviews, validate real "
+                "replacement recall, or produce a versioned memory score."
             ),
         },
     }
+
+
+def _claim_relation_gold_set_status() -> dict[str, Any]:
+    try:
+        return evaluate_claim_relation_gold_set(
+            load_claim_relation_gold_candidates(),
+            load_claim_relation_gold_reviews(
+                CLAIM_RELATION_GOLD_ROOT / "reviews.jsonl"
+            ),
+            manifest=load_claim_relation_gold_manifest(),
+        )
+    except EvidenceClaimRelationGoldSetError:
+        return {
+            "schema_version": (
+                EVIDENCE_CLAIM_RELATION_GOLD_SCHEMA_VERSION
+            ),
+            "dataset_version": (
+                EVIDENCE_CLAIM_RELATION_GOLD_DATASET_VERSION
+            ),
+            "runtime_effect": False,
+            "authority": False,
+            "promotion_ready": False,
+            "promotion_blockers": [
+                "claim_relation_gold_set_unavailable"
+            ],
+            "summary": {
+                "candidate_count": 0,
+                "reviewed_count": 0,
+                "pending_count": 0,
+                "false_replacement_count": 0,
+                "missed_replacement_count": 0,
+                "candidate_prediction_counts": {},
+                "candidate_predicted_replacement_count": 0,
+                "reviewed_predicted_replacement_count": 0,
+                "reviewed_real_replacement_count": 0,
+            },
+            "pending_case_ids": [],
+            "evaluated": [],
+        }
 
 
 def render_evidence_memory_stress_markdown(report: dict[str, Any]) -> str:
@@ -262,6 +336,7 @@ def render_evidence_memory_stress_markdown(report: dict[str, Any]) -> str:
             f"- Claim variants: `{claim_summary.get('claim_variant_count', 0)}`",
             f"- Claim occurrences: `{claim_summary.get('claim_occurrence_count', 0)}`",
             f"- Proposed relations: `{claim_summary.get('relation_candidate_count', 0)}`",
+            f"- Historical backfill claim records: `{claim_summary.get('historical_backfill_claim_record_count', 0)}`",
             f"- Ignored bare claim IDs: `{claim_summary.get('ignored_bare_claim_id_count', 0)}`",
             f"- Ignored structural metadata rows: `{claim_summary.get('ignored_claim_metadata_count', 0)}`",
             "",
@@ -285,13 +360,35 @@ def render_evidence_memory_stress_markdown(report: dict[str, Any]) -> str:
             )
             + " |"
         )
+    claim_relation_gold = report.get("claim_relation_gold_set") or {}
+    claim_relation_gold_summary = claim_relation_gold.get("summary") or {}
+    lines.extend(
+        [
+            "",
+            "## Claim relation review set",
+            "",
+            f"- Dataset: `{claim_relation_gold.get('dataset_version', 'unknown')}`",
+            f"- Promotion ready: `{str(bool(claim_relation_gold.get('promotion_ready'))).lower()}`",
+            f"- Candidates: `{claim_relation_gold_summary.get('candidate_count', 0)}`",
+            f"- Reviewed: `{claim_relation_gold_summary.get('reviewed_count', 0)}`",
+            f"- Pending: `{claim_relation_gold_summary.get('pending_count', 0)}`",
+            f"- Candidate predictions: `{_format_counts(claim_relation_gold_summary.get('candidate_prediction_counts'))}`",
+            f"- False replacements: `{claim_relation_gold_summary.get('false_replacement_count', 0)}`",
+            f"- Missed replacements: `{claim_relation_gold_summary.get('missed_replacement_count', 0)}`",
+            f"- Reviewed real replacements: `{claim_relation_gold_summary.get('reviewed_real_replacement_count', 0)}`",
+            f"- Blockers: `{_format_counts(Counter(claim_relation_gold.get('promotion_blockers') or []))}`",
+        ]
+    )
     if report.get("promotion_blockers"):
         lines.extend(["", "## Promotion blockers", ""])
         lines.extend(f"- `{blocker}`" for blocker in report["promotion_blockers"])
     return "\n".join(lines) + "\n"
 
 
-def _controlled_probes() -> list[dict[str, Any]]:
+def _controlled_probes(
+    *,
+    claim_relation_gold_set: dict[str, Any],
+) -> list[dict[str, Any]]:
     stable_owned = _evidence(
         ref="web.0",
         source="web",
@@ -629,6 +726,65 @@ def _controlled_probes() -> list[dict[str, Any]]:
     reordered_claim_memory = build_evidence_claim_memory(
         list(reversed(semantic_claim_history))
     )
+    producer_source_records = [
+        EvidenceRecord(
+            ref="web.about",
+            source="web",
+            evidence_type="raw_input",
+            content="# Our Mission\nHelp finance teams close with confidence.",
+            url="https://example.com/about",
+            confidence="high",
+            metadata={"source_class": "owned_copy"},
+        ),
+        EvidenceRecord(
+            ref="web.product",
+            source="web",
+            evidence_type="raw_input",
+            content="# Our Mission\nAutomate treasury operations.",
+            url="https://example.com/products/treasury",
+            confidence="high",
+            metadata={"source_class": "owned_copy"},
+        ),
+    ]
+    producer_pack = BrandEvidencePack(
+        brand_name="Example",
+        url="https://example.com",
+        evidence=producer_source_records,
+    )
+    producer_records = build_claim_memory_evidence(producer_pack)
+    producer_report = _report(
+        "claim-slot-producer",
+        "2026-01-01T00:00:00Z",
+        [record.to_dict() for record in producer_source_records],
+    )
+    producer_report["raw"]["flow"]["candidate"][
+        "claim_memory_evidence"
+    ] = [record.to_dict() for record in producer_records]
+    producer_claim_memory = build_evidence_claim_memory([producer_report])
+    historical_backfill_report = _report(
+        "historical-claim-backfill",
+        "2026-01-01T00:00:00Z",
+        [
+            _evidence(
+                ref="web.about",
+                source="web",
+                source_class="owned_copy",
+                evidence_type="raw_input",
+                url="https://example.com/about",
+                content=(
+                    "# About\nAt Example, our mission is to make every "
+                    "decision traceable."
+                ),
+            )
+        ],
+    )
+    historical_backfill_report["raw"]["flow"]["candidate"][
+        "schema_version"
+    ] = "sv9-flow-candidate-v1"
+    historical_backfill_before = deepcopy(historical_backfill_report)
+    historical_backfill_memory = build_evidence_claim_memory(
+        [historical_backfill_report]
+    )
 
     return [
         _probe(
@@ -843,6 +999,44 @@ def _controlled_probes() -> list[dict[str, Any]]:
             ),
             "An accepted relation remains reversible review metadata and never selects a canonical claim.",
         ),
+        _probe(
+            "claim_slot_producer_is_explicit_scoped_and_shadow_only",
+            (
+                len(producer_records) == 1
+                and producer_records[0].metadata["claim_slot_key"]
+                == "mission.primary"
+                and producer_records[0].metadata["source_evidence_ref"]
+                == "web.about"
+                and producer_records[0].metadata["runtime_effect"] is False
+                and producer_records[0].metadata["authority"] is False
+                and producer_claim_memory["summary"]["claim_slot_count"]
+                == 1
+                and producer_claim_memory["runtime_effect"] is False
+                and producer_claim_memory["authority"] is False
+            ),
+            "The producer accepts an explicit corporate mission, rejects an unscoped product mission, and remains shadow-only.",
+        ),
+        _probe(
+            "historical_claim_backfill_reuses_v1_evidence_without_mutation",
+            (
+                historical_backfill_report == historical_backfill_before
+                and historical_backfill_memory["summary"][
+                    "claim_slot_count"
+                ]
+                == 1
+                and historical_backfill_memory["summary"][
+                    "historical_backfill_claim_record_count"
+                ]
+                == 1
+                and historical_backfill_memory["claim_slot_producer"][
+                    "mutates_reports"
+                ]
+                is False
+                and historical_backfill_memory["runtime_effect"] is False
+                and historical_backfill_memory["authority"] is False
+            ),
+            "A v1 candidate is reprojected from immutable evidence without editing its report or gaining runtime authority.",
+        ),
         {
             "id": "identity_gold_set_pending_human_review",
             "kind": "promotion_blocker",
@@ -878,12 +1072,15 @@ def _controlled_probes() -> list[dict[str, Any]]:
             "status": "blocked",
             "observation": (
                 "The append-only journal can accept, dispute, reject, supersede, and "
-                "revoke relation decisions without authority. No reviewed policy yet "
-                "turns those decisions into a canonical claim version."
+                "revoke relation decisions without authority. The frozen relation set "
+                f"has {claim_relation_gold_set['summary']['candidate_count']} cases, "
+                f"{claim_relation_gold_set['summary']['pending_count']} pending reviews, "
+                "and no reviewed real replacement. No reviewed policy yet turns those "
+                "decisions into a canonical claim version."
             ),
             "required_capability": (
-                "reviewed canonical-claim promotion policy with measured false "
-                "replacement and missed-change rates"
+                "complete relation reviews, add reviewed real replacements, and adopt "
+                "a canonical-claim policy only after precision and recall pass"
             ),
         },
         {
@@ -1186,12 +1383,17 @@ def _replay_claim_memory(
         "relation_candidate_count",
         "ignored_claim_metadata_count",
         "ignored_bare_claim_id_count",
+        "historical_backfill_report_count",
+        "historical_backfill_report_with_claims_count",
+        "historical_backfill_claim_record_count",
     )
     rows: list[dict[str, Any]] = []
     totals = Counter()
     relation_totals = Counter()
     ignored_reason_totals = Counter()
     slot_method_totals = Counter()
+    derivation_mode_totals = Counter()
+    producer_version_totals = Counter()
     for domain, reports in sorted(histories.items()):
         if not reports:
             continue
@@ -1213,6 +1415,12 @@ def _replay_claim_memory(
             "claim_slot_method_counts": dict(
                 summary["claim_slot_method_counts"]
             ),
+            "claim_slot_derivation_mode_counts": dict(
+                summary["claim_slot_derivation_mode_counts"]
+            ),
+            "claim_slot_producer_version_counts": dict(
+                summary["claim_slot_producer_version_counts"]
+            ),
         }
         rows.append(row)
         for key in metric_keys:
@@ -1220,6 +1428,12 @@ def _replay_claim_memory(
         relation_totals.update(row["relation_candidate_counts"])
         ignored_reason_totals.update(row["ignored_claim_reason_counts"])
         slot_method_totals.update(row["claim_slot_method_counts"])
+        derivation_mode_totals.update(
+            row["claim_slot_derivation_mode_counts"]
+        )
+        producer_version_totals.update(
+            row["claim_slot_producer_version_counts"]
+        )
     return {
         "schema_version": "evidence-claim-memory-v1-replay-v1",
         "runtime_effect": False,
@@ -1235,6 +1449,12 @@ def _replay_claim_memory(
             ),
             "claim_slot_method_counts": dict(
                 sorted(slot_method_totals.items())
+            ),
+            "claim_slot_derivation_mode_counts": dict(
+                sorted(derivation_mode_totals.items())
+            ),
+            "claim_slot_producer_version_counts": dict(
+                sorted(producer_version_totals.items())
             ),
         },
         "histories": rows,

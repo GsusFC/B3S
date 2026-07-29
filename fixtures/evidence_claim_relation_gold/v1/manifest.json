@@ -1,0 +1,42 @@
+{
+  "schema_version": "evidence-claim-relation-gold-v1",
+  "dataset_version": "evidence-claim-relation-gold-2026-07-v1",
+  "candidate_fingerprint": "8bd4e0ce54985621783c78ea8dfd231cdf99dc703c58980dc404242f347fe0fe",
+  "status": "candidate_set_pending_human_review",
+  "reviewer_mode": "single_server_configured_reviewer",
+  "decision_semantics": {
+    "replacement": "A later claim variant semantically replaces an earlier variant in the same stable slot.",
+    "coexistence": "The variants are simultaneously valid within the same stable slot.",
+    "no_relation": "The observations do not justify replacement or coexistence.",
+    "disputed": "The available evidence cannot safely resolve the relation."
+  },
+  "promotion_thresholds": {
+    "replacement_precision": 1.0,
+    "replacement_recall": 0.8,
+    "exact_agreement": 0.8,
+    "critical_false_replacement_count": 0,
+    "review_completion": 1.0,
+    "minimum_reviewed_real_history_cases": 5,
+    "minimum_reviewed_real_replacements": 3
+  },
+  "required_case_types": [
+    "stable_repeat",
+    "sequential_replacement",
+    "simultaneous_coexistence",
+    "disappearance",
+    "source_relocation",
+    "claim_type_conflict",
+    "reacquisition",
+    "multi_step_replacement",
+    "coexistence_then_narrowing",
+    "multi_slot_replacement",
+    "real_history_no_relation"
+  ],
+  "notes": [
+    "Candidate proposed decisions are drafting aids, not human labels.",
+    "reviews.jsonl is intentionally absent until the configured reviewer completes it.",
+    "The three real-history cases contain no observed replacement.",
+    "Promotion remains blocked even after controlled reviews until reviewed real replacements exist.",
+    "No result from this dataset has scoring or canonical-selection authority."
+  ]
+}
