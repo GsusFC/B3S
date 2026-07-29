@@ -78,7 +78,10 @@ replaces another. It does not:
 - update a tile, report, canonical scan selection, or score.
 
 Promotion requires a separate reviewed policy and a semantic-slot corpus that
-measures false replacement and missed real changes.
+measures false replacement and missed real changes. The frozen relation review
+set now makes those metrics executable, but its 13 cases remain unreviewed and
+its three real-history cases contain no observed replacement. See
+[`evidence_claim_relation_gold_set_v1.md`](evidence_claim_relation_gold_set_v1.md).
 
 ## Validation limitation
 

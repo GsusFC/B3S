@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import src.services.evidence_memory_stress as stress_module
+from src.services.evidence_claim_relation_gold_set import (
+    EvidenceClaimRelationGoldSetError,
+)
 from src.services.evidence_memory_stress import (
     render_evidence_memory_stress_markdown,
     run_evidence_memory_stress,
@@ -17,8 +21,18 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["promotion_ready"] is False
     assert report["executable_failures"] == []
     assert report["schema_version"] == "evidence-memory-stress-v2"
+    assert report["policy_version"] == "evidence-memory-stress-policy-v6"
     assert report["summary"]["executable_invariant_count"] == 22
     assert report["summary"]["promotion_blocker_count"] == 5
+    assert report["summary"]["claim_relation_gold_candidate_count"] == 13
+    assert report["summary"]["claim_relation_gold_reviewed_count"] == 0
+    assert report["summary"]["claim_relation_gold_pending_count"] == 13
+    assert (
+        report["summary"][
+            "claim_relation_gold_reviewed_real_replacement_count"
+        ]
+        == 0
+    )
     assert all(
         probe["status"] == "pass"
         for probe in probes.values()
@@ -84,6 +98,29 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
     assert probes[
         "historical_claim_backfill_reuses_v1_evidence_without_mutation"
     ]["status"] == "pass"
+    claim_relation = probes["changed_claim_has_no_canonical_resolution"]
+    assert "13 cases" in claim_relation["observation"]
+    assert "13 pending reviews" in claim_relation["observation"]
+    assert "real replacements" in claim_relation["required_capability"]
+
+
+def test_missing_claim_relation_fixture_fails_closed(monkeypatch) -> None:
+    def _missing_candidates() -> list[dict]:
+        raise EvidenceClaimRelationGoldSetError("missing fixture")
+
+    monkeypatch.setattr(
+        stress_module,
+        "load_claim_relation_gold_candidates",
+        _missing_candidates,
+    )
+
+    report = run_evidence_memory_stress({})
+
+    assert report["summary"]["claim_relation_gold_candidate_count"] == 0
+    assert report["claim_relation_gold_set"]["promotion_ready"] is False
+    assert report["claim_relation_gold_set"]["promotion_blockers"] == [
+        "claim_relation_gold_set_unavailable"
+    ]
 
 
 def test_real_history_replay_checks_invariants_without_mutating_reports() -> None:
@@ -240,6 +277,9 @@ def test_markdown_distinguishes_passes_from_promotion_blockers() -> None:
     assert "## Controlled probes" in rendered
     assert "## Identity v2 comparison" in rendered
     assert "## Claim Memory v1 replay" in rendered
+    assert "## Claim relation review set" in rendered
+    assert "Candidates: `13`" in rendered
+    assert "Pending: `13`" in rendered
     assert "## Locator pressure" not in rendered
     assert "## Promotion blockers" in rendered
     assert "no_versioned_memory_evaluator" in rendered

@@ -50,6 +50,10 @@ This proves reuse, not semantic-change recall. There are no repeated historical
 variants for the recovered slots, so the corpus still cannot measure false
 replacement or missed real change.
 
+The recovered cases are frozen into the non-authoritative relation review set
+described in
+[`evidence_claim_relation_gold_set_v1.md`](evidence_claim_relation_gold_set_v1.md).
+
 ## Safety boundary
 
 The backfill does not:
