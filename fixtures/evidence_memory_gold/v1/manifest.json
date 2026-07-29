@@ -2,7 +2,7 @@
   "schema_version": "evidence-identity-gold-v1",
   "dataset_version": "evidence-identity-gold-2026-07-v1",
   "candidate_fingerprint": "49078a0f5789914d2e7963e6242d07e892fd1d4983558162b2738bbb2f4a1eb6",
-  "status": "candidate_set_pending_human_review",
+  "status": "reviewed_promotion_blocked",
   "reviewer_mode": "single_server_configured_reviewer",
   "decision_semantics": {
     "accepted": "The evidence refers to the scanned brand.",
@@ -30,7 +30,8 @@
   ],
   "notes": [
     "Candidate proposed decisions are not human labels.",
-    "reviews.jsonl is intentionally absent until the configured reviewer completes it.",
+    "The configured reviewer completed all 14 decisions on 2026-07-29.",
+    "Accepted precision and recall pass, but exact agreement is below the frozen threshold.",
     "No result from this dataset has scoring or canonical-selection authority."
   ]
 }

@@ -5,6 +5,7 @@ from copy import deepcopy
 import pytest
 
 from src.services.evidence_identity_gold_set import (
+    DEFAULT_GOLD_ROOT,
     EVIDENCE_IDENTITY_GOLD_DATASET_VERSION,
     EVIDENCE_IDENTITY_GOLD_SCHEMA_VERSION,
     EvidenceIdentityGoldSetError,
@@ -13,9 +14,31 @@ from src.services.evidence_identity_gold_set import (
     gold_candidate_fingerprint,
     load_gold_candidates,
     load_gold_manifest,
+    load_gold_reviews,
     predict_identity_disposition,
     render_identity_gold_set_markdown,
 )
+
+
+def test_committed_human_reviews_are_complete_but_miss_agreement_gate() -> None:
+    result = evaluate_identity_gold_set(
+        load_gold_candidates(),
+        load_gold_reviews(DEFAULT_GOLD_ROOT / "reviews.jsonl"),
+        manifest=load_gold_manifest(),
+    )
+
+    assert result["runtime_effect"] is False
+    assert result["authority"] is False
+    assert result["summary"]["reviewed_count"] == 14
+    assert result["summary"]["pending_count"] == 0
+    assert result["summary"]["critical_false_accept_count"] == 0
+    assert result["summary"]["accepted_precision"] == 1.0
+    assert result["summary"]["accepted_recall"] == 1.0
+    assert result["summary"]["exact_agreement_rate"] == 0.785714
+    assert result["promotion_ready"] is False
+    assert result["promotion_blockers"] == [
+        "exact_agreement_below_threshold"
+    ]
 
 
 def test_versioned_candidate_set_covers_required_identity_risks() -> None:

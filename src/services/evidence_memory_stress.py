@@ -31,6 +31,16 @@ from src.services.evidence_claim_relation_gold_set import (
 from src.services.evidence_claim_tile_ledger import (
     build_evidence_claim_tile_ledger,
 )
+from src.services.evidence_identity_gold_set import (
+    DEFAULT_GOLD_ROOT as IDENTITY_GOLD_ROOT,
+    EVIDENCE_IDENTITY_GOLD_DATASET_VERSION,
+    EVIDENCE_IDENTITY_GOLD_SCHEMA_VERSION,
+    EvidenceIdentityGoldSetError,
+    evaluate_identity_gold_set,
+    load_gold_candidates as load_identity_gold_candidates,
+    load_gold_manifest as load_identity_gold_manifest,
+    load_gold_reviews as load_identity_gold_reviews,
+)
 from src.services.evidence_memory_identity_v2 import (
     build_evidence_memory_identity_v2,
 )
@@ -55,8 +65,10 @@ def run_evidence_memory_stress(
         for domain, reports in (histories or {}).items()
         if str(domain).strip()
     }
+    identity_gold_set = _identity_gold_set_status()
     claim_relation_gold_set = _claim_relation_gold_set_status()
     controlled = _controlled_probes(
+        identity_gold_set=identity_gold_set,
         claim_relation_gold_set=claim_relation_gold_set
     )
     replay = _replay_real_histories(normalized_histories)
@@ -149,6 +161,23 @@ def run_evidence_memory_stress(
                     "reviewed_real_replacement_count"
                 ]
             ),
+            "identity_gold_candidate_count": (
+                identity_gold_set["summary"]["candidate_count"]
+            ),
+            "identity_gold_reviewed_count": (
+                identity_gold_set["summary"]["reviewed_count"]
+            ),
+            "identity_gold_pending_count": (
+                identity_gold_set["summary"]["pending_count"]
+            ),
+            "identity_gold_exact_agreement_rate": (
+                identity_gold_set["summary"]["exact_agreement_rate"]
+            ),
+            "identity_gold_critical_false_accept_count": (
+                identity_gold_set["summary"][
+                    "critical_false_accept_count"
+                ]
+            ),
         },
         "executable_failures": executable_failures,
         "promotion_blockers": promotion_blockers,
@@ -157,6 +186,7 @@ def run_evidence_memory_stress(
         "identity_v2_replay": identity_v2_replay,
         "claim_memory_replay": claim_memory_replay,
         "claim_tile_ledger_replay": claim_tile_replay,
+        "identity_gold_set": identity_gold_set,
         "claim_relation_gold_set": claim_relation_gold_set,
         "interpretation": {
             "supported": (
@@ -167,12 +197,51 @@ def run_evidence_memory_stress(
                 "Claim Memory can only propose coexistence or replacement relations; "
                 "it cannot adjudicate a canonical claim. The versioned claim-to-tile "
                 "ledger remains shadow-only and has no reviewed promotion policy. "
-                "Pending identity, source, and claim-relation reviews remain incomplete, "
-                "real replacement recall is unvalidated, and no versioned memory score "
-                "exists."
+                "Identity review is complete but exact agreement misses its frozen "
+                "threshold. Source review is incomplete, real replacement recall is "
+                "unvalidated, and no versioned memory score exists."
             ),
         },
     }
+
+
+def _identity_gold_set_status() -> dict[str, Any]:
+    try:
+        return evaluate_identity_gold_set(
+            load_identity_gold_candidates(),
+            load_identity_gold_reviews(
+                IDENTITY_GOLD_ROOT / "reviews.jsonl"
+            ),
+            manifest=load_identity_gold_manifest(),
+        )
+    except EvidenceIdentityGoldSetError:
+        return {
+            "schema_version": EVIDENCE_IDENTITY_GOLD_SCHEMA_VERSION,
+            "dataset_version": EVIDENCE_IDENTITY_GOLD_DATASET_VERSION,
+            "runtime_effect": False,
+            "authority": False,
+            "promotion_ready": False,
+            "promotion_blockers": [
+                "identity_gold_set_unavailable"
+            ],
+            "summary": {
+                "candidate_count": 0,
+                "reviewed_count": 0,
+                "pending_count": 0,
+                "critical_false_accept_count": 0,
+                "predicted_accept_count": 0,
+                "reviewed_accept_count": 0,
+                "correct_accept_count": 0,
+                "accepted_precision": None,
+                "accepted_recall": None,
+                "exact_agreement_rate": None,
+                "reviewed_slice_counts": {},
+                "confusion": {},
+            },
+            "pending_case_ids": [],
+            "critical_false_accept_case_ids": [],
+            "evaluated": [],
+        }
 
 
 def _claim_relation_gold_set_status() -> dict[str, Any]:
@@ -208,6 +277,7 @@ def _claim_relation_gold_set_status() -> dict[str, Any]:
                 "candidate_predicted_replacement_count": 0,
                 "reviewed_predicted_replacement_count": 0,
                 "reviewed_real_replacement_count": 0,
+                "exact_agreement_rate": None,
             },
             "pending_case_ids": [],
             "evaluated": [],
@@ -411,6 +481,25 @@ def render_evidence_memory_stress_markdown(report: dict[str, Any]) -> str:
             )
             + " |"
         )
+    identity_gold = report.get("identity_gold_set") or {}
+    identity_gold_summary = identity_gold.get("summary") or {}
+    lines.extend(
+        [
+            "",
+            "## Identity review set",
+            "",
+            f"- Dataset: `{identity_gold.get('dataset_version', 'unknown')}`",
+            f"- Promotion ready: `{str(bool(identity_gold.get('promotion_ready'))).lower()}`",
+            f"- Candidates: `{identity_gold_summary.get('candidate_count', 0)}`",
+            f"- Reviewed: `{identity_gold_summary.get('reviewed_count', 0)}`",
+            f"- Pending: `{identity_gold_summary.get('pending_count', 0)}`",
+            f"- Critical false accepts: `{identity_gold_summary.get('critical_false_accept_count', 0)}`",
+            f"- Accepted precision: `{identity_gold_summary.get('accepted_precision')}`",
+            f"- Accepted recall: `{identity_gold_summary.get('accepted_recall')}`",
+            f"- Exact agreement: `{identity_gold_summary.get('exact_agreement_rate')}`",
+            f"- Blockers: `{_format_counts(Counter(identity_gold.get('promotion_blockers') or []))}`",
+        ]
+    )
     claim_relation_gold = report.get("claim_relation_gold_set") or {}
     claim_relation_gold_summary = claim_relation_gold.get("summary") or {}
     lines.extend(
@@ -438,6 +527,7 @@ def render_evidence_memory_stress_markdown(report: dict[str, Any]) -> str:
 
 def _controlled_probes(
     *,
+    identity_gold_set: dict[str, Any],
     claim_relation_gold_set: dict[str, Any],
 ) -> list[dict[str, Any]]:
     stable_owned = _evidence(
@@ -1207,17 +1297,22 @@ def _controlled_probes(
             ),
         ),
         {
-            "id": "identity_gold_set_pending_human_review",
+            "id": "identity_gold_set_below_frozen_agreement_threshold",
             "kind": "promotion_blocker",
             "status": "blocked",
             "observation": (
                 f"In v1 a deliberately wrong external item reached `{poison_state}` because "
                 "brand-name identity metadata was trusted twice. V2 blocks eligibility and "
-                "stores reversible decisions under a server-bound reviewer. A 14-case "
-                "versioned candidate set exists, but it has no human review decisions yet."
+                "stores reversible decisions under a server-bound reviewer. The "
+                f"{identity_gold_set['summary']['candidate_count']}-case set is fully "
+                f"reviewed with {identity_gold_set['summary']['critical_false_accept_count']} "
+                "critical false accepts and exact agreement "
+                f"{identity_gold_set['summary']['exact_agreement_rate']}, below the "
+                "frozen 0.8 threshold."
             ),
             "required_capability": (
-                "complete the candidate reviews and satisfy the frozen gold-set thresholds"
+                "revise the deterministic identity policy under a new version and "
+                "re-evaluate the unchanged human labels without weakening thresholds"
             ),
         },
         {
@@ -1244,12 +1339,13 @@ def _controlled_probes(
                 "revoke relation decisions without authority. The frozen relation set "
                 f"has {claim_relation_gold_set['summary']['candidate_count']} cases, "
                 f"{claim_relation_gold_set['summary']['pending_count']} pending reviews, "
+                f"exact agreement {claim_relation_gold_set['summary']['exact_agreement_rate']}, "
                 "and no reviewed real replacement. No reviewed policy yet turns those "
                 "decisions into a canonical claim version."
             ),
             "required_capability": (
-                "complete relation reviews, add reviewed real replacements, and adopt "
-                "a canonical-claim policy only after precision and recall pass"
+                "add reviewed real replacements under a new dataset version and adopt "
+                "a canonical-claim policy only after precision and recall keep passing"
             ),
         },
         {

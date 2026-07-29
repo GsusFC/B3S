@@ -6,6 +6,7 @@ import json
 import pytest
 
 from src.services.evidence_claim_relation_gold_set import (
+    DEFAULT_GOLD_ROOT,
     EVIDENCE_CLAIM_RELATION_GOLD_DATASET_VERSION,
     EVIDENCE_CLAIM_RELATION_GOLD_SCHEMA_VERSION,
     EvidenceClaimRelationGoldSetError,
@@ -14,9 +15,33 @@ from src.services.evidence_claim_relation_gold_set import (
     gold_candidate_fingerprint,
     load_gold_candidates,
     load_gold_manifest,
+    load_gold_reviews,
     predict_claim_relation_disposition,
     render_claim_relation_gold_set_markdown,
 )
+
+
+def test_committed_human_reviews_pass_relation_metrics_but_not_real_gate() -> None:
+    result = evaluate_claim_relation_gold_set(
+        load_gold_candidates(),
+        load_gold_reviews(DEFAULT_GOLD_ROOT / "reviews.jsonl"),
+        manifest=load_gold_manifest(),
+    )
+
+    assert result["runtime_effect"] is False
+    assert result["authority"] is False
+    assert result["summary"]["reviewed_count"] == 13
+    assert result["summary"]["pending_count"] == 0
+    assert result["summary"]["false_replacement_count"] == 0
+    assert result["summary"]["missed_replacement_count"] == 0
+    assert result["summary"]["replacement_precision"] == 1.0
+    assert result["summary"]["replacement_recall"] == 1.0
+    assert result["summary"]["exact_agreement_rate"] == 0.846154
+    assert result["promotion_ready"] is False
+    assert result["promotion_blockers"] == [
+        "insufficient_reviewed_real_history_cases",
+        "insufficient_reviewed_real_replacements",
+    ]
 
 
 def test_versioned_candidate_set_covers_relation_risks_and_real_history() -> None:

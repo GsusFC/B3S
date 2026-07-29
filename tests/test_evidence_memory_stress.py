@@ -6,6 +6,9 @@ import src.services.evidence_memory_stress as stress_module
 from src.services.evidence_claim_relation_gold_set import (
     EvidenceClaimRelationGoldSetError,
 )
+from src.services.evidence_identity_gold_set import (
+    EvidenceIdentityGoldSetError,
+)
 from src.services.evidence_memory_stress import (
     render_evidence_memory_stress_markdown,
     run_evidence_memory_stress,
@@ -25,8 +28,19 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["summary"]["executable_invariant_count"] == 23
     assert report["summary"]["promotion_blocker_count"] == 5
     assert report["summary"]["claim_relation_gold_candidate_count"] == 13
-    assert report["summary"]["claim_relation_gold_reviewed_count"] == 0
-    assert report["summary"]["claim_relation_gold_pending_count"] == 13
+    assert report["summary"]["claim_relation_gold_reviewed_count"] == 13
+    assert report["summary"]["claim_relation_gold_pending_count"] == 0
+    assert report["summary"]["identity_gold_candidate_count"] == 14
+    assert report["summary"]["identity_gold_reviewed_count"] == 14
+    assert report["summary"]["identity_gold_pending_count"] == 0
+    assert (
+        report["summary"]["identity_gold_exact_agreement_rate"]
+        == 0.785714
+    )
+    assert (
+        report["summary"]["identity_gold_critical_false_accept_count"]
+        == 0
+    )
     assert (
         report["summary"][
             "claim_relation_gold_reviewed_real_replacement_count"
@@ -45,14 +59,16 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
     probes = {probe["id"]: probe for probe in report["controlled_probes"]}
 
     poison = probes[
-        "identity_gold_set_pending_human_review"
+        "identity_gold_set_below_frozen_agreement_threshold"
     ]
     source_independence = probes[
         "source_independence_pending_production_review"
     ]
     assert poison["status"] == "blocked"
     assert "`validation_candidate`" in poison["observation"]
-    assert "candidate reviews" in poison["required_capability"]
+    assert "without weakening thresholds" in poison[
+        "required_capability"
+    ]
     assert source_independence["status"] == "blocked"
     assert "no production-reviewed source" in source_independence["observation"]
     assert probes["identity_v2_weak_external_identity_is_not_eligible"][
@@ -111,7 +127,7 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
     ]
     claim_relation = probes["changed_claim_has_no_canonical_resolution"]
     assert "13 cases" in claim_relation["observation"]
-    assert "13 pending reviews" in claim_relation["observation"]
+    assert "0 pending reviews" in claim_relation["observation"]
     assert "real replacements" in claim_relation["required_capability"]
 
 
@@ -131,6 +147,25 @@ def test_missing_claim_relation_fixture_fails_closed(monkeypatch) -> None:
     assert report["claim_relation_gold_set"]["promotion_ready"] is False
     assert report["claim_relation_gold_set"]["promotion_blockers"] == [
         "claim_relation_gold_set_unavailable"
+    ]
+
+
+def test_missing_identity_fixture_fails_closed(monkeypatch) -> None:
+    def _missing_candidates() -> list[dict]:
+        raise EvidenceIdentityGoldSetError("missing fixture")
+
+    monkeypatch.setattr(
+        stress_module,
+        "load_identity_gold_candidates",
+        _missing_candidates,
+    )
+
+    report = run_evidence_memory_stress({})
+
+    assert report["summary"]["identity_gold_candidate_count"] == 0
+    assert report["identity_gold_set"]["promotion_ready"] is False
+    assert report["identity_gold_set"]["promotion_blockers"] == [
+        "identity_gold_set_unavailable"
     ]
 
 
@@ -296,9 +331,10 @@ def test_markdown_distinguishes_passes_from_promotion_blockers() -> None:
     assert "## Identity v2 comparison" in rendered
     assert "## Claim Memory v1 replay" in rendered
     assert "## Evidence → claim → tile ledger replay" in rendered
+    assert "## Identity review set" in rendered
     assert "## Claim relation review set" in rendered
     assert "Candidates: `13`" in rendered
-    assert "Pending: `13`" in rendered
+    assert "Pending: `0`" in rendered
     assert "## Locator pressure" not in rendered
     assert "## Promotion blockers" in rendered
     assert "no_versioned_memory_evaluator" in rendered

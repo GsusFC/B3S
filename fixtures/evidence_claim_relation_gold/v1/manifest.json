@@ -2,7 +2,7 @@
   "schema_version": "evidence-claim-relation-gold-v1",
   "dataset_version": "evidence-claim-relation-gold-2026-07-v1",
   "candidate_fingerprint": "8bd4e0ce54985621783c78ea8dfd231cdf99dc703c58980dc404242f347fe0fe",
-  "status": "candidate_set_pending_human_review",
+  "status": "reviewed_promotion_blocked",
   "reviewer_mode": "single_server_configured_reviewer",
   "decision_semantics": {
     "replacement": "A later claim variant semantically replaces an earlier variant in the same stable slot.",
@@ -34,7 +34,7 @@
   ],
   "notes": [
     "Candidate proposed decisions are drafting aids, not human labels.",
-    "reviews.jsonl is intentionally absent until the configured reviewer completes it.",
+    "The configured reviewer completed all 13 decisions on 2026-07-29.",
     "The three real-history cases contain no observed replacement.",
     "Promotion remains blocked even after controlled reviews until reviewed real replacements exist.",
     "No result from this dataset has scoring or canonical-selection authority."

@@ -2,10 +2,10 @@
 
 ## Verdict
 
-The repository now contains a frozen 14-case candidate set and a deterministic
-evaluation harness. It is not a reviewed gold set yet: no decision is
-attributed to the configured reviewer until that reviewer creates
-`reviews.jsonl`.
+The repository contains a frozen 14-case set, 14 attributable human reviews,
+and a deterministic evaluation harness. Review is complete, but the identity
+policy is not promotion-ready: exact agreement is `0.785714`, below the frozen
+`0.8` threshold.
 
 Candidate `proposed_review` fields are drafting aids only. They are never loaded
 as human decisions and cannot make the dataset promotion-ready.
@@ -16,6 +16,7 @@ as human decisions and cannot make the dataset promotion-ready.
 fixtures/evidence_memory_gold/v1/
   manifest.json
   candidates.jsonl
+  reviews.jsonl
 ```
 
 The candidate fingerprint is pinned in the manifest. Any silent candidate edit
@@ -36,7 +37,22 @@ The cases cover:
 
 Calibration and test cases are separated in the frozen candidate data.
 
-## Review workflow
+## Reviewed result — 2026-07-29
+
+- reviewed: `14/14`;
+- pending: `0`;
+- critical false accepts: `0`;
+- accepted precision: `1.0`;
+- accepted recall: `1.0`;
+- exact agreement: `0.785714`;
+- blocker: `exact_agreement_below_threshold`.
+
+The reviewer disagreed conservatively on disputed versus rejected cases. No
+non-accepted case was falsely accepted. The threshold must not be weakened to
+make the result pass; the next step is a versioned policy revision evaluated
+against the unchanged human labels.
+
+## Review workflow for a new dataset version
 
 Generate an unsigned template outside the repository:
 
@@ -53,16 +69,15 @@ For every row, replace the `null` fields with:
 - a concrete rationale;
 - an ISO-8601 `reviewed_at` timestamp.
 
-Then evaluate it:
+Evaluate the committed v1 reviews:
 
 ```bash
 .venv/bin/python scripts/evidence_identity_gold_set.py \
-  --reviews tmp/evidence-identity-reviews.jsonl \
   --format markdown
 ```
 
 Use `--require-ready` in a promotion gate. It exits with status `2` while
-reviews or thresholds are incomplete.
+thresholds are unmet.
 
 ## Promotion thresholds
 
@@ -74,4 +89,5 @@ reviews or thresholds are incomplete.
 
 These metrics have no runtime or scoring authority. The small controlled set is
 a Gate 1 safety check, not evidence of general production accuracy. Real
-reviewed cases must be added under a new dataset version before promotion.
+reviewed cases and any policy change require a new dataset/policy version
+before promotion.
