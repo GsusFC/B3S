@@ -23,6 +23,9 @@ kill_timeout = "30s"
   # Observe longitudinal evidence candidates without changing scores or
   # canonical selection. Disable instantly with value "disabled".
   B3S_EVIDENCE_LEDGER_MODE = "shadow"
+  # Persist literal evidence → claim → tile mappings as non-authoritative
+  # versioned history. Disable instantly with value "disabled".
+  B3S_EVIDENCE_CLAIM_TILE_LEDGER_MODE = "shadow"
   SCREENSHOT_PROVIDER = "playwright"
   BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS = "60"
 

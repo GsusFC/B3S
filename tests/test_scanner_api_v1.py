@@ -503,6 +503,80 @@ def test_evidence_claim_memory_endpoint_is_non_authoritative(monkeypatch):
     }
 
 
+def test_evidence_claim_tile_ledger_endpoint_is_non_authoritative(
+    monkeypatch,
+):
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    monkeypatch.setattr(
+        "web.api_v1.router.evidence_claim_tile_ledger_for_domain",
+        lambda _domain: {
+            "schema_version": "evidence-claim-tile-ledger-v1",
+            "policy_version": "evidence-claim-tile-ledger-policy-v1",
+            "mapping_version": "evidence-claim-tile-mapping-v1",
+            "mode": "shadow",
+            "runtime_effect": False,
+            "authority": False,
+            "state_fingerprint": "a" * 64,
+            "brand": {"name": "Example", "domain": "example.com"},
+            "report_count": 2,
+            "latest_report_id": "two",
+            "latest_mapping_series_id": "b" * 64,
+            "summary": {
+                "mapping_series_count": 1,
+                "mapping_count": 1,
+                "mapping_observation_count": 2,
+            },
+            "policy": {
+                "literal_source_quote_required": True,
+                "automatic_scoring_effect": False,
+            },
+            "warnings": [
+                "shadow_only_no_scoring_or_selection_effect"
+            ],
+            "mapping_series": [
+                {
+                    "mapping_series_id": "b" * 64,
+                    "evaluator_model": "evaluator-a",
+                }
+            ],
+            "mappings": [
+                {
+                    "mapping_id": "c" * 64,
+                    "mapping_series_id": "b" * 64,
+                    "source_evidence_id": "d" * 64,
+                    "claim_variant_id": "e" * 64,
+                    "tile_key": "mission.M1",
+                    "polarity": "supports",
+                    "state": "repeated",
+                    "runtime_effect": False,
+                    "authority": False,
+                }
+            ],
+            "persistence": {
+                "stored": True,
+                "backend": "postgres",
+            },
+        },
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/evidence-claim-tile-ledger-shadow",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["object"] == "evidence_claim_tile_ledger_shadow"
+    assert payload["runtime_effect"] is False
+    assert payload["authority"] is False
+    assert payload["policy"]["automatic_scoring_effect"] is False
+    assert payload["mappings"][0]["state"] == "repeated"
+    assert payload["persistence"] == {
+        "stored": True,
+        "backend": "postgres",
+    }
+
+
 def test_create_evidence_memory_adjudication_is_idempotent_and_non_authoritative(
     monkeypatch,
 ):
@@ -1252,6 +1326,10 @@ def test_openapi_is_dedicated_to_v1_routes():
     )
     assert (
         "/api/v1/brands/{domain}/evidence-claim-memory-shadow"
+        in response.json()["paths"]
+    )
+    assert (
+        "/api/v1/brands/{domain}/evidence-claim-tile-ledger-shadow"
         in response.json()["paths"]
     )
     assert (

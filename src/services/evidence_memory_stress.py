@@ -28,6 +28,9 @@ from src.services.evidence_claim_relation_gold_set import (
     load_gold_manifest as load_claim_relation_gold_manifest,
     load_gold_reviews as load_claim_relation_gold_reviews,
 )
+from src.services.evidence_claim_tile_ledger import (
+    build_evidence_claim_tile_ledger,
+)
 from src.services.evidence_memory_identity_v2 import (
     build_evidence_memory_identity_v2,
 )
@@ -38,7 +41,7 @@ from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
 
 
 EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v2"
-EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v6"
+EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v7"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 
 
@@ -59,6 +62,7 @@ def run_evidence_memory_stress(
     replay = _replay_real_histories(normalized_histories)
     identity_v2_replay = _replay_identity_v2(normalized_histories)
     claim_memory_replay = _replay_claim_memory(normalized_histories)
+    claim_tile_replay = _replay_claim_tile_ledger(normalized_histories)
     executable_failures = [
         probe["id"]
         for probe in controlled
@@ -120,6 +124,17 @@ def run_evidence_memory_stress(
                     "historical_backfill_claim_record_count"
                 ]
             ),
+            "claim_tile_mapping_series_count": (
+                claim_tile_replay["summary"]["mapping_series_count"]
+            ),
+            "claim_tile_mapping_count": (
+                claim_tile_replay["summary"]["mapping_count"]
+            ),
+            "claim_tile_mapping_observation_count": (
+                claim_tile_replay["summary"][
+                    "mapping_observation_count"
+                ]
+            ),
             "claim_relation_gold_candidate_count": (
                 claim_relation_gold_set["summary"]["candidate_count"]
             ),
@@ -141,6 +156,7 @@ def run_evidence_memory_stress(
         "real_history_replay": replay,
         "identity_v2_replay": identity_v2_replay,
         "claim_memory_replay": claim_memory_replay,
+        "claim_tile_ledger_replay": claim_tile_replay,
         "claim_relation_gold_set": claim_relation_gold_set,
         "interpretation": {
             "supported": (
@@ -149,9 +165,11 @@ def run_evidence_memory_stress(
             ),
             "not_yet_supported": (
                 "Claim Memory can only propose coexistence or replacement relations; "
-                "it cannot adjudicate a canonical claim, map stable evidence to tiles, "
-                "complete pending identity and claim-relation reviews, validate real "
-                "replacement recall, or produce a versioned memory score."
+                "it cannot adjudicate a canonical claim. The versioned claim-to-tile "
+                "ledger remains shadow-only and has no reviewed promotion policy. "
+                "Pending identity, source, and claim-relation reviews remain incomplete, "
+                "real replacement recall is unvalidated, and no versioned memory score "
+                "exists."
             ),
         },
     }
@@ -356,6 +374,39 @@ def render_evidence_memory_stress_markdown(report: dict[str, Any]) -> str:
                     str(row.get("claim_occurrence_count", 0)),
                     str(row.get("relation_candidate_count", 0)),
                     str(row.get("ignored_claim_metadata_count", 0)),
+                )
+            )
+            + " |"
+        )
+    claim_tile = report.get("claim_tile_ledger_replay") or {}
+    claim_tile_summary = claim_tile.get("summary") or {}
+    lines.extend(
+        [
+            "",
+            "## Evidence → claim → tile ledger replay",
+            "",
+            f"- Mapping series: `{claim_tile_summary.get('mapping_series_count', 0)}`",
+            f"- Unique mappings: `{claim_tile_summary.get('mapping_count', 0)}`",
+            f"- Mapping observations: `{claim_tile_summary.get('mapping_observation_count', 0)}`",
+            f"- Current-series mappings: `{claim_tile_summary.get('current_series_mapping_count', 0)}`",
+            f"- Mapping states: `{_format_counts(claim_tile_summary.get('state_counts'))}`",
+            f"- Polarities: `{_format_counts(claim_tile_summary.get('polarity_counts'))}`",
+            "",
+            "| domain | reports | series | mappings | observations | current |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in claim_tile.get("histories") or []:
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    _md_cell(str(row.get("domain") or "")),
+                    str(row.get("report_count", 0)),
+                    str(row.get("mapping_series_count", 0)),
+                    str(row.get("mapping_count", 0)),
+                    str(row.get("mapping_observation_count", 0)),
+                    str(row.get("current_series_mapping_count", 0)),
                 )
             )
             + " |"
@@ -785,6 +836,79 @@ def _controlled_probes(
     historical_backfill_memory = build_evidence_claim_memory(
         [historical_backfill_report]
     )
+    claim_tile_statement = (
+        "Our mission is to make every finance decision traceable."
+    )
+    claim_tile_source = _evidence(
+        ref="web.about",
+        source="web",
+        source_class="owned_copy",
+        evidence_type="raw_input",
+        url="https://example.com/about",
+        content=(
+            f"{claim_tile_statement} "
+            "We also publish a weekly newsletter."
+        ),
+    )
+    claim_tile_claim = _evidence(
+        ref="claim.mission.primary",
+        source="derived_strategy",
+        source_class="derived_strategy",
+        evidence_type="interpreted_claim",
+        url="https://example.com/about",
+        content=claim_tile_statement,
+    )
+    claim_tile_claim["metadata"].update(
+        {
+            "claim_slot_key": "mission.primary",
+            "claim_type": "mission",
+            "source_evidence_ref": "web.about",
+        }
+    )
+    claim_tile_first = _claim_tile_report(
+        "claim-tile-one",
+        "2026-01-01T00:00:00Z",
+        [claim_tile_source, claim_tile_claim],
+        quote=claim_tile_statement,
+        evaluator_model="evaluator-a",
+    )
+    claim_tile_second = _claim_tile_report(
+        "claim-tile-two",
+        "2026-01-02T00:00:00Z",
+        [claim_tile_source, claim_tile_claim],
+        quote=claim_tile_statement,
+        evaluator_model="evaluator-a",
+    )
+    repeated_claim_tile_ledger = build_evidence_claim_tile_ledger(
+        [claim_tile_first, claim_tile_second],
+        mode="shadow",
+    )
+    versioned_claim_tile_report = _claim_tile_report(
+        "claim-tile-three",
+        "2026-01-03T00:00:00Z",
+        [claim_tile_source, claim_tile_claim],
+        quote=claim_tile_statement,
+        evaluator_model="evaluator-b",
+    )
+    versioned_claim_tile_ledger = build_evidence_claim_tile_ledger(
+        [
+            claim_tile_first,
+            claim_tile_second,
+            versioned_claim_tile_report,
+        ],
+        mode="shadow",
+    )
+    unanchored_claim_tile_report = _claim_tile_report(
+        "claim-tile-unanchored",
+        "2026-01-01T00:00:00Z",
+        [claim_tile_source, claim_tile_claim],
+        quote="We also publish a weekly newsletter.",
+        evaluator_model="evaluator-a",
+    )
+    unanchored_claim_tile_ledger = build_evidence_claim_tile_ledger(
+        [unanchored_claim_tile_report],
+        mode="shadow",
+    )
 
     return [
         _probe(
@@ -1037,6 +1161,51 @@ def _controlled_probes(
             ),
             "A v1 candidate is reprojected from immutable evidence without editing its report or gaining runtime authority.",
         ),
+        _probe(
+            "claim_tile_mapping_is_literal_versioned_and_shadow_only",
+            (
+                repeated_claim_tile_ledger["summary"][
+                    "mapping_count"
+                ]
+                == 1
+                and repeated_claim_tile_ledger["summary"][
+                    "mapping_observation_count"
+                ]
+                == 2
+                and repeated_claim_tile_ledger["mappings"][0][
+                    "state"
+                ]
+                == "repeated"
+                and versioned_claim_tile_ledger["summary"][
+                    "mapping_series_count"
+                ]
+                == 2
+                and versioned_claim_tile_ledger["summary"][
+                    "mapping_count"
+                ]
+                == 2
+                and {
+                    mapping["state"]
+                    for mapping in versioned_claim_tile_ledger["mappings"]
+                }
+                == {"observed", "repeated"}
+                and unanchored_claim_tile_ledger["summary"][
+                    "mapping_count"
+                ]
+                == 0
+                and repeated_claim_tile_ledger["runtime_effect"] is False
+                and repeated_claim_tile_ledger["authority"] is False
+                and repeated_claim_tile_ledger["policy"][
+                    "automatic_scoring_effect"
+                ]
+                is False
+            ),
+            (
+                "Only a literal source quote anchored to a semantic claim maps; "
+                "exact repeats add observations without breadth or points, and "
+                "evaluator drift creates a separate non-authoritative series."
+            ),
+        ),
         {
             "id": "identity_gold_set_pending_human_review",
             "kind": "promotion_blocker",
@@ -1084,13 +1253,19 @@ def _controlled_probes(
             ),
         },
         {
-            "id": "stable_evidence_has_no_tile_mapping",
+            "id": "tile_mapping_pending_reviewed_promotion_policy",
             "kind": "promotion_blocker",
             "status": "blocked",
             "observation": (
-                "The current ledger persists evidence identities but not evidence → claim → tile support."
+                "The persistent versioned evidence → claim → tile ledger now "
+                "runs in shadow mode and fails closed on non-literal or "
+                "ambiguous support. Its real mapping coverage and promotion "
+                "policy have not been reviewed."
             ),
-            "required_capability": "persistent versioned tile-evidence support",
+            "required_capability": (
+                "review real mapping coverage and adopt a canonical promotion "
+                "policy without granting repeated evidence extra breadth or points"
+            ),
         },
         {
             "id": "no_versioned_memory_evaluator",
@@ -1461,6 +1636,76 @@ def _replay_claim_memory(
     }
 
 
+def _replay_claim_tile_ledger(
+    histories: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    metric_keys = (
+        "mapping_series_count",
+        "mapping_count",
+        "mapping_observation_count",
+        "current_series_mapping_count",
+        "source_evidence_count",
+        "claim_variant_count",
+        "tile_count",
+    )
+    rows: list[dict[str, Any]] = []
+    totals = Counter()
+    state_totals = Counter()
+    polarity_totals = Counter()
+    diagnostic_totals = Counter()
+    for domain, reports in sorted(histories.items()):
+        if not reports:
+            continue
+        ledger = build_evidence_claim_tile_ledger(
+            reports,
+            mode="shadow",
+        )
+        summary = ledger["summary"]
+        row = {
+            "domain": domain,
+            "report_count": len(reports),
+            **{
+                key: int(summary.get(key, 0))
+                for key in metric_keys
+            },
+            "state_counts": dict(summary.get("state_counts") or {}),
+            "polarity_counts": dict(
+                summary.get("polarity_counts") or {}
+            ),
+            "diagnostic_counts": dict(
+                summary.get("diagnostic_counts") or {}
+            ),
+        }
+        rows.append(row)
+        for key in metric_keys:
+            totals[key] += int(row[key])
+        state_totals.update(row["state_counts"])
+        polarity_totals.update(row["polarity_counts"])
+        diagnostic_totals.update(row["diagnostic_counts"])
+    return {
+        "schema_version": (
+            "evidence-claim-tile-ledger-v1-replay-v1"
+        ),
+        "runtime_effect": False,
+        "authority": False,
+        "summary": {
+            "history_count": len(rows),
+            **{
+                key: int(totals.get(key, 0))
+                for key in metric_keys
+            },
+            "state_counts": dict(sorted(state_totals.items())),
+            "polarity_counts": dict(
+                sorted(polarity_totals.items())
+            ),
+            "diagnostic_counts": dict(
+                sorted(diagnostic_totals.items())
+            ),
+        },
+        "histories": rows,
+    }
+
+
 def _probe(probe_id: str, passed: bool, observation: str) -> dict[str, Any]:
     return {
         "id": probe_id,
@@ -1600,6 +1845,36 @@ def _report(
                     }
                 }
             }
+        },
+    }
+    return report
+
+
+def _claim_tile_report(
+    report_id: str,
+    created_at: str,
+    evidence: list[dict[str, Any]],
+    *,
+    quote: str,
+    evaluator_model: str,
+) -> dict[str, Any]:
+    report = _report(report_id, created_at, evidence)
+    report["raw"]["schema_version"] = "stress-report-v1"
+    report["raw"]["sv9"] = {
+        "evaluator_model": evaluator_model,
+        "result": {
+            "rubric_version": "stress-rubric-v1",
+            "components": {
+                "mission": {
+                    "tile_profile": [
+                        {
+                            "id": "M1",
+                            "estado": "ok",
+                            "evidencia": quote,
+                        }
+                    ]
+                }
+            },
         },
     }
     return report

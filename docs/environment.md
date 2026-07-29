@@ -117,6 +117,7 @@ These values are safe to commit as placeholders or documented defaults, but not 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `B3S_EVIDENCE_LEDGER_MODE` | `disabled` | `shadow` computes and persists longitudinal evidence candidates without affecting scoring or canonical selection; any other value disables it |
+| `B3S_EVIDENCE_CLAIM_TILE_LEDGER_MODE` | `disabled` | `shadow` computes and persists versioned literal evidence-to-claim-to-tile mappings without affecting tiles, points, scoring, or canonical selection |
 
 ## Screenshot Provider
 

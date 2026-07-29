@@ -26,6 +26,10 @@ from src.services.evidence_claim_reconciliation import (
     EvidenceClaimReconciliationInvalidTransitionError,
     EvidenceClaimReconciliationNotFoundError,
 )
+from src.services.evidence_claim_tile_ledger import (
+    build_evidence_claim_tile_ledger,
+    evidence_claim_tile_ledger_mode,
+)
 from src.services.evidence_memory_adjudication import (
     ADJUDICATION_DECISIONS,
     ADJUDICATION_SUBJECT_TYPE,
@@ -154,6 +158,11 @@ class PostgresHistoryRepository:
                     workspace_id,
                     existing["brand_id"],
                 )
+                self._rebuild_evidence_claim_tile_ledger_safely(
+                    conn,
+                    workspace_id,
+                    existing["brand_id"],
+                )
                 return ImportOutcome(
                     source_report_id=parsed.source_report_id,
                     status="unchanged",
@@ -198,6 +207,11 @@ class PostgresHistoryRepository:
             )
             self._rebuild_brand_stability(conn, workspace_id, brand_id)
             self._rebuild_evidence_ledger_shadow_safely(
+                conn,
+                workspace_id,
+                brand_id,
+            )
+            self._rebuild_evidence_claim_tile_ledger_safely(
                 conn,
                 workspace_id,
                 brand_id,
@@ -391,6 +405,34 @@ class PostgresHistoryRepository:
                 FROM {_SCHEMA}.evidence_ledger_shadow_states
                 JOIN {_SCHEMA}.brands
                   ON brands.id = evidence_ledger_shadow_states.brand_id
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+        return dict(row["payload"]) if row and isinstance(row["payload"], dict) else None
+
+    def get_evidence_claim_tile_ledger(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        """Return the persisted non-authoritative claim-to-tile ledger."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT evidence_claim_tile_ledger_states.payload
+                FROM {_SCHEMA}.evidence_claim_tile_ledger_states
+                JOIN {_SCHEMA}.brands
+                  ON brands.id = evidence_claim_tile_ledger_states.brand_id
                 JOIN {_SCHEMA}.workspaces
                   ON workspaces.id = brands.workspace_id
                 WHERE workspaces.slug = %s
@@ -1102,6 +1144,92 @@ class PostgresHistoryRepository:
             "failed_domains": failed_domains,
         }
 
+    def rebuild_evidence_claim_tile_ledgers(
+        self,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any]:
+        """Backfill the versioned shadow mapping without changing evaluation."""
+
+        mode = evidence_claim_tile_ledger_mode()
+        if mode != "shadow":
+            return {
+                "mode": mode,
+                "runtime_effect": False,
+                "authority": False,
+                "workspace_slug": workspace_slug,
+                "brands_discovered": 0,
+                "rebuilt": 0,
+                "failed": 0,
+                "failed_domains": [],
+            }
+
+        self._ensure_migrated()
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT workspaces.id AS workspace_id,
+                                brands.id,
+                                brands.canonical_domain
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                JOIN {_SCHEMA}.captures
+                  ON captures.brand_id = brands.id
+                JOIN {_SCHEMA}.evaluation_runs
+                  ON evaluation_runs.capture_id = captures.id
+                JOIN {_SCHEMA}.report_snapshots
+                  ON report_snapshots.evaluation_run_id = evaluation_runs.id
+                WHERE workspaces.slug = %s
+                ORDER BY brands.canonical_domain
+                """,
+                (workspace_slug,),
+            ).fetchall()
+
+        rebuilt = 0
+        failed_domains: list[str] = []
+        for row in rows:
+            workspace_id = UUID(str(row["workspace_id"]))
+            brand_id = UUID(str(row["id"]))
+            domain = str(row["canonical_domain"])
+            try:
+                with self._connect() as conn:
+                    conn.execute(
+                        "SELECT pg_advisory_xact_lock(%s)",
+                        (
+                            _advisory_lock_key(
+                                workspace_id,
+                                "brand",
+                                brand_id,
+                            ),
+                        ),
+                    )
+                    if self._rebuild_evidence_claim_tile_ledger_safely(
+                        conn,
+                        workspace_id,
+                        brand_id,
+                    ):
+                        rebuilt += 1
+                    else:
+                        failed_domains.append(domain)
+            except Exception:
+                failed_domains.append(domain)
+                _LOG.exception(
+                    "failed to backfill evidence claim tile ledger",
+                    extra={"brand_id": str(brand_id), "domain": domain},
+                )
+
+        return {
+            "mode": mode,
+            "runtime_effect": False,
+            "authority": False,
+            "workspace_slug": workspace_slug,
+            "brands_discovered": len(rows),
+            "rebuilt": rebuilt,
+            "failed": len(failed_domains),
+            "failed_domains": failed_domains,
+        }
+
     def list_brand_history(
         self,
         domain_or_url: str,
@@ -1165,6 +1293,10 @@ class PostgresHistoryRepository:
             "evidence_ledger_shadow_observations",
             "evidence_memory_adjudication_events",
             "evidence_claim_reconciliation_events",
+            "evidence_claim_tile_ledger_states",
+            "evidence_claim_tile_mapping_series",
+            "evidence_claim_tile_mappings",
+            "evidence_claim_tile_mapping_observations",
         )
         with self._connect() as conn:
             return {
@@ -1742,6 +1874,319 @@ class PostgresHistoryRepository:
                 latest_row["capture_id"] if latest_row is not None else None,
                 str(payload.get("schema_version") or ""),
                 str(payload.get("policy_version") or ""),
+                str(payload.get("state_fingerprint") or ""),
+                _jsonb(payload.get("summary") or {}),
+                _jsonb(payload),
+            ),
+        )
+
+    def _rebuild_evidence_claim_tile_ledger_safely(
+        self,
+        conn,
+        workspace_id: UUID,
+        brand_id: UUID,
+    ) -> bool:
+        """Isolate the experimental mapping from the import transaction."""
+
+        if evidence_claim_tile_ledger_mode() != "shadow":
+            return False
+        try:
+            with conn.transaction():
+                self._rebuild_evidence_claim_tile_ledger(
+                    conn,
+                    workspace_id,
+                    brand_id,
+                )
+            return True
+        except Exception:
+            _LOG.exception(
+                "failed to rebuild evidence claim tile ledger",
+                extra={"brand_id": str(brand_id)},
+            )
+            return False
+
+    @staticmethod
+    def _rebuild_evidence_claim_tile_ledger(
+        conn,
+        workspace_id: UUID,
+        brand_id: UUID,
+    ) -> None:
+        rows = conn.execute(
+            f"""
+            SELECT report_snapshots.source_report_id,
+                   report_snapshots.payload,
+                   captures.id AS capture_id
+            FROM {_SCHEMA}.report_snapshots
+            JOIN {_SCHEMA}.evaluation_runs
+              ON evaluation_runs.id = report_snapshots.evaluation_run_id
+            JOIN {_SCHEMA}.captures
+              ON captures.id = evaluation_runs.capture_id
+            WHERE report_snapshots.workspace_id = %s
+              AND captures.brand_id = %s
+            ORDER BY report_snapshots.created_at,
+                     report_snapshots.source_report_id
+            """,
+            (workspace_id, brand_id),
+        ).fetchall()
+        reports = [
+            dict(row["payload"])
+            for row in rows
+            if isinstance(row["payload"], dict)
+        ]
+        if not reports:
+            conn.execute(
+                f"""
+                DELETE FROM {_SCHEMA}.evidence_claim_tile_ledger_states
+                WHERE brand_id = %s
+                """,
+                (brand_id,),
+            )
+            return
+
+        row_by_report_id = {
+            str(row["source_report_id"]): row for row in rows
+        }
+        payload = build_evidence_claim_tile_ledger(
+            reports,
+            mode="shadow",
+        )
+
+        for series in payload.get("mapping_series") or []:
+            if not isinstance(series, dict):
+                continue
+            series_id = str(series.get("mapping_series_id") or "")
+            series_entry_id = _stable_uuid(
+                brand_id,
+                "evidence-claim-tile-series",
+                series_id,
+            )
+            conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_claim_tile_mapping_series (
+                    id, brand_id, mapping_series_id, mapping_version,
+                    mapping_policy_version, identity_policy_version,
+                    claim_memory_policy_version,
+                    source_registry_fingerprint, pipeline_version,
+                    rubric_version, prompt_version, evaluator_model,
+                    claim_projection_version, identity_projection_version,
+                    first_seen_at, last_seen_at, report_count,
+                    runtime_effect, authority, metadata
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, false, false, %s
+                )
+                ON CONFLICT (brand_id, mapping_series_id) DO UPDATE SET
+                    mapping_version = EXCLUDED.mapping_version,
+                    mapping_policy_version =
+                        EXCLUDED.mapping_policy_version,
+                    identity_policy_version =
+                        EXCLUDED.identity_policy_version,
+                    claim_memory_policy_version =
+                        EXCLUDED.claim_memory_policy_version,
+                    source_registry_fingerprint =
+                        EXCLUDED.source_registry_fingerprint,
+                    pipeline_version = EXCLUDED.pipeline_version,
+                    rubric_version = EXCLUDED.rubric_version,
+                    prompt_version = EXCLUDED.prompt_version,
+                    evaluator_model = EXCLUDED.evaluator_model,
+                    claim_projection_version =
+                        EXCLUDED.claim_projection_version,
+                    identity_projection_version =
+                        EXCLUDED.identity_projection_version,
+                    first_seen_at = EXCLUDED.first_seen_at,
+                    last_seen_at = EXCLUDED.last_seen_at,
+                    report_count = EXCLUDED.report_count,
+                    runtime_effect = false,
+                    authority = false,
+                    metadata = EXCLUDED.metadata
+                """,
+                (
+                    series_entry_id,
+                    brand_id,
+                    series_id,
+                    str(series.get("mapping_version") or ""),
+                    str(series.get("mapping_policy_version") or ""),
+                    str(series.get("identity_policy_version") or ""),
+                    str(series.get("claim_memory_policy_version") or ""),
+                    str(series.get("source_registry_fingerprint") or ""),
+                    str(series.get("pipeline_version") or ""),
+                    str(series.get("rubric_version") or ""),
+                    str(series.get("prompt_version") or ""),
+                    str(series.get("evaluator_model") or ""),
+                    str(series.get("claim_projection_version") or ""),
+                    str(series.get("identity_projection_version") or ""),
+                    series.get("first_seen_at"),
+                    series.get("last_seen_at"),
+                    int(series.get("report_count") or 1),
+                    _jsonb(
+                        {
+                            "report_ids": series.get("report_ids") or [],
+                            "latest_report_id": series.get(
+                                "latest_report_id"
+                            ),
+                            "shadow_only": True,
+                        }
+                    ),
+                ),
+            )
+
+        for mapping in payload.get("mappings") or []:
+            if not isinstance(mapping, dict):
+                continue
+            mapping_id = str(mapping.get("mapping_id") or "")
+            mapping_entry_id = _stable_uuid(
+                brand_id,
+                "evidence-claim-tile-mapping",
+                mapping_id,
+            )
+            conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_claim_tile_mappings (
+                    id, brand_id, mapping_series_id, mapping_id,
+                    source_evidence_id, claim_evidence_id, claim_slot_id,
+                    claim_variant_id, component_key, tile_id, tile_key,
+                    polarity, source_class, identity_status,
+                    source_independence_status, state, first_seen_at,
+                    last_seen_at, observation_count,
+                    present_in_series_latest, present_in_latest_report,
+                    source_evidence_refs, match_methods, quote_hashes,
+                    runtime_effect, authority, metadata
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, false, false, %s
+                )
+                ON CONFLICT (brand_id, mapping_id) DO UPDATE SET
+                    state = EXCLUDED.state,
+                    first_seen_at = EXCLUDED.first_seen_at,
+                    last_seen_at = EXCLUDED.last_seen_at,
+                    observation_count = EXCLUDED.observation_count,
+                    present_in_series_latest =
+                        EXCLUDED.present_in_series_latest,
+                    present_in_latest_report =
+                        EXCLUDED.present_in_latest_report,
+                    source_evidence_refs = EXCLUDED.source_evidence_refs,
+                    match_methods = EXCLUDED.match_methods,
+                    quote_hashes = EXCLUDED.quote_hashes,
+                    runtime_effect = false,
+                    authority = false,
+                    metadata = EXCLUDED.metadata
+                """,
+                (
+                    mapping_entry_id,
+                    brand_id,
+                    str(mapping.get("mapping_series_id") or ""),
+                    mapping_id,
+                    str(mapping.get("source_evidence_id") or ""),
+                    str(mapping.get("claim_evidence_id") or ""),
+                    str(mapping.get("claim_slot_id") or ""),
+                    str(mapping.get("claim_variant_id") or ""),
+                    str(mapping.get("component_key") or ""),
+                    str(mapping.get("tile_id") or ""),
+                    str(mapping.get("tile_key") or ""),
+                    str(mapping.get("polarity") or ""),
+                    str(mapping.get("source_class") or ""),
+                    str(mapping.get("identity_status") or ""),
+                    str(
+                        mapping.get("source_independence_status") or ""
+                    ),
+                    str(mapping.get("state") or "observed"),
+                    mapping.get("first_seen_at"),
+                    mapping.get("last_seen_at"),
+                    int(mapping.get("observation_count") or 1),
+                    bool(mapping.get("present_in_series_latest")),
+                    bool(mapping.get("present_in_latest_report")),
+                    _jsonb(mapping.get("source_evidence_refs") or []),
+                    _jsonb(mapping.get("match_methods") or []),
+                    _jsonb(mapping.get("quote_hashes") or []),
+                    _jsonb(
+                        {
+                            "report_ids": mapping.get("report_ids") or [],
+                            "shadow_only": True,
+                        }
+                    ),
+                ),
+            )
+            for observation in mapping.get("observations") or []:
+                if not isinstance(observation, dict):
+                    continue
+                report_id = str(observation.get("report_id") or "")
+                report_row = row_by_report_id.get(report_id)
+                if report_row is None:
+                    continue
+                conn.execute(
+                    f"""
+                    INSERT INTO {_SCHEMA}.evidence_claim_tile_mapping_observations (
+                            mapping_entry_id, capture_id, source_report_id,
+                            claim_occurrence_id, observed_at, tile_state,
+                            quote_hash, match_method,
+                            duplicate_observation_count
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        )
+                    ON CONFLICT (mapping_entry_id, capture_id)
+                    DO UPDATE SET
+                        source_report_id = EXCLUDED.source_report_id,
+                        claim_occurrence_id =
+                            EXCLUDED.claim_occurrence_id,
+                        observed_at = EXCLUDED.observed_at,
+                        tile_state = EXCLUDED.tile_state,
+                        quote_hash = EXCLUDED.quote_hash,
+                        match_method = EXCLUDED.match_method,
+                        duplicate_observation_count =
+                            EXCLUDED.duplicate_observation_count
+                    """,
+                    (
+                        mapping_entry_id,
+                        report_row["capture_id"],
+                        report_id,
+                        str(
+                            observation.get("claim_occurrence_id") or ""
+                        ),
+                        observation.get("observed_at"),
+                        str(observation.get("tile_state") or ""),
+                        str(observation.get("quote_hash") or ""),
+                        str(observation.get("match_method") or ""),
+                        int(
+                            observation.get(
+                                "duplicate_observation_count"
+                            )
+                            or 1
+                        ),
+                    ),
+                )
+
+        latest_report_id = str(payload.get("latest_report_id") or "")
+        latest_row = row_by_report_id.get(latest_report_id)
+        conn.execute(
+            f"""
+            INSERT INTO {_SCHEMA}.evidence_claim_tile_ledger_states (
+                brand_id, latest_capture_id, schema_version,
+                policy_version, mapping_version, mode, runtime_effect,
+                authority, state_fingerprint, summary, payload, computed_at
+            ) VALUES (
+                %s, %s, %s, %s, %s, 'shadow', false, false,
+                %s, %s, %s, now()
+            )
+            ON CONFLICT (brand_id) DO UPDATE SET
+                latest_capture_id = EXCLUDED.latest_capture_id,
+                schema_version = EXCLUDED.schema_version,
+                policy_version = EXCLUDED.policy_version,
+                mapping_version = EXCLUDED.mapping_version,
+                mode = 'shadow',
+                runtime_effect = false,
+                authority = false,
+                state_fingerprint = EXCLUDED.state_fingerprint,
+                summary = EXCLUDED.summary,
+                payload = EXCLUDED.payload,
+                computed_at = now()
+            """,
+            (
+                brand_id,
+                latest_row["capture_id"] if latest_row else None,
+                str(payload.get("schema_version") or ""),
+                str(payload.get("policy_version") or ""),
+                str(payload.get("mapping_version") or ""),
                 str(payload.get("state_fingerprint") or ""),
                 _jsonb(payload.get("summary") or {}),
                 _jsonb(payload),
