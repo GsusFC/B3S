@@ -97,6 +97,8 @@ The executable foundation must prove:
     accepts.
 25. six attributable production-source reviews preserve publisher
     independence separately from claim corroboration and remain shadow-only.
+26. all eight real claim-to-tile mappings are frozen with their tile contracts
+    and remain pending human review without runtime authority.
 
 The adversarial probes deliberately expose:
 
@@ -105,8 +107,9 @@ The adversarial probes deliberately expose:
    and semantic-paraphrase recall is unmeasured;
 2. the 13 reviewed claim-relation cases have no real replacement examples, and
    reviewed relations still have no canonical-promotion path;
-3. the persistent claim-to-tile mapping has no reviewed real coverage or
-   canonical promotion policy;
+3. the persistent claim-to-tile mapping has eight frozen real candidates but
+   zero reviews, narrow brand/claim/polarity coverage, and no canonical
+   promotion policy;
 4. no evaluator consumes a canonical memory version.
 
 ## Real-history replay
@@ -174,7 +177,7 @@ Claim Memory v1 replayed the same 12 histories and found:
 - 0 relation candidates;
 - 184 structural metadata rows correctly ignored as semantic identity:
   168 visual-tile rows and 16 `checked_block` rows;
-- 25/25 controlled executable invariants passed, including identity policy v4,
+- 26/26 controlled executable invariants passed, including identity policy v4,
   the two-axis production-source review set, Claim Memory,
   reconciliation, claim-slot producer, historical backfill, and the versioned
   evidence-to-claim-to-tile ledger.
@@ -192,6 +195,18 @@ The low coverage is intentional: same-page or thematically related text is
 rejected unless the tile quote is literal in the claim source and anchored to
 the semantic claim. These counts validate deterministic reuse, not canonical
 mapping accuracy.
+
+The separate claim-to-tile review set contains:
+
+- all 8 real mappings frozen as review candidates;
+- 7 Vercel mappings and 1 Robin Capital mapping;
+- 2 brands and 2 unique claim variants;
+- only `supports` polarity;
+- 7 Vercel mappings derived from one mission claim, including 3 mappings into
+  core-purpose tiles;
+- 0 human reviews and 8 pending;
+- explicit tile conditions and evidence contracts for semantic review;
+- no runtime or scoring authority.
 
 The separate claim-relation review set contains:
 
@@ -308,9 +323,11 @@ Required:
 
 Current status: the projection, PostgreSQL persistence, backfill command,
 read-only API, and executable stress invariant are implemented. It remains
-shadow-only. Promotion is blocked until real mapping coverage is reviewed and
-a canonical policy is adopted; repetition must continue to affect persistence
-only.
+shadow-only. All eight current real mappings are now frozen for review, but
+none is reviewed and the set covers only two brands, two claim variants, and
+`supports` polarity. Promotion remains blocked until reviews are complete,
+coverage is expanded, and a canonical policy is adopted; repetition must
+continue to affect persistence only.
 
 ### Gate 3 — versioned memory evaluator
 

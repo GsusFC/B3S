@@ -1,0 +1,36 @@
+{
+  "schema_version": "evidence-claim-tile-review-v1",
+  "dataset_version": "evidence-claim-tile-review-2026-07-v1",
+  "candidate_fingerprint": "c9081e2284c7ba755e12782ddb91165cce77edd7355c981f9c015bb307ee1307",
+  "status": "candidates_frozen_human_review_pending_shadow_only",
+  "reviewer_mode": "single_attributable_reviewer",
+  "decision_semantics": {
+    "accepted": "The cited evidence and claim satisfy the specific tile contract.",
+    "disputed": "The mapping cannot be resolved safely from the frozen context.",
+    "rejected": "Literal overlap exists, but the evidence and claim do not satisfy the tile contract."
+  },
+  "promotion_thresholds": {
+    "confirmed_mapping_precision": 1.0,
+    "review_completion": 1.0,
+    "critical_non_accept_count": 0,
+    "minimum_reviewed_real_brands": 5,
+    "minimum_reviewed_claim_variants": 10,
+    "required_reviewed_polarities": [
+      "supports",
+      "weakens",
+      "insufficient_evidence"
+    ]
+  },
+  "promotion_policy": {
+    "status": "not_adopted",
+    "automatic_scoring_effect": false
+  },
+  "notes": [
+    "All eight candidates were proposed by the deterministic literal mapping policy.",
+    "Seven Vercel mappings reuse one mission claim across mission and core-purpose tiles.",
+    "One Robin Capital mapping covers a mission detection tile.",
+    "Literal overlap is necessary but not sufficient for semantic tile support.",
+    "This v1 set has only two brands, two claim variants, and supports polarity.",
+    "No result from this dataset has runtime, scoring, or canonical-selection authority."
+  ]
+}
