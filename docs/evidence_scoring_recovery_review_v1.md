@@ -112,9 +112,20 @@ B3S_ALLOW_SCHEMA_DROP=1 \
 ```
 
 El 29 de julio de 2026 se ejecutó correctamente sobre un clúster temporal
-PostgreSQL 14: `1 passed`. Esto demuestra el contrato de persistencia y
-reconstrucción sobre PostgreSQL, pero no sustituye la evidencia del
-`release_command` y PostgreSQL 16 del entorno de despliegue.
+PostgreSQL 14: `1 passed`. La CI de PR #27 volvió a ejecutar la suite con el
+servicio `postgres:16`, `B3S_TEST_DATABASE_URL` y
+`B3S_ALLOW_SCHEMA_DROP=1`; terminó con `2287 passed` y un único skip ajeno a
+PostgreSQL. Esto demuestra el contrato de persistencia y reconstrucción tanto
+en PostgreSQL 14 como en el major 16 usado por producción.
+
+La integración
+`test_release_migrate_only_cli_is_complete_and_idempotent` cubre además la
+entrada usada por el `release_command`: ejecuta
+`import_b3s_reports_postgres.py --migrate-only` sin proporcionar
+`--database-url`, comprueba que la primera ejecución aplica `001–007`, que la
+segunda aplica cero migraciones y que la tabla del journal existe. Esto valida
+la ruta CLI y su idempotencia; todavía no equivale a ejecutar el release real
+dentro de una imagen desplegada en Fly.
 
 ## Flujo de archivo para lotes históricos
 
