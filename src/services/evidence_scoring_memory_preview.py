@@ -16,6 +16,7 @@ An explicit later ``no`` is retained as a conflict and is never auto-recovered.
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Iterable
 from urllib.parse import urlparse
@@ -349,6 +350,79 @@ def build_evidence_scoring_memory_preview(
             "scoring": scoring,
         }
     )
+    result["state_fingerprint"] = _state_fingerprint(result)
+    return result
+
+
+def apply_recovery_review_gate(
+    preview: dict[str, Any],
+    latest_report: dict[str, Any],
+    *,
+    accepted_tile_evidence_ids: Iterable[str],
+) -> dict[str, Any]:
+    """Compute a non-authoritative shadow score from reviewed recoveries only."""
+
+    if (
+        preview.get("runtime_effect") is not False
+        or preview.get("authority") is not False
+    ):
+        raise EvidenceScoringMemoryPreviewError(
+            "review gating requires a non-authoritative preview"
+        )
+    accepted_ids = {
+        str(value)
+        for value in accepted_tile_evidence_ids
+        if str(value)
+    }
+    approved_recoveries: list[dict[str, Any]] = []
+    gated_recoveries: list[dict[str, Any]] = []
+    for recovery in preview.get("recoveries") or []:
+        if not isinstance(recovery, dict):
+            continue
+        evidence_ids = {
+            str(value)
+            for value in recovery.get("tile_evidence_ids") or []
+            if str(value)
+        }
+        approved_ids = sorted(evidence_ids & accepted_ids)
+        approved = bool(approved_ids)
+        gated = {
+            **dict(recovery),
+            "semantic_review_state": (
+                "accepted" if approved else "not_accepted"
+            ),
+            "accepted_tile_evidence_ids": approved_ids,
+        }
+        gated_recoveries.append(gated)
+        if approved:
+            approved_recoveries.append(gated)
+
+    reviewed_scoring = _scoring_preview(
+        latest_report,
+        recovered_tiles={
+            (
+                str(row.get("component_key") or ""),
+                str(row.get("tile_id") or ""),
+            )
+            for row in approved_recoveries
+        },
+    )
+    result = deepcopy(preview)
+    result["reviewed_shadow"] = {
+        "schema_version": "evidence-scoring-reviewed-shadow-v1",
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_scoring_effect": False,
+        "review_required": True,
+        "candidate_recovery_count": len(gated_recoveries),
+        "accepted_recovery_count": len(approved_recoveries),
+        "recoveries": gated_recoveries,
+        "scoring": reviewed_scoring,
+        "warnings": [
+            "only_explicitly_accepted_semantic_mappings_are_scored",
+            "reviewed_score_remains_shadow_only",
+        ],
+    }
     result["state_fingerprint"] = _state_fingerprint(result)
     return result
 

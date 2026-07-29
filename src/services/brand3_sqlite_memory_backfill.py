@@ -15,7 +15,12 @@ from src.evidence_identity import (
     stable_artifact_digest,
 )
 from src.services.evidence_scoring_memory_preview import (
+    apply_recovery_review_gate,
     build_evidence_scoring_memory_preview,
+)
+from src.services.evidence_scoring_recovery_review import (
+    build_recovery_review_candidates,
+    evaluate_recovery_reviews,
 )
 from src.sv9.rubric import RUBRIC_VERSION
 from src.sv9_flow.contracts import EvidenceRecord
@@ -76,6 +81,7 @@ def build_brand3_sqlite_memory_validation(
     database_path: str | Path,
     *,
     current_reports: Iterable[dict[str, Any]] = (),
+    recovery_review_events: Iterable[dict[str, Any]] = (),
     rubric_version: str = RUBRIC_VERSION,
 ) -> dict[str, Any]:
     """Measure evaluator repeats, capture history, and the B3S bridge."""
@@ -92,7 +98,7 @@ def build_brand3_sqlite_memory_validation(
     ]
     archive_by_domain = _group_by_domain(archive_reports)
     current_by_domain = _group_by_domain(current_rows)
-    domains: list[dict[str, Any]] = []
+    domain_work: list[dict[str, Any]] = []
     for domain, all_scans in sorted(archive_by_domain.items()):
         capture_reports = _latest_report_per_capture(all_scans)
         all_scan_preview = build_evidence_scoring_memory_preview(
@@ -115,7 +121,7 @@ def build_brand3_sqlite_memory_validation(
             if current_by_domain.get(domain)
             else None
         )
-        domains.append(
+        domain_work.append(
             {
                 "domain": domain,
                 "archive_scan_count": len(all_scans),
@@ -126,19 +132,70 @@ def build_brand3_sqlite_memory_validation(
                 "current_b3s_report_count": len(
                     current_by_domain.get(domain, [])
                 ),
-                "all_scan_preview": _preview_summary(
-                    all_scan_preview
+                "all_scan_preview": all_scan_preview,
+                "all_scan_latest_report": _latest_report_for_preview(
+                    all_scans,
+                    all_scan_preview,
                 ),
-                "capture_preview": _preview_summary(
-                    capture_preview
+                "capture_preview": capture_preview,
+                "capture_latest_report": _latest_report_for_preview(
+                    capture_reports,
+                    capture_preview,
                 ),
-                "bridge_preview": (
-                    _preview_summary(bridge_preview)
+                "bridge_preview": bridge_preview,
+                "bridge_latest_report": (
+                    _latest_report_for_preview(
+                        bridge_rows,
+                        bridge_preview,
+                    )
                     if bridge_preview is not None
                     else None
                 ),
             }
         )
+
+    review_candidates = build_recovery_review_candidates(
+        {
+            "lane": lane,
+            "preview": work[f"{lane}_preview"],
+        }
+        for work in domain_work
+        for lane in ("all_scan", "capture", "bridge")
+        if isinstance(work.get(f"{lane}_preview"), dict)
+    )
+    recovery_review = evaluate_recovery_reviews(
+        review_candidates,
+        recovery_review_events,
+    )
+    accepted_evidence_ids = recovery_review[
+        "accepted_tile_evidence_ids"
+    ]
+    domains: list[dict[str, Any]] = []
+    for work in domain_work:
+        summarized: dict[str, Any] = {
+            key: value
+            for key, value in work.items()
+            if not key.endswith("_preview")
+            and not key.endswith("_latest_report")
+        }
+        for lane in ("all_scan", "capture", "bridge"):
+            preview = work.get(f"{lane}_preview")
+            latest_report = work.get(f"{lane}_latest_report")
+            summarized[f"{lane}_preview"] = (
+                _preview_summary(
+                    apply_recovery_review_gate(
+                        preview,
+                        latest_report,
+                        accepted_tile_evidence_ids=(
+                            accepted_evidence_ids
+                        ),
+                    )
+                )
+                if isinstance(preview, dict)
+                and isinstance(latest_report, dict)
+                else None
+            )
+        domains.append(summarized)
 
     source_manifest = [
         {
@@ -222,15 +279,27 @@ def build_brand3_sqlite_memory_validation(
         "unmatched_current_domain_count": len(
             set(current_by_domain) - set(archive_by_domain)
         ),
+        "recovery_review_candidate_count": int(
+            recovery_review["summary"]["candidate_count"]
+        ),
+        "recovery_review_accepted_count": int(
+            recovery_review["summary"]["accepted_count"]
+        ),
     }
-    review_candidates = _recovery_review_candidates(domains)
     promotion_blockers = [
         "runtime_scoring_wiring_disabled",
         "legacy_backfill_remains_read_only_shadow",
     ]
-    if review_candidates:
+    if recovery_review["summary"]["pending_count"]:
         promotion_blockers.append(
             "recovered_tile_semantics_pending_review"
+        )
+    if (
+        recovery_review["summary"]["disputed_count"]
+        or recovery_review["summary"]["rejected_count"]
+    ):
+        promotion_blockers.append(
+            "recovered_tile_semantics_not_accepted"
         )
     if (
         summary["capture_recovery_count"] == 0
@@ -269,6 +338,7 @@ def build_brand3_sqlite_memory_validation(
         "summary": summary,
         "promotion_blockers": promotion_blockers,
         "recovery_review_candidates": review_candidates,
+        "recovery_review": recovery_review,
         "domains": domains,
         "warnings": [
             "legacy_five_dimension_scores_are_not_converted",
@@ -287,68 +357,6 @@ def build_brand3_sqlite_memory_validation(
         },
     )
     return payload
-
-
-def _recovery_review_candidates(
-    domains: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    for domain_row in domains:
-        for lane in (
-            "all_scan_preview",
-            "capture_preview",
-            "bridge_preview",
-        ):
-            preview = domain_row.get(lane)
-            if not isinstance(preview, dict):
-                continue
-            evidence_by_id = {
-                str(row.get("tile_evidence_id") or ""): row
-                for row in preview.get("recovery_evidence") or []
-                if isinstance(row, dict)
-            }
-            for recovery in preview.get("recoveries") or []:
-                if not isinstance(recovery, dict):
-                    continue
-                evidence = [
-                    evidence_by_id[evidence_id]
-                    for evidence_id in recovery.get(
-                        "tile_evidence_ids"
-                    )
-                    or []
-                    if evidence_id in evidence_by_id
-                ]
-                candidates.append(
-                    {
-                        "domain": str(
-                            domain_row.get("domain") or ""
-                        ),
-                        "lane": lane.removesuffix("_preview"),
-                        "component_key": str(
-                            recovery.get("component_key") or ""
-                        ),
-                        "tile_id": str(
-                            recovery.get("tile_id") or ""
-                        ),
-                        "latest_state": str(
-                            recovery.get("latest_state") or ""
-                        ),
-                        "proposed_state": str(
-                            recovery.get("preview_state") or ""
-                        ),
-                        "decision": "pending",
-                        "evidence": evidence,
-                    }
-                )
-    candidates.sort(
-        key=lambda row: (
-            row["domain"],
-            row["lane"],
-            row["component_key"],
-            row["tile_id"],
-        )
-    )
-    return candidates
 
 
 def _recovery_keys(
@@ -700,9 +708,32 @@ def _latest_report_per_capture(
     return sorted(latest.values(), key=_report_order)
 
 
+def _latest_report_for_preview(
+    reports: Iterable[dict[str, Any]],
+    preview: dict[str, Any],
+) -> dict[str, Any]:
+    latest_report_id = str(preview.get("latest_report_id") or "")
+    for report in reports:
+        if str(report.get("id") or "") == latest_report_id:
+            return report
+    raise Brand3SQLiteBackfillError(
+        "memory preview latest report is absent from its source lane"
+    )
+
+
 def _preview_summary(preview: dict[str, Any]) -> dict[str, Any]:
     summary = preview.get("summary") or {}
     scoring = preview.get("scoring") or {}
+    reviewed_shadow = (
+        preview.get("reviewed_shadow")
+        if isinstance(preview.get("reviewed_shadow"), dict)
+        else {}
+    )
+    reviewed_scoring = (
+        reviewed_shadow.get("scoring")
+        if isinstance(reviewed_shadow.get("scoring"), dict)
+        else {}
+    )
     recoveries = [
         dict(row)
         for row in preview.get("recoveries") or []
@@ -732,6 +763,16 @@ def _preview_summary(preview: dict[str, Any]) -> dict[str, Any]:
         "preview_score": scoring.get("preview_score"),
         "score_delta": scoring.get("score_delta"),
         "scoring_status": str(scoring.get("status") or ""),
+        "reviewed_preview_score": reviewed_scoring.get(
+            "preview_score"
+        ),
+        "reviewed_score_delta": reviewed_scoring.get("score_delta"),
+        "reviewed_scoring_status": str(
+            reviewed_scoring.get("status") or ""
+        ),
+        "reviewed_accepted_recovery_count": int(
+            reviewed_shadow.get("accepted_recovery_count") or 0
+        ),
         "memory_version": preview.get("memory_version"),
         "state_fingerprint": preview.get("state_fingerprint"),
         "recoveries": recoveries,
