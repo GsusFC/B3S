@@ -180,10 +180,18 @@ El archivo de 778 MB produce:
 - 29 escaneos compatibles;
 - 20 capturas únicas;
 - 13 dominios;
-- 174 evidencias reproducibles;
+- 1.400 ocurrencias de evidencia normalizadas en los 20 informes;
+- 174 evidencias mecánicamente elegibles después de deduplicación y filtros;
 - 2 asociaciones semánticas únicas capaces de modificar el scoring candidato;
 - 0 asociaciones aceptadas actualmente;
 - delta revisado de sombra: `0`.
+
+Las 174 no son decisiones humanas ni evidencia ya autorizada para scoring.
+Describen la salida de reglas mecánicas de elegibilidad. Las 1.400 tampoco son
+evidencias únicas: incluyen ocurrencias repetidas entre capturas y componentes.
+El archivo no contiene `claim_slot_id`, variantes, relaciones ni mappings
+semánticos persistidos, por lo que esas estructuras no se reconstruyen
+retroactivamente.
 
 Los dos casos son:
 
