@@ -17,6 +17,18 @@ from src.evidence_identity import canonical_evidence_digest
 from src.external_identity_provenance import (
     build_external_identity_provenance,
 )
+from src.services.evidence_claim_corroboration_review_set import (
+    DEFAULT_REVIEW_ROOT as CLAIM_CORROBORATION_REVIEW_ROOT,
+    EVIDENCE_CLAIM_CORROBORATION_REVIEW_DATASET_VERSION,
+    EVIDENCE_CLAIM_CORROBORATION_REVIEW_EVENT_SCHEMA_VERSION,
+    EVIDENCE_CLAIM_CORROBORATION_REVIEW_SCHEMA_VERSION,
+    EvidenceClaimCorroborationReviewSetError,
+    evaluate_claim_corroboration_review_set,
+    load_review_candidates as load_claim_corroboration_review_candidates,
+    load_review_events as load_claim_corroboration_review_events,
+    load_review_manifest as load_claim_corroboration_review_manifest,
+    verify_frozen_candidate_provenance as verify_claim_corroboration_provenance,
+)
 from src.services.evidence_claim_memory import build_evidence_claim_memory
 from src.services.evidence_claim_relation_gold_set import (
     DEFAULT_GOLD_ROOT as CLAIM_RELATION_GOLD_ROOT,
@@ -79,7 +91,7 @@ from src.sv9_flow.contracts import (
 
 
 EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v2"
-EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v11"
+EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v12"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 
 
@@ -96,11 +108,13 @@ def run_evidence_memory_stress(
     identity_gold_set = _identity_gold_set_status()
     claim_relation_gold_set = _claim_relation_gold_set_status()
     source_review_set = _source_review_set_status()
+    claim_corroboration_review_set = _claim_corroboration_review_set_status()
     claim_tile_review_set = _claim_tile_review_set_status()
     controlled = _controlled_probes(
         identity_gold_set=identity_gold_set,
         claim_relation_gold_set=claim_relation_gold_set,
         source_review_set=source_review_set,
+        claim_corroboration_review_set=claim_corroboration_review_set,
         claim_tile_review_set=claim_tile_review_set,
     )
     replay = _replay_real_histories(normalized_histories)
@@ -224,6 +238,23 @@ def run_evidence_memory_stress(
                     "claim_level_review_required_count"
                 ]
             ),
+            "claim_corroboration_candidate_count": (
+                claim_corroboration_review_set["summary"]["candidate_count"]
+            ),
+            "claim_corroboration_candidate_source_count": (
+                claim_corroboration_review_set["summary"][
+                    "candidate_source_count"
+                ]
+            ),
+            "claim_corroboration_candidate_claim_count": (
+                claim_corroboration_review_set["summary"]["candidate_claim_count"]
+            ),
+            "claim_corroboration_reviewed_count": (
+                claim_corroboration_review_set["summary"]["reviewed_count"]
+            ),
+            "claim_corroboration_pending_count": (
+                claim_corroboration_review_set["summary"]["pending_count"]
+            ),
             "claim_tile_review_candidate_count": (
                 claim_tile_review_set["summary"]["candidate_count"]
             ),
@@ -254,6 +285,7 @@ def run_evidence_memory_stress(
         "identity_gold_set": identity_gold_set,
         "claim_relation_gold_set": claim_relation_gold_set,
         "source_review_set": source_review_set,
+        "claim_corroboration_review_set": claim_corroboration_review_set,
         "claim_tile_review_set": claim_tile_review_set,
         "interpretation": {
             "supported": (
@@ -269,9 +301,10 @@ def run_evidence_memory_stress(
                 "cache exists. "
                 "Identity review is complete and its frozen controlled threshold "
                 "passes. Publisher independence has been reviewed separately from "
-                "claim corroboration, but claim-scoped corroboration and semantic "
-                "paraphrase recall remain unvalidated. Real replacement recall is "
-                "also unvalidated."
+                "claim corroboration. Ten literal claim-scoped cases now form a "
+                "reproducible review queue, but none has a human decision and "
+                "semantic paraphrase recall remains unvalidated. Real replacement "
+                "recall is also unvalidated."
             ),
         },
     }
@@ -396,6 +429,56 @@ def _source_review_set_status() -> dict[str, Any]:
             "pending_case_ids": [],
             "revoked_case_ids": [],
             "claim_level_review_required_case_ids": [],
+            "evaluated": [],
+        }
+
+
+def _claim_corroboration_review_set_status() -> dict[str, Any]:
+    try:
+        candidates = load_claim_corroboration_review_candidates()
+        result = evaluate_claim_corroboration_review_set(
+            candidates,
+            load_claim_corroboration_review_events(
+                CLAIM_CORROBORATION_REVIEW_ROOT / "review_events.jsonl"
+            ),
+            manifest=load_claim_corroboration_review_manifest(),
+        )
+        result["provenance_verified"] = verify_claim_corroboration_provenance(
+            candidates
+        )
+        return result
+    except EvidenceClaimCorroborationReviewSetError:
+        return {
+            "schema_version": EVIDENCE_CLAIM_CORROBORATION_REVIEW_SCHEMA_VERSION,
+            "review_event_schema_version": (
+                EVIDENCE_CLAIM_CORROBORATION_REVIEW_EVENT_SCHEMA_VERSION
+            ),
+            "dataset_version": EVIDENCE_CLAIM_CORROBORATION_REVIEW_DATASET_VERSION,
+            "runtime_effect": False,
+            "authority": False,
+            "review_gate_ready": False,
+            "promotion_ready": False,
+            "provenance_verified": False,
+            "promotion_blockers": [
+                "claim_corroboration_review_set_unavailable"
+            ],
+            "summary": {
+                "candidate_count": 0,
+                "candidate_source_count": 0,
+                "candidate_claim_count": 0,
+                "candidate_brand_count": 0,
+                "review_event_count": 0,
+                "reviewed_count": 0,
+                "pending_count": 0,
+                "revoked_case_count": 0,
+                "reviewed_source_count": 0,
+                "reviewed_claim_count": 0,
+                "reviewed_brand_count": 0,
+                "decision_counts": {},
+                "corroboration_basis_counts": {},
+            },
+            "pending_case_ids": [],
+            "revoked_case_ids": [],
             "evaluated": [],
         }
 
@@ -684,6 +767,27 @@ def render_evidence_memory_stress_markdown(report: dict[str, Any]) -> str:
             f"- Blockers: `{_format_counts(Counter(source_review.get('promotion_blockers') or []))}`",
         ]
     )
+    claim_corroboration = report.get("claim_corroboration_review_set") or {}
+    claim_corroboration_summary = claim_corroboration.get("summary") or {}
+    lines.extend(
+        [
+            "",
+            "## Claim corroboration review set",
+            "",
+            f"- Dataset: `{claim_corroboration.get('dataset_version', 'unknown')}`",
+            f"- Provenance verified: `{str(bool(claim_corroboration.get('provenance_verified'))).lower()}`",
+            f"- Review gate ready: `{str(bool(claim_corroboration.get('review_gate_ready'))).lower()}`",
+            f"- Promotion ready: `{str(bool(claim_corroboration.get('promotion_ready'))).lower()}`",
+            f"- Candidates: `{claim_corroboration_summary.get('candidate_count', 0)}`",
+            f"- Sources: `{claim_corroboration_summary.get('candidate_source_count', 0)}`",
+            f"- Claims: `{claim_corroboration_summary.get('candidate_claim_count', 0)}`",
+            f"- Reviewed: `{claim_corroboration_summary.get('reviewed_count', 0)}`",
+            f"- Pending: `{claim_corroboration_summary.get('pending_count', 0)}`",
+            f"- Decisions: `{_format_counts(claim_corroboration_summary.get('decision_counts'))}`",
+            f"- Bases: `{_format_counts(claim_corroboration_summary.get('corroboration_basis_counts'))}`",
+            f"- Blockers: `{_format_counts(Counter(claim_corroboration.get('promotion_blockers') or []))}`",
+        ]
+    )
     claim_relation_gold = report.get("claim_relation_gold_set") or {}
     claim_relation_gold_summary = claim_relation_gold.get("summary") or {}
     lines.extend(
@@ -736,6 +840,7 @@ def _controlled_probes(
     identity_gold_set: dict[str, Any],
     claim_relation_gold_set: dict[str, Any],
     source_review_set: dict[str, Any],
+    claim_corroboration_review_set: dict[str, Any],
     claim_tile_review_set: dict[str, Any],
 ) -> list[dict[str, Any]]:
     stable_owned = _evidence(
@@ -1667,6 +1772,42 @@ def _controlled_probes(
             ),
         ),
         _probe(
+            "claim_corroboration_review_set_is_literal_and_shadow_only",
+            (
+                claim_corroboration_review_set["runtime_effect"] is False
+                and claim_corroboration_review_set["authority"] is False
+                and claim_corroboration_review_set["provenance_verified"] is True
+                and claim_corroboration_review_set["review_gate_ready"] is False
+                and claim_corroboration_review_set["promotion_ready"] is False
+                and claim_corroboration_review_set["summary"][
+                    "candidate_count"
+                ]
+                == 10
+                and claim_corroboration_review_set["summary"][
+                    "candidate_source_count"
+                ]
+                == 5
+                and claim_corroboration_review_set["summary"][
+                    "candidate_claim_count"
+                ]
+                == 10
+                and claim_corroboration_review_set["summary"][
+                    "candidate_brand_count"
+                ]
+                == 1
+                and claim_corroboration_review_set["summary"]["reviewed_count"]
+                == 0
+                and claim_corroboration_review_set["summary"]["pending_count"]
+                == 10
+            ),
+            (
+                "Ten literal Vercel claim cases across five reviewed "
+                "editorial sources reproduce from immutable capture spans. "
+                "All remain pending human review with no runtime or "
+                "corroboration authority."
+            ),
+        ),
+        _probe(
             "claim_tile_review_set_freezes_real_mappings_without_authority",
             (
                 claim_tile_review_set["runtime_effect"] is False
@@ -1710,13 +1851,23 @@ def _controlled_probes(
                 "production source reviews and separates publisher independence "
                 "from claim corroboration. The operational registry intentionally "
                 "still has no production-reviewed URLs because its single-axis "
-                "schema cannot preserve that distinction. There are "
+                "schema cannot preserve that distinction. The source-level "
+                "set still has "
                 f"{source_review_set['summary']['claim_scoped_review_count']} "
-                "claim-scoped reviews."
+                "claim-scoped reviews. A separate reproducible queue now has "
+                f"{claim_corroboration_review_set['summary']['candidate_count']} "
+                "claim candidates across "
+                f"{claim_corroboration_review_set['summary']['candidate_source_count']} "
+                "sources, with "
+                f"{claim_corroboration_review_set['summary']['reviewed_count']} "
+                "reviewed and "
+                f"{claim_corroboration_review_set['summary']['pending_count']} "
+                "pending."
             ),
             "required_capability": (
-                "claim_id-scoped corroboration reviews, a compatible operational "
-                "two-axis contract, and measured semantic-paraphrase recall"
+                "review the ten frozen claim cases, expand cross-brand coverage, "
+                "adopt a compatible operational two-axis contract, and measure "
+                "semantic-paraphrase recall"
             ),
         },
         {

@@ -105,12 +105,17 @@ The executable foundation must prove:
     acquisition dropout, and evaluator-specific mapping-series drift, while a
     declared evaluator-version change alters only the shadow evaluation
     identity.
+28. the ten claim-scoped corroboration candidates reproduce from immutable
+    captured spans, remain pending human review, and cannot gain runtime or
+    corroboration authority.
 
 The adversarial probes deliberately expose:
 
-1. the offline set has six production-source decisions, but zero claim-scoped
-   corroboration reviews; the operational single-axis registry remains empty
-   and semantic-paraphrase recall is unmeasured;
+1. the offline set has six production-source decisions and a reproducible
+   claim-scoped queue with 10 candidates across 5 sources, but zero human
+   claim decisions; the operational single-axis registry remains empty,
+   cross-brand coverage is absent, and semantic-paraphrase recall is
+   unmeasured;
 2. the 13 reviewed claim-relation cases have no real replacement examples, and
    reviewed relations still have no canonical-promotion path;
 3. the persistent claim-to-tile mapping has eight frozen real candidates but
@@ -184,10 +189,11 @@ Claim Memory v1 replayed the same 12 histories and found:
 - 0 relation candidates;
 - 184 structural metadata rows correctly ignored as semantic identity:
   168 visual-tile rows and 16 `checked_block` rows;
-- 27/27 controlled executable invariants passed, including identity policy v4,
+- 28/28 controlled executable invariants passed, including identity policy v4,
   the two-axis production-source review set, Claim Memory,
   reconciliation, claim-slot producer, historical backfill, and the versioned
-  evidence-to-claim-to-tile ledger plus the shadow memory snapshot.
+  evidence-to-claim-to-tile ledger, the shadow memory snapshot, and the
+  literal claim-corroboration review queue.
 
 The Gate 2 replay over those histories found:
 
@@ -243,10 +249,22 @@ The separate production-source review set contains:
 - 6 accepted identity decisions;
 - 5 `confirmed_independent` publishers and 1 excluded wire source;
 - 4 `mixed`, 1 `disputed`, and 1 `excluded` corroboration decisions;
-- 0 claim-scoped reviews and 5 sources requiring claim-level review;
+- 5 sources requiring claim-level review;
 - a passed publisher gate but blocked claim-corroboration gate;
 - append-only decision/revocation chains with frozen fingerprints;
 - no runtime or canonical authority.
+
+The separate claim-corroboration review set contains:
+
+- 10 literal candidates across the 5 eligible editorial sources;
+- 10 unique claim IDs from 1 real brand;
+- reproducible capture, article-text, and evidence-span hashes plus exact
+  Unicode offsets;
+- 0 human reviews and 10 pending;
+- no PR Newswire candidate because its source-level decision is already
+  `excluded`;
+- a blocked claim-corroboration gate;
+- no runtime, corroboration, or canonical authority.
 
 The 14 labels and the frozen `0.8` exact-agreement threshold were not changed.
 Passing this set does not establish accuracy on production brands; the policy
@@ -304,10 +322,12 @@ clusters exact and light lexical copies, respects explicit lineage, and disputes
 ambiguous similarity. The controlled identity sub-gate now passes all 14
 attributable decisions with zero critical false accepts and exact agreement
 `1.0`. The offline production set additionally resolves publisher independence
-for six Vercel sources, but deliberately leaves five source cases pending
-claim-level review. Gate 1 remains blocked for canonical use by zero
-claim-scoped corroboration decisions, an operational single-axis registry,
-unmeasured semantic-paraphrase recall, and the missing canonical-claim policy.
+for six Vercel sources. A separate reproducible queue now materializes the five
+eligible sources as ten literal claim cases, but all ten remain pending human
+review. Gate 1 remains blocked for canonical use by zero reviewed
+claim-corroboration decisions, one-brand coverage, an operational single-axis
+registry, unmeasured semantic-paraphrase recall, and the missing
+canonical-claim policy.
 
 The separate claim-reconciliation journal now provides the same append-only,
 idempotent, optimistic-concurrency and revocation guarantees for stable

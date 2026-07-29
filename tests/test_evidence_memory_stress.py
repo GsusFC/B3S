@@ -3,6 +3,9 @@ from __future__ import annotations
 from copy import deepcopy
 
 import src.services.evidence_memory_stress as stress_module
+from src.services.evidence_claim_corroboration_review_set import (
+    EvidenceClaimCorroborationReviewSetError,
+)
 from src.services.evidence_claim_relation_gold_set import (
     EvidenceClaimRelationGoldSetError,
 )
@@ -30,8 +33,8 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["promotion_ready"] is False
     assert report["executable_failures"] == []
     assert report["schema_version"] == "evidence-memory-stress-v2"
-    assert report["policy_version"] == "evidence-memory-stress-policy-v11"
-    assert report["summary"]["executable_invariant_count"] == 27
+    assert report["policy_version"] == "evidence-memory-stress-policy-v12"
+    assert report["summary"]["executable_invariant_count"] == 28
     assert report["summary"]["promotion_blocker_count"] == 4
     assert report["summary"]["claim_relation_gold_candidate_count"] == 13
     assert report["summary"]["claim_relation_gold_reviewed_count"] == 13
@@ -60,6 +63,11 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
         report["summary"]["source_review_claim_level_required_count"]
         == 5
     )
+    assert report["summary"]["claim_corroboration_candidate_count"] == 10
+    assert report["summary"]["claim_corroboration_candidate_source_count"] == 5
+    assert report["summary"]["claim_corroboration_candidate_claim_count"] == 10
+    assert report["summary"]["claim_corroboration_reviewed_count"] == 0
+    assert report["summary"]["claim_corroboration_pending_count"] == 10
     assert report["summary"]["claim_tile_review_candidate_count"] == 8
     assert report["summary"]["claim_tile_review_reviewed_count"] == 0
     assert report["summary"]["claim_tile_review_pending_count"] == 8
@@ -92,9 +100,16 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
         source_independence["observation"]
     )
     assert "0 claim-scoped reviews" in source_independence["observation"]
+    assert "10 claim candidates across 5 sources" in (
+        source_independence["observation"]
+    )
+    assert "0 reviewed and 10 pending" in source_independence["observation"]
     assert probes["source_review_axes_are_separate_and_shadow_only"][
         "status"
     ] == "pass"
+    assert probes[
+        "claim_corroboration_review_set_is_literal_and_shadow_only"
+    ]["status"] == "pass"
     assert probes["identity_v4_explicit_other_entity_is_rejected"][
         "status"
     ] == "pass"
@@ -247,6 +262,27 @@ def test_missing_claim_tile_review_fixture_fails_closed(
     assert report["claim_tile_review_set"]["promotion_ready"] is False
     assert report["claim_tile_review_set"]["promotion_blockers"] == [
         "claim_tile_review_set_unavailable"
+    ]
+
+
+def test_missing_claim_corroboration_fixture_fails_closed(
+    monkeypatch,
+) -> None:
+    def _missing_candidates() -> list[dict]:
+        raise EvidenceClaimCorroborationReviewSetError("missing fixture")
+
+    monkeypatch.setattr(
+        stress_module,
+        "load_claim_corroboration_review_candidates",
+        _missing_candidates,
+    )
+
+    report = run_evidence_memory_stress({})
+
+    assert report["summary"]["claim_corroboration_candidate_count"] == 0
+    assert report["claim_corroboration_review_set"]["promotion_ready"] is False
+    assert report["claim_corroboration_review_set"]["promotion_blockers"] == [
+        "claim_corroboration_review_set_unavailable"
     ]
 
 
@@ -414,6 +450,7 @@ def test_markdown_distinguishes_passes_from_promotion_blockers() -> None:
     assert "## Evidence → claim → tile ledger replay" in rendered
     assert "## Identity review set" in rendered
     assert "## Source review set" in rendered
+    assert "## Claim corroboration review set" in rendered
     assert "## Claim relation review set" in rendered
     assert "## Claim-to-tile review set" in rendered
     assert "Candidates: `13`" in rendered
