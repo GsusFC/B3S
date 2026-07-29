@@ -23,7 +23,9 @@ while its journal can reversibly adjudicate proposed relations. Its frozen
 metrics, but it has no real replacement examples. The persistent
 evidence-to-claim-to-tile ledger now reuses conservative literal mappings in
 shadow mode. Claim Memory still cannot promote a canonical claim or evaluate a
-canonical memory version.
+canonical memory version. A versioned shadow snapshot now separates stable
+candidate semantic memory from its rubric/evaluator identity, but it computes
+no score and claims no canonical authority.
 
 ## Read-only harness
 
@@ -99,6 +101,10 @@ The executable foundation must prove:
     independence separately from claim corroboration and remain shadow-only.
 26. all eight real claim-to-tile mappings are frozen with their tile contracts
     and remain pending human review without runtime authority.
+27. the candidate semantic memory version survives exact repetition,
+    acquisition dropout, and evaluator-specific mapping-series drift, while a
+    declared evaluator-version change alters only the shadow evaluation
+    identity.
 
 The adversarial probes deliberately expose:
 
@@ -110,7 +116,8 @@ The adversarial probes deliberately expose:
 3. the persistent claim-to-tile mapping has eight frozen real candidates but
    zero reviews, narrow brand/claim/polarity coverage, and no canonical
    promotion policy;
-4. no evaluator consumes a canonical memory version.
+4. the versioned shadow identity has no canonical memory input, score evaluator,
+   result cache, or score-delta ledger.
 
 ## Real-history replay
 
@@ -177,10 +184,10 @@ Claim Memory v1 replayed the same 12 histories and found:
 - 0 relation candidates;
 - 184 structural metadata rows correctly ignored as semantic identity:
   168 visual-tile rows and 16 `checked_block` rows;
-- 26/26 controlled executable invariants passed, including identity policy v4,
+- 27/27 controlled executable invariants passed, including identity policy v4,
   the two-axis production-source review set, Claim Memory,
   reconciliation, claim-slot producer, historical backfill, and the versioned
-  evidence-to-claim-to-tile ledger.
+  evidence-to-claim-to-tile ledger plus the shadow memory snapshot.
 
 The Gate 2 replay over those histories found:
 
@@ -345,6 +352,20 @@ Required:
   declared version change;
 - repeating the same evidence cannot improve the score;
 - acquisition confidence may fall without changing the memory score.
+
+Current status: Snapshot v1 now produces a stable
+`candidate_memory_version` and a
+`shadow_evaluation_identity = hash(candidate_memory_version + rubric_version +
+evaluator_version)`. The candidate version excludes repeat counts,
+latest-presence/acquisition state, and evaluator-specific mapping-series IDs.
+Controlled regressions prove that those changes do not alter candidate memory,
+while declared rubric/evaluator changes alter the shadow evaluation identity.
+
+This does not close Gate 3. `canonical_memory_version`,
+`evaluation_identity`, `score`, and `score_delta` remain `null`. Promotion is
+blocked until canonical evidence/claim/tile policies exist and score results
+can be persisted and reused by canonical evaluation identity with a complete
+delta ledger. See `docs/evidence_memory_snapshot_v1.md`.
 
 ### Gate 4 — dual-run shadow validation
 
