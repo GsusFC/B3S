@@ -423,7 +423,7 @@ def test_evidence_claim_memory_endpoint_is_non_authoritative(monkeypatch):
         "web.api_v1.router.evidence_claim_memory_for_domain",
         lambda _domain: {
             "schema_version": "evidence-claim-memory-v1",
-            "policy_version": "evidence-claim-memory-policy-v2",
+            "policy_version": "evidence-claim-memory-policy-v3",
             "mode": "shadow",
             "runtime_effect": False,
             "authority": False,

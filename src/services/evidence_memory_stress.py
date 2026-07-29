@@ -23,10 +23,12 @@ from src.services.evidence_memory_identity_v2 import (
 )
 from src.services.evidence_ledger_shadow import build_evidence_ledger_shadow
 from src.services.scanner_evidence_comparison import canonical_evidence_records
+from src.sv9_flow.claim_slot_producer import build_claim_memory_evidence
+from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
 
 
 EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v2"
-EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v3"
+EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v4"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 
 
@@ -629,6 +631,41 @@ def _controlled_probes() -> list[dict[str, Any]]:
     reordered_claim_memory = build_evidence_claim_memory(
         list(reversed(semantic_claim_history))
     )
+    producer_source_records = [
+        EvidenceRecord(
+            ref="web.about",
+            source="web",
+            evidence_type="raw_input",
+            content="# Our Mission\nHelp finance teams close with confidence.",
+            url="https://example.com/about",
+            confidence="high",
+            metadata={"source_class": "owned_copy"},
+        ),
+        EvidenceRecord(
+            ref="web.product",
+            source="web",
+            evidence_type="raw_input",
+            content="# Our Mission\nAutomate treasury operations.",
+            url="https://example.com/products/treasury",
+            confidence="high",
+            metadata={"source_class": "owned_copy"},
+        ),
+    ]
+    producer_pack = BrandEvidencePack(
+        brand_name="Example",
+        url="https://example.com",
+        evidence=producer_source_records,
+    )
+    producer_records = build_claim_memory_evidence(producer_pack)
+    producer_report = _report(
+        "claim-slot-producer",
+        "2026-01-01T00:00:00Z",
+        [record.to_dict() for record in producer_source_records],
+    )
+    producer_report["raw"]["flow"]["candidate"][
+        "claim_memory_evidence"
+    ] = [record.to_dict() for record in producer_records]
+    producer_claim_memory = build_evidence_claim_memory([producer_report])
 
     return [
         _probe(
@@ -842,6 +879,23 @@ def _controlled_probes() -> list[dict[str, Any]]:
                 not in accepted_claim_relation_memory
             ),
             "An accepted relation remains reversible review metadata and never selects a canonical claim.",
+        ),
+        _probe(
+            "claim_slot_producer_is_explicit_scoped_and_shadow_only",
+            (
+                len(producer_records) == 1
+                and producer_records[0].metadata["claim_slot_key"]
+                == "mission.primary"
+                and producer_records[0].metadata["source_evidence_ref"]
+                == "web.about"
+                and producer_records[0].metadata["runtime_effect"] is False
+                and producer_records[0].metadata["authority"] is False
+                and producer_claim_memory["summary"]["claim_slot_count"]
+                == 1
+                and producer_claim_memory["runtime_effect"] is False
+                and producer_claim_memory["authority"] is False
+            ),
+            "The producer accepts an explicit corporate mission, rejects an unscoped product mission, and remains shadow-only.",
         ),
         {
             "id": "identity_gold_set_pending_human_review",

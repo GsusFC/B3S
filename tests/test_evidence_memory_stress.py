@@ -17,7 +17,7 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["promotion_ready"] is False
     assert report["executable_failures"] == []
     assert report["schema_version"] == "evidence-memory-stress-v2"
-    assert report["summary"]["executable_invariant_count"] == 20
+    assert report["summary"]["executable_invariant_count"] == 21
     assert report["summary"]["promotion_blocker_count"] == 5
     assert all(
         probe["status"] == "pass"
@@ -77,6 +77,9 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
     assert probes["claim_memory_report_order_invariance"]["status"] == "pass"
     assert probes[
         "accepted_claim_relation_never_grants_canonical_authority"
+    ]["status"] == "pass"
+    assert probes[
+        "claim_slot_producer_is_explicit_scoped_and_shadow_only"
     ]["status"] == "pass"
 
 

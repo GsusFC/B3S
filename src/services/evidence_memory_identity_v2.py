@@ -657,8 +657,21 @@ def _evidence_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
     flow = raw.get("flow") if isinstance(raw.get("flow"), dict) else {}
     candidate = flow.get("candidate") if isinstance(flow.get("candidate"), dict) else {}
     pack = candidate.get("evidence_pack") if isinstance(candidate.get("evidence_pack"), dict) else {}
-    rows = pack.get("evidence") if isinstance(pack.get("evidence"), list) else []
-    return [row for row in rows if isinstance(row, dict)]
+    evidence_rows = (
+        pack.get("evidence")
+        if isinstance(pack.get("evidence"), list)
+        else []
+    )
+    claim_rows = (
+        candidate.get("claim_memory_evidence")
+        if isinstance(candidate.get("claim_memory_evidence"), list)
+        else []
+    )
+    return [
+        row
+        for row in [*evidence_rows, *claim_rows]
+        if isinstance(row, dict)
+    ]
 
 
 def _infer_source_class(source: str, evidence_type: str) -> str:

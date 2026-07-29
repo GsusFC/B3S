@@ -75,6 +75,8 @@ The executable foundation must prove:
 18. simultaneous variants become coexistence candidates, not replacements;
 19. report order cannot change Claim Memory v1;
 20. accepting a relation cannot grant canonical or runtime authority.
+21. the slot producer accepts an explicit corporate mission, rejects an
+    unscoped product mission, and stays outside runtime authority.
 
 The adversarial probes deliberately expose:
 
@@ -147,8 +149,8 @@ Claim Memory v1 replayed the same 12 histories and found:
 - 0 semantic claim slots, variants, occurrences, or relation candidates;
 - 184 structural metadata rows correctly ignored as semantic identity:
   168 visual-tile rows and 16 `checked_block` rows;
-- 20/20 controlled executable invariants passed, including the Claim Memory
-  and reconciliation invariants.
+- 21/21 controlled executable invariants passed, including the Claim Memory,
+  reconciliation, and claim-slot producer invariants.
 
 Verdict: `foundation_supported_promotion_blocked`.
 

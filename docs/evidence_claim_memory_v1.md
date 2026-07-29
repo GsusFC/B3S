@@ -111,7 +111,8 @@ The read-only stress harness replayed 12 local brand histories:
 - 0 relation candidates;
 - 184 rows ignored as non-semantic structural metadata: 168 visual-tile rows
   and 16 `checked_block` rows;
-- 20 controlled executable invariants passed with 0 failures.
+- 21 controlled executable invariants passed with 0 failures, including the
+  separate claim-slot producer lane.
 
 This is expected: the historical acquisition contract did not emit
 `claim_slot_key`. The replay demonstrates fail-closed behavior, not real-world
@@ -131,8 +132,21 @@ evaluator are later, separate gates.
 
 ## Producer migration
 
-Future acquisition code should emit a stable, human-readable
-`claim_slot_key` only where the semantic subject is known, for example
-`mission.primary` or `audience.finance_team`. It must not retrofit keys from
-claim text, URL position, tile ID, or `checked_block`; doing so would recreate
-the identity error this layer is designed to prevent.
+`sv9-flow-candidate-v2` now persists a separate
+`candidate.claim_memory_evidence` lane. Producer v1 emits only explicit owned
+`mission.primary` and `vision.primary` declarations. The lane is excluded from
+the evidence pack used by interpretation and scoring, and Claim Memory policy
+v3 reads it only for the shadow projection.
+
+Unscoped declarations are limited to the homepage and unambiguous corporate
+surfaces. Product pages require explicit `entity_scope`; external proof,
+values, audiences, offers, generic strategic language, and inferred
+mission/vision language fail closed.
+
+Historical reports remain unchanged and still replay to zero semantic slots.
+The system must not retrofit keys from claim text, URL position, tile ID,
+`checked_block`, or EvidenceGraph's text-derived `claim_id`; doing so would
+recreate the identity error this layer is designed to prevent.
+
+See
+[`evidence_claim_slot_producer_v1.md`](evidence_claim_slot_producer_v1.md).

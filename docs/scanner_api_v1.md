@@ -245,6 +245,12 @@ explicitly declared with `metadata.claim_id_semantics=stable_slot`. Bare claim
 IDs, visual tiles, and `checked_block` metadata are reported as ignored rather
 than promoted into semantic claim identity.
 
+New `sv9-flow-candidate-v2` reports may also contain the separate
+`candidate.claim_memory_evidence` shadow lane. Its v1 producer emits only
+explicit owned mission and vision declarations. Those records are not added
+to the runtime evidence pack and cannot affect interpretation, tiles, scores,
+or canonical selection. Historical reports have no lane and remain readable.
+
 Sequential variants may produce a `replacement_candidate`; variants present
 in the same report may produce a `coexistence_candidate`. Both remain
 `adjudication_state=proposed`, `runtime_effect=false`, and `authority=false`.

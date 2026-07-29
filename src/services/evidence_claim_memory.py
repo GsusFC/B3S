@@ -27,7 +27,7 @@ from src.services.scanner_evidence_comparison import MATERIAL_SOURCE_CLASSES
 
 
 EVIDENCE_CLAIM_MEMORY_VERSION = "evidence-claim-memory-v1"
-EVIDENCE_CLAIM_MEMORY_POLICY_VERSION = "evidence-claim-memory-policy-v2"
+EVIDENCE_CLAIM_MEMORY_POLICY_VERSION = "evidence-claim-memory-policy-v3"
 _SLOT_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,199}$")
 
 
@@ -68,6 +68,7 @@ def build_evidence_claim_memory(
             "checked_block_is_semantic_claim_slot": False,
             "explicit_stable_slot_declaration_required": True,
             "legacy_claim_id_requires_stable_semantics": True,
+            "shadow_producer_lane_affects_runtime": False,
         },
         "warnings": [
             "shadow_only_no_scoring_or_selection_effect",
@@ -580,12 +581,21 @@ def _evidence_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(candidate.get("evidence_pack"), dict)
         else {}
     )
-    rows = (
+    evidence_rows = (
         pack.get("evidence")
         if isinstance(pack.get("evidence"), list)
         else []
     )
-    return [row for row in rows if isinstance(row, dict)]
+    claim_rows = (
+        candidate.get("claim_memory_evidence")
+        if isinstance(candidate.get("claim_memory_evidence"), list)
+        else []
+    )
+    return [
+        row
+        for row in [*evidence_rows, *claim_rows]
+        if isinstance(row, dict)
+    ]
 
 
 def _infer_source_class(source: str, evidence_type: str) -> str:
