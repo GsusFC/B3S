@@ -10,6 +10,7 @@ without granting runtime or scoring authority.
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import json
@@ -39,10 +40,67 @@ REVIEW_DECISIONS = frozenset(
 EVIDENCE_SCORING_REVIEWED_SHADOW_VERSION = (
     "evidence-scoring-reviewed-memory-shadow-v1"
 )
+SCORING_RECOVERY_REVIEW_SUBJECT_TYPE = "scoring_recovery"
 
 
 class EvidenceScoringRecoveryReviewError(ValueError):
     """Recovery candidates or review events violate the review contract."""
+
+
+class EvidenceScoringRecoveryJournalError(RuntimeError):
+    """Base error for the durable semantic-recovery review boundary."""
+
+
+class EvidenceScoringRecoveryReviewUnavailableError(
+    EvidenceScoringRecoveryJournalError
+):
+    """The durable semantic-recovery review journal is unavailable."""
+
+
+class EvidenceScoringRecoveryReviewNotFoundError(
+    EvidenceScoringRecoveryJournalError
+):
+    """The brand or semantic recovery subject does not exist."""
+
+
+class EvidenceScoringRecoveryReviewInvalidTransitionError(
+    EvidenceScoringRecoveryJournalError
+):
+    """The requested decision cannot follow the current journal event."""
+
+
+class EvidenceScoringRecoveryReviewConflictError(
+    EvidenceScoringRecoveryJournalError
+):
+    """An optimistic-concurrency or idempotency precondition failed."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        current_event_id: str | None = None,
+        existing_event_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.current_event_id = current_event_id
+        self.existing_event_id = existing_event_id
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceScoringRecoveryReviewCommand:
+    """Validated command passed to the append-only PostgreSQL journal."""
+
+    subject_id: str
+    case_id: str
+    decision: str
+    expected_current_event_id: str | None
+    reviewer: str
+    reason_code: str
+    rationale: str
+    evaluator_version: str
+    actor_id: str
+    idempotency_key_hash: str
+    request_fingerprint: str
 
 
 def build_reviewed_scoring_memory_shadow(
@@ -51,6 +109,8 @@ def build_reviewed_scoring_memory_shadow(
     lane: str = "history",
     evidence_adjudications: Iterable[dict[str, Any]] = (),
     recovery_review_events: Iterable[dict[str, Any]] = (),
+    ignore_stale_review_events: bool = False,
+    review_events_are_current: bool = False,
 ) -> dict[str, Any]:
     """Build candidate and fail-closed reviewed scores from one report history."""
 
@@ -67,10 +127,56 @@ def build_reviewed_scoring_memory_shadow(
     candidates = build_recovery_review_candidates(
         [{"lane": lane, "preview": preview}]
     )
+    stored_events = [
+        dict(event)
+        for event in recovery_review_events
+        if isinstance(event, dict)
+    ]
+    candidate_fingerprints = {
+        str(candidate["case_id"]): str(
+            candidate["candidate_fingerprint"]
+        )
+        for candidate in candidates
+    }
+    stale_events: list[dict[str, Any]] = []
+    applicable_events: list[dict[str, Any]] = []
+    for event in stored_events:
+        case_id = str(event.get("case_id") or "")
+        expected = candidate_fingerprints.get(case_id)
+        if (
+            ignore_stale_review_events
+            and (
+                expected is None
+                or str(event.get("candidate_fingerprint") or "")
+                != expected
+            )
+        ):
+            stale_events.append(event)
+        else:
+            applicable_events.append(event)
     review = evaluate_recovery_reviews(
         candidates,
-        recovery_review_events,
+        applicable_events,
+        events_are_current=review_events_are_current,
     )
+    review["journal"] = {
+        "stored_event_count": len(stored_events),
+        "applicable_event_count": len(applicable_events),
+        "stale_event_count": len(stale_events),
+        "stale_event_ids": sorted(
+            str(
+                event.get("event_id")
+                or event.get("id")
+                or ""
+            )
+            for event in stale_events
+            if str(
+                event.get("event_id")
+                or event.get("id")
+                or ""
+            )
+        ),
+    }
     latest_report_id = str(preview.get("latest_report_id") or "")
     latest_report = next(
         (
@@ -305,6 +411,27 @@ def build_recovery_review_candidates(
     return sorted(candidates, key=lambda row: str(row["case_id"]))
 
 
+def recovery_review_subject(
+    candidates: Iterable[dict[str, Any]],
+    subject_id: str,
+) -> dict[str, Any] | None:
+    """Return one currently projected semantic mapping by its fingerprint."""
+
+    normalized = str(subject_id or "").strip().lower()
+    return next(
+        (
+            dict(candidate)
+            for candidate in candidates
+            if isinstance(candidate, dict)
+            and str(
+                candidate.get("candidate_fingerprint") or ""
+            ).strip().lower()
+            == normalized
+        ),
+        None,
+    )
+
+
 def build_recovery_review_template(
     candidates: Iterable[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -375,8 +502,10 @@ def load_recovery_review_events(
 def evaluate_recovery_reviews(
     candidates: Iterable[dict[str, Any]],
     review_events: Iterable[dict[str, Any]],
+    *,
+    events_are_current: bool = False,
 ) -> dict[str, Any]:
-    """Resolve review chains and expose only currently accepted evidence IDs."""
+    """Resolve full chains or durable current projections fail-closed."""
 
     candidate_rows = [dict(row) for row in candidates]
     event_rows = [dict(row) for row in review_events]
@@ -417,6 +546,33 @@ def evaluate_recovery_reviews(
 
     current_by_case: dict[str, dict[str, Any]] = {}
     for case_id, events in events_by_case.items():
+        if events_are_current:
+            if len(events) != 1:
+                raise EvidenceScoringRecoveryReviewError(
+                    "durable recovery review projection contains "
+                    f"multiple current events for case: {case_id}"
+                )
+            event = events[0]
+            sequence = int(event["sequence"])
+            previous_event_id = (
+                str(event["previous_event_id"])
+                if event.get("previous_event_id")
+                else None
+            )
+            if (
+                (sequence == 1 and previous_event_id is not None)
+                or (sequence > 1 and previous_event_id is None)
+                or (
+                    str(event["decision"]) == "revoked"
+                    and sequence == 1
+                )
+            ):
+                raise EvidenceScoringRecoveryReviewError(
+                    "durable recovery review projection has invalid "
+                    f"sequence metadata for case: {case_id}"
+                )
+            current_by_case[case_id] = event
+            continue
         ordered = sorted(
             events,
             key=lambda row: (
@@ -535,6 +691,11 @@ def evaluate_recovery_reviews(
         "runtime_effect": False,
         "authority": False,
         "automatic_scoring_effect": False,
+        "review_event_mode": (
+            "current_projection"
+            if events_are_current
+            else "full_chain"
+        ),
         "review_gate_ready": review_gate_ready,
         "promotion_ready": False,
         "promotion_blockers": sorted(set(blockers)),

@@ -44,6 +44,14 @@ from src.services.evidence_ledger_shadow import (
 from src.services.evidence_memory_identity_v2 import (
     build_evidence_memory_identity_v2,
 )
+from src.services.evidence_scoring_recovery_review import (
+    EvidenceScoringRecoveryJournalError,
+    EvidenceScoringRecoveryReviewCommand,
+    EvidenceScoringRecoveryReviewNotFoundError,
+    EvidenceScoringRecoveryReviewUnavailableError,
+    build_reviewed_scoring_memory_shadow,
+    recovery_review_subject,
+)
 from src.services.scanner_evidence_comparison import (
     annotate_report_history,
     selected_report_for_display,
@@ -409,6 +417,114 @@ def evidence_claim_tile_ledger_for_domain(
             "backend": "history_derived",
         },
     }
+
+
+def evidence_scoring_memory_preview_for_domain(
+    domain: str,
+) -> dict[str, Any]:
+    """Return candidate and reviewed scoring memory from durable history."""
+
+    repository = _postgres_repository()
+    if repository is not None:
+        try:
+            stored = repository.get_evidence_scoring_memory_preview(
+                domain
+            )
+            if isinstance(stored, dict):
+                return {
+                    **stored,
+                    "persistence": {
+                        "stored": True,
+                        "backend": "postgres_history_derived",
+                        "review_journal": "postgres",
+                    },
+                }
+        except Exception:
+            _LOG.exception(
+                "failed to load evidence scoring memory preview",
+                extra={"domain": domain_key(domain)},
+            )
+    derived = build_reviewed_scoring_memory_shadow(
+        list_reports_for_domain(domain),
+    )
+    return {
+        **derived,
+        "persistence": {
+            "stored": False,
+            "backend": "history_derived",
+            "review_journal": "unavailable",
+        },
+    }
+
+
+def append_evidence_scoring_recovery_review_for_domain(
+    domain: str,
+    command: EvidenceScoringRecoveryReviewCommand,
+) -> tuple[dict[str, Any], bool]:
+    """Validate a projected recovery and append only to PostgreSQL."""
+
+    repository = _postgres_repository()
+    if repository is None:
+        raise EvidenceScoringRecoveryReviewUnavailableError(
+            "The durable scoring recovery review journal is not configured."
+        )
+    try:
+        projection = repository.get_evidence_scoring_memory_preview(domain)
+        if not isinstance(projection, dict):
+            raise EvidenceScoringRecoveryReviewNotFoundError(
+                "The brand has no scoring-memory history."
+            )
+        subject = recovery_review_subject(
+            projection.get("recovery_review_candidates") or [],
+            command.subject_id,
+        )
+        if (
+            subject is None
+            or str(subject.get("case_id") or "") != command.case_id
+        ):
+            raise EvidenceScoringRecoveryReviewNotFoundError(
+                "The scoring recovery does not exist in this brand's "
+                "immutable history."
+            )
+        return repository.append_evidence_scoring_recovery_review(
+            domain,
+            command,
+        )
+    except EvidenceScoringRecoveryJournalError:
+        raise
+    except Exception as exc:
+        raise EvidenceScoringRecoveryReviewUnavailableError(
+            "The durable scoring recovery review journal is unavailable."
+        ) from exc
+
+
+def list_evidence_scoring_recovery_reviews_for_domain(
+    domain: str,
+    *,
+    subject_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Read the durable semantic-recovery review journal."""
+
+    repository = _postgres_repository()
+    if repository is None:
+        raise EvidenceScoringRecoveryReviewUnavailableError(
+            "The durable scoring recovery review journal is not configured."
+        )
+    try:
+        return repository.list_evidence_scoring_recovery_reviews(
+            domain,
+            subject_id=subject_id,
+            limit=limit,
+            offset=offset,
+        )
+    except EvidenceScoringRecoveryJournalError:
+        raise
+    except Exception as exc:
+        raise EvidenceScoringRecoveryReviewUnavailableError(
+            "The durable scoring recovery review journal is unavailable."
+        ) from exc
 
 
 def append_evidence_claim_reconciliation_for_domain(

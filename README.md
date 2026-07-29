@@ -168,6 +168,18 @@ it through
 `GET /api/v1/brands/{domain}/evidence-claim-tile-ledger-shadow`; see
 [`docs/evidence_claim_tile_ledger_v1.md`](docs/evidence_claim_tile_ledger_v1.md).
 
+Scoring-memory recovery remains a separate, non-authoritative layer. The
+candidate preview shows the maximum additive effect, while the reviewed shadow
+applies only human-accepted evidence-to-tile mappings. Decisions are stored in
+an append-only PostgreSQL journal with idempotency, optimistic concurrency,
+server-bound reviewer identity, and revocation; there is no file or in-memory
+write fallback. Inspect and review it through
+`GET /api/v1/brands/{domain}/evidence-scoring-memory-preview` and
+`GET|POST /api/v1/brands/{domain}/evidence-scoring-recovery-reviews`; see
+[`docs/evidence_scoring_recovery_review_v1.md`](docs/evidence_scoring_recovery_review_v1.md).
+Every candidate and review remains `runtime_effect=false`, `authority=false`,
+and `automatic_scoring_effect=false`.
+
 Prepare and evaluate the versioned identity review set with:
 
 ```bash

@@ -29,6 +29,10 @@ from src.services.evidence_memory_adjudication import (
 from src.services.evidence_memory_identity_v2 import (
     build_evidence_memory_identity_v2,
 )
+from src.services.evidence_scoring_recovery_review import (
+    EvidenceScoringRecoveryReviewCommand,
+    EvidenceScoringRecoveryReviewConflictError,
+)
 
 
 def test_report_parser_preserves_observed_and_evaluation_history() -> None:
@@ -287,7 +291,7 @@ def test_claim_reconciliation_migration_is_packaged_and_non_authoritative() -> N
         .read_text(encoding="utf-8")
     )
 
-    assert filenames[-2:] == [
+    assert filenames[-3:-1] == [
         "005_evidence_claim_reconciliations.sql",
         "006_evidence_claim_tile_ledger.sql",
     ]
@@ -308,12 +312,36 @@ def test_claim_tile_ledger_migration_is_versioned_and_non_authoritative() -> Non
         .read_text(encoding="utf-8")
     )
 
-    assert filenames[-1] == "006_evidence_claim_tile_ledger.sql"
+    assert filenames[-2] == "006_evidence_claim_tile_ledger.sql"
     assert "evidence_claim_tile_mapping_series" in sql
     assert "evidence_claim_tile_mapping_observations" in sql
     assert "runtime_effect = false" in sql
     assert "authority = false" in sql
     assert "mapping_series_id" in sql
+
+
+def test_scoring_recovery_review_migration_is_append_only_and_safe() -> None:
+    from src.history.repository import _migration_files
+
+    filenames = [filename for filename, _sql in _migration_files()]
+    sql = (
+        resources.files("src.history")
+        .joinpath(
+            "migrations/007_evidence_scoring_recovery_reviews.sql"
+        )
+        .read_text(encoding="utf-8")
+    )
+
+    assert filenames[-1] == (
+        "007_evidence_scoring_recovery_reviews.sql"
+    )
+    assert "subject_type = 'scoring_recovery'" in sql
+    assert "candidate_fingerprint = subject_id" in sql
+    assert "supersedes_event_id" in sql
+    assert "UNIQUE (brand_id, idempotency_key_hash)" in sql
+    assert "runtime_effect = false" in sql
+    assert "authority = false" in sql
+    assert "automatic_scoring_effect = false" in sql
 
 
 def test_claim_reconciliation_repository_validation_rejects_bad_subjects() -> None:
@@ -417,6 +445,83 @@ def test_claim_reconciliation_repository_is_idempotent_and_optimistic() -> None:
     assert len(connection.events) == 2
 
 
+def test_scoring_recovery_review_repository_is_idempotent_and_optimistic() -> None:
+    from src.history.repository import PostgresHistoryRepository
+
+    connection = _ScoringRecoveryReviewConnection()
+    repository = PostgresHistoryRepository(
+        "postgresql://example.test/b3s",
+        connect=lambda *_args, **_kwargs: connection,
+    )
+    repository._migrated = True
+    subject_id = "a" * 64
+    case_id = "scoring-recovery-example-com-magnetism-mg1-aaaaaaaaaaaa"
+    accepted_command = _scoring_recovery_review_command(
+        subject_id,
+        case_id=case_id,
+        decision="accepted",
+        expected_current_event_id=None,
+        key_hash="b" * 64,
+        fingerprint="c" * 64,
+    )
+
+    accepted, replayed = (
+        repository.append_evidence_scoring_recovery_review(
+            "example.com",
+            accepted_command,
+        )
+    )
+    replay, was_replayed = (
+        repository.append_evidence_scoring_recovery_review(
+            "example.com",
+            accepted_command,
+        )
+    )
+
+    assert replayed is False
+    assert was_replayed is True
+    assert replay["id"] == accepted["id"]
+    assert accepted["candidate_fingerprint"] == subject_id
+    assert accepted["automatic_scoring_effect"] is False
+    assert len(connection.events) == 1
+
+    with pytest.raises(
+        EvidenceScoringRecoveryReviewConflictError,
+        match="changed after it was read",
+    ):
+        repository.append_evidence_scoring_recovery_review(
+            "example.com",
+            _scoring_recovery_review_command(
+                subject_id,
+                case_id=case_id,
+                decision="disputed",
+                expected_current_event_id=None,
+                key_hash="d" * 64,
+                fingerprint="e" * 64,
+            ),
+        )
+
+    revoked, replayed = (
+        repository.append_evidence_scoring_recovery_review(
+            "example.com",
+            _scoring_recovery_review_command(
+                subject_id,
+                case_id=case_id,
+                decision="revoked",
+                expected_current_event_id=accepted["id"],
+                key_hash="f" * 64,
+                fingerprint="0" * 64,
+            ),
+        )
+    )
+
+    assert replayed is False
+    assert revoked["sequence"] == 2
+    assert revoked["previous_event_id"] == accepted["id"]
+    assert revoked["supersedes_event_id"] == accepted["id"]
+    assert len(connection.events) == 2
+
+
 @pytest.mark.skipif(
     not os.environ.get("B3S_TEST_DATABASE_URL"),
     reason="B3S_TEST_DATABASE_URL is required for PostgreSQL integration",
@@ -447,6 +552,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "004_evidence_memory_adjudications.sql",
             "005_evidence_claim_reconciliations.sql",
             "006_evidence_claim_tile_ledger.sql",
+            "007_evidence_scoring_recovery_reviews.sql",
         ]
         assert repository.migrate() == []
 
@@ -532,6 +638,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "evidence_ledger_shadow_observations": 2,
             "evidence_memory_adjudication_events": 0,
             "evidence_claim_reconciliation_events": 0,
+            "evidence_scoring_recovery_review_events": 0,
             "evidence_claim_tile_ledger_states": 1,
             "evidence_claim_tile_mapping_series": 1,
             "evidence_claim_tile_mappings": 0,
@@ -864,6 +971,30 @@ def _claim_reconciliation_command(
     )
 
 
+def _scoring_recovery_review_command(
+    subject_id: str,
+    *,
+    case_id: str,
+    decision: str,
+    expected_current_event_id: str | None,
+    key_hash: str,
+    fingerprint: str,
+) -> EvidenceScoringRecoveryReviewCommand:
+    return EvidenceScoringRecoveryReviewCommand(
+        subject_id=subject_id,
+        case_id=case_id,
+        decision=decision,
+        expected_current_event_id=expected_current_event_id,
+        reviewer="gsus",
+        reason_code="tile_contract_reviewed",
+        rationale="The reviewer checked the semantic tile contract.",
+        evaluator_version="manual-review-v1",
+        actor_id="gsus",
+        idempotency_key_hash=key_hash,
+        request_fingerprint=fingerprint,
+    )
+
+
 class _ClaimReconciliationCursor:
     def __init__(self, row=None):
         self.row = row
@@ -943,6 +1074,99 @@ class _ClaimReconciliationConnection:
                 "runtime_effect": False,
                 "authority": False,
                 "created_at": datetime(2026, 7, 29, tzinfo=timezone.utc),
+            }
+            self.events.append(row)
+            return _ClaimReconciliationCursor(row)
+        raise AssertionError(f"unexpected SQL: {compact}")
+
+    def _current(self, subject_id):
+        matching = [
+            event
+            for event in self.events
+            if event["subject_id"] == subject_id
+        ]
+        return (
+            max(matching, key=lambda event: event["sequence"])
+            if matching
+            else None
+        )
+
+
+class _ScoringRecoveryReviewConnection:
+    def __init__(self):
+        self.brand_id = uuid4()
+        self.events: list[dict] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, sql, params=(), **_kwargs):
+        compact = " ".join(str(sql).split())
+        table = (
+            "b3s_history.evidence_scoring_recovery_review_events"
+        )
+        if "SELECT brands.id" in compact:
+            return _ClaimReconciliationCursor({"id": self.brand_id})
+        if "pg_advisory_xact_lock" in compact:
+            return _ClaimReconciliationCursor()
+        if (
+            f"SELECT * FROM {table}" in compact
+            and "idempotency_key_hash = %s" in compact
+        ):
+            key_hash = params[1]
+            row = next(
+                (
+                    event
+                    for event in self.events
+                    if event["idempotency_key_hash"] == key_hash
+                ),
+                None,
+            )
+            return _ClaimReconciliationCursor(row)
+        if f"SELECT id FROM {table}" in compact:
+            current = self._current(params[2])
+            return _ClaimReconciliationCursor(
+                {"id": current["id"]} if current else None
+            )
+        if (
+            f"SELECT * FROM {table}" in compact
+            and "ORDER BY sequence DESC" in compact
+        ):
+            return _ClaimReconciliationCursor(
+                self._current(params[2])
+            )
+        if f"INSERT INTO {table}" in compact:
+            row = {
+                "id": params[0],
+                "brand_id": params[1],
+                "subject_type": params[2],
+                "subject_id": params[3],
+                "case_id": params[4],
+                "candidate_fingerprint": params[5],
+                "sequence": params[6],
+                "decision": params[7],
+                "supersedes_event_id": params[8],
+                "schema_version": params[9],
+                "policy_version": params[10],
+                "evaluator_version": params[11],
+                "reviewer": params[12],
+                "actor_id": params[13],
+                "reason_code": params[14],
+                "rationale": params[15],
+                "idempotency_key_hash": params[16],
+                "request_fingerprint": params[17],
+                "runtime_effect": False,
+                "authority": False,
+                "automatic_scoring_effect": False,
+                "created_at": datetime(
+                    2026,
+                    7,
+                    29,
+                    tzinfo=timezone.utc,
+                ),
             }
             self.events.append(row)
             return _ClaimReconciliationCursor(row)

@@ -1209,6 +1209,381 @@ def test_claim_reconciliation_journal_exposes_superseded_events(monkeypatch):
     assert response.json()["pagination"]["has_more"] is False
 
 
+def test_scoring_memory_preview_exposes_candidate_and_reviewed_scores(
+    monkeypatch,
+):
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    monkeypatch.setattr(
+        "web.api_v1.router.evidence_scoring_memory_preview_for_domain",
+        lambda _domain: {
+            "schema_version": "evidence-scoring-memory-preview-v1",
+            "policy_version": (
+                "evidence-scoring-memory-preview-policy-v1"
+            ),
+            "reviewed_shadow_version": (
+                "evidence-scoring-reviewed-memory-shadow-v1"
+            ),
+            "mode": "shadow",
+            "runtime_effect": False,
+            "authority": False,
+            "automatic_scoring_effect": False,
+            "state_fingerprint": "a" * 64,
+            "scoring": {"score_delta": 2},
+            "reviewed_shadow": {
+                "scoring": {"score_delta": 0},
+            },
+            "recovery_review_candidates": [
+                {"candidate_fingerprint": "b" * 64}
+            ],
+            "recovery_review": {
+                "summary": {"pending_count": 1}
+            },
+            "persistence": {
+                "stored": True,
+                "backend": "postgres_history_derived",
+                "review_journal": "postgres",
+            },
+        },
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/evidence-scoring-memory-preview",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scoring"]["score_delta"] == 2
+    assert payload["reviewed_shadow"]["scoring"]["score_delta"] == 0
+    assert payload["recovery_review"]["summary"]["pending_count"] == 1
+    assert payload["runtime_effect"] is False
+    assert payload["automatic_scoring_effect"] is False
+
+
+def test_create_scoring_recovery_review_is_attributable_and_idempotent(
+    monkeypatch,
+):
+    _configure_evidence_reviewer(monkeypatch)
+    captured = {}
+    event = _scoring_recovery_review_event()
+
+    def fake_create(
+        domain,
+        payload,
+        *,
+        client_id,
+        reviewer_id,
+        idempotency_key,
+    ):
+        captured.update(
+            domain=domain,
+            payload=payload,
+            client_id=client_id,
+            reviewer_id=reviewer_id,
+            idempotency_key=idempotency_key,
+        )
+        return event, True
+
+    monkeypatch.setattr(
+        "web.api_v1.router.create_evidence_scoring_recovery_review",
+        fake_create,
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/"
+        "evidence-scoring-recovery-reviews",
+        headers={
+            **REVIEW_AUTH,
+            "Idempotency-Key": "review-scoring-recovery-1",
+        },
+        json={
+            "subject_id": "b" * 64,
+            "case_id": "scoring-recovery-example-magnetism-mg1",
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "tile_contract_satisfied",
+            "rationale": "The quote satisfies the tile contract.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.headers["idempotent-replayed"] == "true"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["automatic_scoring_effect"] is False
+    assert response.json()["event"]["reviewer"] == REVIEWER_ID
+    assert captured["reviewer_id"] == REVIEWER_ID
+    assert captured["client_id"] == REVIEWER_ID
+    assert "reviewer" not in captured["payload"]
+    assert captured["idempotency_key"] == "review-scoring-recovery-1"
+
+
+def test_scanner_token_cannot_review_scoring_recovery(monkeypatch):
+    _configure_evidence_reviewer(monkeypatch)
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/"
+        "evidence-scoring-recovery-reviews",
+        headers={
+            **AUTH,
+            "Idempotency-Key": "scanner-cannot-review-scoring",
+        },
+        json={
+            "subject_id": "b" * 64,
+            "case_id": "scoring-recovery-example-magnetism-mg1",
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "tile_contract_satisfied",
+            "rationale": "The quote satisfies the tile contract.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["details"]["required_scope"] == (
+        "evidence:adjudicate"
+    )
+
+
+def test_scoring_recovery_review_requires_idempotency_key(monkeypatch):
+    _configure_evidence_reviewer(monkeypatch)
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/"
+        "evidence-scoring-recovery-reviews",
+        headers=REVIEW_AUTH,
+        json={
+            "subject_id": "b" * 64,
+            "case_id": "scoring-recovery-example-magnetism-mg1",
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "tile_contract_satisfied",
+            "rationale": "The quote satisfies the tile contract.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "idempotency_key_required"
+
+
+def test_scoring_recovery_review_fails_closed_without_durable_store(
+    monkeypatch,
+):
+    from src.services.evidence_scoring_recovery_review import (
+        EvidenceScoringRecoveryReviewUnavailableError,
+    )
+
+    _configure_evidence_reviewer(monkeypatch)
+
+    def unavailable(*_args, **_kwargs):
+        raise EvidenceScoringRecoveryReviewUnavailableError(
+            "not configured"
+        )
+
+    monkeypatch.setattr(
+        "web.api_v1.service."
+        "append_evidence_scoring_recovery_review_for_domain",
+        unavailable,
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/"
+        "evidence-scoring-recovery-reviews",
+        headers={
+            **REVIEW_AUTH,
+            "Idempotency-Key": "scoring-journal-unavailable",
+        },
+        json={
+            "subject_id": "b" * 64,
+            "case_id": "scoring-recovery-example-magnetism-mg1",
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "tile_contract_satisfied",
+            "rationale": "The quote satisfies the tile contract.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == (
+        "scoring_recovery_review_store_unavailable"
+    )
+
+
+def test_scoring_recovery_review_rejects_stale_current_event(
+    monkeypatch,
+):
+    from src.services.evidence_scoring_recovery_review import (
+        EvidenceScoringRecoveryReviewConflictError,
+    )
+
+    _configure_evidence_reviewer(monkeypatch)
+    current_event_id = "00000000-0000-0000-0000-000000000029"
+
+    def conflict(*_args, **_kwargs):
+        raise EvidenceScoringRecoveryReviewConflictError(
+            "The recovery review changed after it was read.",
+            current_event_id=current_event_id,
+        )
+
+    monkeypatch.setattr(
+        "web.api_v1.service."
+        "append_evidence_scoring_recovery_review_for_domain",
+        conflict,
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/"
+        "evidence-scoring-recovery-reviews",
+        headers={
+            **REVIEW_AUTH,
+            "Idempotency-Key": "scoring-recovery-stale",
+        },
+        json={
+            "subject_id": "b" * 64,
+            "case_id": "scoring-recovery-example-magnetism-mg1",
+            "decision": "disputed",
+            "expected_current_event_id": None,
+            "reason_code": "tile_contract_conflict",
+            "rationale": "A concurrent review changed the recovery.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == (
+        "scoring_recovery_review_precondition_failed"
+    )
+    assert response.json()["error"]["details"]["current_event_id"] == (
+        current_event_id
+    )
+
+
+def test_scoring_recovery_review_rejects_unknown_projected_candidate(
+    monkeypatch,
+):
+    from src.services.evidence_scoring_recovery_review import (
+        EvidenceScoringRecoveryReviewNotFoundError,
+    )
+
+    _configure_evidence_reviewer(monkeypatch)
+
+    def missing(*_args, **_kwargs):
+        raise EvidenceScoringRecoveryReviewNotFoundError(
+            "The scoring recovery does not exist."
+        )
+
+    monkeypatch.setattr(
+        "web.api_v1.service."
+        "append_evidence_scoring_recovery_review_for_domain",
+        missing,
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/"
+        "evidence-scoring-recovery-reviews",
+        headers={
+            **REVIEW_AUTH,
+            "Idempotency-Key": "unknown-scoring-recovery",
+        },
+        json={
+            "subject_id": "b" * 64,
+            "case_id": "scoring-recovery-example-magnetism-mg1",
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "tile_contract_satisfied",
+            "rationale": "The quote satisfies the tile contract.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == (
+        "scoring_recovery_not_found"
+    )
+    assert response.json()["error"]["details"]["subject_id"] == "b" * 64
+
+
+def test_scoring_recovery_service_binds_authenticated_reviewer(
+    monkeypatch,
+):
+    from web.api_v1.service import (
+        create_evidence_scoring_recovery_review,
+    )
+
+    captured = {}
+
+    def append(_domain, command):
+        captured["command"] = command
+        return _scoring_recovery_review_event(), False
+
+    monkeypatch.setattr(
+        "web.api_v1.service."
+        "append_evidence_scoring_recovery_review_for_domain",
+        append,
+    )
+
+    create_evidence_scoring_recovery_review(
+        "example.com",
+        {
+            "subject_id": "b" * 64,
+            "case_id": "scoring-recovery-example-magnetism-mg1",
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "tile_contract_satisfied",
+            "rationale": "The quote satisfies the tile contract.",
+            "evaluator_version": "manual-review-v1",
+        },
+        client_id=REVIEWER_ID,
+        reviewer_id=REVIEWER_ID,
+        idempotency_key="server-derived-scoring-reviewer",
+    )
+
+    assert captured["command"].reviewer == REVIEWER_ID
+    assert captured["command"].actor_id == REVIEWER_ID
+    assert captured["command"].case_id == (
+        "scoring-recovery-example-magnetism-mg1"
+    )
+
+
+def test_scoring_recovery_review_journal_exposes_superseded_events(
+    monkeypatch,
+):
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    current = _scoring_recovery_review_event()
+    superseded = {
+        **current,
+        "id": "00000000-0000-0000-0000-000000000020",
+        "event_id": "00000000-0000-0000-0000-000000000020",
+        "effective_state": "superseded",
+    }
+    monkeypatch.setattr(
+        "web.api_v1.router.get_evidence_scoring_recovery_reviews",
+        lambda domain, **_kwargs: {
+            "events": [current, superseded],
+            "current": [current],
+            "total": 2,
+            "limit": 100,
+            "offset": 0,
+        },
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/"
+        "evidence-scoring-recovery-reviews",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["automatic_scoring_effect"] is False
+    assert [item["effective_state"] for item in response.json()["events"]] == [
+        "accepted",
+        "superseded",
+    ]
+    assert response.json()["pagination"]["has_more"] is False
+
+
 def test_failed_status_never_exposes_internal_exception_text():
     status = _running_scan()
     status.update(
@@ -1269,6 +1644,40 @@ def _claim_reconciliation_event() -> dict:
         "runtime_effect": False,
         "authority": False,
         "created_at": "2026-07-29T10:00:00+00:00",
+    }
+
+
+def _scoring_recovery_review_event() -> dict:
+    event_id = "00000000-0000-0000-0000-000000000021"
+    return {
+        "id": event_id,
+        "event_id": event_id,
+        "subject_type": "scoring_recovery",
+        "subject_id": "b" * 64,
+        "case_id": "scoring-recovery-example-magnetism-mg1",
+        "candidate_fingerprint": "b" * 64,
+        "sequence": 1,
+        "decision": "accepted",
+        "effective_state": "accepted",
+        "supersedes_event_id": None,
+        "previous_event_id": None,
+        "schema_version": (
+            "evidence-scoring-recovery-review-event-v1"
+        ),
+        "policy_version": (
+            "evidence-scoring-recovery-review-policy-v1"
+        ),
+        "evaluator_version": "manual-review-v1",
+        "reviewer": REVIEWER_ID,
+        "reviewer_id": REVIEWER_ID,
+        "actor_id": REVIEWER_ID,
+        "reason_code": "tile_contract_satisfied",
+        "rationale": "The quote satisfies the tile contract.",
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_scoring_effect": False,
+        "created_at": "2026-07-29T15:00:00+00:00",
+        "reviewed_at": "2026-07-29T15:00:00+00:00",
     }
 
 
@@ -1334,6 +1743,14 @@ def test_openapi_is_dedicated_to_v1_routes():
     )
     assert (
         "/api/v1/brands/{domain}/evidence-claim-reconciliations"
+        in response.json()["paths"]
+    )
+    assert (
+        "/api/v1/brands/{domain}/evidence-scoring-memory-preview"
+        in response.json()["paths"]
+    )
+    assert (
+        "/api/v1/brands/{domain}/evidence-scoring-recovery-reviews"
         in response.json()["paths"]
     )
     assert "/scan" not in response.json()["paths"]

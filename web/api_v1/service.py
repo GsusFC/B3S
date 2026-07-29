@@ -22,12 +22,21 @@ from src.services.evidence_memory_adjudication import (
     EvidenceMemoryAdjudicationNotFoundError,
     EvidenceMemoryAdjudicationUnavailableError,
 )
+from src.services.evidence_scoring_recovery_review import (
+    EvidenceScoringRecoveryReviewCommand,
+    EvidenceScoringRecoveryReviewConflictError,
+    EvidenceScoringRecoveryReviewInvalidTransitionError,
+    EvidenceScoringRecoveryReviewNotFoundError,
+    EvidenceScoringRecoveryReviewUnavailableError,
+)
 from src.storage.sqlite_store import SQLiteStore
 from web.report_store import (
     append_evidence_claim_reconciliation_for_domain,
     append_evidence_memory_adjudication_for_domain,
+    append_evidence_scoring_recovery_review_for_domain,
     list_evidence_claim_reconciliations_for_domain,
     list_evidence_memory_adjudications_for_domain,
+    list_evidence_scoring_recovery_reviews_for_domain,
     load_report,
     new_scan_id,
 )
@@ -395,6 +404,136 @@ def get_evidence_claim_reconciliations(
             503,
             "claim_reconciliation_store_unavailable",
             "The durable claim reconciliation journal is temporarily unavailable.",
+        ) from exc
+
+
+def create_evidence_scoring_recovery_review(
+    domain: str,
+    request_payload: dict[str, Any],
+    *,
+    client_id: str,
+    reviewer_id: str,
+    idempotency_key: str | None,
+) -> tuple[dict[str, Any], bool]:
+    """Append a semantic recovery decision without runtime scoring authority."""
+
+    key_hash = _idempotency_key_hash(idempotency_key)
+    if key_hash is None:
+        raise ApiError(
+            400,
+            "idempotency_key_required",
+            "Idempotency-Key is required for scoring recovery reviews.",
+        )
+    normalized = {
+        "domain": str(domain).strip().lower(),
+        "subject_id": str(
+            request_payload.get("subject_id") or ""
+        ).strip().lower(),
+        "case_id": str(
+            request_payload.get("case_id") or ""
+        ).strip(),
+        "decision": str(
+            request_payload.get("decision") or ""
+        ).strip().lower(),
+        "expected_current_event_id": (
+            str(
+                request_payload["expected_current_event_id"]
+            ).strip().lower()
+            if request_payload.get("expected_current_event_id")
+            else None
+        ),
+        "reviewer": str(reviewer_id or "").strip(),
+        "reason_code": str(
+            request_payload.get("reason_code") or ""
+        ).strip().lower(),
+        "rationale": str(
+            request_payload.get("rationale") or ""
+        ).strip(),
+        "evaluator_version": str(
+            request_payload.get("evaluator_version") or ""
+        ).strip(),
+        "actor_id": str(client_id or "").strip(),
+    }
+    command = EvidenceScoringRecoveryReviewCommand(
+        subject_id=normalized["subject_id"],
+        case_id=normalized["case_id"],
+        decision=normalized["decision"],
+        expected_current_event_id=normalized[
+            "expected_current_event_id"
+        ],
+        reviewer=normalized["reviewer"],
+        reason_code=normalized["reason_code"],
+        rationale=normalized["rationale"],
+        evaluator_version=normalized["evaluator_version"],
+        actor_id=normalized["actor_id"],
+        idempotency_key_hash=key_hash,
+        request_fingerprint=_request_fingerprint(normalized),
+    )
+    try:
+        return append_evidence_scoring_recovery_review_for_domain(
+            domain,
+            command,
+        )
+    except EvidenceScoringRecoveryReviewNotFoundError as exc:
+        raise ApiError(
+            404,
+            "scoring_recovery_not_found",
+            str(exc),
+            details={"subject_id": command.subject_id},
+        ) from exc
+    except EvidenceScoringRecoveryReviewConflictError as exc:
+        if exc.existing_event_id:
+            raise ApiError(
+                409,
+                "idempotency_key_reused",
+                str(exc),
+                details={
+                    "existing_event_id": exc.existing_event_id
+                },
+            ) from exc
+        raise ApiError(
+            409,
+            "scoring_recovery_review_precondition_failed",
+            str(exc),
+            details={"current_event_id": exc.current_event_id},
+        ) from exc
+    except EvidenceScoringRecoveryReviewInvalidTransitionError as exc:
+        raise ApiError(
+            409,
+            "invalid_scoring_recovery_review_transition",
+            str(exc),
+        ) from exc
+    except EvidenceScoringRecoveryReviewUnavailableError as exc:
+        raise ApiError(
+            503,
+            "scoring_recovery_review_store_unavailable",
+            "The durable scoring recovery review journal is temporarily unavailable.",
+        ) from exc
+
+
+def get_evidence_scoring_recovery_reviews(
+    domain: str,
+    *,
+    subject_id: str | None,
+    limit: int,
+    offset: int,
+) -> dict[str, Any]:
+    """Read a page from the durable semantic-recovery review journal."""
+
+    try:
+        return list_evidence_scoring_recovery_reviews_for_domain(
+            domain,
+            subject_id=subject_id,
+            limit=limit,
+            offset=offset,
+        )
+    except EvidenceScoringRecoveryReviewNotFoundError as exc:
+        raise ApiError(404, "brand_not_found", str(exc)) from exc
+    except EvidenceScoringRecoveryReviewUnavailableError as exc:
+        raise ApiError(
+            503,
+            "scoring_recovery_review_store_unavailable",
+            "The durable scoring recovery review journal is temporarily unavailable.",
         ) from exc
 
 
