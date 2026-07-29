@@ -33,6 +33,9 @@ from .models import (
     EvidenceClaimReconciliationCreateRequest,
     EvidenceClaimReconciliationCreateResponse,
     EvidenceClaimReconciliationJournalResponse,
+    EvidenceClaimTileReviewCreateRequest,
+    EvidenceClaimTileReviewCreateResponse,
+    EvidenceClaimTileReviewJournalResponse,
     EvidenceLedgerShadowResponse,
     EvidenceMemoryAdjudicationCreateRequest,
     EvidenceMemoryAdjudicationCreateResponse,
@@ -50,11 +53,13 @@ from .models import (
 from .presenters import evidence_payload, report_etag, result_payload, status_payload
 from .service import (
     create_evidence_claim_reconciliation,
+    create_evidence_claim_tile_review,
     create_evidence_memory_adjudication,
     create_evidence_scoring_recovery_review,
     create_scan_job,
     get_completed_report,
     get_evidence_claim_reconciliations,
+    get_evidence_claim_tile_reviews,
     get_evidence_memory_adjudications,
     get_evidence_scoring_recovery_reviews,
     get_scan,
@@ -406,6 +411,108 @@ def brand_evidence_claim_tile_ledger_shadow(
         "api_version": "v1",
         "domain": normalized,
         **evidence_claim_tile_ledger_for_domain(normalized),
+    }
+
+
+@router.post(
+    "/brands/{domain}/evidence-claim-tile-reviews",
+    response_model=EvidenceClaimTileReviewCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="createBrandEvidenceClaimTileReview",
+    responses=_ERRORS,
+)
+def create_brand_evidence_claim_tile_review(
+    domain: str,
+    payload: EvidenceClaimTileReviewCreateRequest,
+    response: Response,
+    principal: AdjudicationPrincipal,
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
+) -> dict[str, Any]:
+    normalized = domain_key(domain)
+    if not normalized:
+        raise ApiError(
+            400,
+            "invalid_domain",
+            "A valid brand domain is required.",
+        )
+    event, replayed = create_evidence_claim_tile_review(
+        normalized,
+        payload.model_dump(),
+        client_id=principal.client_id,
+        reviewer_id=principal.reviewer_id or "",
+        idempotency_key=idempotency_key,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Location"] = (
+        f"/api/v1/brands/{normalized}/evidence-claim-tile-reviews"
+        f"?subject_id={event['subject_id']}"
+    )
+    if replayed:
+        response.headers["Idempotent-Replayed"] = "true"
+    return {
+        "object": "evidence_claim_tile_review",
+        "api_version": "v1",
+        "domain": normalized,
+        "replayed": replayed,
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_tile_effect": False,
+        "automatic_scoring_effect": False,
+        "event": event,
+    }
+
+
+@router.get(
+    "/brands/{domain}/evidence-claim-tile-reviews",
+    response_model=EvidenceClaimTileReviewJournalResponse,
+    operation_id="listBrandEvidenceClaimTileReviews",
+    responses=_ERRORS,
+)
+def list_brand_evidence_claim_tile_reviews(
+    domain: str,
+    _principal: ReadPrincipal,
+    subject_id: Annotated[
+        str | None,
+        Query(pattern=r"^[0-9a-f]{64}$"),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, Any]:
+    normalized = domain_key(domain)
+    if not normalized:
+        raise ApiError(
+            400,
+            "invalid_domain",
+            "A valid brand domain is required.",
+        )
+    journal = get_evidence_claim_tile_reviews(
+        normalized,
+        subject_id=subject_id,
+        limit=limit,
+        offset=offset,
+    )
+    events = journal["events"]
+    return {
+        "object": "evidence_claim_tile_review_list",
+        "api_version": "v1",
+        "domain": normalized,
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_tile_effect": False,
+        "automatic_scoring_effect": False,
+        "events": events,
+        "current": journal["current"],
+        "pagination": {
+            "limit": journal["limit"],
+            "offset": journal["offset"],
+            "count": len(events),
+            "has_more": (
+                journal["offset"] + len(events) < journal["total"]
+            ),
+        },
     }
 
 

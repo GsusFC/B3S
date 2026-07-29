@@ -57,6 +57,9 @@ canonical/provisional reference are related but not interchangeable.
   hashed quote provenance for each unique mapping.
 - `evidence_claim_tile_mapping_observations`: capture-level persistence for a
   mapping.
+- `evidence_claim_tile_review_events`: append-only semantic decisions over
+  immutable claim-to-tile mapping ids, including their evidence, claim variant,
+  tile, polarity, and mapping-series snapshot.
 
 ## Invariants
 
@@ -73,10 +76,13 @@ canonical/provisional reference are related but not interchangeable.
 - Claim-to-tile rebuilds use a separate savepoint, retain older versioned
   mapping series, return no raw claim/quote text, and enforce
   `runtime_effect=false` and `authority=false`.
-- Evidence adjudication and claim reconciliation use separate append-only
-  journals with idempotency, optimistic concurrency, explicit supersession,
-  revocation, and database-enforced `runtime_effect=false` and
-  `authority=false`.
+- Evidence adjudication, claim reconciliation, scoring recovery, and
+  claim-to-tile review use separate append-only journals with idempotency,
+  optimistic concurrency, explicit supersession, revocation, and
+  database-enforced `runtime_effect=false` and `authority=false`.
+- Claim-to-tile review also enforces `automatic_tile_effect=false` and
+  `automatic_scoring_effect=false`; its foreign key can reference only a
+  mapping already present in immutable brand history.
 
 PostgreSQL cannot represent NUL inside `text` or `jsonb`. Imported text replaces NUL with U+FFFD for querying, while `evidence_records.content_raw` and `report_snapshots.payload_raw` preserve canonical original bytes. Hashes are calculated from the unsanitized content.
 
@@ -116,9 +122,11 @@ python scripts/import_b3s_reports_postgres.py --migrate-only
 ```
 
 The first run must apply every packaged migration, the second must apply none,
-and migration `007` must leave the scoring-recovery review journal available.
-This proves the CLI contract and idempotency on PostgreSQL; it does not replace
-an observed Fly release using the built image and production secret.
+and migrations `007–008` must leave both semantic-review journals available.
+The claim-to-tile integration test also proves acceptance, restart recovery,
+revocation, supersession, and an unchanged ledger fingerprint. This proves the
+CLI and journal contracts on PostgreSQL; it does not replace an observed Fly
+release using the built image and production secret.
 
 ## Cutover boundary
 

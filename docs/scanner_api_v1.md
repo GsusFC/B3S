@@ -304,6 +304,36 @@ immutable-history fingerprint. Otherwise the API returns the deterministic
 `B3S_EVIDENCE_CLAIM_TILE_LEDGER_MODE=disabled` to stop projection and
 persistence.
 
+## Evidence claim-to-tile review journal
+
+```text
+GET  /api/v1/brands/{domain}/evidence-claim-tile-reviews
+POST /api/v1/brands/{domain}/evidence-claim-tile-reviews
+```
+
+The review subject is a 64-character `mapping_id` already present in the
+brand's persistent claim-to-tile ledger. A write requires the dedicated
+reviewer credential, an `Idempotency-Key`, and an explicit
+`expected_current_event_id`. The server binds reviewer identity and resolves
+the mapping metadata from PostgreSQL.
+
+Every event freezes the exact `source_evidence_id`, `claim_variant_id`,
+`mapping_series_id`, tile, and polarity. Decisions are `accepted`, `disputed`,
+`rejected`, or `revoked`; superseded events remain readable. A missing mapping
+returns `404`, stale optimistic concurrency or idempotency reuse returns `409`,
+and an unavailable durable store returns `503`.
+
+The journal is semantic review evidence, not tile authority:
+
+```text
+runtime_effect=false
+authority=false
+automatic_tile_effect=false
+automatic_scoring_effect=false
+```
+
+There is no JSONL, SQLite, or in-memory write fallback.
+
 ## Evidence claim reconciliation journal
 
 ```text

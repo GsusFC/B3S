@@ -109,6 +109,11 @@ text and tile contracts. None has a human review yet. Seven reuse one Vercel
 mission claim, only two brands and two claim variants are represented, and all
 eight have `supports` polarity.
 
+Completed decisions now have a durable, revocable PostgreSQL boundary at
+`GET|POST /api/v1/brands/{domain}/evidence-claim-tile-reviews`; see
+[`evidence_claim_tile_review_v1.md`](evidence_claim_tile_review_v1.md).
+Recording a decision does not edit this ledger or its fingerprint.
+
 This demonstrates reuse of existing scanner evidence; it does not validate
 coverage or correctness for canonical promotion. Gate 2 therefore remains
 blocked on completed reviews, broader real coverage, polarity coverage, and an

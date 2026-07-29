@@ -30,6 +30,17 @@ from src.services.evidence_claim_tile_ledger import (
     build_evidence_claim_tile_ledger,
     evidence_claim_tile_ledger_mode,
 )
+from src.services.evidence_claim_tile_review import (
+    CLAIM_TILE_REVIEW_DECISIONS,
+    CLAIM_TILE_REVIEW_SUBJECT_TYPE,
+    EVIDENCE_CLAIM_TILE_REVIEW_EVENT_VERSION,
+    EVIDENCE_CLAIM_TILE_REVIEW_POLICY_VERSION,
+    EvidenceClaimTileReviewCommand,
+    EvidenceClaimTileReviewConflictError,
+    EvidenceClaimTileReviewInvalidTransitionError,
+    EvidenceClaimTileReviewNotFoundError,
+    claim_tile_review_case_id,
+)
 from src.services.evidence_memory_adjudication import (
     ADJUDICATION_DECISIONS,
     ADJUDICATION_SUBJECT_TYPE,
@@ -452,6 +463,359 @@ class PostgresHistoryRepository:
                 (workspace_slug, domain),
             ).fetchone()
         return dict(row["payload"]) if row and isinstance(row["payload"], dict) else None
+
+    def append_evidence_claim_tile_review(
+        self,
+        domain_or_url: str,
+        command: EvidenceClaimTileReviewCommand,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Append one semantic mapping decision with optimistic locking."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceClaimTileReviewNotFoundError(
+                "The brand domain does not exist in durable history."
+            )
+        _validate_claim_tile_review_command(command)
+
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceClaimTileReviewNotFoundError(
+                    "The brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        "evidence-claim-tile-review-idempotency",
+                        command.idempotency_key_hash,
+                    ),
+                ),
+            )
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        CLAIM_TILE_REVIEW_SUBJECT_TYPE,
+                        command.subject_id,
+                    ),
+                ),
+            )
+            existing = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_claim_tile_review_events
+                WHERE brand_id = %s
+                  AND idempotency_key_hash = %s
+                """,
+                (brand_id, command.idempotency_key_hash),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["request_fingerprint"])
+                    != command.request_fingerprint
+                ):
+                    raise EvidenceClaimTileReviewConflictError(
+                        "The Idempotency-Key was already used for a different claim-to-tile review.",
+                        existing_event_id=str(existing["id"]),
+                    )
+                latest = conn.execute(
+                    f"""
+                    SELECT id
+                    FROM {_SCHEMA}.evidence_claim_tile_review_events
+                    WHERE brand_id = %s
+                      AND subject_type = %s
+                      AND subject_id = %s
+                    ORDER BY sequence DESC
+                    LIMIT 1
+                    """,
+                    (
+                        brand_id,
+                        CLAIM_TILE_REVIEW_SUBJECT_TYPE,
+                        command.subject_id,
+                    ),
+                ).fetchone()
+                effective_state = (
+                    str(existing["decision"])
+                    if latest is not None
+                    and latest["id"] == existing["id"]
+                    else "superseded"
+                )
+                return _claim_tile_review_event(
+                    existing,
+                    effective_state=effective_state,
+                ), True
+
+            mapping = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_claim_tile_mappings
+                WHERE brand_id = %s
+                  AND mapping_id = %s
+                """,
+                (brand_id, command.subject_id),
+            ).fetchone()
+            if mapping is None:
+                raise EvidenceClaimTileReviewNotFoundError(
+                    "The claim-to-tile mapping does not exist in this "
+                    "brand's immutable history."
+                )
+
+            current = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_claim_tile_review_events
+                WHERE brand_id = %s
+                  AND subject_type = %s
+                  AND subject_id = %s
+                ORDER BY sequence DESC
+                LIMIT 1
+                """,
+                (
+                    brand_id,
+                    CLAIM_TILE_REVIEW_SUBJECT_TYPE,
+                    command.subject_id,
+                ),
+            ).fetchone()
+            current_id = (
+                str(current["id"]) if current is not None else None
+            )
+            if command.expected_current_event_id != current_id:
+                raise EvidenceClaimTileReviewConflictError(
+                    "The claim-to-tile review changed after it was read.",
+                    current_event_id=current_id,
+                )
+            if command.decision == "revoked" and (
+                current is None
+                or str(current["decision"]) == "revoked"
+            ):
+                raise EvidenceClaimTileReviewInvalidTransitionError(
+                    "Only a current accepted, disputed, or rejected "
+                    "claim-to-tile review can be revoked."
+                )
+
+            sequence = (
+                int(current["sequence"]) + 1
+                if current is not None
+                else 1
+            )
+            event_id = _stable_uuid(
+                brand_id,
+                "evidence-claim-tile-review",
+                command.idempotency_key_hash,
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_claim_tile_review_events (
+                    id, brand_id, subject_type, subject_id, case_id,
+                    mapping_id, mapping_series_id, source_evidence_id,
+                    claim_variant_id, component_key, tile_id, tile_key,
+                    polarity, sequence, decision, supersedes_event_id,
+                    schema_version, policy_version, evaluator_version,
+                    reviewer, actor_id, reason_code, rationale,
+                    idempotency_key_hash, request_fingerprint,
+                    runtime_effect, authority, automatic_tile_effect,
+                    automatic_scoring_effect
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, false, false, false, false
+                )
+                RETURNING *
+                """,
+                (
+                    event_id,
+                    brand_id,
+                    CLAIM_TILE_REVIEW_SUBJECT_TYPE,
+                    command.subject_id,
+                    claim_tile_review_case_id(domain, dict(mapping)),
+                    command.subject_id,
+                    str(mapping["mapping_series_id"]),
+                    str(mapping["source_evidence_id"]),
+                    str(mapping["claim_variant_id"]),
+                    str(mapping["component_key"]),
+                    str(mapping["tile_id"]),
+                    str(mapping["tile_key"]),
+                    str(mapping["polarity"]),
+                    sequence,
+                    command.decision,
+                    current["id"] if current is not None else None,
+                    EVIDENCE_CLAIM_TILE_REVIEW_EVENT_VERSION,
+                    EVIDENCE_CLAIM_TILE_REVIEW_POLICY_VERSION,
+                    command.evaluator_version,
+                    command.reviewer,
+                    command.actor_id,
+                    command.reason_code,
+                    command.rationale,
+                    command.idempotency_key_hash,
+                    command.request_fingerprint,
+                ),
+            ).fetchone()
+        return _claim_tile_review_event(inserted), False
+
+    def list_current_evidence_claim_tile_reviews(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> list[dict[str, Any]]:
+        """Return the latest semantic decision for every mapping subject."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT ON (events.subject_type, events.subject_id)
+                       events.*
+                FROM {_SCHEMA}.evidence_claim_tile_review_events AS events
+                JOIN {_SCHEMA}.brands
+                  ON brands.id = events.brand_id
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                ORDER BY events.subject_type,
+                         events.subject_id,
+                         events.sequence DESC
+                """,
+                (workspace_slug, domain),
+            ).fetchall()
+        return [_claim_tile_review_event(row) for row in rows]
+
+    def list_evidence_claim_tile_reviews(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+        subject_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Return one page of the durable claim-to-tile review journal."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceClaimTileReviewNotFoundError(
+                "The brand domain does not exist in durable history."
+            )
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
+        normalized_subject_id = (
+            str(subject_id or "").strip().lower() or None
+        )
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceClaimTileReviewNotFoundError(
+                    "The brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            rows = conn.execute(
+                f"""
+                WITH ranked AS (
+                    SELECT events.*,
+                           max(sequence) OVER (
+                               PARTITION BY subject_type, subject_id
+                           ) AS current_sequence
+                    FROM {_SCHEMA}.evidence_claim_tile_review_events
+                         AS events
+                    WHERE brand_id = %s
+                      AND (%s::text IS NULL OR subject_id = %s)
+                )
+                SELECT *
+                FROM ranked
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s OFFSET %s
+                """,
+                (
+                    brand_id,
+                    normalized_subject_id,
+                    normalized_subject_id,
+                    limit,
+                    offset,
+                ),
+            ).fetchall()
+            total_row = conn.execute(
+                f"""
+                SELECT count(*) AS count
+                FROM {_SCHEMA}.evidence_claim_tile_review_events
+                WHERE brand_id = %s
+                  AND (%s::text IS NULL OR subject_id = %s)
+                """,
+                (
+                    brand_id,
+                    normalized_subject_id,
+                    normalized_subject_id,
+                ),
+            ).fetchone()
+            current_rows = conn.execute(
+                f"""
+                SELECT DISTINCT ON (subject_type, subject_id) *
+                FROM {_SCHEMA}.evidence_claim_tile_review_events
+                WHERE brand_id = %s
+                  AND (%s::text IS NULL OR subject_id = %s)
+                ORDER BY subject_type, subject_id, sequence DESC
+                """,
+                (
+                    brand_id,
+                    normalized_subject_id,
+                    normalized_subject_id,
+                ),
+            ).fetchall()
+
+        events = [
+            _claim_tile_review_event(
+                row,
+                effective_state=(
+                    str(row["decision"])
+                    if int(row["sequence"])
+                    == int(row["current_sequence"])
+                    else "superseded"
+                ),
+            )
+            for row in rows
+        ]
+        return {
+            "events": events,
+            "current": [
+                _claim_tile_review_event(row)
+                for row in current_rows
+            ],
+            "total": int(total_row["count"]),
+            "limit": limit,
+            "offset": offset,
+        }
 
     def get_evidence_scoring_memory_preview(
         self,
@@ -1684,6 +2048,7 @@ class PostgresHistoryRepository:
             "evidence_memory_adjudication_events",
             "evidence_claim_reconciliation_events",
             "evidence_scoring_recovery_review_events",
+            "evidence_claim_tile_review_events",
             "evidence_claim_tile_ledger_states",
             "evidence_claim_tile_mapping_series",
             "evidence_claim_tile_mappings",
@@ -2980,6 +3345,106 @@ def _validate_scoring_recovery_review_command(
             )
         ):
             raise ValueError(f"invalid scoring recovery review {field}")
+
+
+def _validate_claim_tile_review_command(
+    command: EvidenceClaimTileReviewCommand,
+) -> None:
+    if command.decision not in CLAIM_TILE_REVIEW_DECISIONS:
+        raise ValueError("unsupported claim-to-tile review decision")
+    if (
+        len(command.subject_id) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in command.subject_id
+        )
+    ):
+        raise ValueError(
+            "claim-to-tile subject_id must be a lowercase SHA-256 digest"
+        )
+    for field, value, maximum in (
+        ("reviewer", command.reviewer, 200),
+        ("actor_id", command.actor_id, 200),
+        ("evaluator_version", command.evaluator_version, 200),
+        ("rationale", command.rationale, 2000),
+    ):
+        if not value or len(value) > maximum or "\x00" in value:
+            raise ValueError(f"invalid claim-to-tile review {field}")
+    if (
+        not command.reason_code
+        or len(command.reason_code) > 100
+        or not command.reason_code[0].isalnum()
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789_"
+            for character in command.reason_code
+        )
+    ):
+        raise ValueError("invalid claim-to-tile review reason_code")
+    for field, value in (
+        ("idempotency_key_hash", command.idempotency_key_hash),
+        ("request_fingerprint", command.request_fingerprint),
+    ):
+        if (
+            len(value) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in value
+            )
+        ):
+            raise ValueError(f"invalid claim-to-tile review {field}")
+
+
+def _claim_tile_review_event(
+    row: Any,
+    *,
+    effective_state: str | None = None,
+) -> dict[str, Any]:
+    created_at = row["created_at"]
+    timestamp = (
+        created_at.isoformat()
+        if hasattr(created_at, "isoformat")
+        else str(created_at)
+    )
+    event_id = str(row["id"])
+    supersedes_event_id = (
+        str(row["supersedes_event_id"])
+        if row["supersedes_event_id"] is not None
+        else None
+    )
+    return {
+        "id": event_id,
+        "event_id": event_id,
+        "subject_type": str(row["subject_type"]),
+        "subject_id": str(row["subject_id"]),
+        "case_id": str(row["case_id"]),
+        "mapping_id": str(row["mapping_id"]),
+        "mapping_series_id": str(row["mapping_series_id"]),
+        "source_evidence_id": str(row["source_evidence_id"]),
+        "claim_variant_id": str(row["claim_variant_id"]),
+        "component_key": str(row["component_key"]),
+        "tile_id": str(row["tile_id"]),
+        "tile_key": str(row["tile_key"]),
+        "polarity": str(row["polarity"]),
+        "sequence": int(row["sequence"]),
+        "decision": str(row["decision"]),
+        "effective_state": effective_state or str(row["decision"]),
+        "supersedes_event_id": supersedes_event_id,
+        "previous_event_id": supersedes_event_id,
+        "schema_version": str(row["schema_version"]),
+        "policy_version": str(row["policy_version"]),
+        "evaluator_version": str(row["evaluator_version"]),
+        "reviewer": str(row["reviewer"]),
+        "reviewer_id": str(row["reviewer"]),
+        "actor_id": str(row["actor_id"]),
+        "reason_code": str(row["reason_code"]),
+        "rationale": str(row["rationale"]),
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_tile_effect": False,
+        "automatic_scoring_effect": False,
+        "created_at": timestamp,
+        "reviewed_at": timestamp,
+    }
 
 
 def _scoring_recovery_review_event(

@@ -1209,6 +1209,229 @@ def test_claim_reconciliation_journal_exposes_superseded_events(monkeypatch):
     assert response.json()["pagination"]["has_more"] is False
 
 
+def test_create_claim_tile_review_is_attributable_and_non_authoritative(
+    monkeypatch,
+):
+    _configure_evidence_reviewer(monkeypatch)
+    captured = {}
+    event = _claim_tile_review_event()
+
+    def fake_create(
+        domain,
+        payload,
+        *,
+        client_id,
+        reviewer_id,
+        idempotency_key,
+    ):
+        captured.update(
+            domain=domain,
+            payload=payload,
+            client_id=client_id,
+            reviewer_id=reviewer_id,
+            idempotency_key=idempotency_key,
+        )
+        return event, True
+
+    monkeypatch.setattr(
+        "web.api_v1.router.create_evidence_claim_tile_review",
+        fake_create,
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-claim-tile-reviews",
+        headers={
+            **REVIEW_AUTH,
+            "Idempotency-Key": "claim-tile-review-1",
+        },
+        json={
+            "subject_id": "c" * 64,
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "tile_contract_satisfied",
+            "rationale": "The claim satisfies this exact tile contract.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.headers["idempotent-replayed"] == "true"
+    assert response.headers["cache-control"] == "no-store"
+    payload = response.json()
+    assert payload["runtime_effect"] is False
+    assert payload["authority"] is False
+    assert payload["automatic_tile_effect"] is False
+    assert payload["automatic_scoring_effect"] is False
+    assert payload["event"]["reviewer"] == REVIEWER_ID
+    assert captured["reviewer_id"] == REVIEWER_ID
+    assert captured["client_id"] == REVIEWER_ID
+    assert "reviewer" not in captured["payload"]
+
+
+def test_claim_tile_review_requires_idempotency_key(monkeypatch):
+    _configure_evidence_reviewer(monkeypatch)
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-claim-tile-reviews",
+        headers=REVIEW_AUTH,
+        json={
+            "subject_id": "c" * 64,
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "tile_contract_satisfied",
+            "rationale": "The claim satisfies this exact tile contract.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "idempotency_key_required"
+
+
+def test_scanner_token_cannot_review_claim_tile_mapping(monkeypatch):
+    _configure_evidence_reviewer(monkeypatch)
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-claim-tile-reviews",
+        headers={
+            **AUTH,
+            "Idempotency-Key": "scanner-cannot-review-claim-tile",
+        },
+        json={
+            "subject_id": "c" * 64,
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "tile_contract_satisfied",
+            "rationale": "The claim satisfies this exact tile contract.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["details"]["required_scope"] == (
+        "evidence:adjudicate"
+    )
+
+
+def test_claim_tile_review_fails_closed_without_durable_store(
+    monkeypatch,
+):
+    from src.services.evidence_claim_tile_review import (
+        EvidenceClaimTileReviewUnavailableError,
+    )
+
+    _configure_evidence_reviewer(monkeypatch)
+
+    def unavailable(*_args, **_kwargs):
+        raise EvidenceClaimTileReviewUnavailableError("not configured")
+
+    monkeypatch.setattr(
+        "web.api_v1.service."
+        "append_evidence_claim_tile_review_for_domain",
+        unavailable,
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-claim-tile-reviews",
+        headers={
+            **REVIEW_AUTH,
+            "Idempotency-Key": "claim-tile-journal-unavailable",
+        },
+        json={
+            "subject_id": "c" * 64,
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "tile_contract_satisfied",
+            "rationale": "The claim satisfies this exact tile contract.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == (
+        "claim_tile_review_store_unavailable"
+    )
+
+
+def test_claim_tile_review_rejects_unknown_mapping(monkeypatch):
+    from src.services.evidence_claim_tile_review import (
+        EvidenceClaimTileReviewNotFoundError,
+    )
+
+    _configure_evidence_reviewer(monkeypatch)
+
+    def missing(*_args, **_kwargs):
+        raise EvidenceClaimTileReviewNotFoundError(
+            "The claim-to-tile mapping does not exist."
+        )
+
+    monkeypatch.setattr(
+        "web.api_v1.service."
+        "append_evidence_claim_tile_review_for_domain",
+        missing,
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-claim-tile-reviews",
+        headers={
+            **REVIEW_AUTH,
+            "Idempotency-Key": "unknown-claim-tile-mapping",
+        },
+        json={
+            "subject_id": "c" * 64,
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "tile_contract_satisfied",
+            "rationale": "The claim satisfies this exact tile contract.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == (
+        "claim_tile_mapping_not_found"
+    )
+    assert response.json()["error"]["details"]["subject_id"] == "c" * 64
+
+
+def test_claim_tile_review_journal_exposes_superseded_events(
+    monkeypatch,
+):
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    current = _claim_tile_review_event()
+    superseded = {
+        **current,
+        "id": "00000000-0000-0000-0000-000000000030",
+        "event_id": "00000000-0000-0000-0000-000000000030",
+        "effective_state": "superseded",
+    }
+    monkeypatch.setattr(
+        "web.api_v1.router.get_evidence_claim_tile_reviews",
+        lambda domain, **_kwargs: {
+            "events": [current, superseded],
+            "current": [current],
+            "total": 2,
+            "limit": 100,
+            "offset": 0,
+        },
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/evidence-claim-tile-reviews",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["automatic_tile_effect"] is False
+    assert payload["automatic_scoring_effect"] is False
+    assert [item["effective_state"] for item in payload["events"]] == [
+        "accepted",
+        "superseded",
+    ]
+    assert payload["pagination"]["has_more"] is False
+
+
 def test_scoring_memory_preview_exposes_candidate_and_reviewed_scores(
     monkeypatch,
 ):
@@ -1647,6 +1870,44 @@ def _claim_reconciliation_event() -> dict:
     }
 
 
+def _claim_tile_review_event() -> dict:
+    event_id = "00000000-0000-0000-0000-000000000031"
+    return {
+        "id": event_id,
+        "event_id": event_id,
+        "subject_type": "claim_tile_mapping",
+        "subject_id": "c" * 64,
+        "case_id": "claim-tile-example-com-mission-m1-cccccccccccc",
+        "mapping_id": "c" * 64,
+        "mapping_series_id": "d" * 64,
+        "source_evidence_id": "e" * 64,
+        "claim_variant_id": "f" * 64,
+        "component_key": "mission",
+        "tile_id": "M1",
+        "tile_key": "mission.M1",
+        "polarity": "supports",
+        "sequence": 1,
+        "decision": "accepted",
+        "effective_state": "accepted",
+        "supersedes_event_id": None,
+        "previous_event_id": None,
+        "schema_version": "evidence-claim-tile-review-event-v1",
+        "policy_version": "evidence-claim-tile-review-policy-v1",
+        "evaluator_version": "manual-review-v1",
+        "reviewer": REVIEWER_ID,
+        "reviewer_id": REVIEWER_ID,
+        "actor_id": REVIEWER_ID,
+        "reason_code": "tile_contract_satisfied",
+        "rationale": "The claim satisfies this exact tile contract.",
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_tile_effect": False,
+        "automatic_scoring_effect": False,
+        "created_at": "2026-07-29T16:00:00+00:00",
+        "reviewed_at": "2026-07-29T16:00:00+00:00",
+    }
+
+
 def _scoring_recovery_review_event() -> dict:
     event_id = "00000000-0000-0000-0000-000000000021"
     return {
@@ -1739,6 +2000,10 @@ def test_openapi_is_dedicated_to_v1_routes():
     )
     assert (
         "/api/v1/brands/{domain}/evidence-claim-tile-ledger-shadow"
+        in response.json()["paths"]
+    )
+    assert (
+        "/api/v1/brands/{domain}/evidence-claim-tile-reviews"
         in response.json()["paths"]
     )
     assert (
