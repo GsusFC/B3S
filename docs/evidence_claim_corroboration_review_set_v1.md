@@ -9,6 +9,11 @@ claim cases: two per source.
 No corroboration decision has been inferred automatically. All ten cases are
 pending human review.
 
+Stress policy v12 consumes this queue as its 28th controlled invariant. It
+verifies the literal provenance, counts `10 candidates / 5 sources / 10
+claims / 0 reviewed / 10 pending`, and keeps the claim-corroboration promotion
+gate blocked.
+
 ## What is frozen
 
 Each candidate includes:
