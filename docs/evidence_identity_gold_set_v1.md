@@ -3,9 +3,12 @@
 ## Verdict
 
 The repository contains a frozen 14-case set, 14 attributable human reviews,
-and a deterministic evaluation harness. Review is complete, but the identity
-policy is not promotion-ready: exact agreement is `0.785714`, below the frozen
-`0.8` threshold.
+and a deterministic evaluation harness. Under identity policy v4, the unchanged
+reviews pass the frozen controlled gate with exact agreement `1.0`.
+
+This does not make the identity system production-ready. The fixture is small,
+controlled, and shadow-only; it proves that v4 corrects the known semantics
+without weakening the threshold, not that it generalizes to real brands.
 
 Candidate `proposed_review` fields are drafting aids only. They are never loaded
 as human decisions and cannot make the dataset promotion-ready.
@@ -44,13 +47,37 @@ Calibration and test cases are separated in the frozen candidate data.
 - critical false accepts: `0`;
 - accepted precision: `1.0`;
 - accepted recall: `1.0`;
-- exact agreement: `0.785714`;
-- blocker: `exact_agreement_below_threshold`.
+- exact agreement: `1.0`;
+- promotion blockers in this controlled set: none.
 
-The reviewer disagreed conservatively on disputed versus rejected cases. No
-non-accepted case was falsely accepted. The threshold must not be weakened to
-make the result pass; the next step is a versioned policy revision evaluated
-against the unchanged human labels.
+Identity policy v4 corrects the three former disagreements by requiring
+reproducible evidence of another entity for `rejected`, preserving unresolved
+identity as `disputed`, and resolving related domains before using them as
+identity evidence. No human label, candidate, fingerprint, or threshold was
+changed.
+
+## Policy-v4 boundary regressions
+
+Seven additional controlled cases live separately under:
+
+```text
+fixtures/evidence_identity_policy/v4/
+  manifest.json
+  boundary_cases.jsonl
+```
+
+They cover:
+
+- unreproduced name-only identity;
+- a sector difference without an identified alternative entity;
+- an explicit different company;
+- a verified parent with unresolved passage subject;
+- a verified unrelated external domain;
+- a verified product relation whose subject is exactly the scanned entity;
+- an LLM-only conflict.
+
+These are executable policy regressions, not new human gold decisions. The
+original 14 reviews remain the sole reviewed set.
 
 ## Review workflow for a new dataset version
 
@@ -76,8 +103,8 @@ Evaluate the committed v1 reviews:
   --format markdown
 ```
 
-Use `--require-ready` in a promotion gate. It exits with status `2` while
-thresholds are unmet.
+Use `--require-ready` in the controlled gate. It exits with status `2` when
+those thresholds are unmet.
 
 ## Promotion thresholds
 
@@ -89,5 +116,5 @@ thresholds are unmet.
 
 These metrics have no runtime or scoring authority. The small controlled set is
 a Gate 1 safety check, not evidence of general production accuracy. Real
-reviewed cases and any policy change require a new dataset/policy version
-before promotion.
+reviewed cases and any future policy change require a new dataset/policy
+version before production promotion.

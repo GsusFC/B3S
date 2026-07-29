@@ -7,7 +7,7 @@ are independent merely because no exact relationship was found. It remains a
 read-only shadow projection and grants no scoring or corroboration authority.
 
 The identity-v2 schema now uses
-`evidence-memory-identity-policy-v3` and embeds the versioned
+`evidence-memory-identity-policy-v4` and embeds the versioned
 `evidence-source-independence-v3` contract.
 
 ## Status contract

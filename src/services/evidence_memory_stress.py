@@ -51,7 +51,7 @@ from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
 
 
 EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v2"
-EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v7"
+EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v8"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 
 
@@ -630,15 +630,6 @@ def _controlled_probes(
         content="A different company called Example launched a product.",
         identity_match="brand_name",
     )
-    poison_ledger = build_evidence_ledger_shadow(
-        [
-            _report("poison-one", "2026-01-01T00:00:00Z", [poison]),
-            _report("poison-two", "2026-01-02T00:00:00Z", [deepcopy(poison)]),
-        ],
-        mode="shadow",
-    )
-    poison_state = poison_ledger["entries"][0]["state"]
-
     syndicated_rows = [
         _evidence(
             ref="exa.1",
@@ -1041,13 +1032,17 @@ def _controlled_probes(
             "Identity v2 keeps two passages from one URL without inventing a temporal revision.",
         ),
         _probe(
-            "identity_v2_weak_external_identity_is_not_eligible",
+            "identity_v4_explicit_other_entity_is_rejected",
             (
-                v2_poison_entry["identity_status"] == "unverified"
+                v2_poison_entry["identity_status"] == "mismatch"
+                and v2_poison_entry["identity_strength"] == "negative"
                 and v2_poison_entry["qualified_observation_count"] == 0
                 and v2_poison_entry["state"] == "repeated"
             ),
-            "Identity v2 remembers repeated brand-name-only evidence but does not validate it.",
+            (
+                "Identity policy v4 rejects an explicit, reproducible other-entity "
+                "conflict even when upstream metadata matches the brand name."
+            ),
         ),
         _probe(
             "accepted_identity_never_grants_runtime_authority",
@@ -1055,7 +1050,7 @@ def _controlled_probes(
                 v2_manually_accepted_poison_entry["adjudication_state"]
                 == "accepted"
                 and v2_manually_accepted_poison_entry["identity_status"]
-                == "unverified"
+                == "mismatch"
                 and v2_manually_accepted_poison_entry["state"] == "repeated"
                 and v2_manually_accepted_poison["runtime_effect"] is False
                 and v2_manually_accepted_poison["authority"] is False
@@ -1063,13 +1058,16 @@ def _controlled_probes(
             "Even a deliberately false manual acceptance changes only identity adjudication metadata.",
         ),
         _probe(
-            "identity_v2_bare_upstream_domain_label_is_not_eligible",
+            "identity_v4_upstream_domain_label_cannot_override_conflict",
             (
-                v2_strong_label_poison_entry["identity_status"] == "unverified"
+                v2_strong_label_poison_entry["identity_status"] == "mismatch"
                 and v2_strong_label_poison_entry["qualified_observation_count"] == 0
                 and v2_strong_label_poison_entry["state"] == "repeated"
             ),
-            "Identity v2 refuses a strong-looking upstream label without reproducible provenance.",
+            (
+                "Identity policy v4 refuses a strong-looking upstream label when "
+                "the passage reproducibly identifies another entity."
+            ),
         ),
         _probe(
             "identity_v2_reproduced_external_identity_is_eligible",
@@ -1296,25 +1294,29 @@ def _controlled_probes(
                 "evaluator drift creates a separate non-authoritative series."
             ),
         ),
-        {
-            "id": "identity_gold_set_below_frozen_agreement_threshold",
-            "kind": "promotion_blocker",
-            "status": "blocked",
-            "observation": (
-                f"In v1 a deliberately wrong external item reached `{poison_state}` because "
-                "brand-name identity metadata was trusted twice. V2 blocks eligibility and "
-                "stores reversible decisions under a server-bound reviewer. The "
-                f"{identity_gold_set['summary']['candidate_count']}-case set is fully "
-                f"reviewed with {identity_gold_set['summary']['critical_false_accept_count']} "
-                "critical false accepts and exact agreement "
-                f"{identity_gold_set['summary']['exact_agreement_rate']}, below the "
-                "frozen 0.8 threshold."
+        _probe(
+            "identity_v4_matches_frozen_human_reviews",
+            (
+                identity_gold_set["promotion_ready"] is True
+                and identity_gold_set["runtime_effect"] is False
+                and identity_gold_set["authority"] is False
+                and identity_gold_set["summary"]["candidate_count"] == 14
+                and identity_gold_set["summary"]["reviewed_count"] == 14
+                and identity_gold_set["summary"][
+                    "critical_false_accept_count"
+                ]
+                == 0
+                and identity_gold_set["summary"]["accepted_precision"] == 1.0
+                and identity_gold_set["summary"]["accepted_recall"] == 1.0
+                and identity_gold_set["summary"]["exact_agreement_rate"] == 1.0
             ),
-            "required_capability": (
-                "revise the deterministic identity policy under a new version and "
-                "re-evaluate the unchanged human labels without weakening thresholds"
+            (
+                f"Identity policy v4 matches all "
+                f"{identity_gold_set['summary']['candidate_count']} unchanged human "
+                f"decisions with {identity_gold_set['summary']['critical_false_accept_count']} "
+                "critical false accepts, while remaining shadow-only."
             ),
-        },
+        ),
         {
             "id": "source_independence_pending_production_review",
             "kind": "promotion_blocker",

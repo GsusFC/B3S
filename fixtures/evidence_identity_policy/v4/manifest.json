@@ -1,0 +1,14 @@
+{
+  "schema_version": "evidence-identity-policy-regression-v1",
+  "policy_version": "evidence-memory-identity-policy-v4",
+  "status": "controlled_regression_fixture",
+  "runtime_effect": false,
+  "authority": false,
+  "case_count": 7,
+  "case_file_sha256": "be1675366840ad18f095acd089fa09d77fa0e1ca5dc5158ff3dcfe97a92777a7",
+  "notes": [
+    "These cases are policy regressions, not additional human gold decisions.",
+    "The frozen 14-case human review set remains unchanged.",
+    "LLM-only conflict metadata cannot produce an authoritative negative identity."
+  ]
+}

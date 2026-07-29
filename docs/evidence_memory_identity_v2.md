@@ -2,8 +2,9 @@
 
 ## Verdict
 
-Identity v2 fixes the known URL-locator error in the first shadow ledger, but
-it is not a canonical evidence store and has no scoring authority.
+Identity schema v2 fixes the known URL-locator error in the first shadow
+ledger. Its current identity decision contract is policy v4. It is not a
+canonical evidence store and has no scoring authority.
 
 The projection separates:
 
@@ -123,29 +124,73 @@ unlike this lower-level projection, it never treats a visual tile,
 
 No state implies semantic contradiction or automatic claim replacement.
 
-## External identity policy
+## Identity policy v4
 
-Owned evidence is eligible only when its URL belongs to the scanned brand
-domain.
+Policy v4 keeps the final internal states `eligible`, `mismatch`, `disputed`,
+and `unverified`, but evaluates two independent axes before deciding:
 
-External evidence is treated conservatively:
+- identity strength: `positive`, `negative`, `unverified`, or `conflicting`;
+- entity relation: `same_entity`, `parent`, `subsidiary`, `product`,
+  `related_party`, `unrelated`, or `unknown`.
 
-- a persisted strong match whose subject domain, source domain, alias, method,
-  score, collector relationship, and review state can be reproduced against
-  the evidence: eligible as a candidate;
-- a bare upstream `identity_match=domain` label: unverified;
-- brand-name-only match: unverified;
-- LLM-only domain or name match: unverified;
+The projection maps these states to the reviewed gold semantics without
+changing the gold data:
+
+```text
+eligible   → accepted
+mismatch   → rejected
+disputed   → disputed
+unverified → disputed
+```
+
+`rejected` now requires reproducible evidence of non-identity. Missing
+provenance, a name-only match, or an unresolved corporate relationship is
+`unverified`, not a fallback mismatch.
+
+Policy v4 consumes two versioned provenance blocks:
+
+- `entity_conflict_provenance`: conflict type, deterministic method,
+  reproducible evidence spans or alternative entity locator, and version;
+- `entity_relation_provenance`: verified/candidate status, relation,
+  passage-subject role, source and subject domains, reproducible method, and
+  version.
+
+Raw evidence spans are never returned by the projection; only counts and
+digests are exposed for audit. LLM-only conflicts remain non-authoritative even
+when upstream metadata labels them reproducible. Locator-only registry claims
+also fail closed until a deterministic external registry verifier exists.
+
+All positive and negative signals are evaluated before a decision:
+
+- reproducible positive plus reproducible negative: `disputed`;
+- reproducible negative only: `mismatch`;
+- reproducible positive only: `eligible`;
+- otherwise: `unverified`.
+
+For `owned_copy` outside the scanned domain:
+
+- verified `unrelated`, an explicit other entity, or a reproducible ownership
+  mismatch: `mismatch`;
+- candidate/unknown relation or unresolved subject role: `unverified`;
+- verified related entity with the scanned entity as the exact passage
+  subject: `eligible`;
+- verified related entity with another entity as subject: `mismatch`.
+
+External evidence remains conservative:
+
+- reproducible strong external attribution: eligible as a candidate;
+- bare upstream domain or brand-name match: unverified;
+- LLM-only match or mismatch: unverified;
 - deterministic mismatch: mismatch;
-- a reproduced strong match contradicted by a deterministic or LLM mismatch:
-  disputed.
+- reproduced positive attribution contradicted by another signal: disputed.
 
-New Exa captures persist this reproducible attribution contract. The evidence
-worker carries it into immutable report evidence, and identity v2 re-runs the
-check rather than trusting the summary label. Historic evidence and providers
-without this contract remain unverified; they are remembered but cannot become
-`validation_candidate`. This closes the bare-strong-label poisoning path in v2,
-but it does not resolve homonyms or replace human adjudication.
+New Exa captures persist the positive attribution contract. The evidence worker
+carries it into immutable report evidence, and identity v2 re-runs the check
+rather than trusting the summary label. Historic evidence and providers without
+the v4 contracts remain unverified unless the passage contains one of the
+deliberately narrow deterministic conflict rules. This closes the known
+homonym, explicit-other-entity, domain-transfer, and parent-domain fallback
+errors without replacing human adjudication.
 
 ## Source independence
 
@@ -208,5 +253,5 @@ Identity v2 must remain non-authoritative until at least:
 2. production source-independence reviews are attributable and reversible;
 3. evidence is mapped persistently through claim to tile;
 4. a reviewed dataset measures both false-change rate and real-change recall;
-5. a reviewed gold set measures both false identity acceptance and identity
-   recall on ambiguous real cases.
+5. reviewed real cases measure both false identity acceptance and identity
+   recall beyond the controlled 14-case set.

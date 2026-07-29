@@ -20,7 +20,7 @@ from src.services.evidence_identity_gold_set import (
 )
 
 
-def test_committed_human_reviews_are_complete_but_miss_agreement_gate() -> None:
+def test_committed_human_reviews_satisfy_identity_v4_gate() -> None:
     result = evaluate_identity_gold_set(
         load_gold_candidates(),
         load_gold_reviews(DEFAULT_GOLD_ROOT / "reviews.jsonl"),
@@ -34,11 +34,9 @@ def test_committed_human_reviews_are_complete_but_miss_agreement_gate() -> None:
     assert result["summary"]["critical_false_accept_count"] == 0
     assert result["summary"]["accepted_precision"] == 1.0
     assert result["summary"]["accepted_recall"] == 1.0
-    assert result["summary"]["exact_agreement_rate"] == 0.785714
-    assert result["promotion_ready"] is False
-    assert result["promotion_blockers"] == [
-        "exact_agreement_below_threshold"
-    ]
+    assert result["summary"]["exact_agreement_rate"] == 1.0
+    assert result["promotion_ready"] is True
+    assert result["promotion_blockers"] == []
 
 
 def test_versioned_candidate_set_covers_required_identity_risks() -> None:
@@ -79,8 +77,8 @@ def test_candidate_predictions_keep_weak_identity_out_of_acceptance() -> None:
     assert predict_identity_disposition(
         candidates["cal-homonym-name-only"]
     ) == {
-        "identity_status": "unverified",
-        "decision": "disputed",
+        "identity_status": "mismatch",
+        "decision": "rejected",
     }
     assert predict_identity_disposition(
         candidates["test-reproducible-external"]
@@ -92,6 +90,18 @@ def test_candidate_predictions_keep_weak_identity_out_of_acceptance() -> None:
         candidates["test-reproduced-disagreement"]
     ) == {
         "identity_status": "disputed",
+        "decision": "disputed",
+    }
+    assert predict_identity_disposition(
+        candidates["test-first-scan-poison"]
+    ) == {
+        "identity_status": "mismatch",
+        "decision": "rejected",
+    }
+    assert predict_identity_disposition(
+        candidates["test-product-on-parent-domain"]
+    ) == {
+        "identity_status": "unverified",
         "decision": "disputed",
     }
 

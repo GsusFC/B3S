@@ -24,9 +24,9 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["promotion_ready"] is False
     assert report["executable_failures"] == []
     assert report["schema_version"] == "evidence-memory-stress-v2"
-    assert report["policy_version"] == "evidence-memory-stress-policy-v7"
-    assert report["summary"]["executable_invariant_count"] == 23
-    assert report["summary"]["promotion_blocker_count"] == 5
+    assert report["policy_version"] == "evidence-memory-stress-policy-v8"
+    assert report["summary"]["executable_invariant_count"] == 24
+    assert report["summary"]["promotion_blocker_count"] == 4
     assert report["summary"]["claim_relation_gold_candidate_count"] == 13
     assert report["summary"]["claim_relation_gold_reviewed_count"] == 13
     assert report["summary"]["claim_relation_gold_pending_count"] == 0
@@ -35,7 +35,7 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["summary"]["identity_gold_pending_count"] == 0
     assert (
         report["summary"]["identity_gold_exact_agreement_rate"]
-        == 0.785714
+        == 1.0
     )
     assert (
         report["summary"]["identity_gold_critical_false_accept_count"]
@@ -58,20 +58,15 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
     report = run_evidence_memory_stress({})
     probes = {probe["id"]: probe for probe in report["controlled_probes"]}
 
-    poison = probes[
-        "identity_gold_set_below_frozen_agreement_threshold"
-    ]
+    identity_v4 = probes["identity_v4_matches_frozen_human_reviews"]
     source_independence = probes[
         "source_independence_pending_production_review"
     ]
-    assert poison["status"] == "blocked"
-    assert "`validation_candidate`" in poison["observation"]
-    assert "without weakening thresholds" in poison[
-        "required_capability"
-    ]
+    assert identity_v4["status"] == "pass"
+    assert "14 unchanged human decisions" in identity_v4["observation"]
     assert source_independence["status"] == "blocked"
     assert "no production-reviewed source" in source_independence["observation"]
-    assert probes["identity_v2_weak_external_identity_is_not_eligible"][
+    assert probes["identity_v4_explicit_other_entity_is_rejected"][
         "status"
     ] == "pass"
     assert probes["accepted_identity_never_grants_runtime_authority"][
@@ -90,7 +85,7 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
         "status"
     ] == "pass"
     assert probes[
-        "identity_v2_bare_upstream_domain_label_is_not_eligible"
+        "identity_v4_upstream_domain_label_cannot_override_conflict"
     ]["status"] == "pass"
     assert probes[
         "identity_v2_reproduced_external_identity_is_eligible"

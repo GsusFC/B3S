@@ -44,7 +44,7 @@ The read-only replay examined 32 v1 reports across 12 brand histories:
 - no coexistence or replacement relation was proposed;
 - 2 variants are current and Vercel's older variant is `not_reacquired`;
 - all 184 structural `tile`/`checked_block` rows remain ignored;
-- 23/23 controlled invariants passed with 0 failures.
+- 24/24 controlled invariants passed with 0 failures.
 
 This proves reuse, not semantic-change recall. There are no repeated historical
 variants for the recovered slots, so the corpus still cannot measure false
