@@ -236,6 +236,7 @@ class EvidenceMemoryIdentityV2ShadowResponse(StrictModel):
     latest_report_id: str | None = None
     summary: dict[str, Any] = Field(default_factory=dict)
     policy: dict[str, Any] = Field(default_factory=dict)
+    source_independence: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     entries: list[dict[str, Any]] = Field(default_factory=list)
     adjudication: dict[str, Any] = Field(default_factory=dict)

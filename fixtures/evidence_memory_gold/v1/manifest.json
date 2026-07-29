@@ -1,0 +1,36 @@
+{
+  "schema_version": "evidence-identity-gold-v1",
+  "dataset_version": "evidence-identity-gold-2026-07-v1",
+  "candidate_fingerprint": "49078a0f5789914d2e7963e6242d07e892fd1d4983558162b2738bbb2f4a1eb6",
+  "status": "candidate_set_pending_human_review",
+  "reviewer_mode": "single_server_configured_reviewer",
+  "decision_semantics": {
+    "accepted": "The evidence refers to the scanned brand.",
+    "disputed": "The available identity signals cannot safely resolve the association.",
+    "rejected": "The evidence does not refer to the scanned brand."
+  },
+  "promotion_thresholds": {
+    "accepted_precision": 1.0,
+    "accepted_recall": 0.8,
+    "exact_agreement": 0.8,
+    "critical_false_accept_count": 0,
+    "review_completion": 1.0
+  },
+  "required_case_types": [
+    "owned_domain",
+    "wrong_domain",
+    "homonym",
+    "parent_product",
+    "llm_only",
+    "bare_upstream_label",
+    "reproducible_external",
+    "identity_disagreement",
+    "first_scan_poisoning",
+    "domain_transfer"
+  ],
+  "notes": [
+    "Candidate proposed decisions are not human labels.",
+    "reviews.jsonl is intentionally absent until the configured reviewer completes it.",
+    "No result from this dataset has scoring or canonical-selection authority."
+  ]
+}

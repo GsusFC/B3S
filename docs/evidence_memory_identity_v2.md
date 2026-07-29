@@ -146,17 +146,34 @@ but it does not resolve homonyms or replace human adjudication.
 
 ## Source independence
 
-External passages are joined into one conservative independence cluster when:
+Identity schema v2 now runs source-independence policy v3. Every current
+external passage is classified as `confirmed_independent`, `same_cluster`,
+`disputed`, or `unknown`.
+
+External passages are joined into one conservative cluster when:
 
 - they share a publisher domain; or
-- their normalized content is exactly equal across publishers.
+- they belong to the same publisher ownership group in the versioned registry;
+- their normalized content is exactly equal across publishers;
+- canonical/original-source metadata connects them; or
+- deterministic three-word shingle similarity reaches the frozen same-cluster
+  threshold.
 
-This prevents exact syndicated copies from appearing as independent
-corroboration. Paraphrased syndication, publisher ownership groups, wire-service
-lineage, and copied claims with small edits remain unresolved.
+Ambiguous similarity is `disputed`. Missing publisher ownership or source-level
+review is `unknown`; absence of a detected relationship is never treated as
+proof of independence. Wire and press-release lineage cannot be confirmed
+without source review.
 
 Cluster IDs describe the current projection membership. They are not accepted,
-permanent source identities.
+permanent source identities. Only `confirmed_independent` appears in the legacy
+`current_independent_external_cluster_count`; a separate
+`current_external_cluster_count` exposes structural clusters. Neither count
+affects runtime corroboration or scoring.
+
+The committed registry contains controlled `.test` fixtures but no
+production-reviewed source URLs, so real sources fail closed. See
+[`evidence_source_independence_v3.md`](evidence_source_independence_v3.md) for
+the complete contract and limitations.
 
 ## Local replay result — 2026-07-28
 
@@ -170,8 +187,11 @@ The replay covered 12 local brand histories:
   proposed revision;
 - controlled tests prove that a false bare strong label remains unverified and
   that a reproduced Exa attribution can become a validation candidate;
-- 185 current external passages collapsed to 162 conservative independence
-  clusters.
+- 185 current external passages collapsed to 160 structural source clusters;
+- those clusters classify as 19 `same_cluster`, 12 `disputed`, and 129
+  `unknown`;
+- 0 real clusters were marked `confirmed_independent` because the registry has
+  no production-reviewed source URLs.
 
 This demonstrates that v1's locator generated false change pressure. It does
 not demonstrate real-world semantic-change recall because the historical corpus
@@ -182,7 +202,7 @@ contains no stable semantic claim IDs.
 Identity v2 must remain non-authoritative until at least:
 
 1. stable semantic claim IDs are emitted by acquisition;
-2. paraphrased syndication and publisher ownership are addressed;
+2. production source-independence reviews are attributable and reversible;
 3. evidence is mapped persistently through claim to tile;
 4. a reviewed dataset measures both false-change rate and real-change recall;
 5. a reviewed gold set measures both false identity acceptance and identity

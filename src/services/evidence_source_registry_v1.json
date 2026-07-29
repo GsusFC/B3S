@@ -1,0 +1,58 @@
+{
+  "schema_version": "evidence-source-registry-v1",
+  "policy_version": "evidence-source-independence-policy-v3",
+  "registry_version": "evidence-source-registry-2026-07-v1",
+  "similarity": {
+    "shingle_size": 3,
+    "minimum_shingle_count": 6,
+    "same_cluster_threshold": 0.65,
+    "disputed_threshold": 0.35
+  },
+  "publisher_groups": [
+    {
+      "id": "fixture-editorial-group-one",
+      "kind": "editorial",
+      "review_state": "fixture",
+      "fixture_only": true,
+      "domains": [
+        "alpha-news.test",
+        "beta-news.test"
+      ]
+    },
+    {
+      "id": "fixture-editorial-group-two",
+      "kind": "editorial",
+      "review_state": "fixture",
+      "fixture_only": true,
+      "domains": [
+        "gamma-news.test"
+      ]
+    },
+    {
+      "id": "fixture-wire-service",
+      "kind": "wire_service",
+      "review_state": "fixture",
+      "fixture_only": true,
+      "domains": [
+        "wire-one.test",
+        "wire-two.test"
+      ]
+    }
+  ],
+  "reviewed_sources": [
+    {
+      "url": "https://alpha-news.test/story",
+      "publisher_group_id": "fixture-editorial-group-one",
+      "decision": "confirmed_independent",
+      "review_state": "fixture",
+      "fixture_only": true
+    },
+    {
+      "url": "https://gamma-news.test/report",
+      "publisher_group_id": "fixture-editorial-group-two",
+      "decision": "confirmed_independent",
+      "review_state": "fixture",
+      "fixture_only": true
+    }
+  ]
+}

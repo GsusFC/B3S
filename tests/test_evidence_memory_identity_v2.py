@@ -22,6 +22,12 @@ def test_multiple_passages_from_one_document_are_not_revision_candidates() -> No
 
     assert result["runtime_effect"] is False
     assert result["authority"] is False
+    assert result["policy_version"] == "evidence-memory-identity-policy-v3"
+    assert result["source_independence"]["schema_version"] == (
+        "evidence-source-independence-v3"
+    )
+    assert result["source_independence"]["production_reviewed_source_count"] == 0
+    assert result["source_independence"]["authority"] is False
     assert result["summary"]["entry_count"] == 2
     assert result["summary"]["document_count"] == 1
     assert result["summary"]["passage_count"] == 2
@@ -236,7 +242,11 @@ def test_exact_syndication_across_publishers_counts_as_one_independent_cluster()
 
     assert result["summary"]["current_external_publisher_count"] == 2
     assert result["summary"]["current_external_syndication_cluster_count"] == 1
-    assert result["summary"]["current_independent_external_cluster_count"] == 1
+    assert result["summary"]["current_external_cluster_count"] == 1
+    assert result["summary"]["current_independent_external_cluster_count"] == 0
+    assert result["summary"][
+        "current_external_independence_cluster_status_counts"
+    ] == {"same_cluster": 1}
     assert {
         entry["independence_cluster_id"] for entry in result["entries"]
     } == {result["entries"][0]["independence_cluster_id"]}
@@ -244,6 +254,9 @@ def test_exact_syndication_across_publishers_counts_as_one_independent_cluster()
         entry["independence_cluster_member_count"] == 2
         for entry in result["entries"]
     )
+    assert {entry["independence_status"] for entry in result["entries"]} == {
+        "same_cluster"
+    }
 
 
 def test_different_external_passages_from_one_publisher_are_one_cluster() -> None:
@@ -268,7 +281,11 @@ def test_different_external_passages_from_one_publisher_are_one_cluster() -> Non
 
     assert result["summary"]["current_external_publisher_count"] == 1
     assert result["summary"]["current_external_syndication_cluster_count"] == 2
-    assert result["summary"]["current_independent_external_cluster_count"] == 1
+    assert result["summary"]["current_external_cluster_count"] == 1
+    assert result["summary"]["current_independent_external_cluster_count"] == 0
+    assert {entry["independence_status"] for entry in result["entries"]} == {
+        "same_cluster"
+    }
 
 
 def test_historical_external_passages_do_not_bridge_current_clusters() -> None:
@@ -310,7 +327,11 @@ def test_historical_external_passages_do_not_bridge_current_clusters() -> None:
         entry for entry in result["entries"] if not entry["present_in_latest"]
     ]
 
-    assert result["summary"]["current_independent_external_cluster_count"] == 2
+    assert result["summary"]["current_external_cluster_count"] == 2
+    assert result["summary"]["current_independent_external_cluster_count"] == 0
+    assert {entry["independence_status"] for entry in current_entries} == {
+        "unknown"
+    }
     assert len(
         {entry["independence_cluster_id"] for entry in current_entries}
     ) == 2
@@ -318,6 +339,271 @@ def test_historical_external_passages_do_not_bridge_current_clusters() -> None:
         entry["independence_cluster_id"] == ""
         and entry["independence_cluster_member_count"] == 0
         for entry in historical_entries
+    )
+
+
+def test_lightly_paraphrased_external_copy_is_one_cluster() -> None:
+    rows = [
+        _external(
+            "exa.1",
+            "https://publisher-one.test/story",
+            (
+                "Example announced a new platform that helps finance teams close "
+                "monthly books faster with automated reporting across every subsidiary."
+            ),
+        ),
+        _external(
+            "exa.2",
+            "https://publisher-two.test/copy",
+            (
+                "Example announced a new platform that helps finance teams close "
+                "monthly books faster using automated reporting across every subsidiary."
+            ),
+        ),
+    ]
+
+    result = build_evidence_memory_identity_v2(
+        [_report("one", "2026-01-01T00:00:00Z", rows)]
+    )
+
+    assert result["summary"]["current_external_cluster_count"] == 1
+    assert result["summary"]["current_independent_external_cluster_count"] == 0
+    assert {entry["independence_status"] for entry in result["entries"]} == {
+        "same_cluster"
+    }
+    assert all(
+        "near_duplicate_content" in entry["independence_reason_codes"]
+        for entry in result["entries"]
+    )
+
+
+def test_ambiguous_similarity_is_disputed_and_never_counts() -> None:
+    rows = [
+        _external(
+            "exa.1",
+            "https://publisher-one.test/story",
+            (
+                "Example announced a new platform that helps finance teams close "
+                "monthly books faster with automated reporting across every subsidiary."
+            ),
+        ),
+        _external(
+            "exa.2",
+            "https://publisher-two.test/story",
+            (
+                "Example announced a new platform that helps operations teams close "
+                "monthly books faster using automated reporting across every subsidiary."
+            ),
+        ),
+    ]
+
+    result = build_evidence_memory_identity_v2(
+        [_report("one", "2026-01-01T00:00:00Z", rows)]
+    )
+
+    assert result["summary"]["current_external_cluster_count"] == 2
+    assert result["summary"]["current_independent_external_cluster_count"] == 0
+    assert {entry["independence_status"] for entry in result["entries"]} == {
+        "disputed"
+    }
+    assert all(
+        entry["independence_requires_human_review"] is True
+        for entry in result["entries"]
+    )
+
+
+def test_reviewed_publisher_groups_can_confirm_distinct_eligible_sources() -> None:
+    rows = [
+        _external(
+            "exa.1",
+            "https://alpha-news.test/story",
+            "Alpha independently documented Example's launch.",
+            provenance=_provenance("https://alpha-news.test/story"),
+        ),
+        _external(
+            "exa.2",
+            "https://gamma-news.test/report",
+            "Gamma separately interviewed Example customers.",
+            provenance=_provenance("https://gamma-news.test/report"),
+        ),
+    ]
+
+    result = build_evidence_memory_identity_v2(
+        [
+            _report("one", "2026-01-01T00:00:00Z", rows),
+            _report("two", "2026-01-02T00:00:00Z", deepcopy(rows)),
+        ]
+    )
+
+    assert result["summary"]["current_external_cluster_count"] == 2
+    assert result["summary"]["current_independent_external_cluster_count"] == 2
+    assert result["summary"][
+        "current_confirmed_independent_external_cluster_count"
+    ] == 2
+    assert {entry["independence_status"] for entry in result["entries"]} == {
+        "confirmed_independent"
+    }
+    assert all(
+        entry["independence_requires_human_review"] is False
+        for entry in result["entries"]
+    )
+
+
+def test_same_reviewed_publisher_group_is_one_cluster() -> None:
+    rows = [
+        _external(
+            "exa.1",
+            "https://alpha-news.test/story",
+            "Alpha documented the product launch.",
+            provenance=_provenance("https://alpha-news.test/story"),
+        ),
+        _external(
+            "exa.2",
+            "https://beta-news.test/report",
+            "Beta interviewed a customer about the product.",
+            provenance=_provenance("https://beta-news.test/report"),
+        ),
+    ]
+
+    result = build_evidence_memory_identity_v2(
+        [
+            _report("one", "2026-01-01T00:00:00Z", rows),
+            _report("two", "2026-01-02T00:00:00Z", deepcopy(rows)),
+        ]
+    )
+
+    assert result["summary"]["current_external_cluster_count"] == 1
+    assert result["summary"]["current_independent_external_cluster_count"] == 0
+    assert {entry["publisher_group_id"] for entry in result["entries"]} == {
+        "fixture-editorial-group-one"
+    }
+    assert {entry["independence_status"] for entry in result["entries"]} == {
+        "same_cluster"
+    }
+
+
+def test_explicit_original_source_lineage_collapses_republished_copy() -> None:
+    origin_url = "https://origin.test/release"
+    rows = [
+        _external(
+            "exa.1",
+            origin_url,
+            "Original release with complete launch details.",
+        ),
+        _external(
+            "exa.2",
+            "https://publisher.test/copy",
+            "A shortened copy of the launch announcement.",
+            original_source_url=origin_url,
+            distribution_type="press_release",
+        ),
+    ]
+
+    result = build_evidence_memory_identity_v2(
+        [_report("one", "2026-01-01T00:00:00Z", rows)]
+    )
+
+    assert result["summary"]["current_external_cluster_count"] == 1
+    assert {entry["independence_status"] for entry in result["entries"]} == {
+        "same_cluster"
+    }
+    assert all(
+        "shared_source_lineage" in entry["independence_reason_codes"]
+        for entry in result["entries"]
+    )
+
+
+def test_unreviewed_publisher_is_unknown_even_with_eligible_identity() -> None:
+    row = _external(
+        "exa.1",
+        "https://unreviewed.test/story",
+        "An eligible external identity with unknown publisher ownership.",
+        provenance=_provenance("https://unreviewed.test/story"),
+    )
+
+    result = build_evidence_memory_identity_v2(
+        [
+            _report("one", "2026-01-01T00:00:00Z", [row]),
+            _report("two", "2026-01-02T00:00:00Z", [deepcopy(row)]),
+        ]
+    )
+    entry = result["entries"][0]
+
+    assert result["summary"]["current_independent_external_cluster_count"] == 0
+    assert entry["independence_status"] == "unknown"
+    assert entry["independence_requires_human_review"] is True
+    assert "unreviewed_publisher_ownership" in entry["independence_reason_codes"]
+    assert "_source_independence_shingles" not in entry
+
+
+def test_reviewed_group_without_source_review_stays_unknown() -> None:
+    row = _external(
+        "exa.1",
+        "https://alpha-news.test/unreviewed",
+        "Publisher ownership alone cannot prove original reporting.",
+        provenance=_provenance("https://alpha-news.test/unreviewed"),
+    )
+
+    result = build_evidence_memory_identity_v2(
+        [
+            _report("one", "2026-01-01T00:00:00Z", [row]),
+            _report("two", "2026-01-02T00:00:00Z", [deepcopy(row)]),
+        ]
+    )
+    entry = result["entries"][0]
+
+    assert entry["publisher_registry_status"] == "fixture"
+    assert entry["source_independence_review_status"] == "unreviewed"
+    assert entry["independence_status"] == "unknown"
+    assert "source_not_manually_reviewed" in entry["independence_reason_codes"]
+
+
+def test_canonical_alias_does_not_borrow_another_url_source_review() -> None:
+    row = _external(
+        "exa.1",
+        "https://alpha-news.test/reprint",
+        "A reprint cannot inherit the reviewed origin's independence decision.",
+        provenance=_provenance("https://alpha-news.test/reprint"),
+        canonical_url="https://alpha-news.test/story",
+    )
+
+    result = build_evidence_memory_identity_v2(
+        [
+            _report("one", "2026-01-01T00:00:00Z", [row]),
+            _report("two", "2026-01-02T00:00:00Z", [deepcopy(row)]),
+        ]
+    )
+    entry = result["entries"][0]
+
+    assert entry["canonical_urls"] == [
+        "https://alpha-news.test/reprint",
+        "https://alpha-news.test/story",
+    ]
+    assert entry["source_independence_review_status"] == "unreviewed"
+    assert entry["independence_status"] == "unknown"
+
+
+def test_press_release_label_blocks_confirmed_independence() -> None:
+    row = _external(
+        "exa.1",
+        "https://alpha-news.test/story",
+        "A reviewed URL explicitly identified as a press release.",
+        provenance=_provenance("https://alpha-news.test/story"),
+        distribution_type="press_release",
+    )
+
+    result = build_evidence_memory_identity_v2(
+        [
+            _report("one", "2026-01-01T00:00:00Z", [row]),
+            _report("two", "2026-01-02T00:00:00Z", [deepcopy(row)]),
+        ]
+    )
+    entry = result["entries"][0]
+
+    assert entry["source_independence_review_status"] == "fixture"
+    assert entry["independence_status"] == "unknown"
+    assert "wire_or_press_release_lineage_unresolved" in (
+        entry["independence_reason_codes"]
     )
 
 
@@ -334,6 +620,36 @@ def test_projection_is_order_invariant_and_deduplicates_refs() -> None:
     assert forward["summary"]["entry_count"] == 1
     assert forward["entries"][0]["observation_count"] == 2
     assert forward["entries"][0]["observations"][0]["duplicate_ref_count"] == 2
+
+
+def test_source_independence_is_invariant_to_evidence_row_order() -> None:
+    rows = [
+        _external(
+            "exa.1",
+            "https://publisher-one.test/story",
+            (
+                "Example announced a new platform that helps finance teams close "
+                "monthly books faster with automated reporting across every subsidiary."
+            ),
+        ),
+        _external(
+            "exa.2",
+            "https://publisher-two.test/copy",
+            (
+                "Example announced a new platform that helps finance teams close "
+                "monthly books faster using automated reporting across every subsidiary."
+            ),
+        ),
+    ]
+
+    forward = build_evidence_memory_identity_v2(
+        [_report("one", "2026-01-01T00:00:00Z", rows)]
+    )
+    reverse = build_evidence_memory_identity_v2(
+        [_report("one", "2026-01-01T00:00:00Z", list(reversed(rows)))]
+    )
+
+    assert forward["state_fingerprint"] == reverse["state_fingerprint"]
 
 
 def _owned(ref: str, content: str, *, claim_id: str = "") -> dict:
@@ -358,6 +674,9 @@ def _external(
     identity_match: str = "",
     identity_match_llm: str = "",
     provenance: dict | None = None,
+    canonical_url: str = "",
+    original_source_url: str = "",
+    distribution_type: str = "",
 ) -> dict:
     metadata = {"source_class": "external_proof"}
     if identity_match:
@@ -366,6 +685,12 @@ def _external(
         metadata["identity_match_llm"] = identity_match_llm
     if provenance:
         metadata["external_identity_provenance"] = deepcopy(provenance)
+    if canonical_url:
+        metadata["canonical_url"] = canonical_url
+    if original_source_url:
+        metadata["original_source_url"] = original_source_url
+    if distribution_type:
+        metadata["distribution_type"] = distribution_type
     return {
         "ref": ref,
         "source": "exa",
@@ -376,11 +701,11 @@ def _external(
     }
 
 
-def _provenance() -> dict:
+def _provenance(source_url: str = "https://press.test/story") -> dict:
     return build_external_identity_provenance(
         provider="exa",
         subject_url="https://example.com",
-        source_url="https://press.test/story",
+        source_url=source_url,
         matched_alias="Example",
         match_method="alias_in_title",
         match_score=0.95,

@@ -30,6 +30,7 @@ dev = [
 [tool.setuptools.package-data]
 "web" = ["templates/*.j2", "static/*"]
 "src.history" = ["migrations/*.sql"]
+"src.services" = ["*.json"]
 "src.sv9_flow" = ["policy_data/*.json"]
 
 [tool.setuptools.packages.find]

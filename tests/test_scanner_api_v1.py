@@ -358,7 +358,7 @@ def test_evidence_memory_identity_v2_endpoint_is_non_authoritative(monkeypatch):
         "web.api_v1.router.evidence_memory_identity_v2_for_domain",
         lambda _domain: {
             "schema_version": "evidence-memory-identity-v2",
-            "policy_version": "evidence-memory-identity-policy-v2",
+            "policy_version": "evidence-memory-identity-policy-v3",
             "mode": "shadow",
             "runtime_effect": False,
             "authority": False,
@@ -374,6 +374,12 @@ def test_evidence_memory_identity_v2_endpoint_is_non_authoritative(monkeypatch):
             "policy": {
                 "automatic_validation": False,
                 "url_equality_implies_revision": False,
+            },
+            "source_independence": {
+                "schema_version": "evidence-source-independence-v3",
+                "policy_version": "evidence-source-independence-policy-v3",
+                "runtime_effect": False,
+                "authority": False,
             },
             "warnings": ["revision_requires_explicit_claim_slot"],
             "entries": [
@@ -403,6 +409,7 @@ def test_evidence_memory_identity_v2_endpoint_is_non_authoritative(monkeypatch):
     assert response.json()["runtime_effect"] is False
     assert response.json()["authority"] is False
     assert response.json()["policy"]["url_equality_implies_revision"] is False
+    assert response.json()["source_independence"]["authority"] is False
     assert response.json()["entries"][0]["adjudication_state"] == "proposed"
     assert response.json()["persistence"] == {
         "stored": False,
