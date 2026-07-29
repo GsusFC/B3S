@@ -77,6 +77,8 @@ The executable foundation must prove:
 20. accepting a relation cannot grant canonical or runtime authority.
 21. the slot producer accepts an explicit corporate mission, rejects an
     unscoped product mission, and stays outside runtime authority.
+22. historical v1 evidence can produce claim slots without mutating the
+    immutable candidate or gaining runtime authority.
 
 The adversarial probes deliberately expose:
 
@@ -146,20 +148,25 @@ The v1/v2 comparison found:
 
 Claim Memory v1 replayed the same 12 histories and found:
 
-- 0 semantic claim slots, variants, occurrences, or relation candidates;
+- 3 explicit mission slots, 3 variants, and 3 occurrences recovered from 3 of
+  32 eligible immutable v1 reports;
+- Robin's duplicate web/Exa capture collapsed to one occurrence;
+- 2 current variants and one older Vercel variant marked `not_reacquired`;
+- 0 relation candidates;
 - 184 structural metadata rows correctly ignored as semantic identity:
   168 visual-tile rows and 16 `checked_block` rows;
-- 21/21 controlled executable invariants passed, including the Claim Memory,
-  reconciliation, and claim-slot producer invariants.
+- 22/22 controlled executable invariants passed, including the Claim Memory,
+  reconciliation, claim-slot producer, and historical-backfill invariants.
 
 Verdict: `foundation_supported_promotion_blocked`.
 
-This result validates only the identity-memory foundation and the removal of a
-specific v1 false-change mechanism. The controlled explicit-claim probe proves
-that the relation-proposal mechanism exists, but the real corpus cannot measure
-semantic-change recall because it has no stable semantic claim slots. It does
-does not validate canonical claim promotion, memory scoring, or production
-real-change detection.
+This result validates only the identity-memory foundation, explicit evidence
+reuse, and the removal of a specific v1 false-change mechanism. The controlled
+explicit-claim probe proves that the relation-proposal mechanism exists, but
+the real corpus still cannot measure semantic-change recall because none of
+its three recovered slots contains multiple historical variants. It does not
+validate canonical claim promotion, memory scoring, or production real-change
+detection.
 
 ## Promotion gates
 

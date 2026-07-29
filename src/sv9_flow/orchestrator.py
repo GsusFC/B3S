@@ -16,7 +16,11 @@ from src.sv9_flow.claim_slot_producer import (
     build_claim_memory_evidence,
     claim_slot_producer_summary,
 )
-from src.sv9_flow.contracts import Sv9FlowCandidate, interpretation_contract_violations
+from src.sv9_flow.contracts import (
+    SV9_FLOW_CANDIDATE_VERSION,
+    Sv9FlowCandidate,
+    interpretation_contract_violations,
+)
 from src.sv9_flow.evidence_coverage import acquisition_coverage, block_coverage, coverage_limitations
 from src.sv9_flow.evidence_identity import (
     EVIDENCE_IDENTITY_VERSION,
@@ -78,7 +82,10 @@ def build_flow_candidate(
         interpretation,
         visual_signature_evidence=visual_signature_evidence,
     )
-    claim_memory_evidence = build_claim_memory_evidence(evidence_pack)
+    claim_memory_evidence = build_claim_memory_evidence(
+        evidence_pack,
+        source_candidate_schema_version=SV9_FLOW_CANDIDATE_VERSION,
+    )
     debug["claim_slot_producer"] = claim_slot_producer_summary(
         claim_memory_evidence
     )

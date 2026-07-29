@@ -12,31 +12,38 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-from src.evidence_identity import normalize_evidence_text
+from src.evidence_identity import (
+    normalize_evidence_text,
+    normalize_evidence_url,
+)
 from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
 
 
-CLAIM_SLOT_PRODUCER_VERSION = "evidence-claim-slot-producer-v1"
+CLAIM_SLOT_PRODUCER_VERSION = "evidence-claim-slot-producer-v2"
+HISTORICAL_CLAIM_BACKFILL_VERSION = "evidence-claim-historical-backfill-v1"
+_LEGACY_CANDIDATE_VERSION = "sv9-flow-candidate-v1"
+_PERSISTED_DERIVATION_MODE = "persisted_shadow_lane"
+_HISTORICAL_DERIVATION_MODE = "historical_backfill"
 _MAX_CLAIM_CHARS = 700
 _MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 _LOCALE_PATH_RE = re.compile(r"^[a-z]{2}(?:-[a-z]{2})?$")
-_SENTENCE_DECLARATIONS: dict[str, re.Pattern[str]] = {
+_DECLARATION_MARKERS: dict[str, re.Pattern[str]] = {
     "mission": re.compile(
-        r"(?:^|[.!?]\s+)"
-        r"(?P<claim>"
-        r"(?:our mission is|nuestra misi[oó]n es|nossa miss[aã]o [eé]|"
-        r"mission\s*[:—-]|misi[oó]n\s*[:—-]|miss[aã]o\s*[:—-])"
-        r"\s+[^.!?\n]{3,680}(?:[.!?]|$)"
-        r")",
+        r"\b(?:"
+        r"our mission\s+(?:is|of|to)|"
+        r"nuestra misi[oó]n\s+(?:es|de|para)|"
+        r"nossa miss[aã]o\s+(?:[eé]|de|para)|"
+        r"mission\s*[:—-]|misi[oó]n\s*[:—-]|miss[aã]o\s*[:—-]"
+        r")\s+",
         flags=re.IGNORECASE,
     ),
     "vision": re.compile(
-        r"(?:^|[.!?]\s+)"
-        r"(?P<claim>"
-        r"(?:our vision is|nuestra visi[oó]n es|nossa vis[aã]o [eé]|"
-        r"vision\s*[:—-]|visi[oó]n\s*[:—-]|vis[aã]o\s*[:—-])"
-        r"\s+[^.!?\n]{3,680}(?:[.!?]|$)"
-        r")",
+        r"\b(?:"
+        r"our vision\s+(?:is|of|to)|"
+        r"nuestra visi[oó]n\s+(?:es|de|para)|"
+        r"nossa vis[aã]o\s+(?:[eé]|de|para)|"
+        r"vision\s*[:—-]|visi[oó]n\s*[:—-]|vis[aã]o\s*[:—-]"
+        r")\s+",
         flags=re.IGNORECASE,
     ),
 }
@@ -76,6 +83,9 @@ _UNSCOPED_STRATEGIC_PATHS = {
 
 def build_claim_memory_evidence(
     evidence_pack: BrandEvidencePack,
+    *,
+    derivation_mode: str = _PERSISTED_DERIVATION_MODE,
+    source_candidate_schema_version: str = "",
 ) -> list[EvidenceRecord]:
     """Return shadow-only semantic records from explicit owned declarations."""
 
@@ -95,7 +105,7 @@ def build_claim_memory_evidence(
                 continue
             dedupe_key = (
                 role,
-                str(source_record.url or "").strip().casefold(),
+                normalize_evidence_url(source_record.url),
                 normalized_content.casefold(),
             )
             if dedupe_key in seen:
@@ -110,9 +120,63 @@ def build_claim_memory_evidence(
                     content=normalized_content[:_MAX_CLAIM_CHARS],
                     basis=basis,
                     ordinal=ordinals[ordinal_key],
+                    derivation_mode=derivation_mode,
+                    source_candidate_schema_version=(
+                        source_candidate_schema_version
+                    ),
                 )
             )
     return records
+
+
+def resolve_candidate_claim_memory_evidence(
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve a persisted v2 lane or derive one from an immutable v1 pack."""
+
+    schema_version = str(candidate.get("schema_version") or "")
+    if "claim_memory_evidence" in candidate:
+        raw_records = candidate.get("claim_memory_evidence")
+        if not isinstance(raw_records, list):
+            return _resolution(
+                [],
+                derivation_mode="invalid_persisted_shadow_lane",
+                source_candidate_schema_version=schema_version,
+            )
+        records = [
+            _persisted_row_with_provenance(row, schema_version=schema_version)
+            for row in raw_records
+            if isinstance(row, dict)
+        ]
+        return _resolution(
+            records,
+            derivation_mode=_PERSISTED_DERIVATION_MODE,
+            source_candidate_schema_version=schema_version,
+        )
+
+    if schema_version != _LEGACY_CANDIDATE_VERSION:
+        return _resolution(
+            [],
+            derivation_mode="ineligible_candidate_schema",
+            source_candidate_schema_version=schema_version,
+        )
+
+    pack_payload = (
+        candidate.get("evidence_pack")
+        if isinstance(candidate.get("evidence_pack"), dict)
+        else {}
+    )
+    pack = _pack_from_payload(pack_payload)
+    records = build_claim_memory_evidence(
+        pack,
+        derivation_mode=_HISTORICAL_DERIVATION_MODE,
+        source_candidate_schema_version=schema_version,
+    )
+    return _resolution(
+        [record.to_dict() for record in records],
+        derivation_mode=_HISTORICAL_DERIVATION_MODE,
+        source_candidate_schema_version=schema_version,
+    )
 
 
 def claim_slot_producer_summary(
@@ -132,16 +196,115 @@ def claim_slot_producer_summary(
     }
 
 
+def _resolution(
+    records: list[dict[str, Any]],
+    *,
+    derivation_mode: str,
+    source_candidate_schema_version: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": HISTORICAL_CLAIM_BACKFILL_VERSION,
+        "derivation_mode": derivation_mode,
+        "source_candidate_schema_version": (
+            source_candidate_schema_version or "unknown"
+        ),
+        "record_count": len(records),
+        "records": records,
+        "runtime_effect": False,
+        "authority": False,
+    }
+
+
+def _persisted_row_with_provenance(
+    row: dict[str, Any],
+    *,
+    schema_version: str,
+) -> dict[str, Any]:
+    copied = dict(row)
+    metadata = (
+        dict(row.get("metadata"))
+        if isinstance(row.get("metadata"), dict)
+        else {}
+    )
+    metadata.setdefault(
+        "claim_slot_derivation_mode",
+        _PERSISTED_DERIVATION_MODE,
+    )
+    metadata.setdefault(
+        "source_candidate_schema_version",
+        schema_version or "unknown",
+    )
+    copied["metadata"] = metadata
+    return copied
+
+
+def _pack_from_payload(payload: dict[str, Any]) -> BrandEvidencePack:
+    evidence = [
+        record
+        for item in payload.get("evidence") or []
+        if isinstance(item, dict)
+        and (record := _record_from_payload(item)) is not None
+    ]
+    return BrandEvidencePack(
+        brand_name=str(payload.get("brand_name") or ""),
+        url=str(payload.get("url") or ""),
+        evidence=evidence,
+        limitations=[
+            str(value)
+            for value in payload.get("limitations") or []
+            if str(value)
+        ],
+        schema_version=str(
+            payload.get("schema_version") or "brand-evidence-pack-v1"
+        ),
+    )
+
+
+def _record_from_payload(payload: dict[str, Any]) -> EvidenceRecord | None:
+    content = str(payload.get("content") or "")
+    if not content.strip():
+        return None
+    confidence = str(payload.get("confidence") or "medium").lower()
+    if confidence not in {"low", "medium", "high"}:
+        confidence = "medium"
+    return EvidenceRecord(
+        ref=str(payload.get("ref") or ""),
+        source=str(payload.get("source") or ""),
+        evidence_type=str(payload.get("evidence_type") or ""),
+        content=content,
+        url=(
+            str(payload.get("url"))
+            if payload.get("url") is not None
+            else None
+        ),
+        confidence=confidence,  # type: ignore[arg-type]
+        metadata=(
+            dict(payload.get("metadata"))
+            if isinstance(payload.get("metadata"), dict)
+            else {}
+        ),
+    )
+
+
 def _eligible_owned_record(
     record: EvidenceRecord,
     *,
     brand_url: str,
 ) -> bool:
     metadata = record.metadata if isinstance(record.metadata, dict) else {}
+    evidence_type = str(record.evidence_type or "").strip().lower()
+    raw_owned_copy = evidence_type == "raw_input"
+    confirmed_owned_copy = (
+        evidence_type == "external_proof.owned_confirmation"
+        and str(metadata.get("intent") or "").strip().lower()
+        == "owned_confirmation"
+        and str(metadata.get("identity_match") or "").strip().lower()
+        == "domain"
+    )
     if not (
         str(metadata.get("source_class") or "").strip().lower()
         == "owned_copy"
-        and str(record.evidence_type or "").strip().lower() == "raw_input"
+        and (raw_owned_copy or confirmed_owned_copy)
         and bool(normalize_evidence_text(record.content))
     ):
         return False
@@ -211,16 +374,90 @@ def _explicit_claim_candidates(
     text = str(value or "").replace("\\n", "\n")
     candidates = _heading_claims(text)
     for paragraph in _paragraphs(text):
-        for role, pattern in _SENTENCE_DECLARATIONS.items():
-            for match in pattern.finditer(paragraph):
-                candidates.append(
-                    (
-                        role,
-                        str(match.group("claim") or ""),
-                        "explicit_owned_statement",
-                    )
+        for role, content in _statement_claims(paragraph):
+            candidates.append(
+                (
+                    role,
+                    content,
+                    "explicit_owned_statement",
                 )
+            )
     return candidates
+
+
+def _statement_claims(value: str) -> list[tuple[str, str]]:
+    claims: list[tuple[str, str]] = []
+    for role, pattern in _DECLARATION_MARKERS.items():
+        matches = list(pattern.finditer(value))
+        for index, match in enumerate(matches):
+            next_marker_start = (
+                matches[index + 1].start()
+                if index + 1 < len(matches)
+                else None
+            )
+            if (
+                next_marker_start is not None
+                and not any(
+                    char in value[match.end():next_marker_start]
+                    for char in ".!?#"
+                )
+            ):
+                continue
+            content = _statement_claim(
+                value,
+                match=match,
+                next_marker_start=next_marker_start,
+            )
+            if content:
+                claims.append(
+                    (role, content)
+                )
+    return claims
+
+
+def _statement_claim(
+    value: str,
+    *,
+    match: re.Match[str],
+    next_marker_start: int | None,
+) -> str:
+    tail_start = match.end()
+    tail_limit = min(len(value), tail_start + _MAX_CLAIM_CHARS)
+    boundaries = [
+        boundary
+        for boundary in (
+            _first_boundary(value, tail_start, tail_limit, ".!?"),
+            _first_boundary(value, tail_start, tail_limit, "#"),
+            next_marker_start,
+        )
+        if boundary is not None and boundary >= tail_start
+    ]
+    tail_end = min(boundaries) if boundaries else tail_limit
+    body = value[tail_start:tail_end].strip()
+    if len(normalize_evidence_text(body)) < 3:
+        return ""
+    punctuation = (
+        value[tail_end]
+        if tail_end < len(value) and value[tail_end] in ".!?"
+        else ""
+    )
+    return normalize_evidence_text(
+        f"{value[match.start():match.end()]}{body}{punctuation}"
+    )
+
+
+def _first_boundary(
+    value: str,
+    start: int,
+    end: int,
+    boundary_chars: str,
+) -> int | None:
+    positions = [
+        position
+        for char in boundary_chars
+        if (position := value.find(char, start, end)) >= 0
+    ]
+    return min(positions) if positions else None
 
 
 def _heading_claims(text: str) -> list[tuple[str, str, str]]:
@@ -230,7 +467,19 @@ def _heading_claims(text: str) -> list[tuple[str, str, str]]:
         match = _MARKDOWN_HEADING_RE.match(line)
         if match is None:
             continue
-        role = _heading_role(str(match.group(1) or ""))
+        label = str(match.group(1) or "")
+        heading_statements = _statement_claims(label)
+        if heading_statements:
+            claims.extend(
+                (
+                    role,
+                    content,
+                    "explicit_owned_heading_statement",
+                )
+                for role, content in heading_statements
+            )
+            continue
+        role = _heading_role(label)
         if not role:
             continue
         paragraph: list[str] = []
@@ -294,6 +543,8 @@ def _claim_record(
     content: str,
     basis: str,
     ordinal: int,
+    derivation_mode: str,
+    source_candidate_schema_version: str,
 ) -> EvidenceRecord:
     source_metadata = (
         source_record.metadata
@@ -307,6 +558,15 @@ def _claim_record(
         "claim_type": role,
         "claim_slot_basis": basis,
         "claim_slot_producer_version": CLAIM_SLOT_PRODUCER_VERSION,
+        "claim_slot_derivation_mode": derivation_mode,
+        "historical_backfill_version": (
+            HISTORICAL_CLAIM_BACKFILL_VERSION
+            if derivation_mode == _HISTORICAL_DERIVATION_MODE
+            else ""
+        ),
+        "source_candidate_schema_version": (
+            source_candidate_schema_version or "unknown"
+        ),
         "source_evidence_ref": source_record.ref,
         "record_ref_semantics": "provenance_only",
         "producer_occurrence": ordinal,
@@ -321,14 +581,35 @@ def _claim_record(
         metadata["entity_scope"] = entity_scope[:200]
     return EvidenceRecord(
         ref=(
-            f"claim_memory.{source_record.ref}.{role}.{ordinal}"
+            f"{'claim_memory_backfill' if derivation_mode == _HISTORICAL_DERIVATION_MODE else 'claim_memory'}."
+            f"{source_record.ref}.{role}.{ordinal}"
         ),
         source=source_record.source,
         evidence_type=f"semantic_claim.{role}",
         content=content,
         url=source_record.url,
-        confidence=(
-            "high" if basis == "explicit_owned_heading" else "medium"
-        ),
+        confidence=_claim_confidence(source_record, basis=basis),
         metadata=metadata,
+    )
+
+
+def _claim_confidence(
+    source_record: EvidenceRecord,
+    *,
+    basis: str,
+) -> str:
+    desired = (
+        "high"
+        if basis
+        in {
+            "explicit_owned_heading",
+            "explicit_owned_heading_statement",
+        }
+        else "medium"
+    )
+    rank = {"low": 0, "medium": 1, "high": 2}
+    source_confidence = str(source_record.confidence or "medium")
+    return min(
+        (desired, source_confidence),
+        key=lambda value: rank.get(value, 1),
     )

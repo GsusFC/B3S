@@ -1,5 +1,9 @@
 # Evidence Claim Slot Producer v1
 
+Status: superseded by
+[`Evidence Claim Slot Producer v2`](evidence_claim_slot_producer_v2.md).
+This document records the original strict producer contract.
+
 ## Verdict
 
 The producer gives future scans usable semantic claim history without changing
@@ -95,9 +99,10 @@ authority=false
 ## Historical replay
 
 Reports created before this contract have no `claim_memory_evidence` lane.
-Their replay therefore remains at zero semantic slots. This is expected and
-must not be “fixed” by deriving historical slot identity from text, URL,
-visual tile, `checked_block`, or EvidenceGraph's text-derived `claim_id`.
+Under the original v1 producer their replay remained at zero semantic slots.
+Historical reuse is now handled by a separate versioned, non-mutating backfill;
+it still does not derive identity from generic text, URL, visual tile,
+`checked_block`, or EvidenceGraph's text-derived `claim_id`.
 
-Recall and false-relation rates can only be measured after repeated v2
-candidates exist. Until then the producer and Claim Memory remain shadow-only.
+See
+[`evidence_claim_historical_backfill_v1.md`](evidence_claim_historical_backfill_v1.md).

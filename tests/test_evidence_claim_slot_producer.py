@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 from src.services.evidence_claim_memory import build_evidence_claim_memory
 from src.sv9_flow.claim_slot_producer import (
     CLAIM_SLOT_PRODUCER_VERSION,
+    HISTORICAL_CLAIM_BACKFILL_VERSION,
     build_claim_memory_evidence,
 )
 from src.sv9_flow.contracts import (
@@ -171,7 +174,7 @@ def test_producer_to_claim_memory_proposes_replacement_without_authority() -> No
 
     memory = build_evidence_claim_memory(reports)
 
-    assert memory["policy_version"] == "evidence-claim-memory-policy-v3"
+    assert memory["policy_version"] == "evidence-claim-memory-policy-v4"
     assert memory["summary"]["claim_slot_count"] == 1
     assert memory["summary"]["claim_variant_count"] == 2
     assert memory["summary"]["relation_candidate_counts"] == {
@@ -181,6 +184,170 @@ def test_producer_to_claim_memory_proposes_replacement_without_authority() -> No
     assert memory["slots"][0]["runtime_effect"] is False
     assert memory["slots"][0]["authority"] is False
     assert memory["policy"]["shadow_producer_lane_affects_runtime"] is False
+
+
+def test_explicit_historical_phrasings_are_recoverable_and_deduplicated() -> None:
+    robin_web = _owned(
+        (
+            "# As OnE\nAs founders ourselves, we are deeply committed to "
+            "our mission of supporting you. We are here for the long haul."
+        ),
+        ref="web.robin",
+        url="https://example.com/about",
+    )
+    robin_exa = EvidenceRecord(
+        ref="exa.robin",
+        source="exa",
+        evidence_type="external_proof.owned_confirmation",
+        content=(
+            "As founders ourselves, we are deeply committed to our mission "
+            "of supporting you. We are here for the long haul."
+        ),
+        url="https://example.com/about",
+        confidence="low",
+        metadata={
+            "source_class": "owned_copy",
+            "intent": "owned_confirmation",
+            "identity_match": "domain",
+        },
+    )
+    pack = _pack(
+        _owned(
+            (
+                "# About Us\nAt Example, our mission is to enable developers "
+                "to publish wonderful apps."
+            ),
+            ref="web.vercel-shape",
+            url="https://example.com/company",
+        ),
+        _owned(
+            "# Our Mission to Democratise Finance",
+            ref="web.liminal-shape",
+            url="https://example.com/mission",
+        ),
+        robin_web,
+        robin_exa,
+    )
+
+    records = build_claim_memory_evidence(pack)
+
+    assert [record.content for record in records] == [
+        "our mission is to enable developers to publish wonderful apps.",
+        "Our Mission to Democratise Finance",
+        "our mission of supporting you.",
+    ]
+    assert [
+        record.metadata["source_evidence_ref"] for record in records
+    ] == [
+        "web.vercel-shape",
+        "web.liminal-shape",
+        "web.robin",
+    ]
+
+
+def test_legacy_candidate_is_backfilled_without_mutating_report() -> None:
+    report = _legacy_report(
+        "legacy",
+        "2026-01-01T00:00:00Z",
+        _owned(
+            (
+                "# About\nAt Example, our mission is to make every "
+                "decision traceable."
+            ),
+            ref="web.about",
+        ),
+    )
+    before = deepcopy(report)
+
+    memory = build_evidence_claim_memory([report])
+
+    assert report == before
+    assert memory["summary"]["claim_slot_count"] == 1
+    assert memory["summary"]["historical_backfill_report_count"] == 1
+    assert (
+        memory["summary"]["historical_backfill_report_with_claims_count"]
+        == 1
+    )
+    assert memory["summary"]["historical_backfill_claim_record_count"] == 1
+    assert memory["summary"]["claim_slot_derivation_mode_counts"] == {
+        "historical_backfill": 1
+    }
+    assert memory["claim_slot_producer"]["historical_backfill_version"] == (
+        HISTORICAL_CLAIM_BACKFILL_VERSION
+    )
+    assert memory["claim_slot_producer"]["resolution_mode_counts"] == {
+        "historical_backfill": 1
+    }
+    assert memory["occurrences"][0]["claim_slot_derivation_mode"] == (
+        "historical_backfill"
+    )
+    assert memory["runtime_effect"] is False
+    assert memory["authority"] is False
+
+
+def test_persisted_empty_lane_prevents_legacy_reinterpretation() -> None:
+    report = _legacy_report(
+        "legacy-with-empty-lane",
+        "2026-01-01T00:00:00Z",
+        _owned(
+            "Our mission is to make every decision traceable.",
+            ref="web.about",
+        ),
+    )
+    candidate = report["raw"]["flow"]["candidate"]
+    candidate["claim_memory_evidence"] = []
+
+    memory = build_evidence_claim_memory([report])
+
+    assert memory["summary"]["claim_slot_count"] == 0
+    assert memory["summary"]["historical_backfill_report_count"] == 0
+    assert memory["claim_slot_producer"]["resolution_mode_counts"] == {
+        "persisted_shadow_lane": 1
+    }
+
+
+def test_malformed_persisted_lane_fails_closed_without_backfill() -> None:
+    report = _legacy_report(
+        "legacy-with-malformed-lane",
+        "2026-01-01T00:00:00Z",
+        _owned(
+            "Our mission is to make every decision traceable.",
+            ref="web.about",
+        ),
+    )
+    report["raw"]["flow"]["candidate"]["claim_memory_evidence"] = {
+        "unexpected": "object"
+    }
+
+    memory = build_evidence_claim_memory([report])
+
+    assert memory["summary"]["claim_slot_count"] == 0
+    assert memory["summary"]["historical_backfill_report_count"] == 0
+    assert memory["claim_slot_producer"]["resolution_mode_counts"] == {
+        "invalid_persisted_shadow_lane": 1
+    }
+
+
+def test_v2_candidate_missing_lane_fails_closed() -> None:
+    report = _legacy_report(
+        "v2-missing",
+        "2026-01-01T00:00:00Z",
+        _owned(
+            "Our mission is to make every decision traceable.",
+            ref="web.about",
+        ),
+    )
+    report["raw"]["flow"]["candidate"]["schema_version"] = (
+        "sv9-flow-candidate-v2"
+    )
+
+    memory = build_evidence_claim_memory([report])
+
+    assert memory["summary"]["claim_slot_count"] == 0
+    assert memory["summary"]["historical_backfill_report_count"] == 0
+    assert memory["claim_slot_producer"]["resolution_mode_counts"] == {
+        "ineligible_candidate_schema": 1
+    }
 
 
 def test_two_explicit_missions_in_one_report_propose_coexistence() -> None:
@@ -316,3 +483,15 @@ def _report(
         "blocks": [],
         "raw": {"flow": {"candidate": candidate.to_dict()}},
     }
+
+
+def _legacy_report(
+    report_id: str,
+    created_at: str,
+    *records: EvidenceRecord,
+) -> dict:
+    report = _report(report_id, created_at, *records)
+    candidate = report["raw"]["flow"]["candidate"]
+    candidate["schema_version"] = "sv9-flow-candidate-v1"
+    candidate.pop("claim_memory_evidence")
+    return report

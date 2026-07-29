@@ -28,7 +28,7 @@ from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
 
 
 EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v2"
-EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v4"
+EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v5"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 
 
@@ -102,6 +102,11 @@ def run_evidence_memory_stress(
             "claim_relation_candidate_count": claim_memory_replay["summary"][
                 "relation_candidate_count"
             ],
+            "historical_backfill_claim_record_count": (
+                claim_memory_replay["summary"][
+                    "historical_backfill_claim_record_count"
+                ]
+            ),
         },
         "executable_failures": executable_failures,
         "promotion_blockers": promotion_blockers,
@@ -264,6 +269,7 @@ def render_evidence_memory_stress_markdown(report: dict[str, Any]) -> str:
             f"- Claim variants: `{claim_summary.get('claim_variant_count', 0)}`",
             f"- Claim occurrences: `{claim_summary.get('claim_occurrence_count', 0)}`",
             f"- Proposed relations: `{claim_summary.get('relation_candidate_count', 0)}`",
+            f"- Historical backfill claim records: `{claim_summary.get('historical_backfill_claim_record_count', 0)}`",
             f"- Ignored bare claim IDs: `{claim_summary.get('ignored_bare_claim_id_count', 0)}`",
             f"- Ignored structural metadata rows: `{claim_summary.get('ignored_claim_metadata_count', 0)}`",
             "",
@@ -666,6 +672,30 @@ def _controlled_probes() -> list[dict[str, Any]]:
         "claim_memory_evidence"
     ] = [record.to_dict() for record in producer_records]
     producer_claim_memory = build_evidence_claim_memory([producer_report])
+    historical_backfill_report = _report(
+        "historical-claim-backfill",
+        "2026-01-01T00:00:00Z",
+        [
+            _evidence(
+                ref="web.about",
+                source="web",
+                source_class="owned_copy",
+                evidence_type="raw_input",
+                url="https://example.com/about",
+                content=(
+                    "# About\nAt Example, our mission is to make every "
+                    "decision traceable."
+                ),
+            )
+        ],
+    )
+    historical_backfill_report["raw"]["flow"]["candidate"][
+        "schema_version"
+    ] = "sv9-flow-candidate-v1"
+    historical_backfill_before = deepcopy(historical_backfill_report)
+    historical_backfill_memory = build_evidence_claim_memory(
+        [historical_backfill_report]
+    )
 
     return [
         _probe(
@@ -896,6 +926,27 @@ def _controlled_probes() -> list[dict[str, Any]]:
                 and producer_claim_memory["authority"] is False
             ),
             "The producer accepts an explicit corporate mission, rejects an unscoped product mission, and remains shadow-only.",
+        ),
+        _probe(
+            "historical_claim_backfill_reuses_v1_evidence_without_mutation",
+            (
+                historical_backfill_report == historical_backfill_before
+                and historical_backfill_memory["summary"][
+                    "claim_slot_count"
+                ]
+                == 1
+                and historical_backfill_memory["summary"][
+                    "historical_backfill_claim_record_count"
+                ]
+                == 1
+                and historical_backfill_memory["claim_slot_producer"][
+                    "mutates_reports"
+                ]
+                is False
+                and historical_backfill_memory["runtime_effect"] is False
+                and historical_backfill_memory["authority"] is False
+            ),
+            "A v1 candidate is reprojected from immutable evidence without editing its report or gaining runtime authority.",
         ),
         {
             "id": "identity_gold_set_pending_human_review",
@@ -1240,12 +1291,17 @@ def _replay_claim_memory(
         "relation_candidate_count",
         "ignored_claim_metadata_count",
         "ignored_bare_claim_id_count",
+        "historical_backfill_report_count",
+        "historical_backfill_report_with_claims_count",
+        "historical_backfill_claim_record_count",
     )
     rows: list[dict[str, Any]] = []
     totals = Counter()
     relation_totals = Counter()
     ignored_reason_totals = Counter()
     slot_method_totals = Counter()
+    derivation_mode_totals = Counter()
+    producer_version_totals = Counter()
     for domain, reports in sorted(histories.items()):
         if not reports:
             continue
@@ -1267,6 +1323,12 @@ def _replay_claim_memory(
             "claim_slot_method_counts": dict(
                 summary["claim_slot_method_counts"]
             ),
+            "claim_slot_derivation_mode_counts": dict(
+                summary["claim_slot_derivation_mode_counts"]
+            ),
+            "claim_slot_producer_version_counts": dict(
+                summary["claim_slot_producer_version_counts"]
+            ),
         }
         rows.append(row)
         for key in metric_keys:
@@ -1274,6 +1336,12 @@ def _replay_claim_memory(
         relation_totals.update(row["relation_candidate_counts"])
         ignored_reason_totals.update(row["ignored_claim_reason_counts"])
         slot_method_totals.update(row["claim_slot_method_counts"])
+        derivation_mode_totals.update(
+            row["claim_slot_derivation_mode_counts"]
+        )
+        producer_version_totals.update(
+            row["claim_slot_producer_version_counts"]
+        )
     return {
         "schema_version": "evidence-claim-memory-v1-replay-v1",
         "runtime_effect": False,
@@ -1289,6 +1357,12 @@ def _replay_claim_memory(
             ),
             "claim_slot_method_counts": dict(
                 sorted(slot_method_totals.items())
+            ),
+            "claim_slot_derivation_mode_counts": dict(
+                sorted(derivation_mode_totals.items())
+            ),
+            "claim_slot_producer_version_counts": dict(
+                sorted(producer_version_totals.items())
             ),
         },
         "histories": rows,

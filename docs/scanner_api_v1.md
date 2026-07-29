@@ -225,8 +225,9 @@ production-reviewed source URLs, so real evidence fails closed rather than
 gaining independence from missing relationship data.
 
 The resource is not proof that real brand changes are detected. The current
-local corpus contains visual stable slots but no stable semantic `claim_id`
-history, so semantic-change recall remains unmeasured.
+local corpus now yields three explicit semantic slots through deterministic
+historical backfill, but none contains multiple variants, so semantic-change
+recall remains unmeasured.
 
 ## Evidence Claim Memory v1 shadow
 
@@ -246,10 +247,17 @@ IDs, visual tiles, and `checked_block` metadata are reported as ignored rather
 than promoted into semantic claim identity.
 
 New `sv9-flow-candidate-v2` reports may also contain the separate
-`candidate.claim_memory_evidence` shadow lane. Its v1 producer emits only
+`candidate.claim_memory_evidence` shadow lane. Its v2 producer emits only
 explicit owned mission and vision declarations. Those records are not added
 to the runtime evidence pack and cannot affect interpretation, tiles, scores,
-or canonical selection. Historical reports have no lane and remain readable.
+or canonical selection.
+
+For immutable `sv9-flow-candidate-v1` reports that predate the lane, Claim
+Memory may derive the same narrow records at read time from their persisted
+evidence pack. Reports are never edited. A persisted lane has precedence,
+including an empty list, and a v2 or unknown-schema report with a missing lane
+fails closed. The response exposes derivation-mode and producer-version
+counters so persisted and historical records remain distinguishable.
 
 Sequential variants may produce a `replacement_candidate`; variants present
 in the same report may produce a `coexistence_candidate`. Both remain
