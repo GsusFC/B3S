@@ -111,6 +111,9 @@ The executable foundation must prove:
 29. a deterministic source/claim registry preserves publisher independence
     and claim corroboration on separate axes, requires `claim_id`, grants no
     source-global decision, and remains shadow-only.
+30. an active accepted evidence identity survives acquisition dropout and an
+    unreviewed content change; accepting the new variant adds it beside the
+    original instead of silently replacing it.
 
 The adversarial probes deliberately expose:
 
@@ -152,7 +155,7 @@ High multi-variant rates are a warning that the v1 locator
 `source_class | evidence_type | URL` is too coarse for change authority. They
 do not prove that the brand changed.
 
-## Baseline result — local reports, 2026-07-29
+## Baseline result — local reports, 2026-07-30
 
 The first run replayed 12 histories containing material evidence:
 
@@ -193,11 +196,12 @@ Claim Memory v1 replayed the same 12 histories and found:
 - 0 relation candidates;
 - 184 structural metadata rows correctly ignored as semantic identity:
   168 visual-tile rows and 16 `checked_block` rows;
-- 29/29 controlled executable invariants passed, including identity policy v4,
+- 30/30 controlled executable invariants passed, including identity policy v4,
   the two-axis production-source review set, Claim Memory,
   reconciliation, claim-slot producer, historical backfill, and the versioned
   evidence-to-claim-to-tile ledger, the shadow memory snapshot, and the
-  literal claim-corroboration review queue plus its two-axis shadow registry.
+  literal claim-corroboration review queue plus its two-axis shadow registry,
+  as well as cumulative accepted-evidence memory without silent replacement.
 
 The Gate 2 replay over those histories found:
 

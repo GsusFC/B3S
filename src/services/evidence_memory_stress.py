@@ -66,6 +66,9 @@ from src.services.evidence_identity_gold_set import (
 from src.services.evidence_memory_identity_v2 import (
     build_evidence_memory_identity_v2,
 )
+from src.services.evidence_accepted_memory import (
+    build_evidence_accepted_memory,
+)
 from src.services.evidence_memory_snapshot import (
     build_evidence_memory_snapshot,
 )
@@ -97,7 +100,7 @@ from src.sv9_flow.contracts import (
 
 
 EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v2"
-EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v13"
+EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v14"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 
 
@@ -1414,15 +1417,16 @@ def _controlled_probes(
         rubric_version=memory_snapshot_rubric,
         evaluator_version=memory_snapshot_evaluator,
     )
+    claim_tile_dropout_report = _report(
+        "claim-tile-dropout",
+        "2026-01-03T00:00:00Z",
+        [],
+    )
     dropout_memory_snapshot = build_evidence_memory_snapshot(
         [
             claim_tile_first,
             claim_tile_second,
-            _report(
-                "claim-tile-dropout",
-                "2026-01-03T00:00:00Z",
-                [],
-            ),
+            claim_tile_dropout_report,
         ],
         rubric_version=memory_snapshot_rubric,
         evaluator_version=memory_snapshot_evaluator,
@@ -1442,6 +1446,82 @@ def _controlled_probes(
         evaluator_version=(
             "evidence-memory-evaluator-unimplemented-v2"
         ),
+    )
+    accepted_source_evidence_id = next(
+        entry["evidence_id"]
+        for entry in baseline_memory_snapshot["semantic_state"][
+            "evidence"
+        ]
+        if entry["source_class"] == "owned_copy"
+    )
+    accepted_source_event = {
+        "id": "accepted-source-one",
+        "subject_type": "evidence",
+        "subject_id": accepted_source_evidence_id,
+        "sequence": 1,
+        "decision": "accepted",
+        "reviewer": "controlled-reviewer",
+        "reason_code": "controlled_identity_acceptance",
+        "rationale": "The controlled evidence identity is accepted.",
+        "evaluator_version": "controlled-review-v1",
+        "created_at": "2026-01-02T00:00:00Z",
+        "runtime_effect": False,
+        "authority": False,
+    }
+    accepted_memory_baseline = build_evidence_accepted_memory(
+        [claim_tile_first],
+        evidence_adjudications=[accepted_source_event],
+    )
+    accepted_memory_dropout = build_evidence_accepted_memory(
+        [
+            claim_tile_first,
+            claim_tile_second,
+            claim_tile_dropout_report,
+        ],
+        evidence_adjudications=[accepted_source_event],
+    )
+    changed_source = deepcopy(claim_tile_source)
+    changed_source["content"] = (
+        "Our mission is to automate every finance decision."
+    )
+    changed_source_report = _report(
+        "claim-tile-source-change",
+        "2026-01-04T00:00:00Z",
+        [changed_source],
+    )
+    accepted_memory_with_unreviewed_change = (
+        build_evidence_accepted_memory(
+            [claim_tile_first, changed_source_report],
+            evidence_adjudications=[accepted_source_event],
+        )
+    )
+    changed_source_evidence_id = canonical_evidence_digest(
+        source_class="owned_copy",
+        evidence_type=str(changed_source["evidence_type"]),
+        url=str(changed_source["url"]),
+        content=str(changed_source["content"]),
+    )
+    accepted_memory_with_both = build_evidence_accepted_memory(
+        [claim_tile_first, changed_source_report],
+        evidence_adjudications=[
+            accepted_source_event,
+            {
+                "id": "accepted-source-two",
+                "subject_type": "evidence",
+                "subject_id": changed_source_evidence_id,
+                "sequence": 1,
+                "decision": "accepted",
+                "reviewer": "controlled-reviewer",
+                "reason_code": "controlled_identity_acceptance",
+                "rationale": (
+                    "The second controlled evidence identity is accepted."
+                ),
+                "evaluator_version": "controlled-review-v1",
+                "created_at": "2026-01-05T00:00:00Z",
+                "runtime_effect": False,
+                "authority": False,
+            },
+        ],
     )
 
     return [
@@ -1804,6 +1884,58 @@ def _controlled_probes(
                 "shadow evaluation identity changes only when its declared "
                 "memory, rubric, or evaluator version changes, without "
                 "claiming canonical memory or a score."
+            ),
+        ),
+        _probe(
+            "accepted_evidence_memory_adds_without_silent_replacement",
+            (
+                accepted_memory_baseline[
+                    "accepted_memory_candidate_version"
+                ]
+                == accepted_memory_dropout[
+                    "accepted_memory_candidate_version"
+                ]
+                == accepted_memory_with_unreviewed_change[
+                    "accepted_memory_candidate_version"
+                ]
+                and accepted_memory_dropout["summary"][
+                    "accepted_not_present_in_latest_count"
+                ]
+                == 1
+                and accepted_memory_with_unreviewed_change["summary"][
+                    "active_accepted_evidence_count"
+                ]
+                == 1
+                and accepted_memory_with_unreviewed_change["summary"][
+                    "accepted_document_with_unaccepted_variant_count"
+                ]
+                == 1
+                and accepted_memory_with_both["summary"][
+                    "active_accepted_evidence_count"
+                ]
+                == 2
+                and accepted_memory_with_both["summary"][
+                    "multi_accepted_variant_document_count"
+                ]
+                == 1
+                and accepted_memory_with_both[
+                    "accepted_memory_candidate_version"
+                ]
+                != accepted_memory_baseline[
+                    "accepted_memory_candidate_version"
+                ]
+                and accepted_memory_baseline["runtime_effect"] is False
+                and accepted_memory_baseline["authority"] is False
+                and accepted_memory_baseline[
+                    "automatic_scoring_effect"
+                ]
+                is False
+            ),
+            (
+                "An accepted evidence identity survives acquisition dropout "
+                "and an unreviewed content change. Accepting the new variant "
+                "adds it beside the original instead of replacing it, while "
+                "the entire projection remains non-authoritative."
             ),
         ),
         _probe(

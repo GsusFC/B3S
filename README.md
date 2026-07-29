@@ -207,6 +207,15 @@ write fallback. Inspect and review it through
 Every candidate and review remains `runtime_effect=false`, `authority=false`,
 and `automatic_scoring_effect=false`.
 
+Accepted evidence now also has an explicit cumulative shadow contract. An
+active human acceptance survives acquisition dropout; a new content variant
+receives another identity and cannot silently replace the accepted one.
+Accepting the new variant adds it beside the original, while an explicit
+revocation changes only the current selection and preserves the append-only
+history. This candidate still has no canonical, runtime, or scoring authority;
+see
+[`docs/evidence_accepted_memory_v1.md`](docs/evidence_accepted_memory_v1.md).
+
 Prepare and evaluate the versioned identity review set with:
 
 ```bash

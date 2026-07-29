@@ -43,6 +43,13 @@ Canonical evidence, canonical claims, and promoted claim-to-tile mappings do
 not exist yet. Using the word `canonical` for the current projection would
 hide that missing work.
 
+An explicit accepted-evidence candidate now exists as a separate Gate 1
+projection. It proves that active human acceptances survive acquisition loss
+and that newly accepted variants accumulate without replacing earlier ones.
+It is still not an adopted canonical-evidence policy and therefore does not
+populate `canonical_memory_version`; see
+[`evidence_accepted_memory_v1.md`](evidence_accepted_memory_v1.md).
+
 Snapshot v1 therefore tests the same hashing boundary under an explicitly
 non-authoritative name:
 
