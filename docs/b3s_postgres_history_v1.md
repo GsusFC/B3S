@@ -45,6 +45,10 @@ canonical/provisional reference are related but not interchangeable.
 - `evidence_ledger_shadow_entries`: exact evidence identities and proposed
   shadow states.
 - `evidence_ledger_shadow_observations`: captures supporting each shadow entry.
+- `evidence_memory_adjudication_events`: append-only evidence-to-brand identity
+  review history.
+- `evidence_claim_reconciliation_events`: append-only decisions over stable
+  claim-relation candidates.
 
 ## Invariants
 
@@ -58,6 +62,10 @@ canonical/provisional reference are related but not interchangeable.
 - Stability recomputation updates only derived comparison/selection tables; immutable report payloads are returned exactly as imported.
 - Evidence-ledger rebuilds run inside a savepoint, never affect scoring or
   canonical selection, and cannot abort an authoritative report import.
+- Evidence adjudication and claim reconciliation use separate append-only
+  journals with idempotency, optimistic concurrency, explicit supersession,
+  revocation, and database-enforced `runtime_effect=false` and
+  `authority=false`.
 
 PostgreSQL cannot represent NUL inside `text` or `jsonb`. Imported text replaces NUL with U+FFFD for querying, while `evidence_records.content_raw` and `report_snapshots.payload_raw` preserve canonical original bytes. Hashes are calculated from the unsanitized content.
 

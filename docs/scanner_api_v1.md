@@ -50,7 +50,8 @@ The v1 dependency model separates `scans:read`, `scans:write`, and
 `evidence:adjudicate`. The scanner environment token receives the scan scopes
 only. Evidence adjudication uses the distinct
 `B3S_EVIDENCE_ADJUDICATION_TOKEN`; its reviewer is derived from
-`B3S_EVIDENCE_REVIEWER_ID`. Both tokens must differ.
+`B3S_EVIDENCE_REVIEWER_ID`. The same reviewer credential governs claim
+relation reconciliation. Both tokens must differ.
 
 ## Create a scan
 
@@ -226,6 +227,56 @@ gaining independence from missing relationship data.
 The resource is not proof that real brand changes are detected. The current
 local corpus contains visual stable slots but no stable semantic `claim_id`
 history, so semantic-change recall remains unmeasured.
+
+## Evidence Claim Memory v1 shadow
+
+```text
+GET /api/v1/brands/{domain}/evidence-claim-memory-shadow
+```
+
+This authenticated, read-only projection separates three identities:
+
+- `claim_slot_id`: the stable semantic subject for a brand/entity scope;
+- `claim_variant_id`: one normalized content variant in that slot;
+- `claim_occurrence_id`: one variant observation in one immutable report.
+
+A slot requires `metadata.claim_slot_key`, or a legacy `metadata.claim_id`
+explicitly declared with `metadata.claim_id_semantics=stable_slot`. Bare claim
+IDs, visual tiles, and `checked_block` metadata are reported as ignored rather
+than promoted into semantic claim identity.
+
+Sequential variants may produce a `replacement_candidate`; variants present
+in the same report may produce a `coexistence_candidate`. Both remain
+`adjudication_state=proposed`, `runtime_effect=false`, and `authority=false`.
+The API never chooses a canonical claim, changes a score, or returns raw claim
+text.
+
+`persistence.stored` is always `false` in v1. The projection is rebuilt from
+immutable history; existing evidence-identity adjudications are overlaid as
+variant provenance and current claim-reconciliation decisions are overlaid on
+stable historical relation candidates.
+
+## Evidence claim reconciliation journal
+
+```text
+GET  /api/v1/brands/{domain}/evidence-claim-reconciliations
+POST /api/v1/brands/{domain}/evidence-claim-reconciliations
+```
+
+Writes require the dedicated evidence reviewer credential, an
+`Idempotency-Key`, and an explicit `expected_current_event_id` (`null` means
+the caller expects no current event). The request identifies a projected
+`relation_candidate_id`; the server resolves its relation type and binds the
+configured reviewer rather than trusting client-supplied identity or relation
+metadata.
+
+The append-only PostgreSQL journal supports `accepted`, `disputed`, `rejected`,
+and `revoked`. Older events remain visible as `superseded`. A write fails with
+`503` when durable storage is unavailable; there is no JSON fallback.
+
+Every event and overlay remains `runtime_effect=false` and `authority=false`.
+Accepting `replacement_candidate` records a review decision but does not select
+the newer variant, alter a tile, or change a score.
 
 ## Errors
 

@@ -4,6 +4,8 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
+from datetime import datetime, timezone
+from importlib import resources
 from threading import Barrier
 from uuid import uuid4
 
@@ -15,6 +17,10 @@ from scripts.import_b3s_reports_postgres import (
 )
 from src.history.models import ReportConflictError, ReportImportError
 from src.history.report_parser import canonical_json_hash, normalize_domain, parse_report
+from src.services.evidence_claim_reconciliation import (
+    EvidenceClaimReconciliationCommand,
+    EvidenceClaimReconciliationConflictError,
+)
 from src.services.evidence_memory_adjudication import (
     EvidenceMemoryAdjudicationCommand,
     EvidenceMemoryAdjudicationConflictError,
@@ -179,6 +185,125 @@ def test_schema_drop_requires_explicit_opt_in(monkeypatch) -> None:
         _require_schema_drop_opt_in()
 
 
+def test_claim_reconciliation_migration_is_packaged_and_non_authoritative() -> None:
+    from src.history.repository import _migration_files
+
+    filenames = [filename for filename, _sql in _migration_files()]
+    sql = (
+        resources.files("src.history")
+        .joinpath("migrations/005_evidence_claim_reconciliations.sql")
+        .read_text(encoding="utf-8")
+    )
+
+    assert filenames[-1] == "005_evidence_claim_reconciliations.sql"
+    assert "subject_type = 'claim_relation'" in sql
+    assert "runtime_effect = false" in sql
+    assert "authority = false" in sql
+    assert "supersedes_event_id" in sql
+    assert "UNIQUE (brand_id, idempotency_key_hash)" in sql
+
+
+def test_claim_reconciliation_repository_validation_rejects_bad_subjects() -> None:
+    from src.history.repository import _validate_claim_reconciliation_command
+
+    valid = _claim_reconciliation_command(
+        "a" * 64,
+        decision="accepted",
+        expected_current_event_id=None,
+        key_hash="b" * 64,
+        fingerprint="c" * 64,
+    )
+
+    _validate_claim_reconciliation_command(
+        valid,
+        relation_type="replacement_candidate",
+    )
+    with pytest.raises(ValueError, match="relation type"):
+        _validate_claim_reconciliation_command(
+            valid,
+            relation_type="canonical_replacement",
+        )
+    with pytest.raises(ValueError, match="subject_id"):
+        _validate_claim_reconciliation_command(
+            _claim_reconciliation_command(
+                "not-a-digest",
+                decision="accepted",
+                expected_current_event_id=None,
+                key_hash="b" * 64,
+                fingerprint="c" * 64,
+            ),
+            relation_type="replacement_candidate",
+        )
+
+
+def test_claim_reconciliation_repository_is_idempotent_and_optimistic() -> None:
+    from src.history.repository import PostgresHistoryRepository
+
+    connection = _ClaimReconciliationConnection()
+    repository = PostgresHistoryRepository(
+        "postgresql://example.test/b3s",
+        connect=lambda *_args, **_kwargs: connection,
+    )
+    repository._migrated = True
+    subject_id = "a" * 64
+    accepted_command = _claim_reconciliation_command(
+        subject_id,
+        decision="accepted",
+        expected_current_event_id=None,
+        key_hash="b" * 64,
+        fingerprint="c" * 64,
+    )
+
+    accepted, replayed = repository.append_evidence_claim_reconciliation(
+        "example.com",
+        accepted_command,
+        relation_type="replacement_candidate",
+    )
+    replay, was_replayed = repository.append_evidence_claim_reconciliation(
+        "example.com",
+        accepted_command,
+        relation_type="replacement_candidate",
+    )
+
+    assert replayed is False
+    assert was_replayed is True
+    assert replay["id"] == accepted["id"]
+    assert len(connection.events) == 1
+
+    with pytest.raises(
+        EvidenceClaimReconciliationConflictError,
+        match="changed after it was read",
+    ):
+        repository.append_evidence_claim_reconciliation(
+            "example.com",
+            _claim_reconciliation_command(
+                subject_id,
+                decision="disputed",
+                expected_current_event_id=None,
+                key_hash="d" * 64,
+                fingerprint="e" * 64,
+            ),
+            relation_type="replacement_candidate",
+        )
+
+    revoked, replayed = repository.append_evidence_claim_reconciliation(
+        "example.com",
+        _claim_reconciliation_command(
+            subject_id,
+            decision="revoked",
+            expected_current_event_id=accepted["id"],
+            key_hash="f" * 64,
+            fingerprint="0" * 64,
+        ),
+        relation_type="replacement_candidate",
+    )
+
+    assert replayed is False
+    assert revoked["sequence"] == 2
+    assert revoked["supersedes_event_id"] == accepted["id"]
+    assert len(connection.events) == 2
+
+
 @pytest.mark.skipif(
     not os.environ.get("B3S_TEST_DATABASE_URL"),
     reason="B3S_TEST_DATABASE_URL is required for PostgreSQL integration",
@@ -203,6 +328,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "002_evidence_stability.sql",
             "003_evidence_ledger_shadow.sql",
             "004_evidence_memory_adjudications.sql",
+            "005_evidence_claim_reconciliations.sql",
         ]
         assert repository.migrate() == []
 
@@ -254,6 +380,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "evidence_ledger_shadow_entries": 1,
             "evidence_ledger_shadow_observations": 2,
             "evidence_memory_adjudication_events": 0,
+            "evidence_claim_reconciliation_events": 0,
         }
 
         with psycopg.connect(dsn) as conn:
@@ -426,6 +553,76 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
         assert repository.list_evidence_memory_adjudications(
             "example.com"
         )["total"] == 3
+
+        relation_subject_id = "d" * 64
+        relation_command = _claim_reconciliation_command(
+            relation_subject_id,
+            decision="accepted",
+            expected_current_event_id=None,
+            key_hash="e" * 64,
+            fingerprint="f" * 64,
+        )
+        relation_event, replayed = (
+            repository.append_evidence_claim_reconciliation(
+                "example.com",
+                relation_command,
+                relation_type="replacement_candidate",
+            )
+        )
+        assert replayed is False
+        assert relation_event["relation_type"] == "replacement_candidate"
+        assert relation_event["runtime_effect"] is False
+        assert relation_event["authority"] is False
+        relation_replay, replayed = (
+            repository.append_evidence_claim_reconciliation(
+                "example.com",
+                relation_command,
+                relation_type="replacement_candidate",
+            )
+        )
+        assert replayed is True
+        assert relation_replay["id"] == relation_event["id"]
+
+        with pytest.raises(
+            EvidenceClaimReconciliationConflictError,
+            match="changed after it was read",
+        ):
+            repository.append_evidence_claim_reconciliation(
+                "example.com",
+                _claim_reconciliation_command(
+                    relation_subject_id,
+                    decision="disputed",
+                    expected_current_event_id=None,
+                    key_hash="0" * 64,
+                    fingerprint="1" * 64,
+                ),
+                relation_type="replacement_candidate",
+            )
+
+        revoked_relation, replayed = (
+            repository.append_evidence_claim_reconciliation(
+                "example.com",
+                _claim_reconciliation_command(
+                    relation_subject_id,
+                    decision="revoked",
+                    expected_current_event_id=relation_event["id"],
+                    key_hash="2" * 64,
+                    fingerprint="3" * 64,
+                ),
+                relation_type="replacement_candidate",
+            )
+        )
+        assert replayed is False
+        assert revoked_relation["supersedes_event_id"] == relation_event["id"]
+        relation_journal = repository.list_evidence_claim_reconciliations(
+            "example.com"
+        )
+        assert relation_journal["total"] == 2
+        assert [
+            event["effective_state"]
+            for event in relation_journal["events"]
+        ] == ["revoked", "superseded"]
+        assert relation_journal["current"] == [revoked_relation]
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
@@ -458,6 +655,125 @@ def _adjudication_command(
         idempotency_key_hash=key_hash,
         request_fingerprint=fingerprint,
     )
+
+
+def _claim_reconciliation_command(
+    subject_id: str,
+    *,
+    decision: str,
+    expected_current_event_id: str | None,
+    key_hash: str,
+    fingerprint: str,
+) -> EvidenceClaimReconciliationCommand:
+    return EvidenceClaimReconciliationCommand(
+        subject_id=subject_id,
+        decision=decision,
+        expected_current_event_id=expected_current_event_id,
+        reviewer="gsus",
+        reason_code="relation_reviewed",
+        rationale="The reviewer checked the claim relation.",
+        evaluator_version="manual-review-v1",
+        actor_id="gsus",
+        idempotency_key_hash=key_hash,
+        request_fingerprint=fingerprint,
+    )
+
+
+class _ClaimReconciliationCursor:
+    def __init__(self, row=None):
+        self.row = row
+
+    def fetchone(self):
+        return self.row
+
+
+class _ClaimReconciliationConnection:
+    def __init__(self):
+        self.brand_id = uuid4()
+        self.events: list[dict] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, sql, params=(), **_kwargs):
+        compact = " ".join(str(sql).split())
+        if "SELECT brands.id" in compact:
+            return _ClaimReconciliationCursor({"id": self.brand_id})
+        if "pg_advisory_xact_lock" in compact:
+            return _ClaimReconciliationCursor()
+        if (
+            "SELECT * FROM b3s_history.evidence_claim_reconciliation_events"
+            in compact
+            and "idempotency_key_hash = %s" in compact
+        ):
+            key_hash = params[1]
+            row = next(
+                (
+                    event
+                    for event in self.events
+                    if event["idempotency_key_hash"] == key_hash
+                ),
+                None,
+            )
+            return _ClaimReconciliationCursor(row)
+        if (
+            "SELECT id FROM b3s_history.evidence_claim_reconciliation_events"
+            in compact
+        ):
+            current = self._current(params[2])
+            return _ClaimReconciliationCursor(
+                {"id": current["id"]} if current else None
+            )
+        if (
+            "SELECT * FROM b3s_history.evidence_claim_reconciliation_events"
+            in compact
+            and "ORDER BY sequence DESC" in compact
+        ):
+            return _ClaimReconciliationCursor(self._current(params[2]))
+        if (
+            "INSERT INTO b3s_history.evidence_claim_reconciliation_events"
+            in compact
+        ):
+            row = {
+                "id": params[0],
+                "brand_id": params[1],
+                "subject_type": params[2],
+                "subject_id": params[3],
+                "relation_type": params[4],
+                "sequence": params[5],
+                "decision": params[6],
+                "supersedes_event_id": params[7],
+                "schema_version": params[8],
+                "policy_version": params[9],
+                "evaluator_version": params[10],
+                "reviewer": params[11],
+                "actor_id": params[12],
+                "reason_code": params[13],
+                "rationale": params[14],
+                "idempotency_key_hash": params[15],
+                "request_fingerprint": params[16],
+                "runtime_effect": False,
+                "authority": False,
+                "created_at": datetime(2026, 7, 29, tzinfo=timezone.utc),
+            }
+            self.events.append(row)
+            return _ClaimReconciliationCursor(row)
+        raise AssertionError(f"unexpected SQL: {compact}")
+
+    def _current(self, subject_id):
+        matching = [
+            event
+            for event in self.events
+            if event["subject_id"] == subject_id
+        ]
+        return (
+            max(matching, key=lambda event: event["sequence"])
+            if matching
+            else None
+        )
 
 
 def _report(

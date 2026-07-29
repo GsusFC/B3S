@@ -13,6 +13,7 @@ from src.build_info import current_build_sha
 from src.services.scanner_evidence_comparison import annotate_report_history
 from web.report_store import (
     domain_key,
+    evidence_claim_memory_for_domain,
     evidence_ledger_shadow_for_domain,
     evidence_memory_identity_v2_for_domain,
     list_reports_for_domain,
@@ -25,6 +26,10 @@ from .models import (
     ApiCapabilitiesResponse,
     ApiErrorResponse,
     BrandScanHistoryResponse,
+    EvidenceClaimMemoryShadowResponse,
+    EvidenceClaimReconciliationCreateRequest,
+    EvidenceClaimReconciliationCreateResponse,
+    EvidenceClaimReconciliationJournalResponse,
     EvidenceLedgerShadowResponse,
     EvidenceMemoryAdjudicationCreateRequest,
     EvidenceMemoryAdjudicationCreateResponse,
@@ -37,9 +42,11 @@ from .models import (
 )
 from .presenters import evidence_payload, report_etag, result_payload, status_payload
 from .service import (
+    create_evidence_claim_reconciliation,
     create_evidence_memory_adjudication,
     create_scan_job,
     get_completed_report,
+    get_evidence_claim_reconciliations,
     get_evidence_memory_adjudications,
     get_scan,
 )
@@ -344,6 +351,115 @@ def brand_evidence_memory_identity_v2_shadow(
         "api_version": "v1",
         "domain": normalized,
         **evidence_memory_identity_v2_for_domain(normalized),
+    }
+
+
+@router.get(
+    "/brands/{domain}/evidence-claim-memory-shadow",
+    response_model=EvidenceClaimMemoryShadowResponse,
+    operation_id="getBrandEvidenceClaimMemoryShadow",
+    responses=_ERRORS,
+)
+def brand_evidence_claim_memory_shadow(
+    domain: str,
+    _principal: ReadPrincipal,
+) -> dict[str, Any]:
+    normalized = domain_key(domain)
+    if not normalized:
+        raise ApiError(400, "invalid_domain", "A valid brand domain is required.")
+    return {
+        "object": "evidence_claim_memory_shadow",
+        "api_version": "v1",
+        "domain": normalized,
+        **evidence_claim_memory_for_domain(normalized),
+    }
+
+
+@router.post(
+    "/brands/{domain}/evidence-claim-reconciliations",
+    response_model=EvidenceClaimReconciliationCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="createBrandEvidenceClaimReconciliation",
+    responses=_ERRORS,
+)
+def create_brand_evidence_claim_reconciliation(
+    domain: str,
+    payload: EvidenceClaimReconciliationCreateRequest,
+    response: Response,
+    principal: AdjudicationPrincipal,
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
+) -> dict[str, Any]:
+    normalized = domain_key(domain)
+    if not normalized:
+        raise ApiError(400, "invalid_domain", "A valid brand domain is required.")
+    event, replayed = create_evidence_claim_reconciliation(
+        normalized,
+        payload.model_dump(),
+        client_id=principal.client_id,
+        reviewer_id=principal.reviewer_id or "",
+        idempotency_key=idempotency_key,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Location"] = (
+        f"/api/v1/brands/{normalized}/evidence-claim-reconciliations"
+        f"?subject_id={event['subject_id']}"
+    )
+    if replayed:
+        response.headers["Idempotent-Replayed"] = "true"
+    return {
+        "object": "evidence_claim_reconciliation",
+        "api_version": "v1",
+        "domain": normalized,
+        "replayed": replayed,
+        "runtime_effect": False,
+        "authority": False,
+        "event": event,
+    }
+
+
+@router.get(
+    "/brands/{domain}/evidence-claim-reconciliations",
+    response_model=EvidenceClaimReconciliationJournalResponse,
+    operation_id="listBrandEvidenceClaimReconciliations",
+    responses=_ERRORS,
+)
+def list_brand_evidence_claim_reconciliations(
+    domain: str,
+    _principal: ReadPrincipal,
+    subject_id: Annotated[
+        str | None,
+        Query(pattern=r"^[0-9a-f]{64}$"),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, Any]:
+    normalized = domain_key(domain)
+    if not normalized:
+        raise ApiError(400, "invalid_domain", "A valid brand domain is required.")
+    journal = get_evidence_claim_reconciliations(
+        normalized,
+        subject_id=subject_id,
+        limit=limit,
+        offset=offset,
+    )
+    events = journal["events"]
+    return {
+        "object": "evidence_claim_reconciliation_list",
+        "api_version": "v1",
+        "domain": normalized,
+        "runtime_effect": False,
+        "authority": False,
+        "events": events,
+        "current": journal["current"],
+        "pagination": {
+            "limit": journal["limit"],
+            "offset": journal["offset"],
+            "count": len(events),
+            "has_more": journal["offset"] + len(events) < journal["total"],
+        },
     }
 
 

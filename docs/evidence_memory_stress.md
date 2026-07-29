@@ -12,8 +12,10 @@ exact copies and light lexical paraphrases under source-independence policy v3.
 New Exa captures also persist enough external-attribution provenance for v2 to
 reproduce a strong match instead of trusting its label. It does not yet support
 safe promotion because the identity set and production source registry have not
-been reviewed, and it cannot adjudicate claims, persist tile support, or
-evaluate a canonical memory version.
+been reviewed. Claim Memory v1 can now separate semantic slots, variants, and
+occurrences, while its journal can reversibly adjudicate proposed relations.
+It still cannot promote a canonical claim, persist tile support, or evaluate a
+canonical memory version.
 
 ## Read-only harness
 
@@ -67,6 +69,12 @@ The executable foundation must prove:
     eligibility, scoring, or canonical selection;
 14. lightly paraphrased copies share a cluster and do not count as independent;
 15. unknown publisher ownership cannot count as independence.
+16. a bare content-derived claim ID cannot become a semantic slot;
+17. claim slot, content variant, and report occurrence identities remain
+    separate;
+18. simultaneous variants become coexistence candidates, not replacements;
+19. report order cannot change Claim Memory v1;
+20. accepting a relation cannot grant canonical or runtime authority.
 
 The adversarial probes deliberately expose:
 
@@ -74,7 +82,7 @@ The adversarial probes deliberately expose:
    while v2 still lacks a reviewed identity gold set;
 2. source-independence v3 has no production-reviewed source decisions or
    measured semantic-paraphrase recall;
-3. old and new content have no canonical claim-resolution path;
+3. reviewed claim relations have no canonical-promotion path;
 4. evidence has no persistent, versioned claim-to-tile mapping;
 5. no evaluator consumes a canonical memory version.
 
@@ -134,13 +142,22 @@ The v1/v2 comparison found:
 - 0 real clusters marked `confirmed_independent`, because the registry has no
   production-reviewed source URLs.
 
+Claim Memory v1 replayed the same 12 histories and found:
+
+- 0 semantic claim slots, variants, occurrences, or relation candidates;
+- 184 structural metadata rows correctly ignored as semantic identity:
+  168 visual-tile rows and 16 `checked_block` rows;
+- 20/20 controlled executable invariants passed, including the Claim Memory
+  and reconciliation invariants.
+
 Verdict: `foundation_supported_promotion_blocked`.
 
 This result validates only the identity-memory foundation and the removal of a
 specific v1 false-change mechanism. The controlled explicit-claim probe proves
-that the revision mechanism exists, but the real corpus cannot measure
-semantic-change recall because it has no stable semantic claim IDs. It does not
-validate memory scoring or production real-change detection.
+that the relation-proposal mechanism exists, but the real corpus cannot measure
+semantic-change recall because it has no stable semantic claim slots. It does
+does not validate canonical claim promotion, memory scoring, or production
+real-change detection.
 
 ## Promotion gates
 
@@ -183,6 +200,12 @@ clusters exact and light lexical copies, respects explicit lineage, and disputes
 ambiguous similarity. Gate 1 is still blocked by the missing human identity
 reviews, the absence of production source reviews, and unmeasured semantic
 paraphrase recall.
+
+The separate claim-reconciliation journal now provides the same append-only,
+idempotent, optimistic-concurrency and revocation guarantees for stable
+relation candidates. Controlled acceptance remains non-authoritative. Claim
+promotion is still blocked because no reviewed policy or real semantic-slot
+corpus establishes acceptable false-replacement and missed-change rates.
 
 ### Gate 2 — tile evidence ledger
 

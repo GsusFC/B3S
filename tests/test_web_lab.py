@@ -287,6 +287,196 @@ def test_evidence_memory_identity_v2_is_derived_without_authority(
     }
 
 
+def test_evidence_claim_memory_is_derived_without_authority(
+    tmp_path,
+    monkeypatch,
+):
+    from web import report_store
+
+    report = {
+        "id": "claim-memory-one",
+        "brand_name": "Example",
+        "url": "https://example.com",
+        "created_at": "2026-07-11T10:00:00+00:00",
+        "reliability_status": "usable",
+        "acquisition_gate": {"state": "pass"},
+        "components": [],
+        "raw": {
+            "flow": {
+                "candidate": {
+                    "evidence_pack": {
+                        "evidence": [
+                            {
+                                "ref": "web.home",
+                                "source": "web",
+                                "evidence_type": "owned_copy.homepage",
+                                "content": "Stable owned proof.",
+                                "url": "https://example.com",
+                                "metadata": {
+                                    "source_class": "owned_copy",
+                                    "claim_slot_key": "promise.primary",
+                                    "claim_type": "promise",
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    }
+    repository = SimpleNamespace(
+        list_report_payloads_for_domain=lambda domain, *, limit, offset: (
+            [report][offset : offset + limit] if domain == "example.com" else []
+        ),
+        list_current_evidence_memory_adjudications=lambda domain: [],
+        list_current_evidence_claim_reconciliations=lambda domain: [],
+    )
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+
+    result = report_store.evidence_claim_memory_for_domain("example.com")
+
+    assert result["schema_version"] == "evidence-claim-memory-v1"
+    assert result["runtime_effect"] is False
+    assert result["authority"] is False
+    assert result["summary"]["claim_slot_count"] == 1
+    assert result["summary"]["claim_variant_count"] == 1
+    assert result["summary"]["claim_occurrence_count"] == 1
+    assert result["persistence"] == {
+        "stored": False,
+        "backend": "history_derived",
+        "adjudications": {
+            "stored": True,
+            "backend": "postgres",
+            "event_count": 0,
+        },
+        "claim_reconciliations": {
+            "stored": True,
+            "backend": "postgres",
+            "event_count": 0,
+        },
+    }
+
+
+def test_claim_reconciliation_write_resolves_relation_type_server_side(
+    tmp_path,
+    monkeypatch,
+):
+    from src.services.evidence_claim_reconciliation import (
+        EvidenceClaimReconciliationCommand,
+    )
+    from web import report_store
+
+    captured = {}
+
+    class Repository:
+        @staticmethod
+        def list_report_payloads_for_domain(_domain, *, limit, offset):
+            return []
+
+        @staticmethod
+        def append_evidence_claim_reconciliation(
+            domain,
+            command,
+            *,
+            relation_type,
+        ):
+            captured.update(
+                domain=domain,
+                command=command,
+                relation_type=relation_type,
+            )
+            return {"id": "event-one"}, False
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: Repository())
+    monkeypatch.setattr(
+        report_store,
+        "build_evidence_claim_memory",
+        lambda *_args, **_kwargs: {
+            "slots": [
+                {
+                    "relation_candidates": [
+                        {
+                            "relation_candidate_id": "a" * 64,
+                            "relation": "replacement_candidate",
+                        }
+                    ]
+                }
+            ]
+        },
+    )
+    command = EvidenceClaimReconciliationCommand(
+        subject_id="a" * 64,
+        decision="accepted",
+        expected_current_event_id=None,
+        reviewer="gsus",
+        reason_code="relation_reviewed",
+        rationale="The relation was manually reviewed.",
+        evaluator_version="manual-review-v1",
+        actor_id="gsus",
+        idempotency_key_hash="b" * 64,
+        request_fingerprint="c" * 64,
+    )
+
+    event, replayed = (
+        report_store.append_evidence_claim_reconciliation_for_domain(
+            "example.com",
+            command,
+        )
+    )
+
+    assert event == {"id": "event-one"}
+    assert replayed is False
+    assert captured["domain"] == "example.com"
+    assert captured["command"] == command
+    assert captured["relation_type"] == "replacement_candidate"
+
+
+def test_claim_reconciliation_write_rejects_unknown_relation(
+    tmp_path,
+    monkeypatch,
+):
+    from src.services.evidence_claim_reconciliation import (
+        EvidenceClaimReconciliationCommand,
+        EvidenceClaimReconciliationNotFoundError,
+    )
+    from web import report_store
+
+    class Repository:
+        @staticmethod
+        def list_report_payloads_for_domain(_domain, *, limit, offset):
+            return []
+
+        @staticmethod
+        def append_evidence_claim_reconciliation(*_args, **_kwargs):
+            raise AssertionError("unknown relation must not reach the journal")
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: Repository())
+    command = EvidenceClaimReconciliationCommand(
+        subject_id="a" * 64,
+        decision="accepted",
+        expected_current_event_id=None,
+        reviewer="gsus",
+        reason_code="relation_reviewed",
+        rationale="The relation was manually reviewed.",
+        evaluator_version="manual-review-v1",
+        actor_id="gsus",
+        idempotency_key_hash="b" * 64,
+        request_fingerprint="c" * 64,
+    )
+
+    with pytest.raises(
+        EvidenceClaimReconciliationNotFoundError,
+        match="does not exist",
+    ):
+        report_store.append_evidence_claim_reconciliation_for_domain(
+            "example.com",
+            command,
+        )
+
+
 def test_evidence_adjudication_write_rejects_unknown_projected_subject(
     tmp_path,
     monkeypatch,

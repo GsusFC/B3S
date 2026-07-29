@@ -102,7 +102,10 @@ be superseded or revoked but are not updated or deleted by the application.
 
 This only resolves evidence-to-brand identity review. Claim truth, semantic
 replacement, canonical claim selection, and tile support remain outside Gate
-1 and cannot be inferred from `accepted`.
+1 and cannot be inferred from `accepted`. The stricter semantic layer is
+documented in [`evidence_claim_memory_v1.md`](evidence_claim_memory_v1.md);
+unlike this lower-level projection, it never treats a visual tile,
+`checked_block`, or an undeclared `claim_id` as a semantic claim slot.
 
 ## State semantics
 
