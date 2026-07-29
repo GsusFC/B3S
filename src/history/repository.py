@@ -40,8 +40,8 @@ from src.services.evidence_memory_adjudication import (
     EvidenceMemoryAdjudicationInvalidTransitionError,
     EvidenceMemoryAdjudicationNotFoundError,
 )
-from src.services.evidence_scoring_memory_preview import (
-    build_evidence_scoring_memory_preview,
+from src.services.evidence_scoring_recovery_review import (
+    build_reviewed_scoring_memory_shadow,
 )
 from src.services.evidence_ledger_shadow import (
     build_evidence_ledger_shadow,
@@ -470,9 +470,8 @@ class PostgresHistoryRepository:
             domain_or_url,
             workspace_slug=workspace_slug,
         )
-        return build_evidence_scoring_memory_preview(
+        return build_reviewed_scoring_memory_shadow(
             reports,
-            mode="shadow",
             evidence_adjudications=adjudications,
         )
 

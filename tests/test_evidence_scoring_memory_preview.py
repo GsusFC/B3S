@@ -320,6 +320,8 @@ def test_repository_preview_rebuilds_from_durable_inputs(
     assert first["memory_version"] == second["memory_version"]
     assert first["state_fingerprint"] == second["state_fingerprint"]
     assert first["scoring"]["score_delta"] == 2
+    assert first["reviewed_shadow"]["scoring"]["score_delta"] == 0
+    assert first["recovery_review"]["summary"]["pending_count"] == 1
 
 
 def _report(

@@ -13,6 +13,9 @@ from src.services.brand3_sqlite_memory_backfill import (
     build_brand3_sqlite_memory_validation,
     load_brand3_sqlite_sv9_reports,
 )
+from src.services.evidence_scoring_recovery_review import (
+    EVIDENCE_SCORING_RECOVERY_REVIEW_EVENT_VERSION,
+)
 from src.sv9.rubric import COMPONENTS, RUBRIC_VERSION, component_points
 
 
@@ -87,13 +90,22 @@ def test_validation_separates_evaluator_repeats_from_captures(
         "bridge_domain_count": 0,
         "bridge_recovery_count": 0,
         "unmatched_current_domain_count": 0,
+        "recovery_review_candidate_count": 1,
+        "recovery_review_accepted_count": 0,
     }
     domain = validation["domains"][0]
     assert domain["all_scan_preview"]["score_delta"] == 2
+    assert domain["all_scan_preview"]["reviewed_score_delta"] == 0
     assert domain["capture_preview"]["score_delta"] == 0
-    assert validation["recovery_review_candidates"][0][
-        "lane"
-    ] == "all_scan"
+    candidate = validation["recovery_review_candidates"][0]
+    assert {
+        context["lane"] for context in candidate["contexts"]
+    } == {"all_scan"}
+    assert candidate["tile"]["tile_key"] == "magnetism.MG1"
+    assert (
+        validation["recovery_review"]["summary"]["pending_count"]
+        == 1
+    )
     assert (
         "recovered_tile_semantics_pending_review"
         in validation["promotion_blockers"]
@@ -129,9 +141,63 @@ def test_distinct_captures_can_recover_a_later_blind_spot(
     domain = validation["domains"][0]
     assert domain["capture_preview"]["score_delta"] == 2
     assert {
-        candidate["lane"]
+        context["lane"]
         for candidate in validation["recovery_review_candidates"]
+        for context in candidate["contexts"]
     } == {"all_scan", "capture"}
+    assert len(validation["recovery_review_candidates"]) == 1
+
+
+def test_only_accepted_semantic_mapping_changes_reviewed_shadow_score(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "brand3.sqlite3"
+    with sqlite3.connect(database) as conn:
+        _create_schema(conn)
+        _insert_capture(
+            conn,
+            source_run_id=10,
+            scan_id=20,
+            created_at="2026-06-01T08:00:00+00:00",
+            target_state="ok",
+        )
+        _insert_scan(
+            conn,
+            source_run_id=10,
+            scan_id=21,
+            created_at="2026-06-01T09:00:00+00:00",
+            target_state="sin_evidencia",
+        )
+    pending = build_brand3_sqlite_memory_validation(database)
+    candidate = pending["recovery_review_candidates"][0]
+
+    accepted = build_brand3_sqlite_memory_validation(
+        database,
+        recovery_review_events=[
+            _review_event(candidate, decision="accepted")
+        ],
+    )
+    disputed = build_brand3_sqlite_memory_validation(
+        database,
+        recovery_review_events=[
+            _review_event(candidate, decision="disputed")
+        ],
+    )
+
+    assert accepted["domains"][0]["all_scan_preview"][
+        "reviewed_score_delta"
+    ] == 2
+    assert accepted["summary"]["recovery_review_accepted_count"] == 1
+    assert accepted["domains"][0]["all_scan_preview"][
+        "reviewed_accepted_recovery_count"
+    ] == 1
+    assert disputed["domains"][0]["all_scan_preview"][
+        "reviewed_score_delta"
+    ] == 0
+    assert (
+        "recovered_tile_semantics_not_accepted"
+        in disputed["promotion_blockers"]
+    )
 
 
 def test_non_matching_legacy_rubric_is_not_converted(
@@ -386,3 +452,28 @@ def _insert_scan(
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _review_event(
+    candidate: dict,
+    *,
+    decision: str,
+) -> dict:
+    return {
+        "schema_version": (
+            EVIDENCE_SCORING_RECOVERY_REVIEW_EVENT_VERSION
+        ),
+        "case_id": candidate["case_id"],
+        "candidate_fingerprint": candidate[
+            "candidate_fingerprint"
+        ],
+        "event_id": f"{candidate['case_id']}-{decision}-1",
+        "sequence": 1,
+        "previous_event_id": None,
+        "decision": decision,
+        "reviewer_id": "gsus",
+        "rationale": "Manual semantic mapping review.",
+        "reviewed_at": "2026-07-29T17:00:00+02:00",
+        "runtime_effect": False,
+        "authority": False,
+    }

@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from src.history.report_parser import normalize_domain
-from src.services.evidence_scoring_memory_preview import (
-    build_evidence_scoring_memory_preview,
+from src.services.evidence_scoring_recovery_review import (
+    build_reviewed_scoring_memory_shadow,
 )
 
 
@@ -49,7 +49,7 @@ def main() -> int:
         grouped.setdefault(domain, []).append(report)
 
     previews = [
-        build_evidence_scoring_memory_preview(rows, mode="shadow")
+        build_reviewed_scoring_memory_shadow(rows)
         for _domain, rows in sorted(grouped.items())
     ]
     payload = {
@@ -113,24 +113,43 @@ def _markdown(payload: dict[str, Any]) -> str:
         ),
         "- Runtime effect: `false`",
         "",
-        "| Domain | Reports | Evidence | Recoveries | Current | Preview | Delta |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        (
+            "| Domain | Reports | Evidence | Recoveries | Pending reviews | "
+            "Current | Candidate | Candidate Δ | Reviewed | Reviewed Δ |"
+        ),
+        (
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | "
+            "---: | ---: | ---: |"
+        ),
     ]
     for preview in payload.get("previews") or []:
         brand = preview.get("brand") or {}
         summary = preview.get("summary") or {}
         scoring = preview.get("scoring") or {}
+        reviewed = preview.get("reviewed_shadow") or {}
+        reviewed_scoring = reviewed.get("scoring") or {}
+        review_summary = (
+            (preview.get("recovery_review") or {}).get("summary") or {}
+        )
         lines.append(
             "| {domain} | {reports} | {evidence} | {recoveries} | "
-            "{current} | {preview_score} | {delta} |".format(
+            "{pending} | {current} | {preview_score} | {delta} | "
+            "{reviewed_score} | {reviewed_delta} |".format(
                 domain=brand.get("domain") or "",
                 reports=preview.get("report_count") or 0,
                 evidence=summary.get("accepted_evidence_count") or 0,
                 recoveries=summary.get("recovered_blind_spot_count")
                 or 0,
+                pending=review_summary.get("pending_count") or 0,
                 current=_display(scoring.get("current_score")),
                 preview_score=_display(scoring.get("preview_score")),
                 delta=_display(scoring.get("score_delta")),
+                reviewed_score=_display(
+                    reviewed_scoring.get("preview_score")
+                ),
+                reviewed_delta=_display(
+                    reviewed_scoring.get("score_delta")
+                ),
             )
         )
     return "\n".join(lines) + "\n"
