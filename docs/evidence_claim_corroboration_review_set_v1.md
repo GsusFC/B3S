@@ -9,10 +9,10 @@ claim cases: two per source.
 No corroboration decision has been inferred automatically. All ten cases are
 pending human review.
 
-Stress policy v12 consumes this queue as its 28th controlled invariant. It
-verifies the literal provenance, counts `10 candidates / 5 sources / 10
-claims / 0 reviewed / 10 pending`, and keeps the claim-corroboration promotion
-gate blocked.
+Stress policy v13 consumes this queue as its 28th controlled invariant and its
+two-axis shadow projection as the 29th. It verifies the literal provenance,
+counts `10 candidates / 5 sources / 10 claims / 0 reviewed / 10 pending`, and
+keeps the claim-corroboration promotion gate blocked.
 
 ## What is frozen
 
@@ -111,7 +111,8 @@ Promotion remains blocked by:
 
 - only one reviewed real brand;
 - unmeasured semantic-paraphrase recall;
-- no adopted operational two-axis source/claim contract.
+- a reproducible two-axis v2 shadow contract that is not yet authorized for
+  operational adoption.
 
 Every candidate and review preserves:
 

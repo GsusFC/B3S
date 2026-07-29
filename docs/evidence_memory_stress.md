@@ -108,12 +108,16 @@ The executable foundation must prove:
 28. the ten claim-scoped corroboration candidates reproduce from immutable
     captured spans, remain pending human review, and cannot gain runtime or
     corroboration authority.
+29. a deterministic source/claim registry preserves publisher independence
+    and claim corroboration on separate axes, requires `claim_id`, grants no
+    source-global decision, and remains shadow-only.
 
 The adversarial probes deliberately expose:
 
 1. the offline set has six production-source decisions and a reproducible
    claim-scoped queue with 10 candidates across 5 sources, but zero human
-   claim decisions; the operational single-axis registry remains empty,
+   claim decisions; a two-axis v2 shadow registry now exists, while the active
+   identity projection still uses the fixture-only single-axis v1 registry,
    cross-brand coverage is absent, and semantic-paraphrase recall is
    unmeasured;
 2. the 13 reviewed claim-relation cases have no real replacement examples, and
@@ -189,11 +193,11 @@ Claim Memory v1 replayed the same 12 histories and found:
 - 0 relation candidates;
 - 184 structural metadata rows correctly ignored as semantic identity:
   168 visual-tile rows and 16 `checked_block` rows;
-- 28/28 controlled executable invariants passed, including identity policy v4,
+- 29/29 controlled executable invariants passed, including identity policy v4,
   the two-axis production-source review set, Claim Memory,
   reconciliation, claim-slot producer, historical backfill, and the versioned
   evidence-to-claim-to-tile ledger, the shadow memory snapshot, and the
-  literal claim-corroboration review queue.
+  literal claim-corroboration review queue plus its two-axis shadow registry.
 
 The Gate 2 replay over those histories found:
 
@@ -266,6 +270,16 @@ The separate claim-corroboration review set contains:
 - a blocked claim-corroboration gate;
 - no runtime, corroboration, or canonical authority.
 
+The source/claim registry v2 projection contains:
+
+- 6 reviewed publisher records and 10 claim-scoped records;
+- 5 `confirmed_independent` publishers and 1 excluded wire source;
+- 0 reviewed claims, 10 pending claims, and 0 source-global corroboration
+  decisions;
+- exact dataset/event fingerprints and a deterministic registry fingerprint;
+- a ready shadow contract but no operational-adoption readiness;
+- no runtime, scoring, corroboration, or canonical authority.
+
 The 14 labels and the frozen `0.8` exact-agreement threshold were not changed.
 Passing this set does not establish accuracy on production brands; the policy
 and projection remain shadow-only with `runtime_effect=false` and
@@ -324,10 +338,12 @@ attributable decisions with zero critical false accepts and exact agreement
 `1.0`. The offline production set additionally resolves publisher independence
 for six Vercel sources. A separate reproducible queue now materializes the five
 eligible sources as ten literal claim cases, but all ten remain pending human
-review. Gate 1 remains blocked for canonical use by zero reviewed
-claim-corroboration decisions, one-brand coverage, an operational single-axis
-registry, unmeasured semantic-paraphrase recall, and the missing
-canonical-claim policy.
+review. A deterministic two-axis v2 shadow registry now represents those
+records without inheriting source-global corroboration, but the active
+identity projection still consumes the fixture-only single-axis v1 registry.
+Gate 1 remains blocked for canonical use by zero reviewed claim-corroboration
+decisions, one-brand coverage, unmeasured semantic-paraphrase recall,
+unapproved v2 operational adoption, and the missing canonical-claim policy.
 
 The separate claim-reconciliation journal now provides the same append-only,
 idempotent, optimistic-concurrency and revocation guarantees for stable

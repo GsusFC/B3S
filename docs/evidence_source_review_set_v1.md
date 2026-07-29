@@ -111,6 +111,11 @@ The operational
 single-axis `confirmed_independent` decision cannot represent the distinction
 above, so copying V1–V5 into it would overstate corroboration.
 
+The executable shadow projection documented in
+[`evidence_source_claim_registry_v2.md`](evidence_source_claim_registry_v2.md)
+now represents both axes without modifying v1. This closes the data-model gap,
+not the operational-adoption gate.
+
 ## Promotion boundary
 
 The next dataset version must introduce claim-scoped candidates before any
@@ -120,4 +125,4 @@ and a human decision about whether that particular claim is independently
 supported.
 
 Even after claim review, promotion still requires measured semantic-paraphrase
-recall and an operational contract that preserves both axes.
+recall and explicit authorization to adopt the v2 contract operationally.
