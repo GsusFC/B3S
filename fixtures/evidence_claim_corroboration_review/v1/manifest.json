@@ -24,6 +24,19 @@
     "status": "not_adopted",
     "schema": null
   },
+  "upstream_coverage": [
+    {
+      "source_case_id": "vercel-v6-pr-newswire",
+      "upstream_dataset": "evidence_source_review",
+      "upstream_dataset_version": "evidence-source-review-2026-07-v1",
+      "upstream_event_schema_version": "evidence-source-review-event-v1",
+      "upstream_event_id": "vercel-v6-pr-newswire-review-001",
+      "publisher_independence_decision": "excluded",
+      "claim_corroboration_decision": "excluded",
+      "requires_claim_level_review": false,
+      "candidate_generation": "skipped"
+    }
+  ],
   "decision_semantics": {
     "independently_corroborated": "The source provides claim-specific support based on independent observation, testing, third-party documentation, or a reproducible absence check.",
     "mixed": "The exact claim combines independent material with first-party statements or material.",

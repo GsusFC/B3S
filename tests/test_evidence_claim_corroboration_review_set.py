@@ -24,6 +24,9 @@ from src.services.evidence_claim_corroboration_review_set import (
     review_set_fingerprint,
     verify_frozen_candidate_provenance,
 )
+from src.services.evidence_source_review_set import (
+    load_review_events as load_source_review_events,
+)
 
 
 def test_frozen_candidates_reproduce_from_real_capture() -> None:
@@ -93,15 +96,53 @@ def test_empty_review_set_exposes_pending_work_without_authority() -> None:
 
 
 def test_review_template_contains_no_automatic_decisions() -> None:
-    template = build_review_template(load_review_candidates())
+    manifest = load_review_manifest()
+    template = build_review_template(
+        load_review_candidates(),
+        manifest=manifest,
+    )
 
     assert len(template) == 10
+    assert {
+        row["candidate_fingerprint"] for row in template
+    } == {manifest["candidate_fingerprint"]}
     assert all(row["event_id"] is None for row in template)
     assert all(row["decision"] is None for row in template)
     assert all(row["corroboration_bases"] == [] for row in template)
     assert all(row["reviewer_id"] is None for row in template)
     assert all(row["runtime_effect"] is False for row in template)
     assert all(row["authority"] is False for row in template)
+
+
+def test_manifest_exposes_stable_upstream_exclusion_for_v6() -> None:
+    coverage = load_review_manifest()["upstream_coverage"]
+    source_event = next(
+        row
+        for row in load_source_review_events()
+        if row["event_id"] == "vercel-v6-pr-newswire-review-001"
+    )
+
+    assert coverage == [
+        {
+            "source_case_id": source_event["case_id"],
+            "upstream_dataset": "evidence_source_review",
+            "upstream_dataset_version": source_event[
+                "dataset_version"
+            ],
+            "upstream_event_schema_version": source_event[
+                "schema_version"
+            ],
+            "upstream_event_id": source_event["event_id"],
+            "publisher_independence_decision": source_event[
+                "publisher_independence_decision"
+            ],
+            "claim_corroboration_decision": source_event[
+                "claim_corroboration_decision"
+            ],
+            "requires_claim_level_review": False,
+            "candidate_generation": "skipped",
+        }
+    ]
 
 
 def test_complete_reviews_close_review_gate_but_not_promotion() -> None:
@@ -316,6 +357,53 @@ def test_fingerprint_and_capture_tampering_fail_closed() -> None:
         )
 
 
+def test_review_fingerprint_must_match_candidates_and_be_uniform() -> None:
+    candidates = load_review_candidates()
+    manifest = load_review_manifest()
+    mismatched = _decision(
+        candidates[0]["case_id"],
+        event_id="mismatched",
+        decision="disputed",
+        bases=["unresolved"],
+    )
+    mismatched["candidate_fingerprint"] = "0" * 64
+
+    with pytest.raises(
+        EvidenceClaimCorroborationReviewSetError,
+        match="candidate fingerprint mismatch",
+    ):
+        evaluate_claim_corroboration_review_set(
+            candidates,
+            [mismatched],
+            manifest=manifest,
+        )
+
+    mixed = [
+        _decision(
+            candidates[0]["case_id"],
+            event_id="first-candidate-set",
+            decision="disputed",
+            bases=["unresolved"],
+        ),
+        _decision(
+            candidates[1]["case_id"],
+            event_id="second-candidate-set",
+            decision="disputed",
+            bases=["unresolved"],
+        ),
+    ]
+    mixed[1]["candidate_fingerprint"] = "0" * 64
+    with pytest.raises(
+        EvidenceClaimCorroborationReviewSetError,
+        match="mix candidate fingerprints",
+    ):
+        evaluate_claim_corroboration_review_set(
+            candidates,
+            mixed,
+            manifest=manifest,
+        )
+
+
 def test_markdown_reports_claim_scoped_queue() -> None:
     rendered = render_claim_corroboration_review_set_markdown(
         evaluate_claim_corroboration_review_set(
@@ -355,6 +443,9 @@ def _decision(
         "dataset_version": (
             EVIDENCE_CLAIM_CORROBORATION_REVIEW_DATASET_VERSION
         ),
+        "candidate_fingerprint": load_review_manifest()[
+            "candidate_fingerprint"
+        ],
         "event_id": event_id,
         "case_id": case_id,
         "sequence": sequence,
@@ -386,6 +477,9 @@ def _revocation(
         "dataset_version": (
             EVIDENCE_CLAIM_CORROBORATION_REVIEW_DATASET_VERSION
         ),
+        "candidate_fingerprint": load_review_manifest()[
+            "candidate_fingerprint"
+        ],
         "event_id": event_id,
         "case_id": case_id,
         "sequence": sequence,
