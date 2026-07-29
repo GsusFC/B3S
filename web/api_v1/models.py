@@ -297,6 +297,41 @@ class EvidenceClaimTileLedgerShadowResponse(StrictModel):
     persistence: dict[str, Any] = Field(default_factory=dict)
 
 
+class EvidenceScoringMemoryPreviewResponse(StrictModel):
+    object: Literal["evidence_scoring_memory_preview"] = (
+        "evidence_scoring_memory_preview"
+    )
+    api_version: Literal["v1"] = "v1"
+    domain: str
+    schema_version: str
+    policy_version: str
+    reviewed_shadow_version: str
+    mode: Literal["disabled", "shadow"]
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    automatic_scoring_effect: Literal[False] = False
+    state_fingerprint: str
+    brand: dict[str, Any] = Field(default_factory=dict)
+    report_count: int = 0
+    latest_report_id: str | None = None
+    rubric_version: str | None = None
+    memory_version: str | None = None
+    summary: dict[str, Any] = Field(default_factory=dict)
+    accepted_evidence: list[dict[str, Any]] = Field(
+        default_factory=list
+    )
+    recoveries: list[dict[str, Any]] = Field(default_factory=list)
+    conflicts: list[dict[str, Any]] = Field(default_factory=list)
+    scoring: dict[str, Any] = Field(default_factory=dict)
+    reviewed_shadow: dict[str, Any] = Field(default_factory=dict)
+    recovery_review_candidates: list[dict[str, Any]] = Field(
+        default_factory=list
+    )
+    recovery_review: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    persistence: dict[str, Any] = Field(default_factory=dict)
+
+
 class EvidenceMemoryAdjudicationCreateRequest(StrictModel):
     subject_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     decision: EvidenceAdjudicationDecision
@@ -433,6 +468,81 @@ class EvidenceClaimReconciliationJournalResponse(StrictModel):
         default_factory=list
     )
     current: list[EvidenceClaimReconciliationEvent] = Field(
+        default_factory=list
+    )
+    pagination: Pagination
+
+
+class EvidenceScoringRecoveryReviewCreateRequest(
+    EvidenceMemoryAdjudicationCreateRequest
+):
+    case_id: str = Field(min_length=1, max_length=300)
+
+    @field_validator("case_id", mode="before")
+    @classmethod
+    def strip_case_id(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class EvidenceScoringRecoveryReviewEvent(StrictModel):
+    id: str
+    event_id: str
+    subject_type: Literal["scoring_recovery"] = "scoring_recovery"
+    subject_id: str
+    case_id: str
+    candidate_fingerprint: str
+    sequence: int = Field(ge=1)
+    decision: EvidenceAdjudicationDecision
+    effective_state: Literal[
+        "accepted",
+        "disputed",
+        "rejected",
+        "revoked",
+        "superseded",
+    ]
+    supersedes_event_id: str | None = None
+    previous_event_id: str | None = None
+    schema_version: str
+    policy_version: str
+    evaluator_version: str
+    reviewer: str
+    reviewer_id: str
+    actor_id: str
+    reason_code: str
+    rationale: str
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    automatic_scoring_effect: Literal[False] = False
+    created_at: str
+    reviewed_at: str
+
+
+class EvidenceScoringRecoveryReviewCreateResponse(StrictModel):
+    object: Literal["evidence_scoring_recovery_review"] = (
+        "evidence_scoring_recovery_review"
+    )
+    api_version: Literal["v1"] = "v1"
+    domain: str
+    replayed: bool
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    automatic_scoring_effect: Literal[False] = False
+    event: EvidenceScoringRecoveryReviewEvent
+
+
+class EvidenceScoringRecoveryReviewJournalResponse(StrictModel):
+    object: Literal["evidence_scoring_recovery_review_list"] = (
+        "evidence_scoring_recovery_review_list"
+    )
+    api_version: Literal["v1"] = "v1"
+    domain: str
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    automatic_scoring_effect: Literal[False] = False
+    events: list[EvidenceScoringRecoveryReviewEvent] = Field(
+        default_factory=list
+    )
+    current: list[EvidenceScoringRecoveryReviewEvent] = Field(
         default_factory=list
     )
     pagination: Pagination

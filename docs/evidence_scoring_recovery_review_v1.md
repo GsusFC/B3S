@@ -26,7 +26,64 @@ ambas lecturas desde los informes persistidos. Mientras no exista un evento
 semántico aceptado, el preview candidato puede mostrar un delta, pero
 `reviewed_shadow.scoring.score_delta` permanece en `0`.
 
-## Flujo
+## Journal PostgreSQL y API
+
+La revisión operativa se guarda en
+`b3s_history.evidence_scoring_recovery_review_events`. La tabla es append-only:
+cada decisión tiene secuencia, predecesor, revisor, actor, justificación,
+versión e idempotencia. No existe fallback de escritura a JSON ni a memoria.
+Si PostgreSQL no está disponible, la API de escritura responde `503`.
+
+Los recursos autenticados son:
+
+```text
+GET  /api/v1/brands/{domain}/evidence-scoring-memory-preview
+GET  /api/v1/brands/{domain}/evidence-scoring-recovery-reviews
+POST /api/v1/brands/{domain}/evidence-scoring-recovery-reviews
+```
+
+El primer recurso expone en paralelo:
+
+- `scoring`: resultado candidato si se aceptaran todas las asociaciones;
+- `reviewed_shadow.scoring`: resultado que incorpora únicamente decisiones
+  `accepted` vigentes;
+- `recovery_review_candidates`: sujetos exactos que pueden revisarse;
+- `recovery_review.journal`: eventos vigentes aplicables y eventos obsoletos.
+
+Una escritura requiere la credencial `evidence:adjudicate`, un
+`Idempotency-Key` y `expected_current_event_id`. El revisor no procede del
+JSON del cliente: el servidor lo liga a `B3S_EVIDENCE_REVIEWER_ID`.
+
+Ejemplo de primera decisión:
+
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $B3S_EVIDENCE_ADJUDICATION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: scoring-review-<candidate-fingerprint>" \
+  -d '{
+    "subject_id": "<candidate_fingerprint>",
+    "case_id": "<case_id>",
+    "decision": "accepted",
+    "expected_current_event_id": null,
+    "reason_code": "tile_contract_satisfied",
+    "rationale": "La cita satisface específicamente el contrato del tile.",
+    "evaluator_version": "manual-review-v1"
+  }' \
+  http://127.0.0.1:8000/api/v1/brands/example.com/evidence-scoring-recovery-reviews
+```
+
+Para una decisión posterior, `expected_current_event_id` debe contener el
+`event.id` vigente. Reutilizar la misma clave con otra solicitud o escribir
+desde una lectura obsoleta responde `409`.
+
+El preview se reconstruye después de cada proceso o reinicio usando los
+informes inmutables y la decisión vigente de cada sujeto. Si una evolución de
+la rúbrica o de la evidencia cambia el candidato, el evento anterior se
+conserva en el journal pero aparece como obsoleto y no modifica ni siquiera el
+score revisado de sombra.
+
+## Flujo de archivo para lotes históricos
 
 Generar una plantilla sin firma desde el archivo histórico:
 
@@ -45,6 +102,9 @@ Evaluar eventos completados:
   --current-reports-dir data/reports \
   --reviews docs/scoring_recovery_reviews.jsonl
 ```
+
+El JSONL es una vía de evaluación offline. No sustituye al journal PostgreSQL
+usado por la API y nunca actúa como fallback de producción.
 
 Una primera decisión válida tiene esta forma:
 

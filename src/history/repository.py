@@ -41,6 +41,14 @@ from src.services.evidence_memory_adjudication import (
     EvidenceMemoryAdjudicationNotFoundError,
 )
 from src.services.evidence_scoring_recovery_review import (
+    EVIDENCE_SCORING_RECOVERY_REVIEW_EVENT_VERSION,
+    EVIDENCE_SCORING_RECOVERY_REVIEW_POLICY_VERSION,
+    REVIEW_DECISIONS as SCORING_RECOVERY_REVIEW_DECISIONS,
+    SCORING_RECOVERY_REVIEW_SUBJECT_TYPE,
+    EvidenceScoringRecoveryReviewCommand,
+    EvidenceScoringRecoveryReviewConflictError,
+    EvidenceScoringRecoveryReviewInvalidTransitionError,
+    EvidenceScoringRecoveryReviewNotFoundError,
     build_reviewed_scoring_memory_shadow,
 )
 from src.services.evidence_ledger_shadow import (
@@ -470,10 +478,359 @@ class PostgresHistoryRepository:
             domain_or_url,
             workspace_slug=workspace_slug,
         )
+        recovery_reviews = (
+            self.list_current_evidence_scoring_recovery_reviews(
+                domain_or_url,
+                workspace_slug=workspace_slug,
+            )
+        )
         return build_reviewed_scoring_memory_shadow(
             reports,
             evidence_adjudications=adjudications,
+            recovery_review_events=recovery_reviews,
+            ignore_stale_review_events=True,
+            review_events_are_current=True,
         )
+
+    def append_evidence_scoring_recovery_review(
+        self,
+        domain_or_url: str,
+        command: EvidenceScoringRecoveryReviewCommand,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Append one semantic recovery decision with optimistic locking."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceScoringRecoveryReviewNotFoundError(
+                "The brand domain does not exist in durable history."
+            )
+        _validate_scoring_recovery_review_command(command)
+
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceScoringRecoveryReviewNotFoundError(
+                    "The brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        "evidence-scoring-recovery-review-idempotency",
+                        command.idempotency_key_hash,
+                    ),
+                ),
+            )
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        SCORING_RECOVERY_REVIEW_SUBJECT_TYPE,
+                        command.subject_id,
+                    ),
+                ),
+            )
+            existing = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_scoring_recovery_review_events
+                WHERE brand_id = %s
+                  AND idempotency_key_hash = %s
+                """,
+                (brand_id, command.idempotency_key_hash),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["request_fingerprint"])
+                    != command.request_fingerprint
+                ):
+                    raise EvidenceScoringRecoveryReviewConflictError(
+                        "The Idempotency-Key was already used for a different recovery review.",
+                        existing_event_id=str(existing["id"]),
+                    )
+                latest = conn.execute(
+                    f"""
+                    SELECT id
+                    FROM {_SCHEMA}.evidence_scoring_recovery_review_events
+                    WHERE brand_id = %s
+                      AND subject_type = %s
+                      AND subject_id = %s
+                    ORDER BY sequence DESC
+                    LIMIT 1
+                    """,
+                    (
+                        brand_id,
+                        SCORING_RECOVERY_REVIEW_SUBJECT_TYPE,
+                        command.subject_id,
+                    ),
+                ).fetchone()
+                effective_state = (
+                    str(existing["decision"])
+                    if latest is not None
+                    and latest["id"] == existing["id"]
+                    else "superseded"
+                )
+                return _scoring_recovery_review_event(
+                    existing,
+                    effective_state=effective_state,
+                ), True
+
+            current = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_scoring_recovery_review_events
+                WHERE brand_id = %s
+                  AND subject_type = %s
+                  AND subject_id = %s
+                ORDER BY sequence DESC
+                LIMIT 1
+                """,
+                (
+                    brand_id,
+                    SCORING_RECOVERY_REVIEW_SUBJECT_TYPE,
+                    command.subject_id,
+                ),
+            ).fetchone()
+            current_id = (
+                str(current["id"]) if current is not None else None
+            )
+            if command.expected_current_event_id != current_id:
+                raise EvidenceScoringRecoveryReviewConflictError(
+                    "The scoring recovery review changed after it was read.",
+                    current_event_id=current_id,
+                )
+            if (
+                current is not None
+                and str(current["case_id"]) != command.case_id
+            ):
+                raise EvidenceScoringRecoveryReviewConflictError(
+                    "The projected scoring recovery case changed unexpectedly.",
+                    current_event_id=current_id,
+                )
+            if command.decision == "revoked" and (
+                current is None
+                or str(current["decision"]) == "revoked"
+            ):
+                raise (
+                    EvidenceScoringRecoveryReviewInvalidTransitionError(
+                        "Only a current accepted, disputed, or rejected recovery review can be revoked."
+                    )
+                )
+
+            sequence = (
+                int(current["sequence"]) + 1
+                if current is not None
+                else 1
+            )
+            event_id = _stable_uuid(
+                brand_id,
+                "evidence-scoring-recovery-review",
+                command.idempotency_key_hash,
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_scoring_recovery_review_events (
+                    id, brand_id, subject_type, subject_id, case_id,
+                    candidate_fingerprint, sequence, decision,
+                    supersedes_event_id, schema_version, policy_version,
+                    evaluator_version, reviewer, actor_id, reason_code,
+                    rationale, idempotency_key_hash, request_fingerprint,
+                    runtime_effect, authority, automatic_scoring_effect
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, false, false, false
+                )
+                RETURNING *
+                """,
+                (
+                    event_id,
+                    brand_id,
+                    SCORING_RECOVERY_REVIEW_SUBJECT_TYPE,
+                    command.subject_id,
+                    command.case_id,
+                    command.subject_id,
+                    sequence,
+                    command.decision,
+                    current["id"] if current is not None else None,
+                    EVIDENCE_SCORING_RECOVERY_REVIEW_EVENT_VERSION,
+                    EVIDENCE_SCORING_RECOVERY_REVIEW_POLICY_VERSION,
+                    command.evaluator_version,
+                    command.reviewer,
+                    command.actor_id,
+                    command.reason_code,
+                    command.rationale,
+                    command.idempotency_key_hash,
+                    command.request_fingerprint,
+                ),
+            ).fetchone()
+        return _scoring_recovery_review_event(inserted), False
+
+    def list_current_evidence_scoring_recovery_reviews(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> list[dict[str, Any]]:
+        """Return the latest semantic decision for each recovery subject."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT ON (events.subject_type, events.subject_id)
+                       events.*
+                FROM {_SCHEMA}.evidence_scoring_recovery_review_events AS events
+                JOIN {_SCHEMA}.brands
+                  ON brands.id = events.brand_id
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                ORDER BY events.subject_type,
+                         events.subject_id,
+                         events.sequence DESC
+                """,
+                (workspace_slug, domain),
+            ).fetchall()
+        return [
+            _scoring_recovery_review_event(row)
+            for row in rows
+        ]
+
+    def list_evidence_scoring_recovery_reviews(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+        subject_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Return a reviewable semantic-recovery journal page."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceScoringRecoveryReviewNotFoundError(
+                "The brand domain does not exist in durable history."
+            )
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
+        normalized_subject_id = (
+            str(subject_id or "").strip().lower() or None
+        )
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceScoringRecoveryReviewNotFoundError(
+                    "The brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            rows = conn.execute(
+                f"""
+                WITH ranked AS (
+                    SELECT events.*,
+                           max(sequence) OVER (
+                               PARTITION BY subject_type, subject_id
+                           ) AS current_sequence
+                    FROM {_SCHEMA}.evidence_scoring_recovery_review_events
+                         AS events
+                    WHERE brand_id = %s
+                      AND (%s::text IS NULL OR subject_id = %s)
+                )
+                SELECT *
+                FROM ranked
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s OFFSET %s
+                """,
+                (
+                    brand_id,
+                    normalized_subject_id,
+                    normalized_subject_id,
+                    limit,
+                    offset,
+                ),
+            ).fetchall()
+            total_row = conn.execute(
+                f"""
+                SELECT count(*) AS count
+                FROM {_SCHEMA}.evidence_scoring_recovery_review_events
+                WHERE brand_id = %s
+                  AND (%s::text IS NULL OR subject_id = %s)
+                """,
+                (
+                    brand_id,
+                    normalized_subject_id,
+                    normalized_subject_id,
+                ),
+            ).fetchone()
+            current_rows = conn.execute(
+                f"""
+                SELECT DISTINCT ON (subject_type, subject_id) *
+                FROM {_SCHEMA}.evidence_scoring_recovery_review_events
+                WHERE brand_id = %s
+                  AND (%s::text IS NULL OR subject_id = %s)
+                ORDER BY subject_type, subject_id, sequence DESC
+                """,
+                (
+                    brand_id,
+                    normalized_subject_id,
+                    normalized_subject_id,
+                ),
+            ).fetchall()
+
+        events = [
+            _scoring_recovery_review_event(
+                row,
+                effective_state=(
+                    str(row["decision"])
+                    if int(row["sequence"])
+                    == int(row["current_sequence"])
+                    else "superseded"
+                ),
+            )
+            for row in rows
+        ]
+        total = int(total_row["count"])
+        return {
+            "events": events,
+            "current": [
+                _scoring_recovery_review_event(row)
+                for row in current_rows
+            ],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
 
     def append_evidence_memory_adjudication(
         self,
@@ -1326,6 +1683,7 @@ class PostgresHistoryRepository:
             "evidence_ledger_shadow_observations",
             "evidence_memory_adjudication_events",
             "evidence_claim_reconciliation_events",
+            "evidence_scoring_recovery_review_events",
             "evidence_claim_tile_ledger_states",
             "evidence_claim_tile_mapping_series",
             "evidence_claim_tile_mappings",
@@ -2568,6 +2926,106 @@ def _claim_reconciliation_event(
             if hasattr(created_at, "isoformat")
             else str(created_at)
         ),
+    }
+
+
+def _validate_scoring_recovery_review_command(
+    command: EvidenceScoringRecoveryReviewCommand,
+) -> None:
+    if command.decision not in SCORING_RECOVERY_REVIEW_DECISIONS:
+        raise ValueError("unsupported scoring recovery review decision")
+    if (
+        len(command.subject_id) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in command.subject_id
+        )
+    ):
+        raise ValueError(
+            "scoring recovery subject_id must be a lowercase SHA-256 digest"
+        )
+    if (
+        not command.case_id
+        or len(command.case_id) > 300
+        or "\x00" in command.case_id
+    ):
+        raise ValueError("invalid scoring recovery case_id")
+    for field, value, maximum in (
+        ("reviewer", command.reviewer, 200),
+        ("actor_id", command.actor_id, 200),
+        ("evaluator_version", command.evaluator_version, 200),
+        ("rationale", command.rationale, 2000),
+    ):
+        if not value or len(value) > maximum or "\x00" in value:
+            raise ValueError(f"invalid scoring recovery review {field}")
+    if (
+        not command.reason_code
+        or len(command.reason_code) > 100
+        or not command.reason_code[0].isalnum()
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789_"
+            for character in command.reason_code
+        )
+    ):
+        raise ValueError("invalid scoring recovery review reason_code")
+    for field, value in (
+        ("idempotency_key_hash", command.idempotency_key_hash),
+        ("request_fingerprint", command.request_fingerprint),
+    ):
+        if (
+            len(value) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in value
+            )
+        ):
+            raise ValueError(f"invalid scoring recovery review {field}")
+
+
+def _scoring_recovery_review_event(
+    row: Any,
+    *,
+    effective_state: str | None = None,
+) -> dict[str, Any]:
+    created_at = row["created_at"]
+    timestamp = (
+        created_at.isoformat()
+        if hasattr(created_at, "isoformat")
+        else str(created_at)
+    )
+    event_id = str(row["id"])
+    supersedes_event_id = (
+        str(row["supersedes_event_id"])
+        if row["supersedes_event_id"] is not None
+        else None
+    )
+    return {
+        "id": event_id,
+        "event_id": event_id,
+        "subject_type": str(row["subject_type"]),
+        "subject_id": str(row["subject_id"]),
+        "case_id": str(row["case_id"]),
+        "candidate_fingerprint": str(
+            row["candidate_fingerprint"]
+        ),
+        "sequence": int(row["sequence"]),
+        "decision": str(row["decision"]),
+        "effective_state": effective_state or str(row["decision"]),
+        "supersedes_event_id": supersedes_event_id,
+        "previous_event_id": supersedes_event_id,
+        "schema_version": str(row["schema_version"]),
+        "policy_version": str(row["policy_version"]),
+        "evaluator_version": str(row["evaluator_version"]),
+        "reviewer": str(row["reviewer"]),
+        "reviewer_id": str(row["reviewer"]),
+        "actor_id": str(row["actor_id"]),
+        "reason_code": str(row["reason_code"]),
+        "rationale": str(row["rationale"]),
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_scoring_effect": False,
+        "created_at": timestamp,
+        "reviewed_at": timestamp,
     }
 
 

@@ -51,7 +51,7 @@ The v1 dependency model separates `scans:read`, `scans:write`, and
 only. Evidence adjudication uses the distinct
 `B3S_EVIDENCE_ADJUDICATION_TOKEN`; its reviewer is derived from
 `B3S_EVIDENCE_REVIEWER_ID`. The same reviewer credential governs claim
-relation reconciliation. Both tokens must differ.
+relation reconciliation and scoring-recovery review. Both tokens must differ.
 
 ## Create a scan
 
@@ -325,6 +325,37 @@ and `revoked`. Older events remain visible as `superseded`. A write fails with
 Every event and overlay remains `runtime_effect=false` and `authority=false`.
 Accepting `replacement_candidate` records a review decision but does not select
 the newer variant, alter a tile, or change a score.
+
+## Evidence scoring memory and recovery review
+
+```text
+GET  /api/v1/brands/{domain}/evidence-scoring-memory-preview
+GET  /api/v1/brands/{domain}/evidence-scoring-recovery-reviews
+POST /api/v1/brands/{domain}/evidence-scoring-recovery-reviews
+```
+
+The preview rebuilds scoring-memory candidates from immutable PostgreSQL report
+history. `scoring` shows the candidate effect; `reviewed_shadow.scoring` applies
+only current, human-accepted evidence-to-tile mappings. Both are experimental:
+`runtime_effect=false`, `authority=false`, and
+`automatic_scoring_effect=false`.
+
+Each candidate exposes a stable `candidate_fingerprint` and `case_id`. A write
+must send those exact values, an `Idempotency-Key`, and an explicit
+`expected_current_event_id`. The dedicated reviewer credential supplies the
+reviewer identity; client-supplied reviewer fields are rejected.
+
+The append-only PostgreSQL journal accepts `accepted`, `disputed`, `rejected`,
+and `revoked`. A current `accepted` event changes only the reviewed shadow. A
+revocation returns that mapping to pending. Superseded events remain readable,
+and stale events remain stored but are excluded when their frozen candidate no
+longer matches the current history/rubric projection.
+
+Writes fail with `503` when PostgreSQL is unavailable. There is no JSONL,
+SQLite, or in-memory fallback. Recreating the process or repository derives the
+same reviewed shadow from immutable reports plus the current journal events;
+the journal is durable, while the preview remains a computed,
+non-authoritative projection.
 
 ## Errors
 

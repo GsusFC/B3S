@@ -12,6 +12,10 @@ from src.services.evidence_scoring_memory_preview import (
     EvidenceScoringMemoryPreviewError,
     build_evidence_scoring_memory_preview,
 )
+from src.services.evidence_scoring_recovery_review import (
+    EVIDENCE_SCORING_RECOVERY_REVIEW_EVENT_VERSION,
+    build_reviewed_scoring_memory_shadow,
+)
 from src.sv9.rubric import COMPONENTS, component_points
 
 
@@ -307,6 +311,11 @@ def test_repository_preview_rebuilds_from_durable_inputs(
         "list_current_evidence_memory_adjudications",
         lambda *_args, **_kwargs: [],
     )
+    monkeypatch.setattr(
+        repository,
+        "list_current_evidence_scoring_recovery_reviews",
+        lambda *_args, **_kwargs: [],
+    )
 
     first = repository.get_evidence_scoring_memory_preview(
         "example.com"
@@ -322,6 +331,182 @@ def test_repository_preview_rebuilds_from_durable_inputs(
     assert first["scoring"]["score_delta"] == 2
     assert first["reviewed_shadow"]["scoring"]["score_delta"] == 0
     assert first["recovery_review"]["summary"]["pending_count"] == 1
+
+
+def test_repository_preview_applies_current_review_after_restart(
+    monkeypatch,
+) -> None:
+    reports = [
+        _report(
+            "older",
+            "2026-07-01T08:00:00Z",
+            target_state="ok",
+        ),
+        _report(
+            "newer",
+            "2026-07-02T08:00:00Z",
+            target_state="sin_evidencia",
+        ),
+    ]
+    candidate = build_reviewed_scoring_memory_shadow(reports)[
+        "recovery_review_candidates"
+    ][0]
+    current_event = _durable_current_review_event(
+        candidate,
+        decision="accepted",
+        sequence=2,
+    )
+    repository = PostgresHistoryRepository(
+        "postgresql://example.test/b3s"
+    )
+    monkeypatch.setattr(
+        repository,
+        "list_report_payloads_for_domain",
+        lambda *_args, **_kwargs: deepcopy(reports),
+    )
+    monkeypatch.setattr(
+        repository,
+        "list_current_evidence_memory_adjudications",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        repository,
+        "list_current_evidence_scoring_recovery_reviews",
+        lambda *_args, **_kwargs: [deepcopy(current_event)],
+    )
+
+    rebuilt = repository.get_evidence_scoring_memory_preview(
+        "example.com"
+    )
+
+    assert rebuilt is not None
+    assert rebuilt["scoring"]["score_delta"] == 2
+    assert rebuilt["reviewed_shadow"]["scoring"]["score_delta"] == 2
+    assert rebuilt["recovery_review"]["review_event_mode"] == (
+        "current_projection"
+    )
+    assert rebuilt["recovery_review"]["summary"]["accepted_count"] == 1
+    assert rebuilt["recovery_review"]["journal"] == {
+        "stored_event_count": 1,
+        "applicable_event_count": 1,
+        "stale_event_count": 0,
+        "stale_event_ids": [],
+    }
+
+
+def test_repository_preview_revocation_and_stale_events_fail_closed(
+    monkeypatch,
+) -> None:
+    reports = [
+        _report(
+            "older",
+            "2026-07-01T08:00:00Z",
+            target_state="ok",
+        ),
+        _report(
+            "newer",
+            "2026-07-02T08:00:00Z",
+            target_state="sin_evidencia",
+        ),
+    ]
+    candidate = build_reviewed_scoring_memory_shadow(reports)[
+        "recovery_review_candidates"
+    ][0]
+    revoked = _durable_current_review_event(
+        candidate,
+        decision="revoked",
+        sequence=2,
+    )
+    stale = {
+        **_durable_current_review_event(
+            candidate,
+            decision="accepted",
+            sequence=1,
+        ),
+        "event_id": "00000000-0000-0000-0000-000000000099",
+        "id": "00000000-0000-0000-0000-000000000099",
+        "case_id": "scoring-recovery-stale-case",
+    }
+    repository = PostgresHistoryRepository(
+        "postgresql://example.test/b3s"
+    )
+    monkeypatch.setattr(
+        repository,
+        "list_report_payloads_for_domain",
+        lambda *_args, **_kwargs: deepcopy(reports),
+    )
+    monkeypatch.setattr(
+        repository,
+        "list_current_evidence_memory_adjudications",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        repository,
+        "list_current_evidence_scoring_recovery_reviews",
+        lambda *_args, **_kwargs: [deepcopy(revoked), deepcopy(stale)],
+    )
+
+    rebuilt = repository.get_evidence_scoring_memory_preview(
+        "example.com"
+    )
+
+    assert rebuilt is not None
+    assert rebuilt["scoring"]["score_delta"] == 2
+    assert rebuilt["reviewed_shadow"]["scoring"]["score_delta"] == 0
+    assert rebuilt["recovery_review"]["summary"]["revoked_count"] == 1
+    assert rebuilt["recovery_review"]["summary"]["pending_count"] == 1
+    assert rebuilt["recovery_review"]["journal"][
+        "stale_event_ids"
+    ] == [stale["event_id"]]
+
+
+def _durable_current_review_event(
+    candidate: dict,
+    *,
+    decision: str,
+    sequence: int,
+) -> dict:
+    event_id = (
+        "00000000-0000-0000-0000-"
+        f"{sequence:012d}"
+    )
+    previous_event_id = (
+        None
+        if sequence == 1
+        else "00000000-0000-0000-0000-000000000001"
+    )
+    return {
+        "id": event_id,
+        "event_id": event_id,
+        "subject_type": "scoring_recovery",
+        "subject_id": candidate["candidate_fingerprint"],
+        "case_id": candidate["case_id"],
+        "candidate_fingerprint": candidate[
+            "candidate_fingerprint"
+        ],
+        "sequence": sequence,
+        "decision": decision,
+        "effective_state": decision,
+        "supersedes_event_id": previous_event_id,
+        "previous_event_id": previous_event_id,
+        "schema_version": (
+            EVIDENCE_SCORING_RECOVERY_REVIEW_EVENT_VERSION
+        ),
+        "policy_version": (
+            "evidence-scoring-recovery-review-policy-v1"
+        ),
+        "evaluator_version": "manual-review-v1",
+        "reviewer": "gsus",
+        "reviewer_id": "gsus",
+        "actor_id": "gsus",
+        "reason_code": "tile_contract_reviewed",
+        "rationale": "The semantic tile contract was reviewed.",
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_scoring_effect": False,
+        "created_at": "2026-07-29T15:00:00+00:00",
+        "reviewed_at": "2026-07-29T15:00:00+00:00",
+    }
 
 
 def _report(
