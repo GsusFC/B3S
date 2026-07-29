@@ -1,0 +1,42 @@
+{
+  "schema_version": "evidence-claim-corroboration-review-v1",
+  "review_event_schema_version": "evidence-claim-corroboration-review-event-v1",
+  "selection_schema_version": "evidence-claim-corroboration-selection-v1",
+  "dataset_version": "evidence-claim-corroboration-review-2026-07-v1",
+  "candidate_fingerprint": "3061197d16fe149191858d4dc50cbabea456f656f4e1cd54333bc90ce9f4a365",
+  "selection_fingerprint": "2540c75bf01229b8daf3bbeb480fc68b5b44d7e3f5b205c3fa29ed240cd023f5",
+  "review_event_fingerprint": null,
+  "review_event_status": "pending_not_frozen",
+  "capture_artifact_path": "fixtures/vercel/vercel_fresh_capture_envelope.json",
+  "capture_artifact_sha256": "15307c2add5ce045f019b8d02d6341cd53b131cf02377ba2d66c5e28dfe2ded2",
+  "status": "frozen_claim_scoped_candidates_pending_human_review",
+  "reviewer_mode": "single_attributable_reviewer",
+  "promotion_thresholds": {
+    "minimum_reviewed_real_sources": 5,
+    "minimum_reviewed_claims": 10,
+    "minimum_reviewed_real_brands": 3
+  },
+  "semantic_paraphrase_evaluation": {
+    "status": "not_measured",
+    "recall": null
+  },
+  "operational_contract": {
+    "status": "not_adopted",
+    "schema": null
+  },
+  "decision_semantics": {
+    "independently_corroborated": "The source provides claim-specific support based on independent observation, testing, third-party documentation, or a reproducible absence check.",
+    "mixed": "The exact claim combines independent material with first-party statements or material.",
+    "disputed": "The source repeats or relies on first-party material, or the independence of its support cannot be resolved safely.",
+    "excluded": "The source or claim case is ineligible for independent corroboration."
+  },
+  "notes": [
+    "All ten candidates are bound to literal spans in an immutable real Vercel capture.",
+    "The five parent sources were already reviewed for identity and publisher independence.",
+    "Candidate claim statements are review subjects, not canonical claims.",
+    "No candidate carries a proposed decision.",
+    "Provisional review files can be evaluated while authority is false; their fingerprint is frozen only when a reviewed dataset version is adopted.",
+    "Decision and revocation events form append-only per-case chains.",
+    "No review has runtime, scoring, canonical-selection, or operational-registry authority."
+  ]
+}
