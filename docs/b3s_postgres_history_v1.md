@@ -103,6 +103,26 @@ B3S_EVIDENCE_CLAIM_TILE_LEDGER_MODE=shadow \
 
 The importer validates every JSON before connecting. It processes reports oldest first so the brand identity projection converges on the latest observation, although the database upsert also guards against out-of-order imports.
 
+Compatible Brand3 SQLite history uses a separate importer and a fixed archive
+workspace:
+
+```bash
+# Read-only validation; no PostgreSQL connection.
+.venv/bin/python scripts/import_brand3_sqlite_postgres.py \
+  /path/to/brand3.sqlite3
+
+# Explicit persistence into b3s-archive.
+.venv/bin/python scripts/import_brand3_sqlite_postgres.py \
+  /path/to/brand3.sqlite3 --apply
+```
+
+The adapter selects one latest evaluation for every persisted capture so model
+reruns cannot become false observations. It never writes the SQLite source,
+never imports legacy five-dimension scores, and does not expose archive brands
+through the default `b3s` workspace. The measured real-archive result and
+safety boundary are documented in
+[`brand3_sqlite_archive_import_v1.md`](brand3_sqlite_archive_import_v1.md).
+
 ## Testing
 
 Parser tests do not require PostgreSQL. Integration tests are opt-in locally and run against PostgreSQL 16 in CI:
@@ -111,6 +131,16 @@ Parser tests do not require PostgreSQL. Integration tests are opt-in locally and
 B3S_TEST_DATABASE_URL=postgresql://... \
 B3S_ALLOW_SCHEMA_DROP=1 \
   .venv/bin/python -m pytest tests/test_b3s_history.py -q
+```
+
+The Brand3 archive integration uses the same disposable-database guard:
+
+```bash
+B3S_TEST_DATABASE_URL=postgresql://... \
+B3S_ALLOW_SCHEMA_DROP=1 \
+  .venv/bin/python -m pytest \
+  tests/test_brand3_sqlite_memory_backfill.py::test_archive_import_cli_is_idempotent_and_workspace_isolated \
+  -q
 ```
 
 The integration suite drops only the `b3s_history` schema, refuses to run without the explicit `B3S_ALLOW_SCHEMA_DROP=1` opt-in, and must still target a disposable database.

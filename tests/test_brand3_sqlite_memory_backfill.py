@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 
 import pytest
 
+from scripts import import_brand3_sqlite_postgres
 from src.history.report_parser import parse_report
+from src.services.brand3_sqlite_history_import import (
+    BRAND3_ARCHIVE_WORKSPACE_SLUG,
+    load_brand3_archive_history_reports,
+)
 from src.services.brand3_sqlite_memory_backfill import (
     Brand3SQLiteBackfillError,
     build_brand3_sqlite_memory_validation,
+    load_brand3_sqlite_capture_reports,
     load_brand3_sqlite_sv9_reports,
 )
 from src.services.evidence_scoring_recovery_review import (
@@ -50,6 +57,95 @@ def test_adapter_is_read_only_and_emits_importable_reports(
     assert parsed.source_report_id == "brand3-sqlite-sv9-20"
     assert parsed.rubric_version == RUBRIC_VERSION
     assert len(parsed.components) == len(COMPONENTS)
+
+
+def test_archive_import_plan_keeps_latest_evaluation_per_capture(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "brand3.sqlite3"
+    with sqlite3.connect(database) as conn:
+        _create_schema(conn)
+        _insert_capture(
+            conn,
+            source_run_id=10,
+            scan_id=20,
+            created_at="2026-06-01T08:00:00+00:00",
+            target_state="ok",
+        )
+        _insert_scan(
+            conn,
+            source_run_id=10,
+            scan_id=21,
+            created_at="2026-06-01T09:00:00+00:00",
+            target_state="sin_evidencia",
+        )
+        _insert_capture(
+            conn,
+            source_run_id=11,
+            scan_id=22,
+            created_at="2026-06-02T08:00:00+00:00",
+            target_state="ok",
+        )
+    before = _sha256(database)
+
+    latest = load_brand3_sqlite_capture_reports(database)
+    reports, plan = load_brand3_archive_history_reports(database)
+
+    assert _sha256(database) == before
+    assert [row["id"] for row in latest] == [
+        "brand3-sqlite-sv9-21",
+        "brand3-sqlite-sv9-22",
+    ]
+    assert [report.source_report_id for report in reports] == [
+        "brand3-sqlite-capture-10",
+        "brand3-sqlite-capture-11",
+    ]
+    assert reports[0].observed_at.isoformat() == (
+        "2026-06-01T08:00:00+00:00"
+    )
+    assert reports[0].evaluated_at.isoformat() == (
+        "2026-06-01T09:00:00+00:00"
+    )
+    assert plan["runtime_effect"] is False
+    assert plan["authority"] is False
+    assert plan["automatic_scoring_effect"] is False
+    assert plan["mutates_source_archive"] is False
+    assert plan["workspace"] == {
+        "slug": "b3s-archive",
+        "name": "B3S Legacy Archive",
+        "operational_workspace": False,
+    }
+    assert plan["summary"]["archive_evaluation_count"] == 3
+    assert plan["summary"]["capture_report_count"] == 2
+    assert plan["summary"]["excluded_evaluator_revision_count"] == 1
+    assert plan["summary"]["brand_count"] == 1
+    assert len(plan["source_database"]["manifest_fingerprint"]) == 64
+    assert len(plan["state_fingerprint"]) == 64
+
+
+def test_archive_import_cli_defaults_to_dry_run(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    database = tmp_path / "brand3.sqlite3"
+    with sqlite3.connect(database) as conn:
+        _create_schema(conn)
+        _insert_capture(
+            conn,
+            source_run_id=10,
+            scan_id=20,
+            created_at="2026-06-01T08:00:00+00:00",
+            target_state="ok",
+        )
+
+    assert import_brand3_sqlite_postgres.main([str(database)]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "valid"
+    assert payload["action"] == "dry_run"
+    assert payload["applied"] is False
+    assert payload["requires_explicit_apply"] is True
+    assert payload["summary"]["capture_report_count"] == 1
 
 
 def test_validation_separates_evaluator_repeats_from_captures(
@@ -230,6 +326,122 @@ def test_missing_archive_tables_are_rejected(tmp_path: Path) -> None:
         match="missing tables",
     ):
         load_brand3_sqlite_sv9_reports(database)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL"),
+    reason="B3S_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
+def test_archive_import_cli_is_idempotent_and_workspace_isolated(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import psycopg
+
+    from src.history.repository import PostgresHistoryRepository
+
+    if os.environ.get("B3S_ALLOW_SCHEMA_DROP") != "1":
+        raise RuntimeError(
+            "B3S_ALLOW_SCHEMA_DROP=1 is required for a disposable database"
+        )
+    database = tmp_path / "brand3.sqlite3"
+    with sqlite3.connect(database) as conn:
+        _create_schema(conn)
+        _insert_capture(
+            conn,
+            source_run_id=10,
+            scan_id=20,
+            created_at="2026-06-01T08:00:00+00:00",
+            target_state="ok",
+        )
+        _insert_scan(
+            conn,
+            source_run_id=10,
+            scan_id=21,
+            created_at="2026-06-01T09:00:00+00:00",
+            target_state="sin_evidencia",
+        )
+        _insert_capture(
+            conn,
+            source_run_id=11,
+            scan_id=22,
+            created_at="2026-06-02T08:00:00+00:00",
+            target_state="ok",
+        )
+    before = _sha256(database)
+    dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+
+    command = [
+        str(database),
+        "--database-url",
+        dsn,
+        "--apply",
+    ]
+    try:
+        assert import_brand3_sqlite_postgres.main(command) == 0
+        first = json.loads(capsys.readouterr().out)
+        assert first["status"] == "ok"
+        assert first["workspace"]["slug"] == (
+            BRAND3_ARCHIVE_WORKSPACE_SLUG
+        )
+        assert first["import"]["discovered"] == 2
+        assert first["import"]["imported"] == 2
+        assert first["import"]["unchanged"] == 0
+        assert first["import"]["failed"] == 0
+
+        assert import_brand3_sqlite_postgres.main(command) == 0
+        second = json.loads(capsys.readouterr().out)
+        assert second["status"] == "ok"
+        assert second["import"]["imported"] == 0
+        assert second["import"]["unchanged"] == 2
+        assert second["import"]["failed"] == 0
+        assert _sha256(database) == before
+
+        repository = PostgresHistoryRepository(dsn)
+        assert repository.get_current_brand_state("example.com") is None
+        archived = repository.get_current_brand_state(
+            "example.com",
+            workspace_slug=BRAND3_ARCHIVE_WORKSPACE_SLUG,
+        )
+        assert archived is not None
+        assert archived["source_report_id"] == (
+            "brand3-sqlite-capture-11"
+        )
+        with sqlite3.connect(database) as conn:
+            _insert_scan(
+                conn,
+                source_run_id=10,
+                scan_id=23,
+                created_at="2026-06-03T09:00:00+00:00",
+                target_state="no",
+            )
+        assert import_brand3_sqlite_postgres.main(command) == 1
+        changed = json.loads(capsys.readouterr().out)
+        assert changed["status"] == "partial"
+        assert changed["import"]["imported"] == 0
+        assert changed["import"]["unchanged"] == 1
+        assert changed["import"]["failed"] == 1
+        assert changed["import"]["failures"][0][
+            "source_report_id"
+        ] == "brand3-sqlite-capture-10"
+        with psycopg.connect(dsn) as conn:
+            counts = conn.execute(
+                """
+                SELECT
+                    (SELECT count(*) FROM b3s_history.captures)
+                        AS captures,
+                    (SELECT count(*) FROM b3s_history.evaluation_runs)
+                        AS evaluations,
+                    (SELECT count(*) FROM b3s_history.report_snapshots)
+                        AS reports
+                """
+            ).fetchone()
+        assert counts == (2, 2, 2)
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
 
 
 def _create_schema(conn: sqlite3.Connection) -> None:

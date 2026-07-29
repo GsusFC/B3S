@@ -77,6 +77,29 @@ def load_brand3_sqlite_sv9_reports(
         ]
 
 
+def load_brand3_sqlite_capture_reports(
+    database_path: str | Path,
+    *,
+    rubric_version: str = RUBRIC_VERSION,
+) -> list[dict[str, Any]]:
+    """Return one latest compatible evaluation per persisted capture."""
+
+    return latest_brand3_reports_per_capture(
+        load_brand3_sqlite_sv9_reports(
+            database_path,
+            rubric_version=rubric_version,
+        )
+    )
+
+
+def latest_brand3_reports_per_capture(
+    reports: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Collapse evaluator revisions without inventing new observations."""
+
+    return _latest_report_per_capture(reports)
+
+
 def build_brand3_sqlite_memory_validation(
     database_path: str | Path,
     *,
@@ -445,12 +468,18 @@ def _report_from_scan(
     ]
     reliability = str(scan["reliability_status"] or "unknown")
     created_at = str(scan["created_at"] or "")
+    observed_at = str(
+        (snapshot.get("run") or {}).get("started_at")
+        or created_at
+    )
     return {
         "id": f"brand3-sqlite-sv9-{scan_id}",
         "brand_name": str(scan["brand_name"] or ""),
         "url": str(scan["url"] or ""),
         "created_at": created_at,
-        "observed_at": created_at,
+        "observed_at": observed_at,
+        "recorded_at": created_at,
+        "evaluated_at": created_at,
         "score": int(scan["brand3_score"] or 0),
         "base_average": scan["base_average"],
         "reliability_status": reliability,
@@ -514,7 +543,14 @@ def _run_snapshot(
 ) -> dict[str, Any]:
     raw_inputs: list[dict[str, Any]] = []
     features: list[dict[str, Any]] = []
+    started_at = ""
     if source_run_id is not None:
+        run = conn.execute(
+            "SELECT started_at FROM runs WHERE id = ?",
+            (source_run_id,),
+        ).fetchone()
+        if run is not None:
+            started_at = str(run["started_at"] or "")
         for row in conn.execute(
             """
             SELECT source, payload_json, created_at
@@ -549,6 +585,7 @@ def _run_snapshot(
             "id": source_run_id,
             "brand_name": brand_name,
             "url": url,
+            "started_at": started_at,
         },
         "raw_inputs": raw_inputs,
         "features": features,

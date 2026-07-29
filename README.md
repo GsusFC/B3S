@@ -98,6 +98,21 @@ Validate and import the current file-backed reports:
 
 The import is idempotent and rejects a reused report id with different content. The schema, invariants, queries and cutover boundary are documented in `docs/b3s_postgres_history_v1.md`.
 
+Legacy Brand3 SV9 captures have a separate, opt-in path. It validates without
+writes by default and can only persist into the fixed, non-operational
+`b3s-archive` workspace:
+
+```bash
+.venv/bin/python scripts/import_brand3_sqlite_postgres.py \
+  /path/to/brand3.sqlite3
+.venv/bin/python scripts/import_brand3_sqlite_postgres.py \
+  /path/to/brand3.sqlite3 --apply
+```
+
+It keeps one latest evaluation per historical capture, never converts the
+legacy five-dimension scores, and has no runtime or scoring authority. See
+[`docs/brand3_sqlite_archive_import_v1.md`](docs/brand3_sqlite_archive_import_v1.md).
+
 ## Temporal evidence stability
 
 Repeated scans are compared against the first non-invalid baseline using normalized evidence, independently from LLM prose and scores. A weaker acquisition or a changed evaluation over materially equivalent evidence is retained in history but cannot silently replace the selected report.
