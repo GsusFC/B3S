@@ -62,10 +62,15 @@ GET  /api/v1/brands/{domain}/evidence-ledger-shadow
 GET  /api/v1/brands/{domain}/evidence-memory-identity-v2-shadow
 GET  /api/v1/brands/{domain}/evidence-claim-memory-shadow
 GET  /api/v1/brands/{domain}/evidence-claim-tile-ledger-shadow
+GET  /api/v1/brands/{domain}/evidence-claim-tile-reviews
+POST /api/v1/brands/{domain}/evidence-claim-tile-reviews
 GET  /api/v1/brands/{domain}/evidence-claim-reconciliations
 POST /api/v1/brands/{domain}/evidence-claim-reconciliations
 GET  /api/v1/brands/{domain}/evidence-memory-adjudications
 POST /api/v1/brands/{domain}/evidence-memory-adjudications
+GET  /api/v1/brands/{domain}/evidence-scoring-memory-preview
+GET  /api/v1/brands/{domain}/evidence-scoring-recovery-reviews
+POST /api/v1/brands/{domain}/evidence-scoring-recovery-reviews
 ```
 
 Bearer authentication uses `BRAND3_SCANNER_API_TOKEN`. Create requests support
@@ -167,6 +172,13 @@ text and cannot change tiles, points, scores, or canonical selection. Inspect
 it through
 `GET /api/v1/brands/{domain}/evidence-claim-tile-ledger-shadow`; see
 [`docs/evidence_claim_tile_ledger_v1.md`](docs/evidence_claim_tile_ledger_v1.md).
+Semantic mapping decisions now use a separate append-only PostgreSQL journal
+with idempotency, optimistic concurrency, server-bound reviewer identity, and
+revocation. The event freezes the exact evidence, claim variant, tile, polarity,
+and mapping-series identities, while database constraints keep tile and scoring
+effects disabled. Review it through
+`GET|POST /api/v1/brands/{domain}/evidence-claim-tile-reviews`; see
+[`docs/evidence_claim_tile_review_v1.md`](docs/evidence_claim_tile_review_v1.md).
 
 Scoring-memory recovery remains a separate, non-authoritative layer. The
 candidate preview shows the maximum additive effect, while the reviewed shadow

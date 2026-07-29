@@ -484,6 +484,90 @@ class EvidenceScoringRecoveryReviewCreateRequest(
         return value.strip() if isinstance(value, str) else value
 
 
+class EvidenceClaimTileReviewCreateRequest(
+    EvidenceMemoryAdjudicationCreateRequest
+):
+    pass
+
+
+class EvidenceClaimTileReviewEvent(StrictModel):
+    id: str
+    event_id: str
+    subject_type: Literal["claim_tile_mapping"] = "claim_tile_mapping"
+    subject_id: str
+    case_id: str
+    mapping_id: str
+    mapping_series_id: str
+    source_evidence_id: str
+    claim_variant_id: str
+    component_key: str
+    tile_id: str
+    tile_key: str
+    polarity: Literal[
+        "supports",
+        "weakens",
+        "insufficient_evidence",
+    ]
+    sequence: int = Field(ge=1)
+    decision: EvidenceAdjudicationDecision
+    effective_state: Literal[
+        "accepted",
+        "disputed",
+        "rejected",
+        "revoked",
+        "superseded",
+    ]
+    supersedes_event_id: str | None = None
+    previous_event_id: str | None = None
+    schema_version: str
+    policy_version: str
+    evaluator_version: str
+    reviewer: str
+    reviewer_id: str
+    actor_id: str
+    reason_code: str
+    rationale: str
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    automatic_tile_effect: Literal[False] = False
+    automatic_scoring_effect: Literal[False] = False
+    created_at: str
+    reviewed_at: str
+
+
+class EvidenceClaimTileReviewCreateResponse(StrictModel):
+    object: Literal["evidence_claim_tile_review"] = (
+        "evidence_claim_tile_review"
+    )
+    api_version: Literal["v1"] = "v1"
+    domain: str
+    replayed: bool
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    automatic_tile_effect: Literal[False] = False
+    automatic_scoring_effect: Literal[False] = False
+    event: EvidenceClaimTileReviewEvent
+
+
+class EvidenceClaimTileReviewJournalResponse(StrictModel):
+    object: Literal["evidence_claim_tile_review_list"] = (
+        "evidence_claim_tile_review_list"
+    )
+    api_version: Literal["v1"] = "v1"
+    domain: str
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    automatic_tile_effect: Literal[False] = False
+    automatic_scoring_effect: Literal[False] = False
+    events: list[EvidenceClaimTileReviewEvent] = Field(
+        default_factory=list
+    )
+    current: list[EvidenceClaimTileReviewEvent] = Field(
+        default_factory=list
+    )
+    pagination: Pagination
+
+
 class EvidenceScoringRecoveryReviewEvent(StrictModel):
     id: str
     event_id: str

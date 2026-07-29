@@ -24,6 +24,9 @@ from src.services.evidence_claim_reconciliation import (
     EvidenceClaimReconciliationCommand,
     EvidenceClaimReconciliationConflictError,
 )
+from src.services.evidence_claim_tile_review import (
+    EvidenceClaimTileReviewCommand,
+)
 from src.services.evidence_memory_adjudication import (
     EvidenceMemoryAdjudicationCommand,
     EvidenceMemoryAdjudicationConflictError,
@@ -294,7 +297,7 @@ def test_claim_reconciliation_migration_is_packaged_and_non_authoritative() -> N
         .read_text(encoding="utf-8")
     )
 
-    assert filenames[-3:-1] == [
+    assert filenames[-4:-2] == [
         "005_evidence_claim_reconciliations.sql",
         "006_evidence_claim_tile_ledger.sql",
     ]
@@ -315,7 +318,7 @@ def test_claim_tile_ledger_migration_is_versioned_and_non_authoritative() -> Non
         .read_text(encoding="utf-8")
     )
 
-    assert filenames[-2] == "006_evidence_claim_tile_ledger.sql"
+    assert filenames[-3] == "006_evidence_claim_tile_ledger.sql"
     assert "evidence_claim_tile_mapping_series" in sql
     assert "evidence_claim_tile_mapping_observations" in sql
     assert "runtime_effect = false" in sql
@@ -335,7 +338,7 @@ def test_scoring_recovery_review_migration_is_append_only_and_safe() -> None:
         .read_text(encoding="utf-8")
     )
 
-    assert filenames[-1] == (
+    assert filenames[-2] == (
         "007_evidence_scoring_recovery_reviews.sql"
     )
     assert "subject_type = 'scoring_recovery'" in sql
@@ -344,6 +347,28 @@ def test_scoring_recovery_review_migration_is_append_only_and_safe() -> None:
     assert "UNIQUE (brand_id, idempotency_key_hash)" in sql
     assert "runtime_effect = false" in sql
     assert "authority = false" in sql
+    assert "automatic_scoring_effect = false" in sql
+
+
+def test_claim_tile_review_migration_is_append_only_and_safe() -> None:
+    from src.history.repository import _migration_files
+
+    filenames = [filename for filename, _sql in _migration_files()]
+    sql = (
+        resources.files("src.history")
+        .joinpath("migrations/008_evidence_claim_tile_reviews.sql")
+        .read_text(encoding="utf-8")
+    )
+
+    assert filenames[-1] == "008_evidence_claim_tile_reviews.sql"
+    assert "subject_type = 'claim_tile_mapping'" in sql
+    assert "mapping_id = subject_id" in sql
+    assert "evidence_claim_tile_mappings" in sql
+    assert "supersedes_event_id" in sql
+    assert "UNIQUE (brand_id, idempotency_key_hash)" in sql
+    assert "runtime_effect = false" in sql
+    assert "authority = false" in sql
+    assert "automatic_tile_effect = false" in sql
     assert "automatic_scoring_effect = false" in sql
 
 
@@ -556,6 +581,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "005_evidence_claim_reconciliations.sql",
             "006_evidence_claim_tile_ledger.sql",
             "007_evidence_scoring_recovery_reviews.sql",
+            "008_evidence_claim_tile_reviews.sql",
         ]
         assert repository.migrate() == []
 
@@ -642,6 +668,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "evidence_memory_adjudication_events": 0,
             "evidence_claim_reconciliation_events": 0,
             "evidence_scoring_recovery_review_events": 0,
+            "evidence_claim_tile_review_events": 0,
             "evidence_claim_tile_ledger_states": 1,
             "evidence_claim_tile_mapping_series": 1,
             "evidence_claim_tile_mappings": 0,
@@ -1052,6 +1079,114 @@ def test_postgres_scoring_recovery_survives_restart_and_revocation() -> None:
     not os.environ.get("B3S_TEST_DATABASE_URL"),
     reason="B3S_TEST_DATABASE_URL is required for PostgreSQL integration",
 )
+def test_postgres_claim_tile_review_survives_restart_and_revocation(
+    monkeypatch,
+) -> None:
+    import psycopg
+
+    from src.history.repository import PostgresHistoryRepository
+
+    _require_schema_drop_opt_in()
+    monkeypatch.setenv(
+        "B3S_EVIDENCE_CLAIM_TILE_LEDGER_MODE",
+        "shadow",
+    )
+    dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+
+    repository = PostgresHistoryRepository(dsn)
+    try:
+        repository.migrate()
+        repository.import_report(
+            _claim_tile_report(
+                "claim-tile-review",
+                "2026-07-06T08:00:00Z",
+            )
+        )
+        ledger = repository.get_evidence_claim_tile_ledger(
+            "memory.example"
+        )
+        assert ledger is not None
+        assert ledger["runtime_effect"] is False
+        assert ledger["authority"] is False
+        assert ledger["summary"]["mapping_count"] == 1
+        mapping = ledger["mappings"][0]
+
+        accepted, replayed = (
+            repository.append_evidence_claim_tile_review(
+                "memory.example",
+                _claim_tile_review_command(
+                    mapping["mapping_id"],
+                    decision="accepted",
+                    expected_current_event_id=None,
+                    key_hash="8" * 64,
+                    fingerprint="9" * 64,
+                ),
+            )
+        )
+        assert replayed is False
+        assert accepted["mapping_id"] == mapping["mapping_id"]
+        assert accepted["source_evidence_id"] == (
+            mapping["source_evidence_id"]
+        )
+        assert accepted["claim_variant_id"] == (
+            mapping["claim_variant_id"]
+        )
+        assert accepted["tile_key"] == "mission.M1"
+        assert accepted["automatic_tile_effect"] is False
+        assert accepted["automatic_scoring_effect"] is False
+
+        restarted = PostgresHistoryRepository(dsn)
+        journal = restarted.list_evidence_claim_tile_reviews(
+            "memory.example"
+        )
+        assert journal["total"] == 1
+        assert journal["current"] == [accepted]
+        assert (
+            restarted.get_evidence_claim_tile_ledger(
+                "memory.example"
+            )["state_fingerprint"]
+            == ledger["state_fingerprint"]
+        )
+
+        revoked, replayed = (
+            restarted.append_evidence_claim_tile_review(
+                "memory.example",
+                _claim_tile_review_command(
+                    mapping["mapping_id"],
+                    decision="revoked",
+                    expected_current_event_id=accepted["id"],
+                    key_hash="a" * 64,
+                    fingerprint="b" * 64,
+                ),
+            )
+        )
+        assert replayed is False
+        assert revoked["sequence"] == 2
+        assert revoked["previous_event_id"] == accepted["id"]
+
+        restarted_again = PostgresHistoryRepository(dsn)
+        revoked_journal = (
+            restarted_again.list_evidence_claim_tile_reviews(
+                "memory.example"
+            )
+        )
+        assert revoked_journal["total"] == 2
+        assert [
+            event["effective_state"]
+            for event in revoked_journal["events"]
+        ] == ["revoked", "superseded"]
+        assert revoked_journal["current"] == [revoked]
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL"),
+    reason="B3S_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
 def test_release_migrate_only_cli_is_complete_and_idempotent(
     capsys,
     monkeypatch,
@@ -1086,6 +1221,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "005_evidence_claim_reconciliations.sql",
             "006_evidence_claim_tile_ledger.sql",
             "007_evidence_scoring_recovery_reviews.sql",
+            "008_evidence_claim_tile_reviews.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0
@@ -1098,7 +1234,10 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
                 """
                 SELECT to_regclass(
                     'b3s_history.evidence_scoring_recovery_review_events'
-                )::text AS review_table,
+                )::text AS recovery_review_table,
+                to_regclass(
+                    'b3s_history.evidence_claim_tile_review_events'
+                )::text AS claim_tile_review_table,
                 (
                     SELECT count(*)
                     FROM b3s_history.schema_migrations
@@ -1108,7 +1247,10 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
         assert stored[0] == (
             "b3s_history.evidence_scoring_recovery_review_events"
         )
-        assert stored[1] == 7
+        assert stored[1] == (
+            "b3s_history.evidence_claim_tile_review_events"
+        )
+        assert stored[2] == 8
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
@@ -1182,6 +1324,28 @@ def _scoring_recovery_review_command(
         reviewer="gsus",
         reason_code="tile_contract_reviewed",
         rationale="The reviewer checked the semantic tile contract.",
+        evaluator_version="manual-review-v1",
+        actor_id="gsus",
+        idempotency_key_hash=key_hash,
+        request_fingerprint=fingerprint,
+    )
+
+
+def _claim_tile_review_command(
+    subject_id: str,
+    *,
+    decision: str,
+    expected_current_event_id: str | None,
+    key_hash: str,
+    fingerprint: str,
+) -> EvidenceClaimTileReviewCommand:
+    return EvidenceClaimTileReviewCommand(
+        subject_id=subject_id,
+        decision=decision,
+        expected_current_event_id=expected_current_event_id,
+        reviewer="gsus",
+        reason_code="tile_contract_reviewed",
+        rationale="The reviewer checked the claim-to-tile contract.",
         evaluator_version="manual-review-v1",
         actor_id="gsus",
         idempotency_key_hash=key_hash,
@@ -1514,6 +1678,62 @@ def _scoring_recovery_report(
             },
         },
     }
+
+
+def _claim_tile_report(report_id: str, created_at: str) -> dict:
+    report = _scoring_recovery_report(
+        report_id,
+        created_at,
+        target_state="no",
+    )
+    quote = "Our mission is to make financial work radically simpler."
+    evidence = report["raw"]["flow"]["candidate"]["evidence_pack"][
+        "evidence"
+    ][0]
+    evidence["content"] = quote
+    evidence["metadata"]["claim_slot_key"] = "mission.primary"
+    raw_mission = report["raw"]["sv9"]["result"]["components"][
+        "mission"
+    ]
+    raw_mission["score"] = 1
+    raw_mission["points"] = component_points("mission", 1)
+    raw_mission["detected_content"] = quote
+    raw_mission["tile_profile"][0].update(
+        estado="ok",
+        evidencia=quote,
+        motivo="",
+    )
+    public_mission = next(
+        component
+        for component in report["components"]
+        if component["key"] == "mission"
+    )
+    public_mission["score"] = 1
+    public_mission["points"] = component_points("mission", 1)
+    public_mission["resumen"] = quote
+    public_mission["tile_profile"][0].update(
+        estado="ok",
+        evidencia=quote,
+        motivo="",
+    )
+    report["blocks"] = [
+        {
+            "name": "mission",
+            "detected": True,
+            "content": quote,
+            "confidence": "high",
+            "coverage_status": "evidence",
+            "provenance_source": "llm_and_gate",
+            "refs": [
+                {
+                    "ref": evidence["ref"],
+                    "url": evidence["url"],
+                    "snippet": quote,
+                }
+            ],
+        }
+    ]
+    return report
 
 
 def _report(

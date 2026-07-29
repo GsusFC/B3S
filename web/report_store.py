@@ -30,6 +30,11 @@ from src.services.evidence_claim_tile_ledger import (
     build_evidence_claim_tile_ledger,
     evidence_claim_tile_ledger_mode,
 )
+from src.services.evidence_claim_tile_review import (
+    EvidenceClaimTileReviewCommand,
+    EvidenceClaimTileReviewJournalError,
+    EvidenceClaimTileReviewUnavailableError,
+)
 from src.services.evidence_memory_adjudication import (
     EvidenceMemoryAdjudicationCommand,
     EvidenceMemoryAdjudicationError,
@@ -495,6 +500,59 @@ def append_evidence_scoring_recovery_review_for_domain(
     except Exception as exc:
         raise EvidenceScoringRecoveryReviewUnavailableError(
             "The durable scoring recovery review journal is unavailable."
+        ) from exc
+
+
+def append_evidence_claim_tile_review_for_domain(
+    domain: str,
+    command: EvidenceClaimTileReviewCommand,
+) -> tuple[dict[str, Any], bool]:
+    """Append a semantic mapping decision only to durable PostgreSQL."""
+
+    repository = _postgres_repository()
+    if repository is None:
+        raise EvidenceClaimTileReviewUnavailableError(
+            "The durable claim-to-tile review journal is not configured."
+        )
+    try:
+        return repository.append_evidence_claim_tile_review(
+            domain,
+            command,
+        )
+    except EvidenceClaimTileReviewJournalError:
+        raise
+    except Exception as exc:
+        raise EvidenceClaimTileReviewUnavailableError(
+            "The durable claim-to-tile review journal is unavailable."
+        ) from exc
+
+
+def list_evidence_claim_tile_reviews_for_domain(
+    domain: str,
+    *,
+    subject_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Read the durable semantic claim-to-tile review journal."""
+
+    repository = _postgres_repository()
+    if repository is None:
+        raise EvidenceClaimTileReviewUnavailableError(
+            "The durable claim-to-tile review journal is not configured."
+        )
+    try:
+        return repository.list_evidence_claim_tile_reviews(
+            domain,
+            subject_id=subject_id,
+            limit=limit,
+            offset=offset,
+        )
+    except EvidenceClaimTileReviewJournalError:
+        raise
+    except Exception as exc:
+        raise EvidenceClaimTileReviewUnavailableError(
+            "The durable claim-to-tile review journal is unavailable."
         ) from exc
 
 

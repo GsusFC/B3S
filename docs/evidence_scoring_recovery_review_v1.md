@@ -89,7 +89,7 @@ La integración
 `test_postgres_scoring_recovery_survives_restart_and_revocation` ejecuta el
 ciclo completo contra una base PostgreSQL real:
 
-1. aplica todas las migraciones, incluida la `007`;
+1. aplica todas las migraciones, incluidas `007–008`;
 2. persiste dos informes de una marca, con evidencia `MG1` en el primero y un
    punto ciego en el segundo;
 3. reconstruye el candidato de recuperación y confirma que sigue pendiente;
@@ -122,10 +122,10 @@ La integración
 `test_release_migrate_only_cli_is_complete_and_idempotent` cubre además la
 entrada usada por el `release_command`: ejecuta
 `import_b3s_reports_postgres.py --migrate-only` sin proporcionar
-`--database-url`, comprueba que la primera ejecución aplica `001–007`, que la
-segunda aplica cero migraciones y que la tabla del journal existe. Esto valida
-la ruta CLI y su idempotencia; todavía no equivale a ejecutar el release real
-dentro de una imagen desplegada en Fly.
+`--database-url`, comprueba que la primera ejecución aplica `001–008`, que la
+segunda aplica cero migraciones y que las tablas de ambos journals semánticos
+existen. Esto valida la ruta CLI y su idempotencia; todavía no equivale a
+ejecutar el release real dentro de una imagen desplegada en Fly.
 
 ## Flujo de archivo para lotes históricos
 

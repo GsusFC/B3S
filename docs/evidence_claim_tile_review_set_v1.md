@@ -79,6 +79,18 @@ Evaluate completed reviews:
 Unsigned templates and deterministic `proposed_review` values are not human
 labels.
 
+Completed decisions can now be recorded in the append-only PostgreSQL journal:
+
+```text
+GET  /api/v1/brands/{domain}/evidence-claim-tile-reviews
+POST /api/v1/brands/{domain}/evidence-claim-tile-reviews
+```
+
+The API subject is the candidate's `mapping.mapping_id`. PostgreSQL derives and
+freezes the evidence, claim-variant, mapping-series, tile, and polarity
+identities; clients submit only the decision and review rationale. See
+[`evidence_claim_tile_review_v1.md`](evidence_claim_tile_review_v1.md).
+
 ## Current gate result
 
 Current state:
@@ -91,6 +103,10 @@ Current state:
 - review gate: blocked;
 - promotion policy: not adopted;
 - runtime and scoring authority: disabled.
+
+The zero above describes committed human decisions, not missing storage
+capability. The journal now exists, but no reviewer decision has been inferred
+or prefilled.
 
 Even eight accepted reviews would not establish generalization. Promotion also
 requires:
