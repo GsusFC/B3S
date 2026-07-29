@@ -54,6 +54,9 @@ from src.services.evidence_identity_gold_set import (
 from src.services.evidence_memory_identity_v2 import (
     build_evidence_memory_identity_v2,
 )
+from src.services.evidence_memory_snapshot import (
+    build_evidence_memory_snapshot,
+)
 from src.services.evidence_source_review_set import (
     DEFAULT_REVIEW_ROOT as SOURCE_REVIEW_ROOT,
     EVIDENCE_SOURCE_REVIEW_DATASET_VERSION,
@@ -76,7 +79,7 @@ from src.sv9_flow.contracts import (
 
 
 EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v2"
-EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v10"
+EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v11"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 
 
@@ -261,11 +264,14 @@ def run_evidence_memory_stress(
                 "Claim Memory can only propose coexistence or replacement relations; "
                 "it cannot adjudicate a canonical claim. The versioned claim-to-tile "
                 "ledger remains shadow-only and has no reviewed promotion policy. "
+                "A candidate semantic memory version and shadow evaluation identity "
+                "now exist, but neither is canonical and no memory score or result "
+                "cache exists. "
                 "Identity review is complete and its frozen controlled threshold "
                 "passes. Publisher independence has been reviewed separately from "
                 "claim corroboration, but claim-scoped corroboration and semantic "
                 "paraphrase recall remain unvalidated. Real replacement recall is "
-                "also unvalidated, and no versioned memory score exists."
+                "also unvalidated."
             ),
         },
     }
@@ -1197,6 +1203,49 @@ def _controlled_probes(
         [unanchored_claim_tile_report],
         mode="shadow",
     )
+    memory_snapshot_rubric = "evidence-memory-rubric-unimplemented-v1"
+    memory_snapshot_evaluator = (
+        "evidence-memory-evaluator-unimplemented-v1"
+    )
+    baseline_memory_snapshot = build_evidence_memory_snapshot(
+        [claim_tile_first],
+        rubric_version=memory_snapshot_rubric,
+        evaluator_version=memory_snapshot_evaluator,
+    )
+    repeated_memory_snapshot = build_evidence_memory_snapshot(
+        [claim_tile_first, claim_tile_second],
+        rubric_version=memory_snapshot_rubric,
+        evaluator_version=memory_snapshot_evaluator,
+    )
+    dropout_memory_snapshot = build_evidence_memory_snapshot(
+        [
+            claim_tile_first,
+            claim_tile_second,
+            _report(
+                "claim-tile-dropout",
+                "2026-01-03T00:00:00Z",
+                [],
+            ),
+        ],
+        rubric_version=memory_snapshot_rubric,
+        evaluator_version=memory_snapshot_evaluator,
+    )
+    versioned_series_memory_snapshot = build_evidence_memory_snapshot(
+        [
+            claim_tile_first,
+            claim_tile_second,
+            versioned_claim_tile_report,
+        ],
+        rubric_version=memory_snapshot_rubric,
+        evaluator_version=memory_snapshot_evaluator,
+    )
+    changed_evaluator_memory_snapshot = build_evidence_memory_snapshot(
+        [claim_tile_first],
+        rubric_version=memory_snapshot_rubric,
+        evaluator_version=(
+            "evidence-memory-evaluator-unimplemented-v2"
+        ),
+    )
 
     return [
         _probe(
@@ -1502,6 +1551,65 @@ def _controlled_probes(
             ),
         ),
         _probe(
+            "shadow_memory_version_is_stable_and_versioned",
+            (
+                baseline_memory_snapshot["candidate_memory_version"]
+                == repeated_memory_snapshot["candidate_memory_version"]
+                == dropout_memory_snapshot["candidate_memory_version"]
+                == versioned_series_memory_snapshot[
+                    "candidate_memory_version"
+                ]
+                and baseline_memory_snapshot[
+                    "shadow_evaluation_identity"
+                ]
+                == repeated_memory_snapshot[
+                    "shadow_evaluation_identity"
+                ]
+                == dropout_memory_snapshot[
+                    "shadow_evaluation_identity"
+                ]
+                == versioned_series_memory_snapshot[
+                    "shadow_evaluation_identity"
+                ]
+                and changed_evaluator_memory_snapshot[
+                    "candidate_memory_version"
+                ]
+                == baseline_memory_snapshot[
+                    "candidate_memory_version"
+                ]
+                and changed_evaluator_memory_snapshot[
+                    "shadow_evaluation_identity"
+                ]
+                != baseline_memory_snapshot[
+                    "shadow_evaluation_identity"
+                ]
+                and baseline_memory_snapshot["summary"][
+                    "claim_tile_mapping_count"
+                ]
+                == 1
+                and repeated_memory_snapshot["summary"][
+                    "claim_tile_mapping_count"
+                ]
+                == 1
+                and baseline_memory_snapshot[
+                    "canonical_memory_version"
+                ]
+                is None
+                and baseline_memory_snapshot["evaluation_identity"]
+                is None
+                and baseline_memory_snapshot["score"] is None
+                and baseline_memory_snapshot["runtime_effect"] is False
+                and baseline_memory_snapshot["authority"] is False
+            ),
+            (
+                "The candidate semantic memory version ignores repeats, "
+                "dropout state, and evaluator-specific mapping series. The "
+                "shadow evaluation identity changes only when its declared "
+                "memory, rubric, or evaluator version changes, without "
+                "claiming canonical memory or a score."
+            ),
+        ),
+        _probe(
             "identity_v4_matches_frozen_human_reviews",
             (
                 identity_gold_set["promotion_ready"] is True
@@ -1654,15 +1762,22 @@ def _controlled_probes(
             ),
         },
         {
-            "id": "no_versioned_memory_evaluator",
+            "id": "versioned_memory_evaluator_waiting_for_canonical_memory",
             "kind": "promotion_blocker",
             "status": "blocked",
             "observation": (
-                "No score is currently computed from a canonical memory version, so score stability "
-                "and real-change sensitivity cannot yet be measured."
+                "A deterministic candidate semantic memory version and shadow "
+                "evaluation identity now exist. They deliberately exclude repeat "
+                "counts, acquisition-presence state, and evaluator-specific mapping "
+                "series. No score is computed from a canonical memory version, so "
+                "result reuse, score stability, and real-change sensitivity cannot "
+                "yet be measured."
             ),
             "required_capability": (
-                "evaluation identity hash(memory_version, rubric_version, evaluator_version)"
+                "adopt canonical evidence, claim and tile selection; then persist "
+                "and reuse score results by "
+                "hash(memory_version, rubric_version, evaluator_version), with an "
+                "auditable score-delta ledger"
             ),
         },
     ]

@@ -30,8 +30,8 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["promotion_ready"] is False
     assert report["executable_failures"] == []
     assert report["schema_version"] == "evidence-memory-stress-v2"
-    assert report["policy_version"] == "evidence-memory-stress-policy-v10"
-    assert report["summary"]["executable_invariant_count"] == 26
+    assert report["policy_version"] == "evidence-memory-stress-policy-v11"
+    assert report["summary"]["executable_invariant_count"] == 27
     assert report["summary"]["promotion_blocker_count"] == 4
     assert report["summary"]["claim_relation_gold_candidate_count"] == 13
     assert report["summary"]["claim_relation_gold_reviewed_count"] == 13
@@ -144,6 +144,19 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
     assert probes[
         "claim_tile_review_set_freezes_real_mappings_without_authority"
     ]["status"] == "pass"
+    assert probes[
+        "shadow_memory_version_is_stable_and_versioned"
+    ]["status"] == "pass"
+    memory_evaluator = probes[
+        "versioned_memory_evaluator_waiting_for_canonical_memory"
+    ]
+    assert memory_evaluator["status"] == "blocked"
+    assert "candidate semantic memory version" in (
+        memory_evaluator["observation"]
+    )
+    assert "score-delta ledger" in memory_evaluator[
+        "required_capability"
+    ]
     tile_mapping = probes[
         "tile_mapping_pending_reviewed_promotion_policy"
     ]
@@ -407,7 +420,10 @@ def test_markdown_distinguishes_passes_from_promotion_blockers() -> None:
     assert "Pending: `0`" in rendered
     assert "## Locator pressure" not in rendered
     assert "## Promotion blockers" in rendered
-    assert "no_versioned_memory_evaluator" in rendered
+    assert (
+        "versioned_memory_evaluator_waiting_for_canonical_memory"
+        in rendered
+    )
 
 
 def _evidence(ref: str, content: str) -> dict:
