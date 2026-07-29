@@ -6,6 +6,9 @@ import src.services.evidence_memory_stress as stress_module
 from src.services.evidence_claim_relation_gold_set import (
     EvidenceClaimRelationGoldSetError,
 )
+from src.services.evidence_claim_tile_review_set import (
+    EvidenceClaimTileReviewSetError,
+)
 from src.services.evidence_identity_gold_set import (
     EvidenceIdentityGoldSetError,
 )
@@ -27,8 +30,8 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["promotion_ready"] is False
     assert report["executable_failures"] == []
     assert report["schema_version"] == "evidence-memory-stress-v2"
-    assert report["policy_version"] == "evidence-memory-stress-policy-v9"
-    assert report["summary"]["executable_invariant_count"] == 25
+    assert report["policy_version"] == "evidence-memory-stress-policy-v10"
+    assert report["summary"]["executable_invariant_count"] == 26
     assert report["summary"]["promotion_blocker_count"] == 4
     assert report["summary"]["claim_relation_gold_candidate_count"] == 13
     assert report["summary"]["claim_relation_gold_reviewed_count"] == 13
@@ -56,6 +59,16 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert (
         report["summary"]["source_review_claim_level_required_count"]
         == 5
+    )
+    assert report["summary"]["claim_tile_review_candidate_count"] == 8
+    assert report["summary"]["claim_tile_review_reviewed_count"] == 0
+    assert report["summary"]["claim_tile_review_pending_count"] == 8
+    assert report["summary"]["claim_tile_review_candidate_brand_count"] == 2
+    assert (
+        report["summary"][
+            "claim_tile_review_candidate_claim_variant_count"
+        ]
+        == 2
     )
     assert all(
         probe["status"] == "pass"
@@ -128,12 +141,16 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
     assert probes[
         "claim_tile_mapping_is_literal_versioned_and_shadow_only"
     ]["status"] == "pass"
+    assert probes[
+        "claim_tile_review_set_freezes_real_mappings_without_authority"
+    ]["status"] == "pass"
     tile_mapping = probes[
         "tile_mapping_pending_reviewed_promotion_policy"
     ]
     assert tile_mapping["status"] == "blocked"
-    assert "persistent versioned" in tile_mapping["observation"]
-    assert "review real mapping coverage" in tile_mapping[
+    assert "8 candidates" in tile_mapping["observation"]
+    assert "0 reviews" in tile_mapping["observation"]
+    assert "review the frozen real mappings" in tile_mapping[
         "required_capability"
     ]
     claim_relation = probes["changed_claim_has_no_canonical_resolution"]
@@ -196,6 +213,27 @@ def test_missing_source_review_fixture_fails_closed(monkeypatch) -> None:
     assert report["source_review_set"]["promotion_ready"] is False
     assert report["source_review_set"]["promotion_blockers"] == [
         "source_review_set_unavailable"
+    ]
+
+
+def test_missing_claim_tile_review_fixture_fails_closed(
+    monkeypatch,
+) -> None:
+    def _missing_candidates() -> list[dict]:
+        raise EvidenceClaimTileReviewSetError("missing fixture")
+
+    monkeypatch.setattr(
+        stress_module,
+        "load_claim_tile_review_candidates",
+        _missing_candidates,
+    )
+
+    report = run_evidence_memory_stress({})
+
+    assert report["summary"]["claim_tile_review_candidate_count"] == 0
+    assert report["claim_tile_review_set"]["promotion_ready"] is False
+    assert report["claim_tile_review_set"]["promotion_blockers"] == [
+        "claim_tile_review_set_unavailable"
     ]
 
 
@@ -364,6 +402,7 @@ def test_markdown_distinguishes_passes_from_promotion_blockers() -> None:
     assert "## Identity review set" in rendered
     assert "## Source review set" in rendered
     assert "## Claim relation review set" in rendered
+    assert "## Claim-to-tile review set" in rendered
     assert "Candidates: `13`" in rendered
     assert "Pending: `0`" in rendered
     assert "## Locator pressure" not in rendered

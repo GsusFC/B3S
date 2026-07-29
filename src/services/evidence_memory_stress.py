@@ -31,6 +31,16 @@ from src.services.evidence_claim_relation_gold_set import (
 from src.services.evidence_claim_tile_ledger import (
     build_evidence_claim_tile_ledger,
 )
+from src.services.evidence_claim_tile_review_set import (
+    DEFAULT_REVIEW_ROOT as CLAIM_TILE_REVIEW_ROOT,
+    EVIDENCE_CLAIM_TILE_REVIEW_DATASET_VERSION,
+    EVIDENCE_CLAIM_TILE_REVIEW_SCHEMA_VERSION,
+    EvidenceClaimTileReviewSetError,
+    evaluate_claim_tile_review_set,
+    load_review_candidates as load_claim_tile_review_candidates,
+    load_review_manifest as load_claim_tile_review_manifest,
+    load_reviews as load_claim_tile_reviews,
+)
 from src.services.evidence_identity_gold_set import (
     DEFAULT_GOLD_ROOT as IDENTITY_GOLD_ROOT,
     EVIDENCE_IDENTITY_GOLD_DATASET_VERSION,
@@ -66,7 +76,7 @@ from src.sv9_flow.contracts import (
 
 
 EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v2"
-EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v9"
+EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v10"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 
 
@@ -83,10 +93,12 @@ def run_evidence_memory_stress(
     identity_gold_set = _identity_gold_set_status()
     claim_relation_gold_set = _claim_relation_gold_set_status()
     source_review_set = _source_review_set_status()
+    claim_tile_review_set = _claim_tile_review_set_status()
     controlled = _controlled_probes(
         identity_gold_set=identity_gold_set,
         claim_relation_gold_set=claim_relation_gold_set,
         source_review_set=source_review_set,
+        claim_tile_review_set=claim_tile_review_set,
     )
     replay = _replay_real_histories(normalized_histories)
     identity_v2_replay = _replay_identity_v2(normalized_histories)
@@ -209,6 +221,25 @@ def run_evidence_memory_stress(
                     "claim_level_review_required_count"
                 ]
             ),
+            "claim_tile_review_candidate_count": (
+                claim_tile_review_set["summary"]["candidate_count"]
+            ),
+            "claim_tile_review_reviewed_count": (
+                claim_tile_review_set["summary"]["reviewed_count"]
+            ),
+            "claim_tile_review_pending_count": (
+                claim_tile_review_set["summary"]["pending_count"]
+            ),
+            "claim_tile_review_candidate_brand_count": (
+                claim_tile_review_set["summary"][
+                    "candidate_brand_count"
+                ]
+            ),
+            "claim_tile_review_candidate_claim_variant_count": (
+                claim_tile_review_set["summary"][
+                    "candidate_claim_variant_count"
+                ]
+            ),
         },
         "executable_failures": executable_failures,
         "promotion_blockers": promotion_blockers,
@@ -220,6 +251,7 @@ def run_evidence_memory_stress(
         "identity_gold_set": identity_gold_set,
         "claim_relation_gold_set": claim_relation_gold_set,
         "source_review_set": source_review_set,
+        "claim_tile_review_set": claim_tile_review_set,
         "interpretation": {
             "supported": (
                 "Evidence identities can be remembered deterministically across "
@@ -358,6 +390,53 @@ def _source_review_set_status() -> dict[str, Any]:
             "pending_case_ids": [],
             "revoked_case_ids": [],
             "claim_level_review_required_case_ids": [],
+            "evaluated": [],
+        }
+
+
+def _claim_tile_review_set_status() -> dict[str, Any]:
+    try:
+        return evaluate_claim_tile_review_set(
+            load_claim_tile_review_candidates(),
+            load_claim_tile_reviews(
+                CLAIM_TILE_REVIEW_ROOT / "reviews.jsonl"
+            ),
+            manifest=load_claim_tile_review_manifest(),
+        )
+    except EvidenceClaimTileReviewSetError:
+        return {
+            "schema_version": EVIDENCE_CLAIM_TILE_REVIEW_SCHEMA_VERSION,
+            "dataset_version": EVIDENCE_CLAIM_TILE_REVIEW_DATASET_VERSION,
+            "runtime_effect": False,
+            "authority": False,
+            "review_gate_ready": False,
+            "promotion_ready": False,
+            "review_blockers": [
+                "claim_tile_review_set_unavailable"
+            ],
+            "promotion_blockers": [
+                "claim_tile_review_set_unavailable"
+            ],
+            "summary": {
+                "candidate_count": 0,
+                "reviewed_count": 0,
+                "pending_count": 0,
+                "accepted_count": 0,
+                "disputed_count": 0,
+                "rejected_count": 0,
+                "critical_non_accept_count": 0,
+                "confirmed_mapping_precision": None,
+                "candidate_brand_count": 0,
+                "candidate_claim_variant_count": 0,
+                "candidate_polarity_counts": {},
+                "reviewed_real_brand_count": 0,
+                "reviewed_claim_variant_count": 0,
+                "reviewed_polarity_counts": {},
+                "reviewed_case_type_counts": {},
+            },
+            "pending_case_ids": [],
+            "critical_non_accept_case_ids": [],
+            "missing_required_polarities": [],
             "evaluated": [],
         }
 
@@ -618,6 +697,28 @@ def render_evidence_memory_stress_markdown(report: dict[str, Any]) -> str:
             f"- Blockers: `{_format_counts(Counter(claim_relation_gold.get('promotion_blockers') or []))}`",
         ]
     )
+    claim_tile_review = report.get("claim_tile_review_set") or {}
+    claim_tile_review_summary = (
+        claim_tile_review.get("summary") or {}
+    )
+    lines.extend(
+        [
+            "",
+            "## Claim-to-tile review set",
+            "",
+            f"- Dataset: `{claim_tile_review.get('dataset_version', 'unknown')}`",
+            f"- Review gate ready: `{str(bool(claim_tile_review.get('review_gate_ready'))).lower()}`",
+            f"- Promotion ready: `{str(bool(claim_tile_review.get('promotion_ready'))).lower()}`",
+            f"- Candidates: `{claim_tile_review_summary.get('candidate_count', 0)}`",
+            f"- Reviewed: `{claim_tile_review_summary.get('reviewed_count', 0)}`",
+            f"- Pending: `{claim_tile_review_summary.get('pending_count', 0)}`",
+            f"- Candidate brands: `{claim_tile_review_summary.get('candidate_brand_count', 0)}`",
+            f"- Candidate claim variants: `{claim_tile_review_summary.get('candidate_claim_variant_count', 0)}`",
+            f"- Candidate polarities: `{_format_counts(claim_tile_review_summary.get('candidate_polarity_counts'))}`",
+            f"- Confirmed mapping precision: `{claim_tile_review_summary.get('confirmed_mapping_precision')}`",
+            f"- Blockers: `{_format_counts(Counter(claim_tile_review.get('promotion_blockers') or []))}`",
+        ]
+    )
     if report.get("promotion_blockers"):
         lines.extend(["", "## Promotion blockers", ""])
         lines.extend(f"- `{blocker}`" for blocker in report["promotion_blockers"])
@@ -629,6 +730,7 @@ def _controlled_probes(
     identity_gold_set: dict[str, Any],
     claim_relation_gold_set: dict[str, Any],
     source_review_set: dict[str, Any],
+    claim_tile_review_set: dict[str, Any],
 ) -> list[dict[str, Any]]:
     stable_owned = _evidence(
         ref="web.0",
@@ -1456,6 +1558,38 @@ def _controlled_probes(
                 "corroboration authority."
             ),
         ),
+        _probe(
+            "claim_tile_review_set_freezes_real_mappings_without_authority",
+            (
+                claim_tile_review_set["runtime_effect"] is False
+                and claim_tile_review_set["authority"] is False
+                and claim_tile_review_set["promotion_ready"] is False
+                and claim_tile_review_set["summary"][
+                    "candidate_count"
+                ]
+                == 8
+                and claim_tile_review_set["summary"]["reviewed_count"]
+                == 0
+                and claim_tile_review_set["summary"][
+                    "candidate_brand_count"
+                ]
+                == 2
+                and claim_tile_review_set["summary"][
+                    "candidate_claim_variant_count"
+                ]
+                == 2
+                and claim_tile_review_set["summary"][
+                    "candidate_polarity_counts"
+                ]
+                == {"supports": 8}
+            ),
+            (
+                "Eight real deterministic mappings are frozen with their "
+                "claim text and tile contracts. Seven Vercel mappings reuse "
+                "one mission claim across mission and core-purpose tiles; no "
+                "candidate has review or scoring authority."
+            ),
+        ),
         {
             "id": "source_corroboration_pending_claim_level_review",
             "kind": "promotion_blocker",
@@ -1502,11 +1636,20 @@ def _controlled_probes(
             "observation": (
                 "The persistent versioned evidence → claim → tile ledger now "
                 "runs in shadow mode and fails closed on non-literal or "
-                "ambiguous support. Its real mapping coverage and promotion "
-                "policy have not been reviewed."
+                "ambiguous support. The frozen real review set has "
+                f"{claim_tile_review_set['summary']['candidate_count']} "
+                "candidates, "
+                f"{claim_tile_review_set['summary']['reviewed_count']} "
+                "reviews, "
+                f"{claim_tile_review_set['summary']['candidate_brand_count']} "
+                "brands, "
+                f"{claim_tile_review_set['summary']['candidate_claim_variant_count']} "
+                "claim variants, and only supports polarity. The promotion "
+                "policy has not been adopted."
             ),
             "required_capability": (
-                "review real mapping coverage and adopt a canonical promotion "
+                "review the frozen real mappings, expand coverage across brands, "
+                "claim variants and polarities, then adopt a canonical promotion "
                 "policy without granting repeated evidence extra breadth or points"
             ),
         },

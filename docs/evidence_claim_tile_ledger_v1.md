@@ -103,6 +103,13 @@ automatic_scoring_effect = false
 
 The real-history replay on 2026-07-29 found 8 conservative mappings across 12
 brand histories: 7 in Vercel and 1 in Robin Capital. Liminal produced none.
+The separate set documented in
+`docs/evidence_claim_tile_review_set_v1.md` freezes all eight with their claim
+text and tile contracts. None has a human review yet. Seven reuse one Vercel
+mission claim, only two brands and two claim variants are represented, and all
+eight have `supports` polarity.
+
 This demonstrates reuse of existing scanner evidence; it does not validate
 coverage or correctness for canonical promotion. Gate 2 therefore remains
-blocked on reviewed real mapping coverage and an explicit promotion policy.
+blocked on completed reviews, broader real coverage, polarity coverage, and an
+explicit promotion policy.
