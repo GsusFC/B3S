@@ -10,15 +10,18 @@ survive acquisition loss and evaluator drift. Identity v2 also separates
 documents from passages, suppresses URL-only change candidates, and clusters
 exact copies and light lexical paraphrases under source-independence policy v3.
 New Exa captures also persist enough external-attribution provenance for v2 to
-reproduce a strong match instead of trusting its label. It does not yet support
-safe promotion because the identity set and production source registry have not
-been reviewed. Claim Memory v1 can now separate semantic slots, variants, and
-occurrences, while its journal can reversibly adjudicate proposed relations.
-Its frozen 13-case relation set can now measure false and missed replacement
-once reviewed, but the set has no attributable human decisions or real
-replacement examples. The persistent evidence-to-claim-to-tile ledger now
-reuses conservative literal mappings in shadow mode. Claim Memory still cannot
-promote a canonical claim or evaluate a canonical memory version.
+reproduce a strong match instead of trusting its label. Identity policy v4 now
+matches all 14 unchanged human decisions and passes the frozen controlled gate.
+It does not yet support safe production promotion because that small fixture
+does not demonstrate generalization and the production source registry has not
+been reviewed.
+Claim Memory v1 can now separate semantic slots, variants, and occurrences,
+while its journal can reversibly adjudicate proposed relations. Its frozen
+13-case relation set is fully reviewed and passes the controlled replacement
+metrics, but it has no real replacement examples. The persistent
+evidence-to-claim-to-tile ledger now reuses conservative literal mappings in
+shadow mode. Claim Memory still cannot promote a canonical claim or evaluate a
+canonical memory version.
 
 ## Read-only harness
 
@@ -63,8 +66,10 @@ The executable foundation must prove:
 5. changed content is surfaced but not silently interpreted as contradiction;
 6. TTL expiry cannot retire evidence automatically;
 7. several passages from one document are not temporal revisions;
-8. weak external identity does not become validation-eligible;
-9. a bare strong-looking upstream label does not become validation-eligible;
+8. an explicit other-entity conflict is rejected even when upstream metadata
+   matches the brand name;
+9. a strong-looking upstream label cannot override a reproducible negative
+   identity signal;
 10. persisted strong external attribution is independently reproducible;
 11. exact syndicated copies share a cluster and do not count as independent;
 12. a controlled stable-slot change is surfaced as a proposed revision;
@@ -85,18 +90,19 @@ The executable foundation must prove:
 23. tile support requires a literal source quote plus claim anchor, exact
     repeats add persistence only, and evaluator drift creates a new
     non-authoritative mapping series.
+24. identity policy v4 matches all 14 unchanged human decisions with exact
+    agreement `1.0`, accepted precision/recall `1.0`, and zero critical false
+    accepts.
 
 The adversarial probes deliberately expose:
 
-1. repeated false identity metadata can create a v1 `validation_candidate`,
-   while v2 still lacks a reviewed identity gold set;
-2. source-independence v3 has no production-reviewed source decisions or
+1. source-independence v3 has no production-reviewed source decisions or
    measured semantic-paraphrase recall;
-3. the 13 claim-relation cases have no attributable reviews or real replacement
-   examples, and reviewed relations still have no canonical-promotion path;
-4. the persistent claim-to-tile mapping has no reviewed real coverage or
+2. the 13 reviewed claim-relation cases have no real replacement examples, and
+   reviewed relations still have no canonical-promotion path;
+3. the persistent claim-to-tile mapping has no reviewed real coverage or
    canonical promotion policy;
-5. no evaluator consumes a canonical memory version.
+4. no evaluator consumes a canonical memory version.
 
 ## Real-history replay
 
@@ -131,7 +137,7 @@ The first run replayed 12 histories containing material evidence:
 - 12/12 retained identity memory after evaluator-only drift;
 - 12/12 kept evidence breadth unchanged after an exact repeat;
 - 0 executable invariant failures;
-- 5 promotion blockers.
+- 4 promotion blockers.
 
 The replay also found multi-variant locator pressure in 11/12 histories. In the
 largest cases, 52%–56% of evidence identities belonged to locators containing
@@ -163,7 +169,8 @@ Claim Memory v1 replayed the same 12 histories and found:
 - 0 relation candidates;
 - 184 structural metadata rows correctly ignored as semantic identity:
   168 visual-tile rows and 16 `checked_block` rows;
-- 23/23 controlled executable invariants passed, including Claim Memory,
+- 24/24 controlled executable invariants passed, including identity policy v4,
+  Claim Memory,
   reconciliation, claim-slot producer, historical backfill, and the versioned
   evidence-to-claim-to-tile ledger.
 
@@ -184,14 +191,29 @@ mapping accuracy.
 The separate claim-relation review set contains:
 
 - 13 frozen cases: 10 controlled and 3 derived from immutable history;
-- 0 attributable human reviews and 13 pending reviews;
+- 13 attributable human reviews and 0 pending reviews;
 - 3 predicted replacement cases, 2 predicted coexistence cases, and 8
   predicted no-relation cases;
+- replacement precision `1.0`, recall `1.0`, exact agreement `0.846154`,
+  0 false replacements, and 0 missed replacements;
 - 3 real-history cases but 0 observed real replacements;
 - enforced metrics for false replacement, missed replacement, precision,
   recall, and exact agreement;
 - a fail-closed promotion result even if controlled cases pass, until reviewed
   real replacements are added under a new dataset version.
+
+The separate identity review set contains:
+
+- 14 attributable reviews and 0 pending;
+- accepted precision and recall `1.0`;
+- 0 critical false accepts;
+- exact agreement `1.0`;
+- no blocker in the controlled identity set.
+
+The 14 labels and the frozen `0.8` exact-agreement threshold were not changed.
+Passing this set does not establish accuracy on production brands; the policy
+and projection remain shadow-only with `runtime_effect=false` and
+`authority=false`.
 
 Verdict: `foundation_supported_promotion_blocked`.
 
@@ -237,20 +259,23 @@ can become accepted.
 Current status: the PostgreSQL identity-adjudication journal now provides
 versioned `accepted`, `disputed`, `rejected`, `superseded`, and `revoked`
 decisions with idempotency and optimistic concurrency. A controlled false
-acceptance remains `runtime_effect=false`, `authority=false`, `unverified`, and
+acceptance remains `runtime_effect=false`, `authority=false`, `mismatch`, and
 `repeated`. The single reviewer is now bound server-side to a dedicated
 credential. Source-independence policy v3 now fails closed on unknown ownership,
 clusters exact and light lexical copies, respects explicit lineage, and disputes
-ambiguous similarity. Gate 1 is still blocked by the missing human identity
-reviews, the absence of production source reviews, and unmeasured semantic
-paraphrase recall.
+ambiguous similarity. The controlled identity sub-gate now passes all 14
+attributable decisions with zero critical false accepts and exact agreement
+`1.0`. Gate 1 remains blocked for canonical use by the absence of production
+source reviews, unmeasured semantic-paraphrase recall, and the missing
+canonical-claim policy.
 
 The separate claim-reconciliation journal now provides the same append-only,
 idempotent, optimistic-concurrency and revocation guarantees for stable
 relation candidates. Controlled acceptance remains non-authoritative. Claim
 promotion is still blocked. The frozen relation set makes false-replacement
-and missed-change metrics executable, but no decisions are attributable and
-the corpus contains no real replacement examples.
+and missed-change metrics executable. All 13 decisions are attributable and
+the controlled precision/recall gates pass, but the corpus contains no real
+replacement examples.
 
 ### Gate 2 — tile evidence ledger
 

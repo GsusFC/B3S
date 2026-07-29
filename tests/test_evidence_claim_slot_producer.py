@@ -9,6 +9,7 @@ from src.sv9_flow.claim_slot_producer import (
     build_claim_memory_evidence,
 )
 from src.sv9_flow.contracts import (
+    SV9_FLOW_CANDIDATE_VERSION,
     BrandEvidencePack,
     BrandInterpretation,
     EvidenceRecord,
@@ -328,6 +329,73 @@ def test_malformed_persisted_lane_fails_closed_without_backfill() -> None:
     }
 
 
+def test_tampered_persisted_lane_fails_closed() -> None:
+    report = _report(
+        "tampered-lane",
+        "2026-01-01T00:00:00Z",
+        _owned(
+            "Our mission is to make every decision traceable.",
+            ref="web.about",
+        ),
+    )
+    lane = report["raw"]["flow"]["candidate"]["claim_memory_evidence"]
+    lane[0]["content"] = "Our mission is to accept an injected claim."
+
+    memory = build_evidence_claim_memory([report])
+
+    assert memory["summary"]["claim_slot_count"] == 0
+    assert memory["claim_slot_producer"]["resolution_mode_counts"] == {
+        "invalid_persisted_shadow_lane": 1
+    }
+
+
+def test_persisted_lane_with_wrong_producer_version_fails_closed() -> None:
+    report = _report(
+        "wrong-producer",
+        "2026-01-01T00:00:00Z",
+        _owned(
+            "Our mission is to make every decision traceable.",
+            ref="web.about",
+        ),
+    )
+    lane = report["raw"]["flow"]["candidate"]["claim_memory_evidence"]
+    lane[0]["metadata"]["claim_slot_producer_version"] = (
+        "untrusted-producer-v1"
+    )
+
+    memory = build_evidence_claim_memory([report])
+
+    assert memory["summary"]["claim_slot_count"] == 0
+    assert memory["claim_slot_producer"]["resolution_mode_counts"] == {
+        "invalid_persisted_shadow_lane": 1
+    }
+
+
+def test_partial_persisted_lane_fails_closed() -> None:
+    report = _report(
+        "partial-lane",
+        "2026-01-01T00:00:00Z",
+        _owned(
+            "# Mission\nMake every decision traceable.",
+            ref="web.about",
+        ),
+        _owned(
+            "# Vision\nMake business evidence trustworthy.",
+            ref="web.company",
+            url="https://example.com/company",
+        ),
+    )
+    lane = report["raw"]["flow"]["candidate"]["claim_memory_evidence"]
+    lane.pop()
+
+    memory = build_evidence_claim_memory([report])
+
+    assert memory["summary"]["claim_slot_count"] == 0
+    assert memory["claim_slot_producer"]["resolution_mode_counts"] == {
+        "invalid_persisted_shadow_lane": 1
+    }
+
+
 def test_v2_candidate_missing_lane_fails_closed() -> None:
     report = _legacy_report(
         "v2-missing",
@@ -470,7 +538,10 @@ def _report(
             brand_name=pack.brand_name,
             url=pack.url,
         ),
-        claim_memory_evidence=build_claim_memory_evidence(pack),
+        claim_memory_evidence=build_claim_memory_evidence(
+            pack,
+            source_candidate_schema_version=SV9_FLOW_CANDIDATE_VERSION,
+        ),
     )
     return {
         "id": report_id,

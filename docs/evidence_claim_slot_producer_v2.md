@@ -70,10 +70,15 @@ Confidence never exceeds the confidence of the source record.
 
 ## Historical compatibility
 
-Persisted `sv9-flow-candidate-v2` lanes always take precedence, including an
-explicitly empty lane. Missing or malformed v2 lanes are not regenerated.
-Only immutable `sv9-flow-candidate-v1` packs are eligible for the separate
-versioned historical backfill.
+Persisted `sv9-flow-candidate-v2` lanes take precedence only after validation.
+Every non-empty lane must reproduce exactly from its immutable evidence pack
+under Producer v2, including record order and pinned provenance. A changed,
+partial, foreign-version, or otherwise malformed lane fails closed instead of
+being consumed or regenerated. An explicitly empty lane remains valid because
+it can suppress a shadow projection but cannot inject a claim.
+
+Only immutable `sv9-flow-candidate-v1` packs without a persisted lane are
+eligible for the separate versioned historical backfill.
 
 See
 [`evidence_claim_historical_backfill_v1.md`](evidence_claim_historical_backfill_v1.md).

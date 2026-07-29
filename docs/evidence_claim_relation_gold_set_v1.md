@@ -4,8 +4,9 @@
 
 The repository now contains a frozen 13-case review set and a deterministic
 evaluator for Claim Memory relation proposals. It measures false replacement,
-missed replacement, replacement precision and replacement recall, but it is
-not reviewed gold data yet.
+missed replacement, replacement precision and replacement recall. All cases
+now have attributable human decisions, but promotion remains blocked because
+the corpus contains only three real-history cases and no real replacement.
 
 The candidate `proposed_review` fields are drafting aids. They are never loaded
 as human decisions and cannot make the dataset promotion-ready.
@@ -16,6 +17,7 @@ as human decisions and cannot make the dataset promotion-ready.
 fixtures/evidence_claim_relation_gold/v1/
   manifest.json
   candidates.jsonl
+  reviews.jsonl
 ```
 
 The manifest pins the candidate fingerprint. A silent edit to any timeline,
@@ -51,7 +53,23 @@ The deterministic prediction is derived only from Claim Memory v1:
 
 Prediction does not adjudicate the case.
 
-## Single-reviewer workflow
+## Reviewed result — 2026-07-29
+
+- reviewed: `13/13`;
+- pending: `0`;
+- false replacements: `0`;
+- missed replacements: `0`;
+- replacement precision: `1.0`;
+- replacement recall: `1.0`;
+- exact agreement: `0.846154`;
+- reviewed real histories: `3`;
+- reviewed real replacements: `0`.
+
+The controlled relation metrics pass. The remaining blockers are
+`insufficient_reviewed_real_history_cases` and
+`insufficient_reviewed_real_replacements`.
+
+## Single-reviewer workflow for a new dataset version
 
 Generate an unsigned template outside the repository:
 
@@ -72,7 +90,6 @@ Then evaluate:
 
 ```bash
 .venv/bin/python scripts/evidence_claim_relation_gold_set.py \
-  --reviews tmp/evidence-claim-relation-reviews.jsonl \
   --format markdown
 ```
 
@@ -99,9 +116,9 @@ replacements. Therefore even perfect agreement on every controlled case cannot
 authorize promotion. New real cases require a new dataset version and
 fingerprint.
 
-Before review, the deterministic projection proposes 3 replacement cases, 2
-coexistence cases, and 8 cases with no relation. These are model outputs, not
-human labels.
+The deterministic projection proposes 3 replacement cases, 2 coexistence
+cases, and 8 cases with no relation. The committed human decisions are 3
+replacement, 1 coexistence, 7 no-relation, and 2 disputed.
 
 All results remain:
 

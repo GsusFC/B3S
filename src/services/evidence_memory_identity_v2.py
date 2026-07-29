@@ -14,6 +14,11 @@ import json
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
+from src.entity_identity_provenance import (
+    related_entity_relation,
+    resolve_entity_conflict_provenance,
+    resolve_entity_relation_provenance,
+)
 from src.evidence_identity import (
     canonical_evidence_digest,
     normalize_evidence_text,
@@ -42,7 +47,7 @@ from src.sv9_flow.claim_slot_producer import (
 
 
 EVIDENCE_MEMORY_IDENTITY_V2_VERSION = "evidence-memory-identity-v2"
-EVIDENCE_MEMORY_IDENTITY_V2_POLICY_VERSION = "evidence-memory-identity-policy-v3"
+EVIDENCE_MEMORY_IDENTITY_V2_POLICY_VERSION = "evidence-memory-identity-policy-v4"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 _GOOD_ACQUISITION_STATES = {"pass", "warning"}
 _TTL_DAYS = {
@@ -68,6 +73,7 @@ def build_evidence_memory_identity_v2(
     latest_report_id = str(latest.get("id") or "")
     latest_at = _timestamp(latest.get("created_at"))
     brand_domain = _domain(str(latest.get("url") or ""))
+    brand_name = str(latest.get("brand_name") or "")
     result: dict[str, Any] = {
         "schema_version": EVIDENCE_MEMORY_IDENTITY_V2_VERSION,
         "policy_version": EVIDENCE_MEMORY_IDENTITY_V2_POLICY_VERSION,
@@ -75,7 +81,7 @@ def build_evidence_memory_identity_v2(
         "runtime_effect": False,
         "authority": False,
         "brand": {
-            "name": str(latest.get("brand_name") or ""),
+            "name": brand_name,
             "domain": brand_domain,
         },
         "report_count": len(ordered),
@@ -90,6 +96,36 @@ def build_evidence_memory_identity_v2(
             "brand_name_only_external_identity_is_eligible": False,
             "upstream_identity_label_is_eligible": False,
             "reproducible_external_identity_is_eligible": True,
+            "rejected_requires_reproducible_negative_identity": True,
+            "owned_external_domain_is_not_automatic_mismatch": True,
+            "corporate_relation_alone_establishes_identity": False,
+            "llm_only_entity_conflict_is_authoritative": False,
+            "identity_strength_states": [
+                "positive",
+                "negative",
+                "unverified",
+                "conflicting",
+            ],
+            "entity_relation_states": [
+                "same_entity",
+                "parent",
+                "subsidiary",
+                "product",
+                "related_party",
+                "unrelated",
+                "unknown",
+            ],
+            "entity_relation_status_states": [
+                "verified",
+                "candidate",
+                "none",
+                "unknown",
+            ],
+            "entity_subject_roles": [
+                "scanned_entity",
+                "related_entity",
+                "unresolved",
+            ],
             "exact_syndication_clustering": True,
             "same_publisher_is_one_independence_cluster": True,
             "same_publisher_group_is_one_independence_cluster": True,
@@ -104,6 +140,8 @@ def build_evidence_memory_identity_v2(
             "revision_requires_explicit_claim_slot",
             "external_brand_name_match_requires_adjudication",
             "external_identity_requires_reproducible_provenance",
+            "negative_identity_requires_reproducible_entity_conflict",
+            "related_domain_requires_resolved_subject_role",
             "unreviewed_publisher_ownership_remains_unknown",
             "ambiguous_source_independence_requires_human_review",
             "source_independence_has_no_current_corroboration_or_scoring_effect",
@@ -144,21 +182,48 @@ def build_evidence_memory_identity_v2(
                 {
                     "atom": atom,
                     "identity_statuses": [],
+                    "identity_strengths": [],
                     "identity_reason_codes": set(),
                     "deterministic_identity_matches": set(),
                     "llm_identity_matches": set(),
                     "external_identity_provenance": {},
+                    "entity_conflict_provenance": {},
+                    "entity_relation_provenance": {},
+                    "entity_relation_statuses": set(),
+                    "entity_relations": set(),
+                    "entity_subject_roles": set(),
                     "ref_count": 0,
                 },
             )
-            identity_status, identity_reasons = _row_identity_status(
+            identity = _row_identity_resolution(
                 row,
                 source_class=str(atom["source_class"]),
                 source_domain=str(atom["source_domain"]),
                 brand_domain=brand_domain,
+                brand_name=brand_name,
             )
-            group["identity_statuses"].append(identity_status)
-            group["identity_reason_codes"].update(identity_reasons)
+            group["identity_statuses"].append(identity["identity_status"])
+            group["identity_strengths"].append(identity["identity_strength"])
+            group["identity_reason_codes"].update(identity["reason_codes"])
+            group["entity_relation_statuses"].add(
+                identity["entity_relation_status"]
+            )
+            group["entity_relations"].add(identity["entity_relation"])
+            group["entity_subject_roles"].add(identity["entity_subject_role"])
+            for projection_key in (
+                "entity_conflict_provenance",
+                "entity_relation_provenance",
+            ):
+                projection = identity[projection_key]
+                if projection:
+                    group[projection_key][
+                        json.dumps(
+                            projection,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    ] = projection
             metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
             deterministic = str(metadata.get("identity_match") or "").strip().lower()
             llm = str(metadata.get("identity_match_llm") or "").strip().lower()
@@ -183,6 +248,9 @@ def build_evidence_memory_identity_v2(
         for evidence_id, group in grouped.items():
             atom = group["atom"]
             identity_status = _merge_identity_statuses(group["identity_statuses"])
+            identity_strength = _merge_identity_strengths(
+                group["identity_strengths"]
+            )
             validation_eligible = (
                 identity_status == "eligible"
                 and not snapshot.invalid
@@ -192,6 +260,7 @@ def build_evidence_memory_identity_v2(
                 "report_id": report_id,
                 "observed_at": observed_at,
                 "identity_status": identity_status,
+                "identity_strength": identity_strength,
                 "identity_reason_codes": sorted(group["identity_reason_codes"]),
                 "deterministic_identity_matches": sorted(
                     group["deterministic_identity_matches"]
@@ -201,6 +270,23 @@ def build_evidence_memory_identity_v2(
                     group["external_identity_provenance"][key]
                     for key in sorted(group["external_identity_provenance"])
                 ],
+                "entity_conflict_provenance": [
+                    group["entity_conflict_provenance"][key]
+                    for key in sorted(group["entity_conflict_provenance"])
+                ],
+                "entity_relation_provenance": [
+                    group["entity_relation_provenance"][key]
+                    for key in sorted(group["entity_relation_provenance"])
+                ],
+                "entity_relation_status": _merge_entity_relation_statuses(
+                    group["entity_relation_statuses"]
+                ),
+                "entity_relation": _merge_entity_relations(
+                    group["entity_relations"]
+                ),
+                "entity_subject_role": _merge_entity_subject_roles(
+                    group["entity_subject_roles"]
+                ),
                 "validation_eligible": validation_eligible,
                 "acquisition_state": snapshot.acquisition_state,
                 "invalid": snapshot.invalid,
@@ -244,6 +330,9 @@ def build_evidence_memory_identity_v2(
         identity_status = _merge_identity_statuses(
             [str(item["identity_status"]) for item in atom_observations]
         )
+        identity_strength = _merge_identity_strengths(
+            [str(item["identity_strength"]) for item in atom_observations]
+        )
         claim_slot_id = str(atom.get("claim_slot_id") or "")
         state, state_reasons = _entry_state(
             observation_count=len(atom_observations),
@@ -261,6 +350,25 @@ def build_evidence_memory_identity_v2(
             "state": state,
             "state_reason_codes": state_reasons,
             "identity_status": identity_status,
+            "identity_strength": identity_strength,
+            "entity_relation_status": _merge_entity_relation_statuses(
+                {
+                    str(item["entity_relation_status"])
+                    for item in atom_observations
+                }
+            ),
+            "entity_relation": _merge_entity_relations(
+                {
+                    str(item["entity_relation"])
+                    for item in atom_observations
+                }
+            ),
+            "entity_subject_role": _merge_entity_subject_roles(
+                {
+                    str(item["entity_subject_role"])
+                    for item in atom_observations
+                }
+            ),
             "adjudication_state": "proposed",
             "present_in_latest": present_in_latest,
             "first_seen_at": str(atom_observations[0]["observed_at"]),
@@ -295,6 +403,9 @@ def build_evidence_memory_identity_v2(
     )
     state_counts = Counter(str(entry["state"]) for entry in entries)
     identity_counts = Counter(str(entry["identity_status"]) for entry in entries)
+    identity_strength_counts = Counter(
+        str(entry["identity_strength"]) for entry in entries
+    )
     source_counts = Counter(str(entry["source_class"]) for entry in current_entries)
     current_external = [
         entry
@@ -322,6 +433,9 @@ def build_evidence_memory_identity_v2(
         "revision_candidate_count": state_counts.get("revision_candidate", 0),
         "state_counts": dict(sorted(state_counts.items())),
         "identity_status_counts": dict(sorted(identity_counts.items())),
+        "identity_strength_counts": dict(
+            sorted(identity_strength_counts.items())
+        ),
         "current_source_class_counts": dict(sorted(source_counts.items())),
         "current_external_publisher_count": len(
             {
@@ -525,54 +639,161 @@ def _claim_slot(
     return "", ""
 
 
-def _row_identity_status(
+def _row_identity_resolution(
     row: dict[str, Any],
     *,
     source_class: str,
     source_domain: str,
     brand_domain: str,
-) -> tuple[str, list[str]]:
+    brand_name: str,
+) -> dict[str, Any]:
     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
     deterministic = str(metadata.get("identity_match") or "").strip().lower()
     llm = str(metadata.get("identity_match_llm") or "").strip().lower()
-    if source_class == "owned_copy":
-        if _same_brand_domain(source_domain, brand_domain):
-            return "eligible", ["owned_document_matches_brand_domain"]
-        return "mismatch", ["owned_document_outside_brand_domain"]
-    if source_class != "external_proof":
-        return "unverified", ["source_class_not_identity_validated"]
+    content = normalize_evidence_text(row.get("content"))
+    conflict = resolve_entity_conflict_provenance(
+        metadata.get("entity_conflict_provenance"),
+        brand_name=brand_name,
+        brand_domain=brand_domain,
+        source_domain=source_domain,
+        content=content,
+    )
+    relation = resolve_entity_relation_provenance(
+        metadata.get("entity_relation_provenance"),
+        brand_name=brand_name,
+        brand_domain=brand_domain,
+        source_domain=source_domain,
+        content=content,
+    )
     provenance = metadata.get("external_identity_provenance")
     reproduced, provenance_reasons = verify_external_identity_provenance(
         provenance,
         brand_domain=brand_domain,
         source_domain=source_domain,
-        content=normalize_evidence_text(row.get("content")),
+        content=content,
     )
-    if reproduced:
-        if deterministic == "none" or llm == "none":
-            return "disputed", [
-                *provenance_reasons,
-                "reproduced_external_identity_label_disagrees",
-            ]
-        return "eligible", provenance_reasons
+
+    positive_reasons: list[str] = []
+    negative_reasons: list[str] = []
+    unresolved_reasons: list[str] = []
+
+    if source_class == "owned_copy" and _same_brand_domain(
+        source_domain,
+        brand_domain,
+    ):
+        positive_reasons.append("owned_document_matches_brand_domain")
+    if source_class == "external_proof" and reproduced:
+        positive_reasons.extend(provenance_reasons)
+    elif source_class == "external_proof" and isinstance(provenance, dict):
+        unresolved_reasons.extend(provenance_reasons)
+
+    if conflict["authoritative"]:
+        negative_reasons.extend(conflict["reasons"])
+        negative_reasons.append(
+            f"reproducible_entity_conflict:{conflict['conflict_type']}"
+        )
+
+    relation_is_verified = (
+        relation["status"] == "verified" and relation["authoritative"]
+    )
+    relation_name = str(relation["relation"])
+    subject_role = str(relation["subject_role"])
+    if relation_is_verified and relation_name == "unrelated":
+        negative_reasons.append("verified_unrelated_entity_domain")
+    elif (
+        relation_is_verified
+        and related_entity_relation(relation_name)
+        and subject_role == "related_entity"
+    ):
+        negative_reasons.append("verified_related_entity_is_passage_subject")
+    elif (
+        relation_is_verified
+        and (
+            relation_name == "same_entity"
+            or related_entity_relation(relation_name)
+        )
+        and subject_role == "scanned_entity"
+    ):
+        positive_reasons.append(
+            "verified_relation_identifies_scanned_entity_as_subject"
+        )
+
     if deterministic == "none":
-        return "mismatch", [
-            "deterministic_identity_mismatch",
-            *provenance_reasons,
-        ]
-    if isinstance(provenance, dict):
-        return "unverified", provenance_reasons
-    if deterministic == "domain":
-        return "unverified", [
-            "upstream_domain_label_not_independently_reproduced"
-        ]
-    if deterministic == "brand_name":
-        return "unverified", ["brand_name_match_requires_adjudication"]
-    if llm in {"domain", "brand_name"}:
-        return "unverified", ["llm_only_identity_match_not_eligible"]
-    if llm == "none":
-        return "unverified", ["llm_only_identity_mismatch_not_authoritative"]
-    return "unverified", ["identity_not_established"]
+        negative_reasons.append("deterministic_identity_mismatch")
+
+    positive = bool(positive_reasons)
+    negative = bool(negative_reasons)
+    llm_disagrees_with_positive = positive and llm == "none"
+
+    if positive and (negative or llm_disagrees_with_positive):
+        status = "disputed"
+        strength = "conflicting"
+        if llm_disagrees_with_positive:
+            unresolved_reasons.append(
+                "reproduced_external_identity_label_disagrees"
+            )
+    elif negative:
+        status = "mismatch"
+        strength = "negative"
+    elif positive:
+        status = "eligible"
+        strength = "positive"
+    else:
+        status = "unverified"
+        strength = "unverified"
+        if source_class == "owned_copy":
+            if relation["status"] in {"candidate", "unknown", "none"}:
+                unresolved_reasons.append(
+                    "owned_external_domain_relation_unresolved"
+                )
+            elif (
+                related_entity_relation(relation_name)
+                and subject_role == "unresolved"
+            ):
+                unresolved_reasons.append(
+                    "related_domain_subject_role_unresolved"
+                )
+        elif source_class != "external_proof":
+            unresolved_reasons.append(
+                "source_class_not_identity_validated"
+            )
+        elif deterministic == "domain":
+            unresolved_reasons.append(
+                "upstream_domain_label_not_independently_reproduced"
+            )
+        elif deterministic == "brand_name":
+            unresolved_reasons.append(
+                "brand_name_match_requires_adjudication"
+            )
+        elif llm in {"domain", "brand_name"}:
+            unresolved_reasons.append(
+                "llm_only_identity_match_not_eligible"
+            )
+        elif llm == "none":
+            unresolved_reasons.append(
+                "llm_only_identity_mismatch_not_authoritative"
+            )
+        else:
+            unresolved_reasons.append("identity_not_established")
+
+    return {
+        "identity_status": status,
+        "identity_strength": strength,
+        "reason_codes": _dedupe_strings(
+            [
+                *positive_reasons,
+                *negative_reasons,
+                *unresolved_reasons,
+                *conflict["reasons"],
+                *relation["reasons"],
+            ]
+        ),
+        "entity_conflict_provenance": conflict["provenance"],
+        "entity_relation_provenance": relation["provenance"],
+        "entity_relation_status": relation["status"],
+        "entity_relation": relation_name,
+        "entity_subject_role": subject_role,
+    }
 
 
 def _external_identity_provenance_projection(value: Any) -> dict[str, Any]:
@@ -608,6 +829,44 @@ def _merge_identity_statuses(statuses: Iterable[str]) -> str:
     if values == {"mismatch"}:
         return "mismatch"
     return "unverified"
+
+
+def _merge_identity_strengths(strengths: Iterable[str]) -> str:
+    values = {str(strength) for strength in strengths if str(strength)}
+    if not values:
+        return "unverified"
+    if values == {"positive"}:
+        return "positive"
+    if values == {"negative"}:
+        return "negative"
+    if values == {"unverified"}:
+        return "unverified"
+    return "conflicting"
+
+
+def _merge_entity_relation_statuses(statuses: Iterable[str]) -> str:
+    values = {str(status) for status in statuses if str(status)}
+    if len(values) == 1:
+        return next(iter(values))
+    return "unknown"
+
+
+def _merge_entity_relations(relations: Iterable[str]) -> str:
+    values = {str(relation) for relation in relations if str(relation)}
+    if len(values) == 1:
+        return next(iter(values))
+    return "unknown"
+
+
+def _merge_entity_subject_roles(roles: Iterable[str]) -> str:
+    values = {str(role) for role in roles if str(role)}
+    if len(values) == 1:
+        return next(iter(values))
+    return "unresolved"
+
+
+def _dedupe_strings(values: Iterable[str]) -> list[str]:
+    return list(dict.fromkeys(str(value) for value in values if str(value)))
 
 
 def _entry_state(
@@ -775,6 +1034,7 @@ def _empty_summary() -> dict[str, Any]:
         "revision_candidate_count": 0,
         "state_counts": {},
         "identity_status_counts": {},
+        "identity_strength_counts": {},
         "current_source_class_counts": {},
         "current_external_publisher_count": 0,
         "current_external_syndication_cluster_count": 0,

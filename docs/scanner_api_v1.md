@@ -203,9 +203,13 @@ Its safety boundary is explicit:
 - `runtime_effect` and `authority` are always `false`;
 - URL equality never implies revision;
 - revision proposals require a stable slot;
-- weak external identity remains unverified;
+- `rejected` requires reproducible negative identity evidence;
+- weak or unresolved identity remains unverified;
 - a bare upstream identity label remains unverified, while eligible external
   identity requires reproducible persisted attribution provenance;
+- related external domains remain unverified until both the entity relation
+  and passage-subject role are reproducibly resolved;
+- LLM-only conflict metadata is non-authoritative;
 - exact copies, reviewed publisher groups, explicit source lineage, and high
   deterministic shingle similarity share a conservative source cluster;
 - ambiguous similarity is `disputed`, missing ownership/source review is

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
+import json
+from pathlib import Path
 
 from src.external_identity_provenance import build_external_identity_provenance
 from src.services.evidence_memory_identity_v2 import (
@@ -22,7 +25,7 @@ def test_multiple_passages_from_one_document_are_not_revision_candidates() -> No
 
     assert result["runtime_effect"] is False
     assert result["authority"] is False
-    assert result["policy_version"] == "evidence-memory-identity-policy-v3"
+    assert result["policy_version"] == "evidence-memory-identity-policy-v4"
     assert result["source_independence"]["schema_version"] == (
         "evidence-source-independence-v3"
     )
@@ -94,7 +97,7 @@ def test_explicit_claim_slot_can_propose_revision_without_accepting_replacement(
     assert "semantic_replacement_not_assumed" in revision["state_reason_codes"]
 
 
-def test_llm_only_external_identity_never_becomes_validation_candidate() -> None:
+def test_llm_positive_label_cannot_override_reproducible_entity_conflict() -> None:
     row = _external(
         "exa.0",
         "https://unrelated.test/story",
@@ -110,11 +113,12 @@ def test_llm_only_external_identity_never_becomes_validation_candidate() -> None
     )
     entry = result["entries"][0]
 
-    assert entry["identity_status"] == "unverified"
+    assert entry["identity_status"] == "mismatch"
+    assert entry["identity_strength"] == "negative"
     assert entry["qualified_observation_count"] == 0
     assert entry["state"] == "repeated"
     assert all(
-        "llm_only_identity_match_not_eligible"
+        "reproducible_entity_conflict:explicit_other_entity"
         in observation["identity_reason_codes"]
         for observation in entry["observations"]
     )
@@ -215,6 +219,75 @@ def test_later_identity_dispute_degrades_validation_candidate() -> None:
     assert entry["identity_status"] == "disputed"
     assert entry["state"] == "repeated"
     assert "validation_eligibility_incomplete" in entry["state_reason_codes"]
+
+
+def test_identity_v4_boundary_fixture_keeps_unresolved_separate_from_negative() -> None:
+    root = (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "evidence_identity_policy"
+        / "v4"
+    )
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    case_bytes = (root / "boundary_cases.jsonl").read_bytes()
+    cases = [
+        json.loads(line)
+        for line in case_bytes.decode("utf-8").splitlines()
+        if line.strip()
+    ]
+    decision_by_status = {
+        "eligible": "accepted",
+        "mismatch": "rejected",
+        "disputed": "disputed",
+        "unverified": "disputed",
+    }
+
+    assert manifest["policy_version"] == "evidence-memory-identity-policy-v4"
+    assert manifest["runtime_effect"] is False
+    assert manifest["authority"] is False
+    assert manifest["case_count"] == len(cases) == 7
+    assert manifest["case_file_sha256"] == hashlib.sha256(
+        case_bytes
+    ).hexdigest()
+
+    for case in cases:
+        result = build_evidence_memory_identity_v2(
+            [
+                _report(
+                    str(case["case_id"]),
+                    "2026-01-01T00:00:00Z",
+                    [case["evidence"]],
+                )
+            ]
+        )
+        entry = result["entries"][0]
+        assert decision_by_status[entry["identity_status"]] == case[
+            "expected_decision"
+        ], case["case_id"]
+        assert entry["identity_strength"] == case[
+            "expected_identity_strength"
+        ], case["case_id"]
+
+    llm_only = next(
+        case for case in cases if case["case_id"] == "llm-only-conflict"
+    )
+    llm_result = build_evidence_memory_identity_v2(
+        [
+            _report(
+                "llm-only",
+                "2026-01-01T00:00:00Z",
+                [llm_only["evidence"]],
+            )
+        ]
+    )
+    llm_observation = llm_result["entries"][0]["observations"][0]
+    assert llm_observation["identity_status"] == "unverified"
+    assert "llm_entity_conflict_not_authoritative" in llm_observation[
+        "identity_reason_codes"
+    ]
+    assert "evidence_spans" not in llm_observation[
+        "entity_conflict_provenance"
+    ][0]
 
 
 def test_exact_syndication_across_publishers_counts_as_one_independent_cluster() -> None:

@@ -358,7 +358,7 @@ def test_evidence_memory_identity_v2_endpoint_is_non_authoritative(monkeypatch):
         "web.api_v1.router.evidence_memory_identity_v2_for_domain",
         lambda _domain: {
             "schema_version": "evidence-memory-identity-v2",
-            "policy_version": "evidence-memory-identity-policy-v3",
+            "policy_version": "evidence-memory-identity-policy-v4",
             "mode": "shadow",
             "runtime_effect": False,
             "authority": False,
