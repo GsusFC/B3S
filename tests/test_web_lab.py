@@ -264,6 +264,7 @@ def test_evidence_memory_identity_v2_is_derived_without_authority(
         list_report_payloads_for_domain=lambda domain, *, limit, offset: (
             [report][offset : offset + limit] if domain == "example.com" else []
         ),
+        list_current_evidence_memory_adjudications=lambda domain: [],
     )
     monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
     monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
@@ -278,7 +279,93 @@ def test_evidence_memory_identity_v2_is_derived_without_authority(
     assert result["persistence"] == {
         "stored": False,
         "backend": "history_derived",
+        "adjudications": {
+            "stored": True,
+            "backend": "postgres",
+            "event_count": 0,
+        },
     }
+
+
+def test_evidence_adjudication_write_rejects_unknown_projected_subject(
+    tmp_path,
+    monkeypatch,
+):
+    from src.services.evidence_memory_adjudication import (
+        EvidenceMemoryAdjudicationCommand,
+        EvidenceMemoryAdjudicationNotFoundError,
+    )
+    from web import report_store
+
+    class Repository:
+        @staticmethod
+        def list_report_payloads_for_domain(_domain, *, limit, offset):
+            return []
+
+        @staticmethod
+        def append_evidence_memory_adjudication(*_args, **_kwargs):
+            raise AssertionError("unknown evidence must not reach the journal")
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: Repository())
+    command = EvidenceMemoryAdjudicationCommand(
+        subject_id="a" * 64,
+        decision="accepted",
+        expected_current_event_id=None,
+        reviewer="reviewer@example.com",
+        reason_code="identity_confirmed",
+        rationale="The source identifies the scanned brand.",
+        evaluator_version="manual-review-v1",
+        actor_id="environment-token",
+        idempotency_key_hash="b" * 64,
+        request_fingerprint="c" * 64,
+    )
+
+    with pytest.raises(
+        EvidenceMemoryAdjudicationNotFoundError,
+        match="does not exist",
+    ):
+        report_store.append_evidence_memory_adjudication_for_domain(
+            "example.com",
+            command,
+        )
+
+
+def test_evidence_adjudication_write_never_falls_back_to_json_files(
+    tmp_path,
+    monkeypatch,
+):
+    from src.services.evidence_memory_adjudication import (
+        EvidenceMemoryAdjudicationCommand,
+        EvidenceMemoryAdjudicationUnavailableError,
+    )
+    from web import report_store
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: None)
+    command = EvidenceMemoryAdjudicationCommand(
+        subject_id="a" * 64,
+        decision="accepted",
+        expected_current_event_id=None,
+        reviewer="reviewer@example.com",
+        reason_code="identity_confirmed",
+        rationale="The source identifies the scanned brand.",
+        evaluator_version="manual-review-v1",
+        actor_id="environment-token",
+        idempotency_key_hash="b" * 64,
+        request_fingerprint="c" * 64,
+    )
+
+    with pytest.raises(
+        EvidenceMemoryAdjudicationUnavailableError,
+        match="not configured",
+    ):
+        report_store.append_evidence_memory_adjudication_for_domain(
+            "example.com",
+            command,
+        )
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_report_store_rejects_reused_file_id_with_different_content(tmp_path, monkeypatch):

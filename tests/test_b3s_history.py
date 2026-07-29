@@ -15,6 +15,13 @@ from scripts.import_b3s_reports_postgres import (
 )
 from src.history.models import ReportConflictError, ReportImportError
 from src.history.report_parser import canonical_json_hash, normalize_domain, parse_report
+from src.services.evidence_memory_adjudication import (
+    EvidenceMemoryAdjudicationCommand,
+    EvidenceMemoryAdjudicationConflictError,
+)
+from src.services.evidence_memory_identity_v2 import (
+    build_evidence_memory_identity_v2,
+)
 
 
 def test_report_parser_preserves_observed_and_evaluation_history() -> None:
@@ -195,6 +202,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "001_history_v1.sql",
             "002_evidence_stability.sql",
             "003_evidence_ledger_shadow.sql",
+            "004_evidence_memory_adjudications.sql",
         ]
         assert repository.migrate() == []
 
@@ -245,6 +253,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "evidence_ledger_shadow_states": 1,
             "evidence_ledger_shadow_entries": 1,
             "evidence_ledger_shadow_observations": 2,
+            "evidence_memory_adjudication_events": 0,
         }
 
         with psycopg.connect(dsn) as conn:
@@ -305,6 +314,118 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
         conflicting["score"] = 99
         with pytest.raises(ReportConflictError, match="different content"):
             repository.import_report(conflicting)
+
+        subject_id = build_evidence_memory_identity_v2(
+            [older, newer]
+        )["entries"][0]["evidence_id"]
+        accepted_command = _adjudication_command(
+            subject_id,
+            decision="accepted",
+            expected_current_event_id=None,
+            key_hash="1" * 64,
+            fingerprint="2" * 64,
+        )
+        accepted, replayed = repository.append_evidence_memory_adjudication(
+            "example.com",
+            accepted_command,
+        )
+        assert replayed is False
+        assert accepted["decision"] == "accepted"
+        assert accepted["runtime_effect"] is False
+        assert accepted["authority"] is False
+        replay, replayed = repository.append_evidence_memory_adjudication(
+            "example.com",
+            accepted_command,
+        )
+        assert replayed is True
+        assert replay["id"] == accepted["id"]
+
+        stale_command = _adjudication_command(
+            subject_id,
+            decision="disputed",
+            expected_current_event_id=None,
+            key_hash="3" * 64,
+            fingerprint="4" * 64,
+        )
+        with pytest.raises(
+            EvidenceMemoryAdjudicationConflictError,
+            match="changed after it was read",
+        ):
+            repository.append_evidence_memory_adjudication(
+                "example.com",
+                stale_command,
+            )
+
+        revoked, replayed = repository.append_evidence_memory_adjudication(
+            "example.com",
+            _adjudication_command(
+                subject_id,
+                decision="revoked",
+                expected_current_event_id=accepted["id"],
+                key_hash="5" * 64,
+                fingerprint="6" * 64,
+            ),
+        )
+        assert replayed is False
+        assert revoked["supersedes_event_id"] == accepted["id"]
+        old_replay, replayed = repository.append_evidence_memory_adjudication(
+            "example.com",
+            accepted_command,
+        )
+        assert replayed is True
+        assert old_replay["effective_state"] == "superseded"
+        journal = repository.list_evidence_memory_adjudications(
+            "example.com"
+        )
+        assert journal["total"] == 2
+        assert [event["effective_state"] for event in journal["events"]] == [
+            "revoked",
+            "superseded",
+        ]
+        assert journal["current"] == [revoked]
+
+        adjudication_barrier = Barrier(2)
+        competing_commands = (
+            _adjudication_command(
+                subject_id,
+                decision="accepted",
+                expected_current_event_id=revoked["id"],
+                key_hash="7" * 64,
+                fingerprint="8" * 64,
+            ),
+            _adjudication_command(
+                subject_id,
+                decision="disputed",
+                expected_current_event_id=revoked["id"],
+                key_hash="9" * 64,
+                fingerprint="a" * 64,
+            ),
+        )
+
+        def adjudicate_concurrently(command) -> str:
+            adjudication_barrier.wait()
+            try:
+                repository.append_evidence_memory_adjudication(
+                    "example.com",
+                    command,
+                )
+            except EvidenceMemoryAdjudicationConflictError:
+                return "conflict"
+            return "created"
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(adjudicate_concurrently, command)
+                for command in competing_commands
+            ]
+            adjudication_outcomes = sorted(
+                future.result() for future in futures
+            )
+
+        assert adjudication_outcomes == ["conflict", "created"]
+        assert repository.list_evidence_memory_adjudications(
+            "example.com"
+        )["total"] == 3
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
@@ -315,6 +436,28 @@ def _require_schema_drop_opt_in() -> None:
         raise RuntimeError(
             "PostgreSQL integration tests drop b3s_history; set B3S_ALLOW_SCHEMA_DROP=1 only for a disposable database"
         )
+
+
+def _adjudication_command(
+    subject_id: str,
+    *,
+    decision: str,
+    expected_current_event_id: str | None,
+    key_hash: str,
+    fingerprint: str,
+) -> EvidenceMemoryAdjudicationCommand:
+    return EvidenceMemoryAdjudicationCommand(
+        subject_id=subject_id,
+        decision=decision,
+        expected_current_event_id=expected_current_event_id,
+        reviewer="reviewer@example.com",
+        reason_code="identity_reviewed",
+        rationale="The reviewer checked the evidence identity.",
+        evaluator_version="manual-review-v1",
+        actor_id="test-client",
+        idempotency_key_hash=key_hash,
+        request_fingerprint=fingerprint,
+    )
 
 
 def _report(

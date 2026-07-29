@@ -46,9 +46,11 @@ The current server token is configured with `BRAND3_SCANNER_API_TOKEN`.
 real token in source code, browser JavaScript, logs, or committed environment
 files.
 
-The v1 dependency model already separates `scans:read` and `scans:write`. The
-current environment token receives both scopes; per-client credentials can be
-introduced later without changing endpoint contracts.
+The v1 dependency model separates `scans:read`, `scans:write`, and
+`evidence:adjudicate`. The scanner environment token receives the scan scopes
+only. Evidence adjudication uses the distinct
+`B3S_EVIDENCE_ADJUDICATION_TOKEN`; its reviewer is derived from
+`B3S_EVIDENCE_REVIEWER_ID`. Both tokens must differ.
 
 ## Create a scan
 

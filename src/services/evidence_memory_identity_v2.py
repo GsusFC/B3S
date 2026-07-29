@@ -23,6 +23,9 @@ from src.evidence_identity import (
 from src.external_identity_provenance import (
     verify_external_identity_provenance,
 )
+from src.services.evidence_memory_adjudication import (
+    apply_evidence_memory_adjudications,
+)
 from src.services.scanner_evidence_comparison import (
     MATERIAL_SOURCE_CLASSES,
     build_evidence_snapshot,
@@ -46,6 +49,7 @@ def build_evidence_memory_identity_v2(
     reports: Iterable[dict[str, Any]],
     *,
     mode: str = "shadow",
+    adjudications: Iterable[dict[str, Any]] = (),
 ) -> dict[str, Any]:
     """Build a deterministic non-authoritative document/passage projection."""
 
@@ -86,12 +90,13 @@ def build_evidence_memory_identity_v2(
             "external_brand_name_match_requires_adjudication",
             "external_identity_requires_reproducible_provenance",
             "exact_syndication_does_not_detect_paraphrases",
-            "no_accepted_rejected_or_revoked_adjudication_store",
+            "adjudications_do_not_change_scoring_or_canonical_selection",
         ],
         "summary": _empty_summary(),
         "entries": [],
     }
     if effective_mode != "shadow" or not ordered:
+        result = apply_evidence_memory_adjudications(result, adjudications)
         result["state_fingerprint"] = _state_fingerprint(result)
         return result
 
@@ -321,6 +326,7 @@ def build_evidence_memory_identity_v2(
             }
         ),
     }
+    result = apply_evidence_memory_adjudications(result, adjudications)
     result["state_fingerprint"] = _state_fingerprint(result)
     return result
 
@@ -750,6 +756,8 @@ def _empty_summary() -> dict[str, Any]:
         "current_external_publisher_count": 0,
         "current_external_syndication_cluster_count": 0,
         "current_independent_external_cluster_count": 0,
+        "adjudicated_entry_count": 0,
+        "adjudication_state_counts": {},
     }
 
 

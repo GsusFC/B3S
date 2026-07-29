@@ -18,6 +18,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 from src.history.models import ReportConflictError
+from src.services.evidence_memory_adjudication import (
+    EvidenceMemoryAdjudicationCommand,
+    EvidenceMemoryAdjudicationError,
+    EvidenceMemoryAdjudicationNotFoundError,
+    EvidenceMemoryAdjudicationUnavailableError,
+    evidence_subject_exists,
+)
 from src.services.evidence_ledger_shadow import (
     build_evidence_ledger_shadow,
     evidence_ledger_mode,
@@ -240,19 +247,105 @@ def evidence_ledger_shadow_for_domain(domain: str) -> dict[str, Any]:
 
 
 def evidence_memory_identity_v2_for_domain(domain: str) -> dict[str, Any]:
-    """Derive the non-authoritative identity-v2 projection from history."""
+    """Derive identity v2 and overlay durable, non-authoritative decisions."""
 
+    events: list[dict[str, Any]] = []
+    adjudication_persistence: dict[str, Any] = {
+        "stored": False,
+        "backend": "not_configured",
+        "event_count": 0,
+    }
+    repository = _postgres_repository()
+    if repository is not None:
+        try:
+            events = repository.list_current_evidence_memory_adjudications(
+                domain
+            )
+            adjudication_persistence = {
+                "stored": True,
+                "backend": "postgres",
+                "event_count": len(events),
+            }
+        except Exception:
+            _LOG.exception(
+                "failed to load evidence memory adjudications",
+                extra={"domain": domain_key(domain)},
+            )
+            adjudication_persistence["backend"] = "unavailable"
     derived = build_evidence_memory_identity_v2(
         list_reports_for_domain(domain),
         mode="shadow",
+        adjudications=events,
     )
     return {
         **derived,
         "persistence": {
             "stored": False,
             "backend": "history_derived",
+            "adjudications": adjudication_persistence,
         },
     }
+
+
+def append_evidence_memory_adjudication_for_domain(
+    domain: str,
+    command: EvidenceMemoryAdjudicationCommand,
+) -> tuple[dict[str, Any], bool]:
+    """Validate a projected subject and append only to the durable journal."""
+
+    repository = _postgres_repository()
+    if repository is None:
+        raise EvidenceMemoryAdjudicationUnavailableError(
+            "The durable evidence adjudication journal is not configured."
+        )
+    projection = build_evidence_memory_identity_v2(
+        list_reports_for_domain(domain),
+        mode="shadow",
+    )
+    if not evidence_subject_exists(projection, command.subject_id):
+        raise EvidenceMemoryAdjudicationNotFoundError(
+            "The evidence subject does not exist in this brand's immutable history."
+        )
+    try:
+        return repository.append_evidence_memory_adjudication(
+            domain,
+            command,
+        )
+    except EvidenceMemoryAdjudicationError:
+        raise
+    except Exception as exc:
+        raise EvidenceMemoryAdjudicationUnavailableError(
+            "The durable evidence adjudication journal is unavailable."
+        ) from exc
+
+
+def list_evidence_memory_adjudications_for_domain(
+    domain: str,
+    *,
+    subject_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Read the durable, reviewable adjudication journal."""
+
+    repository = _postgres_repository()
+    if repository is None:
+        raise EvidenceMemoryAdjudicationUnavailableError(
+            "The durable evidence adjudication journal is not configured."
+        )
+    try:
+        return repository.list_evidence_memory_adjudications(
+            domain,
+            subject_id=subject_id,
+            limit=limit,
+            offset=offset,
+        )
+    except EvidenceMemoryAdjudicationError:
+        raise
+    except Exception as exc:
+        raise EvidenceMemoryAdjudicationUnavailableError(
+            "The durable evidence adjudication journal is unavailable."
+        ) from exc
 
 
 def current_report_for_domain(

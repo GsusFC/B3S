@@ -60,6 +60,8 @@ GET  /api/v1/scans/{scan_id}/evidence
 GET  /api/v1/brands/{domain}/scans
 GET  /api/v1/brands/{domain}/evidence-ledger-shadow
 GET  /api/v1/brands/{domain}/evidence-memory-identity-v2-shadow
+GET  /api/v1/brands/{domain}/evidence-memory-adjudications
+POST /api/v1/brands/{domain}/evidence-memory-adjudications
 ```
 
 Bearer authentication uses `BRAND3_SCANNER_API_TOKEN`. Create requests support
@@ -119,7 +121,9 @@ chunks from one URL cannot masquerade as temporal brand change:
   --format markdown
 ```
 
-Identity v2 is not persisted or used by scoring. The authenticated
+Identity v2 is not persisted or used by scoring. Its separate adjudication
+journal is PostgreSQL-backed, reversible, and also has no scoring authority.
+The authenticated
 `GET /api/v1/brands/{domain}/evidence-memory-identity-v2-shadow` endpoint
 recomputes it from immutable history for observation. Its contract and current
 replay evidence are documented in
@@ -127,6 +131,10 @@ replay evidence are documented in
 and [`docs/evidence_memory_stress.md`](docs/evidence_memory_stress.md). New Exa
 captures persist reproducible external-identity provenance; bare summary labels
 and older evidence without that contract remain validation-ineligible.
+Adjudication writes require a dedicated
+`B3S_EVIDENCE_ADJUDICATION_TOKEN`; the server binds every decision to
+`B3S_EVIDENCE_REVIEWER_ID` rather than trusting a reviewer supplied by the
+client.
 
 ## Deployment
 
