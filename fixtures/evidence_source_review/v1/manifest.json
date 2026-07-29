@@ -1,0 +1,38 @@
+{
+  "schema_version": "evidence-source-review-v1",
+  "review_event_schema_version": "evidence-source-review-event-v1",
+  "dataset_version": "evidence-source-review-2026-07-v1",
+  "candidate_fingerprint": "54a831021cc5a778d9ff0120a81bb6e3f0156b44f4ced3773c534d3d35fccc6b",
+  "review_event_fingerprint": "ea3684f9fbd7334bc142db8e6f049eb9a3ba380e3b8b331be8da60732382152e",
+  "status": "publisher_reviewed_claim_corroboration_blocked_shadow_only",
+  "reviewer_mode": "single_attributable_reviewer",
+  "decision_semantics": {
+    "identity": {
+      "accepted": "The source refers to the scanned brand.",
+      "disputed": "The available signals cannot safely resolve source identity.",
+      "rejected": "Reproducible evidence identifies a different entity."
+    },
+    "publisher_independence": {
+      "confirmed_independent": "The publisher independently controls and publishes the editorial piece.",
+      "disputed": "Publisher control or editorial provenance is unresolved.",
+      "excluded": "The source is a press-release or distribution surface, not independent editorial publication."
+    },
+    "claim_corroboration": {
+      "independently_corroborated": "A claim-scoped review found independent evidence supporting the claim.",
+      "mixed": "The piece mixes original editorial work with claims that ultimately rely on first-party evidence.",
+      "disputed": "The source does not establish independent corroboration for the reviewed claim scope.",
+      "excluded": "The source cannot count as independent corroboration."
+    }
+  },
+  "semantic_paraphrase_evaluation": {
+    "status": "not_measured",
+    "recall": null
+  },
+  "notes": [
+    "Publisher independence and claim corroboration are separate review axes.",
+    "A publisher-independent article does not globally corroborate every claim it contains.",
+    "Independent corroboration cannot be recorded without an explicit claim_id.",
+    "Decision and revocation events form append-only per-case chains.",
+    "No result from this dataset has runtime, scoring, or canonical-selection authority."
+  ]
+}

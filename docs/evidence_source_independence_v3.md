@@ -65,17 +65,23 @@ confirm it.
 
 ## Review boundary
 
-The committed registry currently contains only `.test` publisher groups and
-source decisions used by controlled tests. It contains zero production-reviewed
-source URLs. Therefore real sources remain `unknown`, `disputed`, or
-`same_cluster`, and the current local replay produces zero confirmed independent
-clusters.
+The committed operational registry currently contains only `.test` publisher
+groups and source decisions used by controlled tests. It contains zero
+production-reviewed source URLs. Therefore real sources remain `unknown`,
+`disputed`, or `same_cluster`, and the current local replay produces zero
+confirmed independent clusters.
 
-This is deliberate. Publisher ownership alone does not prove original
-reporting, and a deterministic lexical matcher cannot detect every semantic
-paraphrase. A future production source review must be attributable and
-reversible before production URLs are added or persisted. Until then, missing
-knowledge fails closed.
+The separate versioned dataset documented in
+`docs/evidence_source_review_set_v1.md` now contains six attributable and
+reversible production-source reviews. It deliberately does not update this
+registry: the registry's single independence decision cannot distinguish
+publisher control from claim-level corroboration. Copying five editorial
+decisions into it would incorrectly grant source-global corroboration.
+
+Publisher ownership alone does not prove original reporting, and a
+deterministic lexical matcher cannot detect every semantic paraphrase. Missing
+claim-level review and unmeasured paraphrase recall therefore continue to fail
+closed.
 
 The existing PostgreSQL adjudication journal reviews evidence-to-brand identity
 only. An `accepted` identity decision must not be reused as a source-independence
