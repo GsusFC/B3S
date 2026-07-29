@@ -475,6 +475,31 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "scan-older",
         ]
         assert len(repository.list_evaluation_revisions(old_outcome.capture_id)) == 1
+        scoring_memory = (
+            repository.get_evidence_scoring_memory_preview(
+                "example.com"
+            )
+        )
+        assert scoring_memory is not None
+        assert scoring_memory["runtime_effect"] is False
+        assert scoring_memory["summary"][
+            "accepted_evidence_count"
+        ] == 1
+        restarted_repository = PostgresHistoryRepository(dsn)
+        restarted_scoring_memory = (
+            restarted_repository.get_evidence_scoring_memory_preview(
+                "example.com"
+            )
+        )
+        assert restarted_scoring_memory is not None
+        assert (
+            restarted_scoring_memory["memory_version"]
+            == scoring_memory["memory_version"]
+        )
+        assert (
+            restarted_scoring_memory["state_fingerprint"]
+            == scoring_memory["state_fingerprint"]
+        )
         ledger = repository.get_evidence_ledger_shadow("example.com")
         assert ledger is not None
         assert ledger["runtime_effect"] is False

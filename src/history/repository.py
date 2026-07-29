@@ -40,6 +40,9 @@ from src.services.evidence_memory_adjudication import (
     EvidenceMemoryAdjudicationInvalidTransitionError,
     EvidenceMemoryAdjudicationNotFoundError,
 )
+from src.services.evidence_scoring_memory_preview import (
+    build_evidence_scoring_memory_preview,
+)
 from src.services.evidence_ledger_shadow import (
     build_evidence_ledger_shadow,
     evidence_ledger_mode,
@@ -441,6 +444,37 @@ class PostgresHistoryRepository:
                 (workspace_slug, domain),
             ).fetchone()
         return dict(row["payload"]) if row and isinstance(row["payload"], dict) else None
+
+    def get_evidence_scoring_memory_preview(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        """Rebuild the additive score preview from durable immutable history.
+
+        The preview is intentionally computed on read. PostgreSQL persists the
+        source reports and review events; recreating this repository after a
+        process restart therefore reconstructs the same memory version without
+        introducing a second authoritative copy.
+        """
+
+        reports = self.list_report_payloads_for_domain(
+            domain_or_url,
+            workspace_slug=workspace_slug,
+            limit=500,
+        )
+        if not reports:
+            return None
+        adjudications = self.list_current_evidence_memory_adjudications(
+            domain_or_url,
+            workspace_slug=workspace_slug,
+        )
+        return build_evidence_scoring_memory_preview(
+            reports,
+            mode="shadow",
+            evidence_adjudications=adjudications,
+        )
 
     def append_evidence_memory_adjudication(
         self,
