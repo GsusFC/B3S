@@ -26,7 +26,7 @@ from src.services.scanner_evidence_comparison import canonical_evidence_records
 
 
 EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v2"
-EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v2"
+EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v3"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 
 
@@ -600,6 +600,23 @@ def _controlled_probes() -> list[dict[str, Any]]:
     semantic_claim_memory = build_evidence_claim_memory(
         semantic_claim_history
     )
+    relation_subject_id = semantic_claim_memory["slots"][0][
+        "relation_candidates"
+    ][0]["relation_candidate_id"]
+    accepted_claim_relation_memory = build_evidence_claim_memory(
+        semantic_claim_history,
+        claim_reconciliations=[
+            {
+                "id": "00000000-0000-0000-0000-000000000002",
+                "subject_type": "claim_relation",
+                "subject_id": relation_subject_id,
+                "relation_type": "replacement_candidate",
+                "sequence": 1,
+                "decision": "accepted",
+                "created_at": "2026-01-03T00:00:00Z",
+            }
+        ],
+    )
     simultaneous_claim_memory = build_evidence_claim_memory(
         [
             _report(
@@ -808,6 +825,24 @@ def _controlled_probes() -> list[dict[str, Any]]:
             ),
             "Claim Memory is deterministic when immutable reports arrive in a different order.",
         ),
+        _probe(
+            "accepted_claim_relation_never_grants_canonical_authority",
+            (
+                accepted_claim_relation_memory["slots"][0][
+                    "relation_candidates"
+                ][0]["adjudication_state"]
+                == "accepted"
+                and accepted_claim_relation_memory["claim_reconciliation"][
+                    "automatic_canonical_selection"
+                ]
+                is False
+                and accepted_claim_relation_memory["runtime_effect"] is False
+                and accepted_claim_relation_memory["authority"] is False
+                and "canonical_claim_variant_id"
+                not in accepted_claim_relation_memory
+            ),
+            "An accepted relation remains reversible review metadata and never selects a canonical claim.",
+        ),
         {
             "id": "identity_gold_set_pending_human_review",
             "kind": "promotion_blocker",
@@ -842,13 +877,13 @@ def _controlled_probes() -> list[dict[str, Any]]:
             "kind": "promotion_blocker",
             "status": "blocked",
             "observation": (
-                "Claim Memory v1 now separates slots, variants, and occurrences and "
-                "proposes coexistence or replacement without authority. It still cannot "
-                "durably accept, supersede, contradict, or reverse those relations."
+                "The append-only journal can accept, dispute, reject, supersede, and "
+                "revoke relation decisions without authority. No reviewed policy yet "
+                "turns those decisions into a canonical claim version."
             ),
             "required_capability": (
-                "append-only versioned claim reconciliation with revocation and an "
-                "appeal path"
+                "reviewed canonical-claim promotion policy with measured false "
+                "replacement and missed-change rates"
             ),
         },
         {

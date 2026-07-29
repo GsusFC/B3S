@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import hashlib
+from itertools import combinations
 import json
 import re
 from typing import Any, Iterable
@@ -16,6 +17,9 @@ from src.evidence_identity import (
     normalize_evidence_url,
     stable_artifact_digest,
 )
+from src.services.evidence_claim_reconciliation import (
+    apply_evidence_claim_reconciliations,
+)
 from src.services.evidence_memory_identity_v2 import (
     build_evidence_memory_identity_v2,
 )
@@ -23,7 +27,7 @@ from src.services.scanner_evidence_comparison import MATERIAL_SOURCE_CLASSES
 
 
 EVIDENCE_CLAIM_MEMORY_VERSION = "evidence-claim-memory-v1"
-EVIDENCE_CLAIM_MEMORY_POLICY_VERSION = "evidence-claim-memory-policy-v1"
+EVIDENCE_CLAIM_MEMORY_POLICY_VERSION = "evidence-claim-memory-policy-v2"
 _SLOT_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,199}$")
 
 
@@ -32,6 +36,7 @@ def build_evidence_claim_memory(
     *,
     mode: str = "shadow",
     evidence_adjudications: Iterable[dict[str, Any]] = (),
+    claim_reconciliations: Iterable[dict[str, Any]] = (),
 ) -> dict[str, Any]:
     """Build a deterministic claim projection from immutable evidence history."""
 
@@ -67,6 +72,8 @@ def build_evidence_claim_memory(
         "warnings": [
             "shadow_only_no_scoring_or_selection_effect",
             "claim_relation_candidates_are_not_adjudications",
+            "historical_relation_candidates_remain_addressable",
+            "accepted_relation_does_not_choose_a_canonical_claim",
             "bare_claim_id_is_not_a_longitudinal_slot",
             "raw_claim_text_is_not_returned",
         ],
@@ -76,6 +83,10 @@ def build_evidence_claim_memory(
         "occurrences": [],
     }
     if effective_mode != "shadow" or not ordered:
+        result = apply_evidence_claim_reconciliations(
+            result,
+            claim_reconciliations,
+        )
         result["state_fingerprint"] = _state_fingerprint(result)
         return result
 
@@ -239,11 +250,17 @@ def build_evidence_claim_memory(
                     "claim_types": set(),
                     "variant_ids": set(),
                     "report_ids": set(),
+                    "variant_ids_by_report": defaultdict(set),
+                    "observed_at_by_report": {},
                 },
             )
             slot_accumulator["claim_types"].add(claim_type)
             slot_accumulator["variant_ids"].add(claim_variant_id)
             slot_accumulator["report_ids"].add(report_id)
+            slot_accumulator["variant_ids_by_report"][report_id].add(
+                claim_variant_id
+            )
+            slot_accumulator["observed_at_by_report"][report_id] = observed_at
 
     variants = _finalize_variants(
         variant_accumulators,
@@ -307,6 +324,10 @@ def build_evidence_claim_memory(
             )
         ),
     }
+    result = apply_evidence_claim_reconciliations(
+        result,
+        claim_reconciliations,
+    )
     result["state_fingerprint"] = _state_fingerprint(result)
     return result
 
@@ -369,10 +390,26 @@ def _finalize_slots(
             for variant_id in variant_ids
             if latest_report_id in variants_by_id[variant_id]["report_ids"]
         )
+        variant_timeline = sorted(
+            (
+                {
+                    "report_id": report_id,
+                    "observed_at": str(
+                        accumulator["observed_at_by_report"][report_id]
+                    ),
+                    "variant_ids": sorted(variant_ids_for_report),
+                }
+                for report_id, variant_ids_for_report in accumulator[
+                    "variant_ids_by_report"
+                ].items()
+            ),
+            key=lambda item: (
+                str(item["observed_at"]),
+                str(item["report_id"]),
+            ),
+        )
         relation_candidates = _relation_candidates(
-            variant_ids,
-            variants_by_id=variants_by_id,
-            latest_variant_ids=latest_variant_ids,
+            variant_timeline,
         )
         claim_types = sorted(accumulator["claim_types"])
         claim_type_conflict = len(claim_types) > 1
@@ -389,6 +426,7 @@ def _finalize_slots(
                 "variant_count": len(variant_ids),
                 "latest_variant_count": len(latest_variant_ids),
                 "report_ids": sorted(accumulator["report_ids"]),
+                "variant_timeline": variant_timeline,
                 "relation_candidates": relation_candidates,
                 "requires_human_review": (
                     bool(relation_candidates) or claim_type_conflict
@@ -401,55 +439,106 @@ def _finalize_slots(
 
 
 def _relation_candidates(
-    variant_ids: list[str],
-    *,
-    variants_by_id: dict[str, dict[str, Any]],
-    latest_variant_ids: list[str],
+    variant_timeline: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     relations: dict[tuple[str, str, str], dict[str, Any]] = {}
-    latest_set = set(latest_variant_ids)
-    for index, left_id in enumerate(variant_ids):
-        left_reports = set(variants_by_id[left_id]["report_ids"])
-        for right_id in variant_ids[index + 1 :]:
-            right_reports = set(variants_by_id[right_id]["report_ids"])
-            if left_reports & right_reports:
-                relation = "coexistence_candidate"
-                reason_codes = ["variants_observed_in_same_report"]
-                from_id, to_id = left_id, right_id
-            elif len(latest_set) == 1 and (
-                (left_id in latest_set) != (right_id in latest_set)
-            ):
-                relation = "replacement_candidate"
-                reason_codes = [
-                    "one_historical_variant_and_one_latest_variant",
-                    "semantic_replacement_not_assumed",
-                ]
-                from_id = right_id if left_id in latest_set else left_id
-                to_id = left_id if left_id in latest_set else right_id
-            else:
-                continue
-            key = (relation, from_id, to_id)
-            relations[key] = {
-                "relation_candidate_id": stable_artifact_digest(
-                    "evidence-claim-relation-candidate-v1",
+    for observation in variant_timeline:
+        report_id = str(observation["report_id"])
+        for left_id, right_id in combinations(
+            sorted(observation["variant_ids"]),
+            2,
+        ):
+            relation = _relation_accumulator(
+                relations,
+                relation="coexistence_candidate",
+                from_id=left_id,
+                to_id=right_id,
+                reason_codes=["variants_observed_in_same_report"],
+            )
+            relation["coobserved_report_ids"].add(report_id)
+
+    for previous, current in combinations(
+        variant_timeline,
+        2,
+    ):
+        previous_ids = set(previous["variant_ids"])
+        current_ids = set(current["variant_ids"])
+        departed_ids = sorted(previous_ids - current_ids)
+        arrived_ids = sorted(current_ids - previous_ids)
+        for from_id in departed_ids:
+            for to_id in arrived_ids:
+                relation = _relation_accumulator(
+                    relations,
+                    relation="replacement_candidate",
+                    from_id=from_id,
+                    to_id=to_id,
+                    reason_codes=[
+                        "variants_differ_between_ordered_reports",
+                        "semantic_replacement_not_assumed",
+                    ],
+                )
+                relation["transition_report_pairs"].add(
+                    (
+                        str(previous["report_id"]),
+                        str(current["report_id"]),
+                    )
+                )
+
+    finalized: list[dict[str, Any]] = []
+    for key in sorted(relations):
+        relation = relations[key]
+        coobserved_report_ids = sorted(relation.pop("coobserved_report_ids"))
+        transition_pairs = sorted(relation.pop("transition_report_pairs"))
+        finalized.append(
+            {
+                **relation,
+                "coobserved_report_ids": coobserved_report_ids,
+                "transition_report_pairs": [
                     {
-                        "relation": relation,
-                        "from_claim_variant_id": from_id,
-                        "to_claim_variant_id": to_id,
-                    },
+                        "from_report_id": from_report_id,
+                        "to_report_id": to_report_id,
+                    }
+                    for from_report_id, to_report_id in transition_pairs
+                ],
+                "observation_count": (
+                    len(coobserved_report_ids) + len(transition_pairs)
                 ),
-                "relation": relation,
-                "from_claim_variant_id": from_id,
-                "to_claim_variant_id": to_id,
-                "reason_codes": reason_codes,
-                "adjudication_state": "proposed",
-                "runtime_effect": False,
-                "authority": False,
             }
-    return [
-        relations[key]
-        for key in sorted(relations)
-    ]
+        )
+    return finalized
+
+
+def _relation_accumulator(
+    relations: dict[tuple[str, str, str], dict[str, Any]],
+    *,
+    relation: str,
+    from_id: str,
+    to_id: str,
+    reason_codes: list[str],
+) -> dict[str, Any]:
+    key = (relation, from_id, to_id)
+    return relations.setdefault(
+        key,
+        {
+            "relation_candidate_id": stable_artifact_digest(
+                "evidence-claim-relation-candidate-v1",
+                {
+                    "relation": relation,
+                    "from_claim_variant_id": from_id,
+                    "to_claim_variant_id": to_id,
+                },
+            ),
+            "relation": relation,
+            "from_claim_variant_id": from_id,
+            "to_claim_variant_id": to_id,
+            "reason_codes": reason_codes,
+            "adjudication_state": "proposed",
+            "runtime_effect": False,
+            "authority": False,
+            "coobserved_report_ids": set(),
+            "transition_report_pairs": set(),
+        },
+    )
 
 
 def _explicit_slot(metadata: dict[str, Any]) -> tuple[str, str] | None:
@@ -582,6 +671,7 @@ def _state_fingerprint(payload: dict[str, Any]) -> str:
             "mode": payload["mode"],
             "brand": payload["brand"],
             "latest_report_id": payload["latest_report_id"],
+            "claim_reconciliation": payload["claim_reconciliation"],
             "summary": payload["summary"],
             "slots": payload["slots"],
             "variants": payload["variants"],

@@ -19,6 +19,13 @@ from urllib.parse import urlparse
 
 from src.history.models import ReportConflictError
 from src.services.evidence_claim_memory import build_evidence_claim_memory
+from src.services.evidence_claim_reconciliation import (
+    EvidenceClaimReconciliationCommand,
+    EvidenceClaimReconciliationError,
+    EvidenceClaimReconciliationNotFoundError,
+    EvidenceClaimReconciliationUnavailableError,
+    claim_relation_subject,
+)
 from src.services.evidence_memory_adjudication import (
     EvidenceMemoryAdjudicationCommand,
     EvidenceMemoryAdjudicationError,
@@ -297,6 +304,12 @@ def evidence_claim_memory_for_domain(domain: str) -> dict[str, Any]:
         "backend": "not_configured",
         "event_count": 0,
     }
+    reconciliation_events: list[dict[str, Any]] = []
+    reconciliation_persistence: dict[str, Any] = {
+        "stored": False,
+        "backend": "not_configured",
+        "event_count": 0,
+    }
     repository = _postgres_repository()
     if repository is not None:
         try:
@@ -314,10 +327,28 @@ def evidence_claim_memory_for_domain(domain: str) -> dict[str, Any]:
                 extra={"domain": domain_key(domain)},
             )
             adjudication_persistence["backend"] = "unavailable"
+        try:
+            reconciliation_events = (
+                repository.list_current_evidence_claim_reconciliations(
+                    domain
+                )
+            )
+            reconciliation_persistence = {
+                "stored": True,
+                "backend": "postgres",
+                "event_count": len(reconciliation_events),
+            }
+        except Exception:
+            _LOG.exception(
+                "failed to load evidence claim reconciliations",
+                extra={"domain": domain_key(domain)},
+            )
+            reconciliation_persistence["backend"] = "unavailable"
     derived = build_evidence_claim_memory(
         list_reports_for_domain(domain),
         mode="shadow",
         evidence_adjudications=events,
+        claim_reconciliations=reconciliation_events,
     )
     return {
         **derived,
@@ -325,8 +356,72 @@ def evidence_claim_memory_for_domain(domain: str) -> dict[str, Any]:
             "stored": False,
             "backend": "history_derived",
             "adjudications": adjudication_persistence,
+            "claim_reconciliations": reconciliation_persistence,
         },
     }
+
+
+def append_evidence_claim_reconciliation_for_domain(
+    domain: str,
+    command: EvidenceClaimReconciliationCommand,
+) -> tuple[dict[str, Any], bool]:
+    """Validate a projected relation and append only to its durable journal."""
+
+    repository = _postgres_repository()
+    if repository is None:
+        raise EvidenceClaimReconciliationUnavailableError(
+            "The durable claim reconciliation journal is not configured."
+        )
+    projection = build_evidence_claim_memory(
+        list_reports_for_domain(domain),
+        mode="shadow",
+    )
+    subject = claim_relation_subject(projection, command.subject_id)
+    if subject is None:
+        raise EvidenceClaimReconciliationNotFoundError(
+            "The claim relation does not exist in this brand's immutable history."
+        )
+    try:
+        return repository.append_evidence_claim_reconciliation(
+            domain,
+            command,
+            relation_type=str(subject.get("relation") or ""),
+        )
+    except EvidenceClaimReconciliationError:
+        raise
+    except Exception as exc:
+        raise EvidenceClaimReconciliationUnavailableError(
+            "The durable claim reconciliation journal is unavailable."
+        ) from exc
+
+
+def list_evidence_claim_reconciliations_for_domain(
+    domain: str,
+    *,
+    subject_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Read the durable, reviewable claim-reconciliation journal."""
+
+    repository = _postgres_repository()
+    if repository is None:
+        raise EvidenceClaimReconciliationUnavailableError(
+            "The durable claim reconciliation journal is not configured."
+        )
+    try:
+        return repository.list_evidence_claim_reconciliations(
+            domain,
+            subject_id=subject_id,
+            limit=limit,
+            offset=offset,
+        )
+    except EvidenceClaimReconciliationError:
+        raise
+    except Exception as exc:
+        raise EvidenceClaimReconciliationUnavailableError(
+            "The durable claim reconciliation journal is unavailable."
+        ) from exc
 
 
 def append_evidence_memory_adjudication_for_domain(

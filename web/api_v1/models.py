@@ -15,6 +15,10 @@ EvidenceAdjudicationDecision = Literal[
     "rejected",
     "revoked",
 ]
+ClaimRelationType = Literal[
+    "coexistence_candidate",
+    "replacement_candidate",
+]
 
 
 class StrictModel(BaseModel):
@@ -264,6 +268,7 @@ class EvidenceClaimMemoryShadowResponse(StrictModel):
     slots: list[dict[str, Any]] = Field(default_factory=list)
     variants: list[dict[str, Any]] = Field(default_factory=list)
     occurrences: list[dict[str, Any]] = Field(default_factory=list)
+    claim_reconciliation: dict[str, Any] = Field(default_factory=dict)
     persistence: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -343,6 +348,68 @@ class EvidenceMemoryAdjudicationJournalResponse(StrictModel):
     authority: Literal[False] = False
     events: list[EvidenceMemoryAdjudicationEvent] = Field(default_factory=list)
     current: list[EvidenceMemoryAdjudicationEvent] = Field(default_factory=list)
+    pagination: Pagination
+
+
+class EvidenceClaimReconciliationCreateRequest(
+    EvidenceMemoryAdjudicationCreateRequest
+):
+    pass
+
+
+class EvidenceClaimReconciliationEvent(StrictModel):
+    id: str
+    subject_type: Literal["claim_relation"] = "claim_relation"
+    subject_id: str
+    relation_type: ClaimRelationType
+    sequence: int = Field(ge=1)
+    decision: EvidenceAdjudicationDecision
+    effective_state: Literal[
+        "accepted",
+        "disputed",
+        "rejected",
+        "revoked",
+        "superseded",
+    ]
+    supersedes_event_id: str | None = None
+    schema_version: str
+    policy_version: str
+    evaluator_version: str
+    reviewer: str
+    actor_id: str
+    reason_code: str
+    rationale: str
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    created_at: str
+
+
+class EvidenceClaimReconciliationCreateResponse(StrictModel):
+    object: Literal["evidence_claim_reconciliation"] = (
+        "evidence_claim_reconciliation"
+    )
+    api_version: Literal["v1"] = "v1"
+    domain: str
+    replayed: bool
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    event: EvidenceClaimReconciliationEvent
+
+
+class EvidenceClaimReconciliationJournalResponse(StrictModel):
+    object: Literal["evidence_claim_reconciliation_list"] = (
+        "evidence_claim_reconciliation_list"
+    )
+    api_version: Literal["v1"] = "v1"
+    domain: str
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    events: list[EvidenceClaimReconciliationEvent] = Field(
+        default_factory=list
+    )
+    current: list[EvidenceClaimReconciliationEvent] = Field(
+        default_factory=list
+    )
     pagination: Pagination
 
 

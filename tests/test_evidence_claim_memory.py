@@ -138,6 +138,98 @@ def test_sequential_variants_only_propose_replacement() -> None:
     assert relation["authority"] is False
 
 
+def test_historical_replacement_subject_survives_a_third_variant() -> None:
+    first = _owned(
+        "We serve finance teams.",
+        claim_slot_key="audience.primary",
+    )
+    second = _owned(
+        "We serve operations teams.",
+        claim_slot_key="audience.primary",
+    )
+    third = _owned(
+        "We serve procurement teams.",
+        claim_slot_key="audience.primary",
+    )
+    first_two = build_evidence_claim_memory(
+        [
+            _report("one", "2026-01-01T00:00:00Z", [first]),
+            _report("two", "2026-01-02T00:00:00Z", [second]),
+        ]
+    )
+    first_relation_id = first_two["slots"][0]["relation_candidates"][0][
+        "relation_candidate_id"
+    ]
+
+    with_third = build_evidence_claim_memory(
+        [
+            _report("one", "2026-01-01T00:00:00Z", [first]),
+            _report("two", "2026-01-02T00:00:00Z", [second]),
+            _report("three", "2026-01-03T00:00:00Z", [third]),
+        ]
+    )
+    relations = with_third["slots"][0]["relation_candidates"]
+
+    assert len(relations) == 3
+    assert first_relation_id in {
+        relation["relation_candidate_id"] for relation in relations
+    }
+    assert {
+        relation["relation"] for relation in relations
+    } == {"replacement_candidate"}
+    assert all(
+        relation["observation_count"] == 1 for relation in relations
+    )
+
+
+def test_reconciliation_overlay_changes_review_state_not_claim_authority() -> None:
+    old = _owned(
+        "We serve finance teams.",
+        claim_slot_key="audience.primary",
+    )
+    new = _owned(
+        "We serve operations teams.",
+        claim_slot_key="audience.primary",
+    )
+    reports = [
+        _report("old", "2026-01-01T00:00:00Z", [old]),
+        _report("new", "2026-01-02T00:00:00Z", [new]),
+    ]
+    initial = build_evidence_claim_memory(reports)
+    subject_id = initial["slots"][0]["relation_candidates"][0][
+        "relation_candidate_id"
+    ]
+
+    result = build_evidence_claim_memory(
+        reports,
+        claim_reconciliations=[
+            {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "subject_type": "claim_relation",
+                "subject_id": subject_id,
+                "relation_type": "replacement_candidate",
+                "sequence": 1,
+                "decision": "accepted",
+                "created_at": "2026-01-03T00:00:00Z",
+            }
+        ],
+    )
+    relation = result["slots"][0]["relation_candidates"][0]
+
+    assert relation["adjudication_state"] == "accepted"
+    assert relation["runtime_effect"] is False
+    assert relation["authority"] is False
+    assert result["summary"]["adjudicated_relation_count"] == 1
+    assert result["summary"]["pending_relation_review_count"] == 0
+    assert result["slots"][0]["requires_human_review"] is False
+    assert result["claim_reconciliation"][
+        "automatic_canonical_selection"
+    ] is False
+    assert result["authority"] is False
+    assert "canonical_claim_variant_id" not in result
+    assert result["state_fingerprint"] != initial["state_fingerprint"]
+
+
 def test_simultaneous_variants_propose_coexistence_not_replacement() -> None:
     first = _owned(
         "We serve finance teams.",

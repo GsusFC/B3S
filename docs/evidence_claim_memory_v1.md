@@ -69,12 +69,19 @@ Multiple variants in one slot can produce:
 - `replacement_candidate` when exactly one is current and another is
   historical.
 
-These are hypotheses, not decisions. Every relation is
-`adjudication_state=proposed`, `runtime_effect=false`, and `authority=false`.
-The projection does not infer semantic contradiction and does not choose a
+These start as hypotheses. A durable review may change
+`adjudication_state` to `accepted`, `disputed`, `rejected`, or `revoked`, but
+every relation remains `runtime_effect=false` and `authority=false`. The
+projection does not infer semantic contradiction and does not choose a
 canonical variant. Reusing one slot with several `claim_type` values is exposed
 as `claim_type_conflict=true` and requires review even when the normalized
 content did not change.
+
+Historical transition candidates remain addressable when later or backfilled
+reports arrive. The projection compares every ordered report pair, so adding C
+after A → B preserves A → B while adding B → C and the longer-range A → C
+hypothesis. These remain proposals; broader enumeration prevents a journal
+subject from disappearing merely because another immutable report was added.
 
 ## Runtime and API boundary
 
@@ -88,7 +95,9 @@ It is rebuilt deterministically from immutable report history. In v1:
 
 - `persistence.stored=false`;
 - PostgreSQL evidence-identity decisions may be reflected as variant
-  provenance, but no claim relation is written;
+  provenance;
+- PostgreSQL claim-reconciliation decisions may be overlaid on relation
+  candidates while the Claim Memory projection itself remains derived;
 - no raw claim content is returned;
 - no score, report, tile, or canonical selection changes;
 - disabling or removing the endpoint cannot alter scan results.
@@ -102,25 +111,23 @@ The read-only stress harness replayed 12 local brand histories:
 - 0 relation candidates;
 - 184 rows ignored as non-semantic structural metadata: 168 visual-tile rows
   and 16 `checked_block` rows;
-- 19 controlled executable invariants passed with 0 failures.
+- 20 controlled executable invariants passed with 0 failures.
 
 This is expected: the historical acquisition contract did not emit
 `claim_slot_key`. The replay demonstrates fail-closed behavior, not real-world
 semantic-change recall.
 
-## What remains blocked
+## Durable reconciliation boundary
 
-Claim reconciliation still needs a separate append-only journal that records:
+The separate append-only journal now records relation decision, reviewer and
+actor identity, reason, rationale, policy/evaluator versions, optimistic
+concurrency predecessor, supersession, and revocation history. See
+[`evidence_claim_reconciliation_v1.md`](evidence_claim_reconciliation_v1.md).
 
-- accepted relation and current canonical variant;
-- reviewer and actor identity;
-- reason, rationale, policy version, and evaluator version;
-- optimistic-concurrency predecessor;
-- supersession and revocation history.
-
-That journal must remain non-authoritative until reviewed examples measure both
-false replacement and missed real changes. Evidence-to-claim-to-tile support
-and a versioned memory evaluator are later, separate gates.
+Canonical claim selection remains blocked. The journal is intentionally
+non-authoritative until reviewed examples measure both false replacement and
+missed real changes. Evidence-to-claim-to-tile support and a versioned memory
+evaluator are later, separate gates.
 
 ## Producer migration
 

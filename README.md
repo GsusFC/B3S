@@ -61,6 +61,8 @@ GET  /api/v1/brands/{domain}/scans
 GET  /api/v1/brands/{domain}/evidence-ledger-shadow
 GET  /api/v1/brands/{domain}/evidence-memory-identity-v2-shadow
 GET  /api/v1/brands/{domain}/evidence-claim-memory-shadow
+GET  /api/v1/brands/{domain}/evidence-claim-reconciliations
+POST /api/v1/brands/{domain}/evidence-claim-reconciliations
 GET  /api/v1/brands/{domain}/evidence-memory-adjudications
 POST /api/v1/brands/{domain}/evidence-memory-adjudications
 ```
@@ -149,6 +151,11 @@ from immutable history, contains no raw claim text, and cannot affect runtime
 selection or scoring. Inspect it through
 `GET /api/v1/brands/{domain}/evidence-claim-memory-shadow`; see
 [`docs/evidence_claim_memory_v1.md`](docs/evidence_claim_memory_v1.md).
+Relation reviews use a separate append-only PostgreSQL journal with
+idempotency, optimistic concurrency, server-bound reviewer identity, and
+revocation. An accepted relation remains non-authoritative and does not select
+a canonical claim; see
+[`docs/evidence_claim_reconciliation_v1.md`](docs/evidence_claim_reconciliation_v1.md).
 
 Prepare and evaluate the versioned identity review set with:
 

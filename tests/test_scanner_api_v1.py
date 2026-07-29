@@ -423,7 +423,7 @@ def test_evidence_claim_memory_endpoint_is_non_authoritative(monkeypatch):
         "web.api_v1.router.evidence_claim_memory_for_domain",
         lambda _domain: {
             "schema_version": "evidence-claim-memory-v1",
-            "policy_version": "evidence-claim-memory-policy-v1",
+            "policy_version": "evidence-claim-memory-policy-v2",
             "mode": "shadow",
             "runtime_effect": False,
             "authority": False,
@@ -862,6 +862,279 @@ def test_evidence_memory_adjudication_journal_exposes_superseded_events(
     assert response.json()["pagination"]["has_more"] is False
 
 
+def test_create_claim_reconciliation_is_idempotent_and_non_authoritative(
+    monkeypatch,
+):
+    _configure_evidence_reviewer(monkeypatch)
+    captured = {}
+    event = _claim_reconciliation_event()
+
+    def fake_create(
+        domain,
+        payload,
+        *,
+        client_id,
+        reviewer_id,
+        idempotency_key,
+    ):
+        captured.update(
+            domain=domain,
+            payload=payload,
+            client_id=client_id,
+            reviewer_id=reviewer_id,
+            idempotency_key=idempotency_key,
+        )
+        return event, True
+
+    monkeypatch.setattr(
+        "web.api_v1.router.create_evidence_claim_reconciliation",
+        fake_create,
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-claim-reconciliations",
+        headers={
+            **REVIEW_AUTH,
+            "Idempotency-Key": "review-claim-relation-1",
+        },
+        json={
+            "subject_id": "f" * 64,
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "replacement_confirmed",
+            "rationale": "The newer variant replaces the earlier statement.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.headers["idempotent-replayed"] == "true"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["runtime_effect"] is False
+    assert response.json()["authority"] is False
+    assert response.json()["event"]["relation_type"] == (
+        "replacement_candidate"
+    )
+    assert captured["client_id"] == REVIEWER_ID
+    assert captured["reviewer_id"] == REVIEWER_ID
+    assert "reviewer" not in captured["payload"]
+    assert captured["idempotency_key"] == "review-claim-relation-1"
+
+
+def test_scanner_token_cannot_reconcile_claims(monkeypatch):
+    _configure_evidence_reviewer(monkeypatch)
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-claim-reconciliations",
+        headers={**AUTH, "Idempotency-Key": "scanner-cannot-reconcile"},
+        json={
+            "subject_id": "f" * 64,
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "replacement_confirmed",
+            "rationale": "The relation was reviewed.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "insufficient_scope"
+    assert response.json()["error"]["details"]["required_scope"] == (
+        "evidence:adjudicate"
+    )
+
+
+def test_claim_reconciliation_write_fails_closed_without_durable_store(
+    monkeypatch,
+):
+    from src.services.evidence_claim_reconciliation import (
+        EvidenceClaimReconciliationUnavailableError,
+    )
+
+    _configure_evidence_reviewer(monkeypatch)
+
+    def unavailable(*_args, **_kwargs):
+        raise EvidenceClaimReconciliationUnavailableError("not configured")
+
+    monkeypatch.setattr(
+        "web.api_v1.service.append_evidence_claim_reconciliation_for_domain",
+        unavailable,
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-claim-reconciliations",
+        headers={
+            **REVIEW_AUTH,
+            "Idempotency-Key": "claim-journal-unavailable",
+        },
+        json={
+            "subject_id": "f" * 64,
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "replacement_confirmed",
+            "rationale": "The relation was reviewed.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == (
+        "claim_reconciliation_store_unavailable"
+    )
+
+
+def test_claim_reconciliation_rejects_stale_current_event(monkeypatch):
+    from src.services.evidence_claim_reconciliation import (
+        EvidenceClaimReconciliationConflictError,
+    )
+
+    _configure_evidence_reviewer(monkeypatch)
+    current_event_id = "00000000-0000-0000-0000-000000000019"
+
+    def conflict(*_args, **_kwargs):
+        raise EvidenceClaimReconciliationConflictError(
+            "The claim reconciliation changed after it was read.",
+            current_event_id=current_event_id,
+        )
+
+    monkeypatch.setattr(
+        "web.api_v1.service.append_evidence_claim_reconciliation_for_domain",
+        conflict,
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-claim-reconciliations",
+        headers={
+            **REVIEW_AUTH,
+            "Idempotency-Key": "claim-reconciliation-stale",
+        },
+        json={
+            "subject_id": "f" * 64,
+            "decision": "disputed",
+            "expected_current_event_id": None,
+            "reason_code": "relation_conflict",
+            "rationale": "A concurrent review already changed this relation.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == (
+        "claim_reconciliation_precondition_failed"
+    )
+    assert response.json()["error"]["details"]["current_event_id"] == (
+        current_event_id
+    )
+
+
+def test_claim_reconciliation_rejects_unknown_projected_relation(monkeypatch):
+    from src.services.evidence_claim_reconciliation import (
+        EvidenceClaimReconciliationNotFoundError,
+    )
+
+    _configure_evidence_reviewer(monkeypatch)
+
+    def missing(*_args, **_kwargs):
+        raise EvidenceClaimReconciliationNotFoundError(
+            "The claim relation does not exist."
+        )
+
+    monkeypatch.setattr(
+        "web.api_v1.service.append_evidence_claim_reconciliation_for_domain",
+        missing,
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-claim-reconciliations",
+        headers={
+            **REVIEW_AUTH,
+            "Idempotency-Key": "unknown-claim-relation",
+        },
+        json={
+            "subject_id": "f" * 64,
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "replacement_confirmed",
+            "rationale": "The relation was reviewed.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "claim_relation_not_found"
+    assert response.json()["error"]["details"]["subject_id"] == "f" * 64
+
+
+def test_claim_reconciliation_service_binds_authenticated_reviewer(
+    monkeypatch,
+):
+    from web.api_v1.service import create_evidence_claim_reconciliation
+
+    captured = {}
+
+    def append(_domain, command):
+        captured["command"] = command
+        return _claim_reconciliation_event(), False
+
+    monkeypatch.setattr(
+        "web.api_v1.service.append_evidence_claim_reconciliation_for_domain",
+        append,
+    )
+
+    create_evidence_claim_reconciliation(
+        "example.com",
+        {
+            "subject_id": "f" * 64,
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "replacement_confirmed",
+            "rationale": "The relation was manually reviewed.",
+            "evaluator_version": "manual-review-v1",
+        },
+        client_id=REVIEWER_ID,
+        reviewer_id=REVIEWER_ID,
+        idempotency_key="server-derived-claim-reviewer",
+    )
+
+    assert captured["command"].reviewer == REVIEWER_ID
+    assert captured["command"].actor_id == REVIEWER_ID
+
+
+def test_claim_reconciliation_journal_exposes_superseded_events(monkeypatch):
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    current = _claim_reconciliation_event()
+    superseded = {
+        **current,
+        "id": "00000000-0000-0000-0000-000000000000",
+        "effective_state": "superseded",
+    }
+    monkeypatch.setattr(
+        "web.api_v1.router.get_evidence_claim_reconciliations",
+        lambda domain, **_kwargs: {
+            "events": [current, superseded],
+            "current": [current],
+            "total": 2,
+            "limit": 100,
+            "offset": 0,
+        },
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/evidence-claim-reconciliations",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["runtime_effect"] is False
+    assert response.json()["authority"] is False
+    assert [item["effective_state"] for item in response.json()["events"]] == [
+        "accepted",
+        "superseded",
+    ]
+    assert response.json()["current"] == [current]
+    assert response.json()["pagination"]["has_more"] is False
+
+
 def test_failed_status_never_exposes_internal_exception_text():
     status = _running_scan()
     status.update(
@@ -899,6 +1172,29 @@ def _adjudication_event() -> dict:
         "runtime_effect": False,
         "authority": False,
         "created_at": "2026-07-28T10:00:00+00:00",
+    }
+
+
+def _claim_reconciliation_event() -> dict:
+    return {
+        "id": "00000000-0000-0000-0000-000000000011",
+        "subject_type": "claim_relation",
+        "subject_id": "f" * 64,
+        "relation_type": "replacement_candidate",
+        "sequence": 1,
+        "decision": "accepted",
+        "effective_state": "accepted",
+        "supersedes_event_id": None,
+        "schema_version": "evidence-claim-reconciliation-v1",
+        "policy_version": "evidence-claim-reconciliation-policy-v1",
+        "evaluator_version": "manual-review-v1",
+        "reviewer": REVIEWER_ID,
+        "actor_id": REVIEWER_ID,
+        "reason_code": "replacement_confirmed",
+        "rationale": "The newer variant replaces the earlier statement.",
+        "runtime_effect": False,
+        "authority": False,
+        "created_at": "2026-07-29T10:00:00+00:00",
     }
 
 
@@ -956,6 +1252,10 @@ def test_openapi_is_dedicated_to_v1_routes():
     )
     assert (
         "/api/v1/brands/{domain}/evidence-claim-memory-shadow"
+        in response.json()["paths"]
+    )
+    assert (
+        "/api/v1/brands/{domain}/evidence-claim-reconciliations"
         in response.json()["paths"]
     )
     assert "/scan" not in response.json()["paths"]
