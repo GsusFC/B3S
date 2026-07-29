@@ -47,7 +47,11 @@ from src.services.evidence_memory_identity_v2 import (
 from src.services.evidence_ledger_shadow import build_evidence_ledger_shadow
 from src.services.scanner_evidence_comparison import canonical_evidence_records
 from src.sv9_flow.claim_slot_producer import build_claim_memory_evidence
-from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
+from src.sv9_flow.contracts import (
+    SV9_FLOW_CANDIDATE_VERSION,
+    BrandEvidencePack,
+    EvidenceRecord,
+)
 
 
 EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v2"
@@ -883,15 +887,20 @@ def _controlled_probes(
         url="https://example.com",
         evidence=producer_source_records,
     )
-    producer_records = build_claim_memory_evidence(producer_pack)
+    producer_records = build_claim_memory_evidence(
+        producer_pack,
+        source_candidate_schema_version=SV9_FLOW_CANDIDATE_VERSION,
+    )
     producer_report = _report(
         "claim-slot-producer",
         "2026-01-01T00:00:00Z",
         [record.to_dict() for record in producer_source_records],
     )
-    producer_report["raw"]["flow"]["candidate"][
-        "claim_memory_evidence"
-    ] = [record.to_dict() for record in producer_records]
+    producer_candidate = producer_report["raw"]["flow"]["candidate"]
+    producer_candidate["schema_version"] = SV9_FLOW_CANDIDATE_VERSION
+    producer_candidate["claim_memory_evidence"] = [
+        record.to_dict() for record in producer_records
+    ]
     producer_claim_memory = build_evidence_claim_memory([producer_report])
     historical_backfill_report = _report(
         "historical-claim-backfill",

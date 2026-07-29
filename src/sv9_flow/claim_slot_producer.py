@@ -16,7 +16,11 @@ from src.evidence_identity import (
     normalize_evidence_text,
     normalize_evidence_url,
 )
-from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
+from src.sv9_flow.contracts import (
+    SV9_FLOW_CANDIDATE_VERSION,
+    BrandEvidencePack,
+    EvidenceRecord,
+)
 
 
 CLAIM_SLOT_PRODUCER_VERSION = "evidence-claim-slot-producer-v2"
@@ -143,11 +147,17 @@ def resolve_candidate_claim_memory_evidence(
                 derivation_mode="invalid_persisted_shadow_lane",
                 source_candidate_schema_version=schema_version,
             )
-        records = [
-            _persisted_row_with_provenance(row, schema_version=schema_version)
-            for row in raw_records
-            if isinstance(row, dict)
-        ]
+        records = _validated_persisted_lane(
+            candidate,
+            raw_records,
+            schema_version=schema_version,
+        )
+        if records is None:
+            return _resolution(
+                [],
+                derivation_mode="invalid_persisted_shadow_lane",
+                source_candidate_schema_version=schema_version,
+            )
         return _resolution(
             records,
             derivation_mode=_PERSISTED_DERIVATION_MODE,
@@ -215,27 +225,36 @@ def _resolution(
     }
 
 
-def _persisted_row_with_provenance(
-    row: dict[str, Any],
+def _validated_persisted_lane(
+    candidate: dict[str, Any],
+    raw_records: list[Any],
     *,
     schema_version: str,
-) -> dict[str, Any]:
-    copied = dict(row)
-    metadata = (
-        dict(row.get("metadata"))
-        if isinstance(row.get("metadata"), dict)
-        else {}
-    )
-    metadata.setdefault(
-        "claim_slot_derivation_mode",
-        _PERSISTED_DERIVATION_MODE,
-    )
-    metadata.setdefault(
-        "source_candidate_schema_version",
-        schema_version or "unknown",
-    )
-    copied["metadata"] = metadata
-    return copied
+) -> list[dict[str, Any]] | None:
+    """Verify a non-empty persisted lane against its immutable source pack."""
+
+    # An explicit empty lane is the conservative persisted decision: it can
+    # suppress a projection but cannot inject a claim.
+    if not raw_records:
+        return []
+    if schema_version != SV9_FLOW_CANDIDATE_VERSION:
+        return None
+    if any(not isinstance(row, dict) for row in raw_records):
+        return None
+    pack_payload = candidate.get("evidence_pack")
+    if not isinstance(pack_payload, dict):
+        return None
+    expected_records = [
+        record.to_dict()
+        for record in build_claim_memory_evidence(
+            _pack_from_payload(pack_payload),
+            source_candidate_schema_version=schema_version,
+        )
+    ]
+    persisted_records = [dict(row) for row in raw_records]
+    if persisted_records != expected_records:
+        return None
+    return persisted_records
 
 
 def _pack_from_payload(payload: dict[str, Any]) -> BrandEvidencePack:

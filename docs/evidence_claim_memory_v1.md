@@ -152,9 +152,11 @@ mission/vision language fail closed.
 Historical `sv9-flow-candidate-v1` reports remain unchanged. When their
 persisted candidate has no claim-memory field, policy v4 may deterministically
 derive the same narrow explicit-claim records from the immutable evidence pack
-at read time. A persisted lane always wins, including an intentionally empty
-list. A v2 or unknown-schema report with a missing lane fails closed instead of
-being reinterpreted.
+at read time. A non-empty persisted v2 lane has precedence only when it
+reproduces exactly from that evidence pack under Producer v2; changed, partial,
+or foreign-version records fail closed. An empty persisted lane remains a
+valid conservative decision. A v2 or unknown-schema report with a missing lane
+also fails closed instead of being reinterpreted.
 
 The system still must not retrofit keys from generic claim text, URL position,
 tile ID, `checked_block`, or EvidenceGraph's text-derived `claim_id`; doing so

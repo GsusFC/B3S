@@ -10,13 +10,16 @@ backfill is a deterministic read-time projection over immutable
 
 For every candidate:
 
-1. if `claim_memory_evidence` exists as a list, use it exactly, including an
-   empty list;
-2. if that persisted field is malformed, fail closed;
-3. if the field is missing and the schema is `sv9-flow-candidate-v1`, run
+1. if `claim_memory_evidence` is an empty list, preserve that conservative
+   persisted decision;
+2. if it is non-empty, require `sv9-flow-candidate-v2` and an exact
+   deterministic replay from the immutable evidence pack under Producer v2;
+3. if the persisted field is malformed, partial, changed, or from another
+   producer version, fail closed;
+4. if the field is missing and the schema is `sv9-flow-candidate-v1`, run
    historical backfill v1;
-4. if the field is missing on v2 or an unknown schema, fail closed;
-5. never write the derived records back into the report.
+5. if the field is missing on v2 or an unknown schema, fail closed;
+6. never write the derived records back into the report.
 
 Backfilled records use Producer v2 and declare:
 
