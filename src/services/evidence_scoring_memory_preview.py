@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Iterable
+from urllib.parse import urlparse
 
 from src.evidence_identity import (
     canonical_evidence_digest,
@@ -25,7 +26,6 @@ from src.evidence_identity import (
     normalize_evidence_url,
     stable_artifact_digest,
 )
-from src.history.report_parser import normalize_domain
 from src.services.evidence_memory_identity_v2 import (
     build_evidence_memory_identity_v2,
 )
@@ -77,9 +77,9 @@ def build_evidence_scoring_memory_preview(
         return result
 
     domains = {
-        normalize_domain(str(report.get("url") or ""))
+        _normalize_domain(str(report.get("url") or ""))
         for report in ordered
-        if normalize_domain(str(report.get("url") or ""))
+        if _normalize_domain(str(report.get("url") or ""))
     }
     if len(domains) != 1:
         raise EvidenceScoringMemoryPreviewError(
@@ -793,6 +793,18 @@ def _infer_source_class(source: str, evidence_type: str) -> str:
     if evidence_type == "raw_input" or source in {"web", "context"}:
         return "owned_copy"
     return "other"
+
+
+def _normalize_domain(value: str) -> str:
+    parsed = urlparse(
+        value if "://" in value else f"https://{value}"
+    )
+    return (
+        str(parsed.hostname or "")
+        .strip(".")
+        .lower()
+        .removeprefix("www.")
+    )
 
 
 def _number(value: Any) -> int | float | None:

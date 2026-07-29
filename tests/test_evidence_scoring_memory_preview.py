@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import subprocess
+import sys
 
 import pytest
 
@@ -11,6 +13,24 @@ from src.services.evidence_scoring_memory_preview import (
     build_evidence_scoring_memory_preview,
 )
 from src.sv9.rubric import COMPONENTS, component_points
+
+
+def test_preview_module_imports_cleanly_in_a_fresh_process() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from src.services.evidence_scoring_memory_preview "
+                "import build_evidence_scoring_memory_preview"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_prior_literal_evidence_recovers_only_a_later_blind_spot() -> None:
