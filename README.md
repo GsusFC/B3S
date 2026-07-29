@@ -200,7 +200,7 @@ Every deploy validates `fly.toml`, builds the committed Dockerfile and runs the 
 
 Experimental. Scoring runs shadow-only. Contracts and policies are expected to change; policy changes must carry a changelog entry justified by a real captured case.
 
-The full local test suite is currently green. Two destructive,
+The full local test suite is currently green. Three destructive,
 environment-dependent PostgreSQL integration tests are skipped unless an
 explicit disposable database is configured, and FastAPI's test client emits an
 upstream Starlette deprecation warning.

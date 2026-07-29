@@ -109,6 +109,17 @@ B3S_ALLOW_SCHEMA_DROP=1 \
 
 The integration suite drops only the `b3s_history` schema, refuses to run without the explicit `B3S_ALLOW_SCHEMA_DROP=1` opt-in, and must still target a disposable database.
 
+It also invokes the same migration entry point used by Fly:
+
+```text
+python scripts/import_b3s_reports_postgres.py --migrate-only
+```
+
+The first run must apply every packaged migration, the second must apply none,
+and migration `007` must leave the scoring-recovery review journal available.
+This proves the CLI contract and idempotency on PostgreSQL; it does not replace
+an observed Fly release using the built image and production secret.
+
 ## Cutover boundary
 
 PostgreSQL already serves imported history and mirrors completed reports, but it is not yet the transactional live scan writer. The remaining controlled cutover is:

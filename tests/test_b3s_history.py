@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -11,6 +12,7 @@ from uuid import uuid4
 
 import pytest
 
+from scripts import import_b3s_reports_postgres
 from scripts.import_b3s_reports_postgres import (
     _run_evidence_claim_tile_ledger_backfill,
     _run_evidence_ledger_shadow_backfill,
@@ -1041,6 +1043,72 @@ def test_postgres_scoring_recovery_survives_restart_and_revocation() -> None:
             for event in recovery_journal["events"]
         ] == ["revoked", "superseded"]
         assert recovery_journal["current"] == [revoked_recovery]
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL"),
+    reason="B3S_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
+def test_release_migrate_only_cli_is_complete_and_idempotent(
+    capsys,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import psycopg
+
+    _require_schema_drop_opt_in()
+    dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+
+    monkeypatch.setattr(
+        import_b3s_reports_postgres,
+        "B3S_DATABASE_URL",
+        dsn,
+    )
+    command = [
+        "--reports-dir",
+        str(tmp_path),
+        "--migrate-only",
+    ]
+    try:
+        assert import_b3s_reports_postgres.main(command) == 0
+        first = json.loads(capsys.readouterr().out)
+        assert first["status"] == "ok"
+        assert first["applied_migrations"] == [
+            "001_history_v1.sql",
+            "002_evidence_stability.sql",
+            "003_evidence_ledger_shadow.sql",
+            "004_evidence_memory_adjudications.sql",
+            "005_evidence_claim_reconciliations.sql",
+            "006_evidence_claim_tile_ledger.sql",
+            "007_evidence_scoring_recovery_reviews.sql",
+        ]
+
+        assert import_b3s_reports_postgres.main(command) == 0
+        second = json.loads(capsys.readouterr().out)
+        assert second["status"] == "ok"
+        assert second["applied_migrations"] == []
+
+        with psycopg.connect(dsn) as conn:
+            stored = conn.execute(
+                """
+                SELECT to_regclass(
+                    'b3s_history.evidence_scoring_recovery_review_events'
+                )::text AS review_table,
+                (
+                    SELECT count(*)
+                    FROM b3s_history.schema_migrations
+                ) AS migration_count
+                """
+            ).fetchone()
+        assert stored[0] == (
+            "b3s_history.evidence_scoring_recovery_review_events"
+        )
+        assert stored[1] == 7
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
