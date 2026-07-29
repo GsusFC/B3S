@@ -227,6 +227,100 @@ def test_evidence_ledger_shadow_recomputes_when_persisted_projection_is_stale(
     }
 
 
+def test_claim_tile_ledger_reuses_matching_persisted_projection(
+    tmp_path,
+    monkeypatch,
+):
+    from src.services.evidence_claim_tile_ledger import (
+        build_evidence_claim_tile_ledger,
+    )
+    from web import report_store
+
+    claim = "Our mission is to simplify finance."
+    report = {
+        "id": "claim-tile-one",
+        "brand_name": "Example",
+        "url": "https://example.com",
+        "created_at": "2026-07-11T10:00:00+00:00",
+        "raw": {
+            "schema_version": "report-v1",
+            "flow": {
+                "candidate": {
+                    "evidence_pack": {
+                        "evidence": [
+                            {
+                                "ref": "web.about",
+                                "source": "web",
+                                "evidence_type": "raw_input",
+                                "url": "https://example.com/about",
+                                "content": claim,
+                                "metadata": {
+                                    "source_class": "owned_copy",
+                                    "claim_slot_key": "mission.primary",
+                                },
+                            }
+                        ]
+                    }
+                }
+            },
+            "sv9": {
+                "evaluator_model": "evaluator-a",
+                "result": {
+                    "rubric_version": "rubric-v1",
+                    "components": {
+                        "mission": {
+                            "tile_profile": [
+                                {
+                                    "id": "M1",
+                                    "estado": "ok",
+                                    "evidencia": claim,
+                                }
+                            ]
+                        }
+                    },
+                },
+            },
+        },
+    }
+    persisted = build_evidence_claim_tile_ledger(
+        [report],
+        mode="shadow",
+    )
+    repository = SimpleNamespace(
+        list_report_payloads_for_domain=lambda domain, *, limit, offset: (
+            [report][offset : offset + limit]
+            if domain == "example.com"
+            else []
+        ),
+        get_evidence_claim_tile_ledger=lambda domain: (
+            persisted if domain == "example.com" else None
+        ),
+    )
+    monkeypatch.setenv(
+        "B3S_EVIDENCE_CLAIM_TILE_LEDGER_MODE",
+        "shadow",
+    )
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        report_store,
+        "_postgres_repository",
+        lambda: repository,
+    )
+
+    result = report_store.evidence_claim_tile_ledger_for_domain(
+        "example.com"
+    )
+
+    assert result["summary"]["mapping_count"] == 1
+    assert result["runtime_effect"] is False
+    assert result["authority"] is False
+    assert result["persistence"] == {
+        "stored": True,
+        "backend": "postgres",
+    }
+    assert claim not in json.dumps(result)
+
+
 def test_evidence_memory_identity_v2_is_derived_without_authority(
     tmp_path,
     monkeypatch,

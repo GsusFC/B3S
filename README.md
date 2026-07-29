@@ -61,6 +61,7 @@ GET  /api/v1/brands/{domain}/scans
 GET  /api/v1/brands/{domain}/evidence-ledger-shadow
 GET  /api/v1/brands/{domain}/evidence-memory-identity-v2-shadow
 GET  /api/v1/brands/{domain}/evidence-claim-memory-shadow
+GET  /api/v1/brands/{domain}/evidence-claim-tile-ledger-shadow
 GET  /api/v1/brands/{domain}/evidence-claim-reconciliations
 POST /api/v1/brands/{domain}/evidence-claim-reconciliations
 GET  /api/v1/brands/{domain}/evidence-memory-adjudications
@@ -156,6 +157,16 @@ idempotency, optimistic concurrency, server-bound reviewer identity, and
 revocation. An accepted relation remains non-authoritative and does not select
 a canonical claim; see
 [`docs/evidence_claim_reconciliation_v1.md`](docs/evidence_claim_reconciliation_v1.md).
+
+The Gate 2 shadow ledger persists conservative
+`evidence → claim → tile` relations already recoverable from immutable scans.
+It requires a literal source quote, a semantic claim anchor, and one
+unambiguous mapping. Exact repeats add persistence only; evaluator changes
+create a new mapping series. It returns hashes rather than raw claim/quote
+text and cannot change tiles, points, scores, or canonical selection. Inspect
+it through
+`GET /api/v1/brands/{domain}/evidence-claim-tile-ledger-shadow`; see
+[`docs/evidence_claim_tile_ledger_v1.md`](docs/evidence_claim_tile_ledger_v1.md).
 
 Prepare and evaluate the versioned identity review set with:
 

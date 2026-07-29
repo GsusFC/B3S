@@ -32,15 +32,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Backfill the non-authoritative evidence ledger from PostgreSQL history",
     )
+    parser.add_argument(
+        "--rebuild-evidence-claim-tile-ledger-shadow",
+        action="store_true",
+        help=(
+            "Backfill the non-authoritative evidence-to-claim-to-tile "
+            "ledger from PostgreSQL history"
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.dry_run and (args.migrate_only or args.rebuild_evidence_ledger_shadow):
+    if args.dry_run and (
+        args.migrate_only
+        or args.rebuild_evidence_ledger_shadow
+        or args.rebuild_evidence_claim_tile_ledger_shadow
+    ):
         raise SystemExit(
             "--dry-run cannot be combined with --migrate-only or "
-            "--rebuild-evidence-ledger-shadow"
+            "a shadow-ledger backfill"
         )
 
     reports, failures = load_reports(Path(args.reports_dir))
@@ -73,12 +85,23 @@ def main(argv: list[str] | None = None) -> int:
             if args.rebuild_evidence_ledger_shadow
             else None
         )
+        claim_tile_backfill = (
+            _run_evidence_claim_tile_ledger_backfill(
+                repository,
+                workspace_slug=args.workspace_slug,
+            )
+            if args.rebuild_evidence_claim_tile_ledger_shadow
+            else None
+        )
         print(
             json.dumps(
                 {
                     "status": "ok",
                     "applied_migrations": applied_migrations,
                     "evidence_ledger_shadow_backfill": backfill,
+                    "evidence_claim_tile_ledger_shadow_backfill": (
+                        claim_tile_backfill
+                    ),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -120,6 +143,13 @@ def main(argv: list[str] | None = None) -> int:
         payload["evidence_ledger_shadow_backfill"] = _run_evidence_ledger_shadow_backfill(
             repository,
             workspace_slug=args.workspace_slug,
+        )
+    if args.rebuild_evidence_claim_tile_ledger_shadow:
+        payload["evidence_claim_tile_ledger_shadow_backfill"] = (
+            _run_evidence_claim_tile_ledger_backfill(
+                repository,
+                workspace_slug=args.workspace_slug,
+            )
         )
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str))
     return 1 if import_failures else 0
@@ -169,6 +199,28 @@ def _run_evidence_ledger_shadow_backfill(
         return {
             "mode": "shadow",
             "runtime_effect": False,
+            "workspace_slug": workspace_slug,
+            "status": "failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _run_evidence_claim_tile_ledger_backfill(
+    repository,
+    *,
+    workspace_slug: str,
+) -> dict[str, Any]:
+    """Keep an experimental mapping backfill outside release authority."""
+
+    try:
+        return repository.rebuild_evidence_claim_tile_ledgers(
+            workspace_slug=workspace_slug,
+        )
+    except Exception as exc:
+        return {
+            "mode": "shadow",
+            "runtime_effect": False,
+            "authority": False,
             "workspace_slug": workspace_slug,
             "status": "failed",
             "error": f"{type(exc).__name__}: {exc}",

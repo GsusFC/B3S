@@ -14,6 +14,7 @@ from src.services.scanner_evidence_comparison import annotate_report_history
 from web.report_store import (
     domain_key,
     evidence_claim_memory_for_domain,
+    evidence_claim_tile_ledger_for_domain,
     evidence_ledger_shadow_for_domain,
     evidence_memory_identity_v2_for_domain,
     list_reports_for_domain,
@@ -27,6 +28,7 @@ from .models import (
     ApiErrorResponse,
     BrandScanHistoryResponse,
     EvidenceClaimMemoryShadowResponse,
+    EvidenceClaimTileLedgerShadowResponse,
     EvidenceClaimReconciliationCreateRequest,
     EvidenceClaimReconciliationCreateResponse,
     EvidenceClaimReconciliationJournalResponse,
@@ -372,6 +374,31 @@ def brand_evidence_claim_memory_shadow(
         "api_version": "v1",
         "domain": normalized,
         **evidence_claim_memory_for_domain(normalized),
+    }
+
+
+@router.get(
+    "/brands/{domain}/evidence-claim-tile-ledger-shadow",
+    response_model=EvidenceClaimTileLedgerShadowResponse,
+    operation_id="getBrandEvidenceClaimTileLedgerShadow",
+    responses=_ERRORS,
+)
+def brand_evidence_claim_tile_ledger_shadow(
+    domain: str,
+    _principal: ReadPrincipal,
+) -> dict[str, Any]:
+    normalized = domain_key(domain)
+    if not normalized:
+        raise ApiError(
+            400,
+            "invalid_domain",
+            "A valid brand domain is required.",
+        )
+    return {
+        "object": "evidence_claim_tile_ledger_shadow",
+        "api_version": "v1",
+        "domain": normalized,
+        **evidence_claim_tile_ledger_for_domain(normalized),
     }
 
 

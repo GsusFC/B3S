@@ -49,6 +49,14 @@ canonical/provisional reference are related but not interchangeable.
   review history.
 - `evidence_claim_reconciliation_events`: append-only decisions over stable
   claim-relation candidates.
+- `evidence_claim_tile_ledger_states`: current non-authoritative mapping
+  projection per brand.
+- `evidence_claim_tile_mapping_series`: immutable evaluator/policy identity for
+  evidence-to-claim-to-tile mappings.
+- `evidence_claim_tile_mappings`: polarity, source independence, lifecycle, and
+  hashed quote provenance for each unique mapping.
+- `evidence_claim_tile_mapping_observations`: capture-level persistence for a
+  mapping.
 
 ## Invariants
 
@@ -62,6 +70,9 @@ canonical/provisional reference are related but not interchangeable.
 - Stability recomputation updates only derived comparison/selection tables; immutable report payloads are returned exactly as imported.
 - Evidence-ledger rebuilds run inside a savepoint, never affect scoring or
   canonical selection, and cannot abort an authoritative report import.
+- Claim-to-tile rebuilds use a separate savepoint, retain older versioned
+  mapping series, return no raw claim/quote text, and enforce
+  `runtime_effect=false` and `authority=false`.
 - Evidence adjudication and claim reconciliation use separate append-only
   journals with idempotency, optimistic concurrency, explicit supersession,
   revocation, and database-enforced `runtime_effect=false` and
@@ -76,6 +87,10 @@ docker compose up -d db
 .venv/bin/python scripts/import_b3s_reports_postgres.py --dry-run
 .venv/bin/python scripts/import_b3s_reports_postgres.py --migrate-only
 .venv/bin/python scripts/import_b3s_reports_postgres.py
+B3S_EVIDENCE_CLAIM_TILE_LEDGER_MODE=shadow \
+  .venv/bin/python scripts/import_b3s_reports_postgres.py \
+  --migrate-only \
+  --rebuild-evidence-claim-tile-ledger-shadow
 ```
 
 `B3S_DATABASE_URL` defaults to `postgresql://b3s:b3s@localhost:5433/b3s`.

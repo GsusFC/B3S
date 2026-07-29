@@ -21,8 +21,8 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["promotion_ready"] is False
     assert report["executable_failures"] == []
     assert report["schema_version"] == "evidence-memory-stress-v2"
-    assert report["policy_version"] == "evidence-memory-stress-policy-v6"
-    assert report["summary"]["executable_invariant_count"] == 22
+    assert report["policy_version"] == "evidence-memory-stress-policy-v7"
+    assert report["summary"]["executable_invariant_count"] == 23
     assert report["summary"]["promotion_blocker_count"] == 5
     assert report["summary"]["claim_relation_gold_candidate_count"] == 13
     assert report["summary"]["claim_relation_gold_reviewed_count"] == 0
@@ -98,6 +98,17 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
     assert probes[
         "historical_claim_backfill_reuses_v1_evidence_without_mutation"
     ]["status"] == "pass"
+    assert probes[
+        "claim_tile_mapping_is_literal_versioned_and_shadow_only"
+    ]["status"] == "pass"
+    tile_mapping = probes[
+        "tile_mapping_pending_reviewed_promotion_policy"
+    ]
+    assert tile_mapping["status"] == "blocked"
+    assert "persistent versioned" in tile_mapping["observation"]
+    assert "review real mapping coverage" in tile_mapping[
+        "required_capability"
+    ]
     claim_relation = probes["changed_claim_has_no_canonical_resolution"]
     assert "13 cases" in claim_relation["observation"]
     assert "13 pending reviews" in claim_relation["observation"]
@@ -151,6 +162,13 @@ def test_real_history_replay_checks_invariants_without_mutating_reports() -> Non
     ] == 0
     assert report["claim_memory_replay"]["summary"]["history_count"] == 1
     assert report["claim_memory_replay"]["summary"]["claim_slot_count"] == 0
+    assert report["claim_tile_ledger_replay"]["summary"][
+        "history_count"
+    ] == 1
+    assert report["claim_tile_ledger_replay"]["authority"] is False
+    assert (
+        report["claim_tile_ledger_replay"]["runtime_effect"] is False
+    )
 
 
 def test_histories_without_material_evidence_are_reported_but_not_used_as_proof() -> None:
@@ -277,6 +295,7 @@ def test_markdown_distinguishes_passes_from_promotion_blockers() -> None:
     assert "## Controlled probes" in rendered
     assert "## Identity v2 comparison" in rendered
     assert "## Claim Memory v1 replay" in rendered
+    assert "## Evidence → claim → tile ledger replay" in rendered
     assert "## Claim relation review set" in rendered
     assert "Candidates: `13`" in rendered
     assert "Pending: `13`" in rendered

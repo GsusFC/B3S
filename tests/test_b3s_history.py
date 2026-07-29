@@ -12,6 +12,7 @@ from uuid import uuid4
 import pytest
 
 from scripts.import_b3s_reports_postgres import (
+    _run_evidence_claim_tile_ledger_backfill,
     _run_evidence_ledger_shadow_backfill,
     dry_run_summary,
 )
@@ -150,6 +151,58 @@ def test_evidence_ledger_backfill_failure_cannot_fail_a_release() -> None:
     }
 
 
+def test_claim_tile_ledger_backfill_is_a_noop_when_disabled(
+    monkeypatch,
+) -> None:
+    from src.history.repository import PostgresHistoryRepository
+
+    def connect(*_args, **_kwargs):
+        raise AssertionError("disabled shadow must not connect")
+
+    repository = PostgresHistoryRepository(
+        "postgresql://example.test/b3s",
+        connect=connect,
+    )
+    monkeypatch.setenv(
+        "B3S_EVIDENCE_CLAIM_TILE_LEDGER_MODE",
+        "disabled",
+    )
+
+    result = repository.rebuild_evidence_claim_tile_ledgers()
+
+    assert result == {
+        "mode": "disabled",
+        "runtime_effect": False,
+        "authority": False,
+        "workspace_slug": "b3s",
+        "brands_discovered": 0,
+        "rebuilt": 0,
+        "failed": 0,
+        "failed_domains": [],
+    }
+
+
+def test_claim_tile_ledger_backfill_failure_cannot_fail_a_release() -> None:
+    class Repository:
+        @staticmethod
+        def rebuild_evidence_claim_tile_ledgers(*, workspace_slug):
+            raise RuntimeError(f"unavailable:{workspace_slug}")
+
+    result = _run_evidence_claim_tile_ledger_backfill(
+        Repository(),
+        workspace_slug="b3s",
+    )
+
+    assert result == {
+        "mode": "shadow",
+        "runtime_effect": False,
+        "authority": False,
+        "workspace_slug": "b3s",
+        "status": "failed",
+        "error": "RuntimeError: unavailable:b3s",
+    }
+
+
 def test_shadow_ledger_failure_isolated_from_authoritative_import(monkeypatch) -> None:
     from src.history.repository import PostgresHistoryRepository
 
@@ -178,6 +231,45 @@ def test_shadow_ledger_failure_isolated_from_authoritative_import(monkeypatch) -
     assert rebuilt is False
 
 
+def test_claim_tile_ledger_failure_isolated_from_authoritative_import(
+    monkeypatch,
+) -> None:
+    from src.history.repository import PostgresHistoryRepository
+
+    class Connection:
+        savepoint_count = 0
+
+        @contextmanager
+        def transaction(self):
+            self.savepoint_count += 1
+            yield
+
+    repository = PostgresHistoryRepository("postgresql://example.test/b3s")
+    connection = Connection()
+    monkeypatch.setenv(
+        "B3S_EVIDENCE_CLAIM_TILE_LEDGER_MODE",
+        "shadow",
+    )
+
+    def fail(*_args):
+        raise RuntimeError("experimental mapping failed")
+
+    monkeypatch.setattr(
+        repository,
+        "_rebuild_evidence_claim_tile_ledger",
+        fail,
+    )
+
+    rebuilt = repository._rebuild_evidence_claim_tile_ledger_safely(
+        connection,
+        uuid4(),
+        uuid4(),
+    )
+
+    assert connection.savepoint_count == 1
+    assert rebuilt is False
+
+
 def test_schema_drop_requires_explicit_opt_in(monkeypatch) -> None:
     monkeypatch.delenv("B3S_ALLOW_SCHEMA_DROP", raising=False)
 
@@ -195,12 +287,33 @@ def test_claim_reconciliation_migration_is_packaged_and_non_authoritative() -> N
         .read_text(encoding="utf-8")
     )
 
-    assert filenames[-1] == "005_evidence_claim_reconciliations.sql"
+    assert filenames[-2:] == [
+        "005_evidence_claim_reconciliations.sql",
+        "006_evidence_claim_tile_ledger.sql",
+    ]
     assert "subject_type = 'claim_relation'" in sql
     assert "runtime_effect = false" in sql
     assert "authority = false" in sql
     assert "supersedes_event_id" in sql
     assert "UNIQUE (brand_id, idempotency_key_hash)" in sql
+
+
+def test_claim_tile_ledger_migration_is_versioned_and_non_authoritative() -> None:
+    from src.history.repository import _migration_files
+
+    filenames = [filename for filename, _sql in _migration_files()]
+    sql = (
+        resources.files("src.history")
+        .joinpath("migrations/006_evidence_claim_tile_ledger.sql")
+        .read_text(encoding="utf-8")
+    )
+
+    assert filenames[-1] == "006_evidence_claim_tile_ledger.sql"
+    assert "evidence_claim_tile_mapping_series" in sql
+    assert "evidence_claim_tile_mapping_observations" in sql
+    assert "runtime_effect = false" in sql
+    assert "authority = false" in sql
+    assert "mapping_series_id" in sql
 
 
 def test_claim_reconciliation_repository_validation_rejects_bad_subjects() -> None:
@@ -317,6 +430,10 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
 
     _require_schema_drop_opt_in()
     monkeypatch.setenv("B3S_EVIDENCE_LEDGER_MODE", "shadow")
+    monkeypatch.setenv(
+        "B3S_EVIDENCE_CLAIM_TILE_LEDGER_MODE",
+        "shadow",
+    )
     dsn = os.environ["B3S_TEST_DATABASE_URL"]
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
@@ -329,6 +446,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "003_evidence_ledger_shadow.sql",
             "004_evidence_memory_adjudications.sql",
             "005_evidence_claim_reconciliations.sql",
+            "006_evidence_claim_tile_ledger.sql",
         ]
         assert repository.migrate() == []
 
@@ -362,6 +480,14 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
         assert ledger["runtime_effect"] is False
         assert ledger["summary"]["state_counts"] == {"validation_candidate": 1}
         assert ledger["entries"][0]["observation_count"] == 2
+        claim_tile_ledger = repository.get_evidence_claim_tile_ledger(
+            "example.com"
+        )
+        assert claim_tile_ledger is not None
+        assert claim_tile_ledger["runtime_effect"] is False
+        assert claim_tile_ledger["authority"] is False
+        assert claim_tile_ledger["summary"]["mapping_count"] == 0
+        assert claim_tile_ledger["summary"]["mapping_series_count"] == 1
         assert repository.storage_counts() == {
             "workspaces": 1,
             "brands": 1,
@@ -381,6 +507,10 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "evidence_ledger_shadow_observations": 2,
             "evidence_memory_adjudication_events": 0,
             "evidence_claim_reconciliation_events": 0,
+            "evidence_claim_tile_ledger_states": 1,
+            "evidence_claim_tile_mapping_series": 1,
+            "evidence_claim_tile_mappings": 0,
+            "evidence_claim_tile_mapping_observations": 0,
         }
 
         with psycopg.connect(dsn) as conn:
@@ -402,6 +532,36 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
         rebuilt_ledger = repository.get_evidence_ledger_shadow("example.com")
         assert rebuilt_ledger is not None
         assert rebuilt_ledger["state_fingerprint"] == ledger["state_fingerprint"]
+
+        with psycopg.connect(dsn) as conn:
+            conn.execute(
+                "DELETE FROM b3s_history.evidence_claim_tile_ledger_states"
+            )
+        assert repository.get_evidence_claim_tile_ledger(
+            "example.com"
+        ) is None
+
+        claim_tile_backfill = (
+            repository.rebuild_evidence_claim_tile_ledgers()
+        )
+        assert claim_tile_backfill == {
+            "mode": "shadow",
+            "runtime_effect": False,
+            "authority": False,
+            "workspace_slug": "b3s",
+            "brands_discovered": 1,
+            "rebuilt": 1,
+            "failed": 0,
+            "failed_domains": [],
+        }
+        rebuilt_claim_tile_ledger = (
+            repository.get_evidence_claim_tile_ledger("example.com")
+        )
+        assert rebuilt_claim_tile_ledger is not None
+        assert (
+            rebuilt_claim_tile_ledger["state_fingerprint"]
+            == claim_tile_ledger["state_fingerprint"]
+        )
 
         concurrent = _report("scan-concurrent", "2026-07-03T08:00:00Z", score=79)
         barrier = Barrier(2)

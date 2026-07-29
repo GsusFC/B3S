@@ -270,6 +270,36 @@ immutable history; existing evidence-identity adjudications are overlaid as
 variant provenance and current claim-reconciliation decisions are overlaid on
 stable historical relation candidates.
 
+## Evidence → claim → tile ledger shadow
+
+```text
+GET /api/v1/brands/{domain}/evidence-claim-tile-ledger-shadow
+```
+
+This authenticated resource reuses support relationships already recoverable
+from immutable reports. A mapping requires a semantic claim occurrence, a
+literal tile quote in that claim's source evidence, a claim-text anchor, and
+one unambiguous source/claim candidate. Same-page similarity is rejected.
+
+Every mapping exposes its polarity, source-independence status, first/last
+observation, persistence state, mapping version, and evaluator/policy series.
+Raw claim and quote text are omitted; only stable identities and quote hashes
+are returned.
+
+The resource is persistent but non-authoritative:
+
+- `runtime_effect=false`;
+- `authority=false`;
+- exact repeats add observations, never breadth or points;
+- evaluator or pinned-policy changes create another mapping series;
+- no mapping changes existing tiles, scores, reports, or canonical selection.
+
+`persistence.stored=true` means PostgreSQL has a payload matching the current
+immutable-history fingerprint. Otherwise the API returns the deterministic
+`history_derived` projection. Set
+`B3S_EVIDENCE_CLAIM_TILE_LEDGER_MODE=disabled` to stop projection and
+persistence.
+
 ## Evidence claim reconciliation journal
 
 ```text

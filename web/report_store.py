@@ -26,6 +26,10 @@ from src.services.evidence_claim_reconciliation import (
     EvidenceClaimReconciliationUnavailableError,
     claim_relation_subject,
 )
+from src.services.evidence_claim_tile_ledger import (
+    build_evidence_claim_tile_ledger,
+    evidence_claim_tile_ledger_mode,
+)
 from src.services.evidence_memory_adjudication import (
     EvidenceMemoryAdjudicationCommand,
     EvidenceMemoryAdjudicationError,
@@ -357,6 +361,52 @@ def evidence_claim_memory_for_domain(domain: str) -> dict[str, Any]:
             "backend": "history_derived",
             "adjudications": adjudication_persistence,
             "claim_reconciliations": reconciliation_persistence,
+        },
+    }
+
+
+def evidence_claim_tile_ledger_for_domain(
+    domain: str,
+) -> dict[str, Any]:
+    """Return the current persisted mapping projection when fingerprints agree."""
+
+    mode = evidence_claim_tile_ledger_mode()
+    reports = list_reports_for_domain(domain)
+    derived = build_evidence_claim_tile_ledger(reports, mode=mode)
+    if mode != "shadow":
+        return {
+            **derived,
+            "persistence": {"stored": False, "backend": "disabled"},
+        }
+
+    repository = _postgres_repository()
+    if repository is not None:
+        try:
+            stored = repository.get_evidence_claim_tile_ledger(domain)
+            if (
+                isinstance(stored, dict)
+                and stored.get("state_fingerprint")
+                == derived.get("state_fingerprint")
+                and stored.get("latest_report_id")
+                == derived.get("latest_report_id")
+            ):
+                return {
+                    **stored,
+                    "persistence": {
+                        "stored": True,
+                        "backend": "postgres",
+                    },
+                }
+        except Exception:
+            _LOG.exception(
+                "failed to load evidence claim tile ledger",
+                extra={"domain": domain_key(domain)},
+            )
+    return {
+        **derived,
+        "persistence": {
+            "stored": False,
+            "backend": "history_derived",
         },
     }
 
