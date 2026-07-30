@@ -295,6 +295,24 @@ def test_claim_tile_ledger_reuses_matching_persisted_projection(
         get_evidence_claim_tile_ledger=lambda domain: (
             persisted if domain == "example.com" else None
         ),
+        get_reviewed_claim_tile_memory_shadow=lambda domain: (
+            {
+                "runtime_effect": False,
+                "authority": False,
+                "automatic_tile_effect": False,
+                "automatic_scoring_effect": False,
+                "reviewed_memory_candidate_version": "1" * 64,
+                "accepted_mappings": [
+                    {
+                        "mapping_id": persisted["mappings"][0][
+                            "mapping_id"
+                        ]
+                    }
+                ],
+            }
+            if domain == "example.com"
+            else None
+        ),
     )
     monkeypatch.setenv(
         "B3S_EVIDENCE_CLAIM_TILE_LEDGER_MODE",
@@ -318,6 +336,12 @@ def test_claim_tile_ledger_reuses_matching_persisted_projection(
         "stored": True,
         "backend": "postgres",
     }
+    assert result["reviewed_memory"]["available"] is True
+    assert result["reviewed_memory"]["persistence"] == {
+        "stored": True,
+        "backend": "postgres_ledger_and_review_journal",
+    }
+    assert len(result["reviewed_memory"]["accepted_mappings"]) == 1
     assert claim not in json.dumps(result)
 
 

@@ -99,35 +99,39 @@ The executable foundation must prove:
     accepts.
 25. six attributable production-source reviews preserve publisher
     independence separately from claim corroboration and remain shadow-only.
-26. all eight real claim-to-tile mappings are frozen with their tile contracts
-    and remain pending human review without runtime authority.
+26. all eight real claim-to-tile mappings have frozen human decisions; one
+    rejected false mapping keeps the precision gate blocked without runtime
+    authority.
 27. the candidate semantic memory version survives exact repetition,
     acquisition dropout, and evaluator-specific mapping-series drift, while a
     declared evaluator-version change alters only the shadow evaluation
     identity.
 28. the ten claim-scoped corroboration candidates reproduce from immutable
-    captured spans, remain pending human review, and cannot gain runtime or
-    corroboration authority.
+    captured spans, carry attributable human decisions, and cannot gain
+    runtime or corroboration authority.
 29. a deterministic source/claim registry preserves publisher independence
     and claim corroboration on separate axes, requires `claim_id`, grants no
     source-global decision, and remains shadow-only.
 30. an active accepted evidence identity survives acquisition dropout and an
     unreviewed content change; accepting the new variant adds it beside the
     original instead of silently replacing it.
+31. reviewed claim-to-tile memory includes only explicit acceptances, excludes
+    rejected mappings, and changes only its shadow evaluation identity when
+    the declared evaluator version changes.
 
 The adversarial probes deliberately expose:
 
 1. the offline set has six production-source decisions and a reproducible
-   claim-scoped queue with 10 candidates across 5 sources, but zero human
-   claim decisions; a two-axis v2 shadow registry now exists, while the active
+   claim-scoped set with 10 reviewed candidates across 5 sources; a two-axis
+   v2 shadow registry now exists, while the active
    identity projection still uses the fixture-only single-axis v1 registry,
    cross-brand coverage is absent, and semantic-paraphrase recall is
    unmeasured;
 2. the 13 reviewed claim-relation cases have no real replacement examples, and
    reviewed relations still have no canonical-promotion path;
-3. the persistent claim-to-tile mapping has eight frozen real candidates but
-   zero reviews, narrow brand/claim/polarity coverage, and no canonical
-   promotion policy;
+3. the persistent claim-to-tile mapping has eight frozen real reviews, one
+   rejected false mapping, narrow brand/claim/polarity coverage, and no
+   canonical promotion policy;
 4. the versioned shadow identity has no canonical memory input, score evaluator,
    result cache, or score-delta ledger.
 
@@ -196,12 +200,24 @@ Claim Memory v1 replayed the same 12 histories and found:
 - 0 relation candidates;
 - 184 structural metadata rows correctly ignored as semantic identity:
   168 visual-tile rows and 16 `checked_block` rows;
-- 30/30 controlled executable invariants passed, including identity policy v4,
+- 31/31 controlled executable invariants passed, including identity policy v4,
   the two-axis production-source review set, Claim Memory,
   reconciliation, claim-slot producer, historical backfill, and the versioned
   evidence-to-claim-to-tile ledger, the shadow memory snapshot, and the
   literal claim-corroboration review queue plus its two-axis shadow registry,
   as well as cumulative accepted-evidence memory without silent replacement.
+
+A coverage audit of the same immutable reports found that nine of the twelve
+brands have no explicit stable mission/vision declaration from which Claim
+Memory can safely derive a slot. Liminal contributes the third claim, but none
+of its tile quotes both occurs literally in the source and anchors that claim.
+Loosening either condition would create inferred identities rather than
+recovering persisted evidence.
+
+The separate scoring-recovery lane finds one additional real pending case:
+Causa Prima `magnetism.MG3`. It proposes a shadow delta of `+2`, while the
+reviewed delta remains `0` because no human review event exists. This case is
+not a claim-to-tile mapping and is not silently merged into that ledger.
 
 The Gate 2 replay over those histories found:
 
@@ -225,7 +241,8 @@ The separate claim-to-tile review set contains:
 - only `supports` polarity;
 - 7 Vercel mappings derived from one mission claim, including 3 mappings into
   core-purpose tiles;
-- 0 human reviews and 8 pending;
+- 8 attributable human reviews and 0 pending;
+- 7 accepted mappings and 1 rejected mapping, for confirmed precision `0.875`;
 - explicit tile conditions and evidence contracts for semantic review;
 - no runtime or scoring authority.
 
@@ -268,17 +285,18 @@ The separate claim-corroboration review set contains:
 - 10 unique claim IDs from 1 real brand;
 - reproducible capture, article-text, and evidence-span hashes plus exact
   Unicode offsets;
-- 0 human reviews and 10 pending;
+- 10 human reviews and 0 pending;
+- 7 `disputed`, 2 `mixed`, and 1 `independently_corroborated`;
 - no PR Newswire candidate because its source-level decision is already
   `excluded`;
-- a blocked claim-corroboration gate;
+- a completed review gate but blocked promotion gate;
 - no runtime, corroboration, or canonical authority.
 
 The source/claim registry v2 projection contains:
 
 - 6 reviewed publisher records and 10 claim-scoped records;
 - 5 `confirmed_independent` publishers and 1 excluded wire source;
-- 0 reviewed claims, 10 pending claims, and 0 source-global corroboration
+- 10 reviewed claims, 0 pending claims, and 0 source-global corroboration
   decisions;
 - exact dataset/event fingerprints and a deterministic registry fingerprint;
 - a ready shadow contract but no operational-adoption readiness;
@@ -340,14 +358,14 @@ clusters exact and light lexical copies, respects explicit lineage, and disputes
 ambiguous similarity. The controlled identity sub-gate now passes all 14
 attributable decisions with zero critical false accepts and exact agreement
 `1.0`. The offline production set additionally resolves publisher independence
-for six Vercel sources. A separate reproducible queue now materializes the five
-eligible sources as ten literal claim cases, but all ten remain pending human
-review. A deterministic two-axis v2 shadow registry now represents those
+for six Vercel sources. A separate reproducible set now materializes the five
+eligible sources as ten reviewed literal claim cases. A deterministic
+two-axis v2 shadow registry now represents those
 records without inheriting source-global corroboration, but the active
 identity projection still consumes the fixture-only single-axis v1 registry.
-Gate 1 remains blocked for canonical use by zero reviewed claim-corroboration
-decisions, one-brand coverage, unmeasured semantic-paraphrase recall,
-unapproved v2 operational adoption, and the missing canonical-claim policy.
+Gate 1 remains blocked for canonical use by one-brand coverage, unmeasured
+semantic-paraphrase recall, unapproved v2 operational adoption, and the
+missing canonical-claim policy.
 
 The separate claim-reconciliation journal now provides the same append-only,
 idempotent, optimistic-concurrency and revocation guarantees for stable
@@ -370,11 +388,12 @@ Required:
 
 Current status: the projection, PostgreSQL persistence, backfill command,
 read-only API, and executable stress invariant are implemented. It remains
-shadow-only. All eight current real mappings are now frozen for review, but
-none is reviewed and the set covers only two brands, two claim variants, and
-`supports` polarity. Promotion remains blocked until reviews are complete,
-coverage is expanded, and a canonical policy is adopted; repetition must
-continue to affect persistence only.
+shadow-only. All eight current real mappings now have frozen human decisions:
+seven accepted and one rejected, for precision `0.875`. The set covers only
+two brands, two claim variants, and `supports` polarity. Promotion remains
+blocked until the false mapping is corrected, coverage is expanded, and a
+canonical policy is adopted; repetition must continue to affect persistence
+only.
 
 ### Gate 3 — versioned memory evaluator
 
@@ -400,6 +419,13 @@ evaluator_version)`. The candidate version excludes repeat counts,
 latest-presence/acquisition state, and evaluator-specific mapping-series IDs.
 Controlled regressions prove that those changes do not alter candidate memory,
 while declared rubric/evaluator changes alter the shadow evaluation identity.
+
+The reviewed claim-to-tile projection now consumes the durable shadow ledger
+plus current attributable review events. It includes only explicit
+`accepted` mappings, excludes rejected mappings such as Vercel `mission.M2`,
+and produces a deterministic reviewed-memory candidate version and shadow
+evaluation identity. It still returns `score=null`, `runtime_effect=false`,
+and `authority=false`.
 
 This does not close Gate 3. `canonical_memory_version`,
 `evaluation_identity`, `score`, and `score_delta` remain `null`. Promotion is

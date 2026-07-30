@@ -51,6 +51,9 @@ from src.services.evidence_memory_adjudication import (
     EvidenceMemoryAdjudicationInvalidTransitionError,
     EvidenceMemoryAdjudicationNotFoundError,
 )
+from src.services.evidence_reviewed_claim_tile_memory import (
+    build_reviewed_claim_tile_memory_from_journal_shadow,
+)
 from src.services.evidence_scoring_recovery_review import (
     EVIDENCE_SCORING_RECOVERY_REVIEW_EVENT_VERSION,
     EVIDENCE_SCORING_RECOVERY_REVIEW_POLICY_VERSION,
@@ -464,6 +467,31 @@ class PostgresHistoryRepository:
             ).fetchone()
         return dict(row["payload"]) if row and isinstance(row["payload"], dict) else None
 
+    def get_reviewed_claim_tile_memory_shadow(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        """Rebuild packet-bound reviewed mappings from durable state."""
+
+        ledger = self.get_evidence_claim_tile_ledger(
+            domain_or_url,
+            workspace_slug=workspace_slug,
+        )
+        if not isinstance(ledger, dict):
+            return None
+        reviews = self.list_current_evidence_claim_tile_reviews(
+            domain_or_url,
+            workspace_slug=workspace_slug,
+        )
+        if not reviews:
+            return None
+        return build_reviewed_claim_tile_memory_from_journal_shadow(
+            ledger,
+            reviews,
+        )
+
     def append_evidence_claim_tile_review(
         self,
         domain_or_url: str,
@@ -629,6 +657,7 @@ class PostgresHistoryRepository:
                     claim_variant_id, component_key, tile_id, tile_key,
                     polarity, sequence, decision, supersedes_event_id,
                     schema_version, policy_version, evaluator_version,
+                    review_packet_fingerprint,
                     reviewer, actor_id, reason_code, rationale,
                     idempotency_key_hash, request_fingerprint,
                     runtime_effect, authority, automatic_tile_effect,
@@ -636,7 +665,7 @@ class PostgresHistoryRepository:
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, false, false, false, false
+                    %s, %s, %s, %s, %s, %s, false, false, false, false
                 )
                 RETURNING *
                 """,
@@ -660,6 +689,7 @@ class PostgresHistoryRepository:
                     EVIDENCE_CLAIM_TILE_REVIEW_EVENT_VERSION,
                     EVIDENCE_CLAIM_TILE_REVIEW_POLICY_VERSION,
                     command.evaluator_version,
+                    command.review_packet_fingerprint,
                     command.reviewer,
                     command.actor_id,
                     command.reason_code,
@@ -3381,6 +3411,10 @@ def _validate_claim_tile_review_command(
     ):
         raise ValueError("invalid claim-to-tile review reason_code")
     for field, value in (
+        (
+            "review_packet_fingerprint",
+            command.review_packet_fingerprint,
+        ),
         ("idempotency_key_hash", command.idempotency_key_hash),
         ("request_fingerprint", command.request_fingerprint),
     ):
@@ -3433,6 +3467,11 @@ def _claim_tile_review_event(
         "schema_version": str(row["schema_version"]),
         "policy_version": str(row["policy_version"]),
         "evaluator_version": str(row["evaluator_version"]),
+        "review_packet_fingerprint": (
+            str(row["review_packet_fingerprint"])
+            if row["review_packet_fingerprint"] is not None
+            else None
+        ),
         "reviewer": str(row["reviewer"]),
         "reviewer_id": str(row["reviewer"]),
         "actor_id": str(row["actor_id"]),

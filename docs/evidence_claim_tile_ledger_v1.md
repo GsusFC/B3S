@@ -85,11 +85,15 @@ GET /api/v1/brands/{domain}/evidence-claim-tile-ledger-shadow
 
 The response exposes mapping IDs, versions, polarity, source independence,
 first/last observation, persistence state, and quote hashes. It returns no raw
-claim or quote text.
+claim or quote text. When packet-bound current reviews exist, the same response
+also includes `reviewed_memory`: a PostgreSQL-derived selection containing
+only explicitly accepted mappings.
 
 `persistence.stored=true` means the PostgreSQL payload fingerprint matches the
 current immutable history. Otherwise the API returns a deterministic
-`history_derived` projection.
+`history_derived` projection. The nested reviewed selection reports its own
+`persistence.backend=postgres_ledger_and_review_journal`; it is rebuilt on read
+from the stored ledger and append-only review events.
 
 ## Safety boundary
 
@@ -105,7 +109,8 @@ The real-history replay on 2026-07-29 found 8 conservative mappings across 12
 brand histories: 7 in Vercel and 1 in Robin Capital. Liminal produced none.
 The separate set documented in
 `docs/evidence_claim_tile_review_set_v1.md` freezes all eight with their claim
-text and tile contracts. None has a human review yet. Seven reuse one Vercel
+text and tile contracts. All eight now have attributable human decisions:
+seven are accepted and Vercel `mission.M2` is rejected. Seven reuse one Vercel
 mission claim, only two brands and two claim variants are represented, and all
 eight have `supports` polarity.
 
@@ -116,5 +121,5 @@ Recording a decision does not edit this ledger or its fingerprint.
 
 This demonstrates reuse of existing scanner evidence; it does not validate
 coverage or correctness for canonical promotion. Gate 2 therefore remains
-blocked on completed reviews, broader real coverage, polarity coverage, and an
-explicit promotion policy.
+blocked on the observed false mapping, broader real coverage, polarity
+coverage, and an explicit promotion policy.

@@ -16,6 +16,7 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 REVIEW_TOKEN = "test-b3s-evidence-review-token"
 REVIEWER_ID = "gsus"
 REVIEW_AUTH = {"Authorization": f"Bearer {REVIEW_TOKEN}"}
+REVIEW_PACKET_FINGERPRINT = "9" * 64
 
 
 def _configure_evidence_reviewer(monkeypatch) -> None:
@@ -556,6 +557,19 @@ def test_evidence_claim_tile_ledger_endpoint_is_non_authoritative(
                 "stored": True,
                 "backend": "postgres",
             },
+            "reviewed_memory": {
+                "available": True,
+                "runtime_effect": False,
+                "authority": False,
+                "automatic_tile_effect": False,
+                "automatic_scoring_effect": False,
+                "accepted_mappings": [
+                    {
+                        "mapping_id": "c" * 64,
+                        "tile_key": "mission.M1",
+                    }
+                ],
+            },
         },
     )
 
@@ -575,6 +589,14 @@ def test_evidence_claim_tile_ledger_endpoint_is_non_authoritative(
         "stored": True,
         "backend": "postgres",
     }
+    assert payload["reviewed_memory"]["available"] is True
+    assert (
+        payload["reviewed_memory"]["automatic_scoring_effect"]
+        is False
+    )
+    assert payload["reviewed_memory"]["accepted_mappings"][0][
+        "tile_key"
+    ] == "mission.M1"
 
 
 def test_create_evidence_memory_adjudication_is_idempotent_and_non_authoritative(
@@ -1251,6 +1273,7 @@ def test_create_claim_tile_review_is_attributable_and_non_authoritative(
             "reason_code": "tile_contract_satisfied",
             "rationale": "The claim satisfies this exact tile contract.",
             "evaluator_version": "manual-review-v1",
+            "review_packet_fingerprint": REVIEW_PACKET_FINGERPRINT,
         },
     )
 
@@ -1281,11 +1304,35 @@ def test_claim_tile_review_requires_idempotency_key(monkeypatch):
             "reason_code": "tile_contract_satisfied",
             "rationale": "The claim satisfies this exact tile contract.",
             "evaluator_version": "manual-review-v1",
+            "review_packet_fingerprint": REVIEW_PACKET_FINGERPRINT,
         },
     )
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "idempotency_key_required"
+
+
+def test_claim_tile_review_requires_packet_fingerprint(monkeypatch):
+    _configure_evidence_reviewer(monkeypatch)
+
+    response = TestClient(app).post(
+        "/api/v1/brands/example.com/evidence-claim-tile-reviews",
+        headers={
+            **REVIEW_AUTH,
+            "Idempotency-Key": "claim-tile-review-without-packet",
+        },
+        json={
+            "subject_id": "c" * 64,
+            "decision": "accepted",
+            "expected_current_event_id": None,
+            "reason_code": "tile_contract_satisfied",
+            "rationale": "The claim satisfies this exact tile contract.",
+            "evaluator_version": "manual-review-v1",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "review_packet_fingerprint" in response.text
 
 
 def test_scanner_token_cannot_review_claim_tile_mapping(monkeypatch):
@@ -1304,6 +1351,7 @@ def test_scanner_token_cannot_review_claim_tile_mapping(monkeypatch):
             "reason_code": "tile_contract_satisfied",
             "rationale": "The claim satisfies this exact tile contract.",
             "evaluator_version": "manual-review-v1",
+            "review_packet_fingerprint": REVIEW_PACKET_FINGERPRINT,
         },
     )
 
@@ -1344,6 +1392,7 @@ def test_claim_tile_review_fails_closed_without_durable_store(
             "reason_code": "tile_contract_satisfied",
             "rationale": "The claim satisfies this exact tile contract.",
             "evaluator_version": "manual-review-v1",
+            "review_packet_fingerprint": REVIEW_PACKET_FINGERPRINT,
         },
     )
 
@@ -1360,7 +1409,10 @@ def test_claim_tile_review_rejects_unknown_mapping(monkeypatch):
 
     _configure_evidence_reviewer(monkeypatch)
 
-    def missing(*_args, **_kwargs):
+    captured = {}
+
+    def missing(_domain, command):
+        captured["command"] = command
         raise EvidenceClaimTileReviewNotFoundError(
             "The claim-to-tile mapping does not exist."
         )
@@ -1384,6 +1436,7 @@ def test_claim_tile_review_rejects_unknown_mapping(monkeypatch):
             "reason_code": "tile_contract_satisfied",
             "rationale": "The claim satisfies this exact tile contract.",
             "evaluator_version": "manual-review-v1",
+            "review_packet_fingerprint": REVIEW_PACKET_FINGERPRINT,
         },
     )
 
@@ -1392,6 +1445,11 @@ def test_claim_tile_review_rejects_unknown_mapping(monkeypatch):
         "claim_tile_mapping_not_found"
     )
     assert response.json()["error"]["details"]["subject_id"] == "c" * 64
+    assert (
+        captured["command"].review_packet_fingerprint
+        == REVIEW_PACKET_FINGERPRINT
+    )
+    assert captured["command"].evaluator_version == "manual-review-v1"
 
 
 def test_claim_tile_review_journal_exposes_superseded_events(
@@ -1891,9 +1949,10 @@ def _claim_tile_review_event() -> dict:
         "effective_state": "accepted",
         "supersedes_event_id": None,
         "previous_event_id": None,
-        "schema_version": "evidence-claim-tile-review-event-v1",
+        "schema_version": "evidence-claim-tile-review-event-v2",
         "policy_version": "evidence-claim-tile-review-policy-v1",
         "evaluator_version": "manual-review-v1",
+        "review_packet_fingerprint": REVIEW_PACKET_FINGERPRINT,
         "reviewer": REVIEWER_ID,
         "reviewer_id": REVIEWER_ID,
         "actor_id": REVIEWER_ID,

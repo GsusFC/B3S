@@ -295,6 +295,7 @@ class EvidenceClaimTileLedgerShadowResponse(StrictModel):
     mapping_series: list[dict[str, Any]] = Field(default_factory=list)
     mappings: list[dict[str, Any]] = Field(default_factory=list)
     persistence: dict[str, Any] = Field(default_factory=dict)
+    reviewed_memory: dict[str, Any] = Field(default_factory=dict)
 
 
 class EvidenceScoringMemoryPreviewResponse(StrictModel):
@@ -487,7 +488,12 @@ class EvidenceScoringRecoveryReviewCreateRequest(
 class EvidenceClaimTileReviewCreateRequest(
     EvidenceMemoryAdjudicationCreateRequest
 ):
-    pass
+    review_packet_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("review_packet_fingerprint", mode="before")
+    @classmethod
+    def strip_review_packet_fingerprint(cls, value):
+        return value.strip() if isinstance(value, str) else value
 
 
 class EvidenceClaimTileReviewEvent(StrictModel):
@@ -522,6 +528,10 @@ class EvidenceClaimTileReviewEvent(StrictModel):
     schema_version: str
     policy_version: str
     evaluator_version: str
+    review_packet_fingerprint: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     reviewer: str
     reviewer_id: str
     actor_id: str
