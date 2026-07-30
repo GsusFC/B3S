@@ -12,6 +12,7 @@ from src.services.evidence_claim_tile_review_set import (
     evaluate_claim_tile_review_set,
     load_review_candidates,
     load_review_manifest,
+    load_reviews,
     render_claim_tile_review_set_markdown,
     review_candidate_fingerprint,
 )
@@ -20,11 +21,17 @@ from src.services.evidence_claim_tile_review_set import (
 def test_frozen_set_contains_all_eight_real_mapping_candidates() -> None:
     manifest = load_review_manifest()
     candidates = load_review_candidates()
+    reviews = load_reviews()
 
     assert len(candidates) == 8
     assert (
         manifest["candidate_fingerprint"]
         == review_candidate_fingerprint(candidates)
+    )
+    assert len(reviews) == 8
+    assert (
+        manifest["review_fingerprint"]
+        == review_candidate_fingerprint(reviews)
     )
     assert {
         str(row["brand"]["domain"]) for row in candidates
@@ -49,7 +56,7 @@ def test_unreviewed_real_candidates_fail_closed() -> None:
     result = evaluate_claim_tile_review_set(
         load_review_candidates(),
         [],
-        manifest=load_review_manifest(),
+        manifest=_unfrozen_manifest(),
     )
 
     assert result["runtime_effect"] is False
@@ -88,7 +95,7 @@ def test_perfect_review_of_current_set_cannot_fake_generalization() -> None:
     result = evaluate_claim_tile_review_set(
         candidates,
         reviews,
-        manifest=load_review_manifest(),
+        manifest=_unfrozen_manifest(),
     )
 
     assert result["review_gate_ready"] is True
@@ -130,7 +137,7 @@ def test_critical_rejection_measures_a_false_mapping() -> None:
     result = evaluate_claim_tile_review_set(
         candidates,
         reviews,
-        manifest=load_review_manifest(),
+        manifest=_unfrozen_manifest(),
     )
 
     assert result["summary"]["rejected_count"] == 1
@@ -164,6 +171,25 @@ def test_candidates_expose_tile_contract_not_only_literal_quote() -> None:
     ]["sin_evidencia"]
 
 
+def test_frozen_human_reviews_capture_the_real_false_mapping() -> None:
+    result = evaluate_claim_tile_review_set(
+        load_review_candidates(),
+        load_reviews(),
+        manifest=load_review_manifest(),
+    )
+
+    assert result["summary"]["reviewed_count"] == 8
+    assert result["summary"]["pending_count"] == 0
+    assert result["summary"]["accepted_count"] == 7
+    assert result["summary"]["rejected_count"] == 1
+    assert result["summary"]["confirmed_mapping_precision"] == 0.875
+    assert result["critical_non_accept_case_ids"] == [
+        "real-vercel-mission-m2-44c34065"
+    ]
+    assert result["review_gate_ready"] is False
+    assert result["promotion_ready"] is False
+
+
 def test_review_template_is_unsigned() -> None:
     manifest = load_review_manifest()
     rows = build_review_template(
@@ -175,6 +201,9 @@ def test_review_template_is_unsigned() -> None:
     assert {
         row["candidate_fingerprint"] for row in rows
     } == {manifest["candidate_fingerprint"]}
+    assert {
+        row["review_packet_fingerprint"] for row in rows
+    } == {manifest["review_packet_fingerprint"]}
     assert all(row["decision"] is None for row in rows)
     assert all(row["reviewer_id"] is None for row in rows)
     assert all(row["reviewed_at"] is None for row in rows)
@@ -192,6 +221,21 @@ def test_manifest_fingerprint_rejects_silent_candidate_edit() -> None:
             candidates,
             [],
             manifest=load_review_manifest(),
+        )
+
+
+def test_packet_fingerprint_rejects_manifest_contract_drift() -> None:
+    manifest = deepcopy(load_review_manifest())
+    manifest["decision_semantics"]["accepted"] = "Changed after review."
+
+    with pytest.raises(
+        EvidenceClaimTileReviewSetError,
+        match="review packet fingerprint mismatch",
+    ):
+        evaluate_claim_tile_review_set(
+            load_review_candidates(),
+            [],
+            manifest=manifest,
         )
 
 
@@ -216,7 +260,7 @@ def test_duplicate_review_is_rejected() -> None:
 
 def test_review_fingerprint_must_match_candidates_and_be_uniform() -> None:
     candidates = load_review_candidates()
-    manifest = load_review_manifest()
+    manifest = _unfrozen_manifest()
     mismatched = [_review(candidates[0]["case_id"], "accepted")]
     mismatched[0]["candidate_fingerprint"] = "0" * 64
 
@@ -245,13 +289,42 @@ def test_review_fingerprint_must_match_candidates_and_be_uniform() -> None:
             manifest=manifest,
         )
 
+    mismatched_packet = [
+        _review(candidates[0]["case_id"], "accepted")
+    ]
+    mismatched_packet[0]["review_packet_fingerprint"] = "0" * 64
+    with pytest.raises(
+        EvidenceClaimTileReviewSetError,
+        match="review packet fingerprint mismatch",
+    ):
+        evaluate_claim_tile_review_set(
+            candidates,
+            mismatched_packet,
+            manifest=manifest,
+        )
+
+    mixed_packets = [
+        _review(candidates[0]["case_id"], "accepted"),
+        _review(candidates[1]["case_id"], "accepted"),
+    ]
+    mixed_packets[1]["review_packet_fingerprint"] = "0" * 64
+    with pytest.raises(
+        EvidenceClaimTileReviewSetError,
+        match="mix review packet fingerprints",
+    ):
+        evaluate_claim_tile_review_set(
+            candidates,
+            mixed_packets,
+            manifest=manifest,
+        )
+
 
 def test_markdown_reports_pending_review_and_coverage() -> None:
     rendered = render_claim_tile_review_set_markdown(
         evaluate_claim_tile_review_set(
             load_review_candidates(),
             [],
-            manifest=load_review_manifest(),
+            manifest=_unfrozen_manifest(),
         )
     )
 
@@ -270,8 +343,17 @@ def _review(case_id: str, decision: str) -> dict:
         "candidate_fingerprint": load_review_manifest()[
             "candidate_fingerprint"
         ],
+        "review_packet_fingerprint": load_review_manifest()[
+            "review_packet_fingerprint"
+        ],
         "decision": decision,
         "reviewer_id": "gsus",
         "rationale": "Manual mapping review.",
         "reviewed_at": "2026-07-29T13:00:00+02:00",
     }
+
+
+def _unfrozen_manifest() -> dict:
+    manifest = deepcopy(load_review_manifest())
+    manifest["review_fingerprint"] = None
+    return manifest

@@ -14,8 +14,9 @@ and preserves:
 - immutable dataset and event fingerprints;
 - `runtime_effect=false` and `authority=false`.
 
-Publisher independence never implies claim corroboration. A pending claim
-never inherits the source-level aggregate `mixed` or `disputed` label.
+Publisher independence never implies claim corroboration. Claim decisions
+come only from claim-scoped review events and never inherit the source-level
+aggregate `mixed` or `disputed` label.
 
 ## Current projection
 
@@ -31,7 +32,8 @@ The current registry contains:
 - 5 `confirmed_independent` publishers and 1 `excluded` wire source;
 - 10 claim-scoped records across 5 sources;
 - 10 unique claim IDs;
-- 0 reviewed claim decisions and 10 pending;
+- 10 reviewed claim decisions and 0 pending;
+- 7 `disputed`, 2 `mixed`, and 1 `independently_corroborated`;
 - 0 source-global corroboration decisions.
 
 The registry fingerprint is deterministic and input-order invariant. A broken
@@ -45,7 +47,6 @@ mean the model is authorized for operational use.
 
 `operational_adoption_ready=false` remains mandatory while:
 
-- the 10 human claim decisions are pending;
 - coverage contains only one real brand;
 - semantic-paraphrase recall is unmeasured;
 - the active identity projection still consumes

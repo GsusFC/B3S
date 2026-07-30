@@ -19,6 +19,7 @@ The dataset lives in:
 fixtures/evidence_claim_tile_review/v1/
   manifest.json
   candidates.jsonl
+  reviews.jsonl
 ```
 
 It contains all eight mappings produced by the current real-history replay:
@@ -79,11 +80,20 @@ Evaluate completed reviews:
 Unsigned templates and deterministic `proposed_review` values are not human
 labels.
 
-Every template row carries the manifest's `candidate_fingerprint`. Evaluation
-recomputes that fingerprint from `candidates.jsonl`, rejects mixed or stale
-review rows, and still joins semantic context exclusively through `case_id`.
+Every template row carries both the manifest's `candidate_fingerprint` and
+`review_packet_fingerprint`. Evaluation recomputes the first from
+`candidates.jsonl` and the second from the normalized manifest, the complete
+candidate set, and the applicable schema version. It rejects mixed or stale
+review rows and still joins semantic context exclusively through `case_id`.
 Claims, quotes, mappings, and tile contracts remain single-sourced in the
 frozen candidate file.
+
+The packet fingerprint excludes only mutable lifecycle fields such as status
+and completed-review fingerprints. Completed decisions are frozen separately,
+so the packet identity never hashes itself.
+
+The completed `reviews.jsonl` is frozen independently by the manifest's
+`review_fingerprint`.
 
 Completed decisions can now be recorded in the append-only PostgreSQL journal:
 
@@ -102,7 +112,10 @@ identities; clients submit only the decision and review rationale. See
 Current state:
 
 - candidates: 8;
-- human reviews: 0;
+- human reviews: 8;
+- accepted: 7;
+- rejected: 1 (`mission.M2`);
+- confirmed mapping precision: `0.875`;
 - brands: 2;
 - unique claim variants: 2;
 - polarities: `supports` only;
@@ -110,12 +123,12 @@ Current state:
 - promotion policy: not adopted;
 - runtime and scoring authority: disabled.
 
-The zero above describes committed human decisions, not missing storage
-capability. The journal now exists, but no reviewer decision has been inferred
-or prefilled.
+The rejected `mission.M2` mapping is the expected value of a human review
+gate: literal overlap did not prove that the mission was sufficiently
+distinctive. The decision is attributable and frozen, but cannot alter runtime
+tiles or scores.
 
-Even eight accepted reviews would not establish generalization. Promotion also
-requires:
+Promotion requires:
 
 - at least 5 reviewed real brands;
 - at least 10 reviewed claim variants;
