@@ -13,7 +13,7 @@ from typing import Any
 
 
 EVIDENCE_CLAIM_TILE_REVIEW_EVENT_VERSION = (
-    "evidence-claim-tile-review-event-v1"
+    "evidence-claim-tile-review-event-v2"
 )
 EVIDENCE_CLAIM_TILE_REVIEW_POLICY_VERSION = (
     "evidence-claim-tile-review-policy-v1"
@@ -76,6 +76,7 @@ class EvidenceClaimTileReviewCommand:
     reason_code: str
     rationale: str
     evaluator_version: str
+    review_packet_fingerprint: str
     actor_id: str
     idempotency_key_hash: str
     request_fingerprint: str

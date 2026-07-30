@@ -8,7 +8,9 @@ import src.services.evidence_source_claim_registry as registry_module
 from src.services.evidence_claim_corroboration_review_set import (
     EvidenceClaimCorroborationReviewSetError,
     build_review_template as build_claim_review_template,
+    claim_corroboration_review_packet_fingerprint,
     load_review_candidates as load_claim_review_candidates,
+    load_review_events as load_claim_review_events,
     load_review_manifest as load_claim_review_manifest,
     review_set_fingerprint,
 )
@@ -54,9 +56,13 @@ def test_default_registry_preserves_both_axes_without_authority() -> None:
         "claim_record_count": 10,
         "claim_source_count": 5,
         "claim_id_count": 10,
-        "claim_reviewed_count": 0,
-        "claim_pending_count": 10,
-        "claim_decision_counts": {},
+        "claim_reviewed_count": 10,
+        "claim_pending_count": 0,
+        "claim_decision_counts": {
+            "disputed": 7,
+            "independently_corroborated": 1,
+            "mixed": 2,
+        },
     }
     assert registry["policy"][
         "publisher_independence_implies_claim_corroboration"
@@ -72,16 +78,16 @@ def test_default_registry_preserves_both_axes_without_authority() -> None:
     ]
 
 
-def test_pending_claim_rows_require_claim_id_and_never_inherit_decision() -> None:
+def test_reviewed_claim_rows_preserve_both_axes_without_authority() -> None:
     registry = build_evidence_source_claim_registry()
 
     assert all(row["claim_id"] for row in registry["claims"])
     assert all(
-        row["claim_corroboration_review_status"] == "pending"
+        row["claim_corroboration_review_status"] == "reviewed"
         for row in registry["claims"]
     )
     assert all(
-        row["claim_corroboration_decision"] is None
+        row["claim_corroboration_decision"] is not None
         for row in registry["claims"]
     )
     assert all(
@@ -102,13 +108,14 @@ def test_registry_fingerprint_is_invariant_to_input_order() -> None:
     source_candidates = load_source_review_candidates()
     source_events = load_source_review_events()
     claim_candidates = load_claim_review_candidates()
+    claim_events = load_claim_review_events()
 
     forward = build_evidence_source_claim_registry(
         source_candidates=source_candidates,
         source_review_events=source_events,
         source_manifest=load_source_review_manifest(),
         claim_candidates=claim_candidates,
-        claim_review_events=[],
+        claim_review_events=claim_events,
         claim_manifest=load_claim_review_manifest(),
     )
     reverse = build_evidence_source_claim_registry(
@@ -116,7 +123,7 @@ def test_registry_fingerprint_is_invariant_to_input_order() -> None:
         source_review_events=reversed(source_events),
         source_manifest=load_source_review_manifest(),
         claim_candidates=reversed(claim_candidates),
-        claim_review_events=[],
+        claim_review_events=reversed(claim_events),
         claim_manifest=load_claim_review_manifest(),
     )
 
@@ -131,6 +138,13 @@ def test_unknown_parent_source_fails_closed() -> None:
     tampered[0]["parent_source_case_id"] = "missing-source-case"
     manifest = deepcopy(load_claim_review_manifest())
     manifest["candidate_fingerprint"] = review_set_fingerprint(tampered)
+    manifest["review_packet_fingerprint"] = (
+        claim_corroboration_review_packet_fingerprint(
+            manifest,
+            tampered,
+        )
+    )
+    manifest["review_event_fingerprint"] = review_set_fingerprint([])
 
     with pytest.raises(
         EvidenceSourceClaimRegistryError,
@@ -201,6 +215,10 @@ def test_independent_claim_cannot_attach_to_excluded_publisher() -> None:
             "reviewed_at": "2026-07-29T15:00:00+02:00",
         }
     )
+    claim_manifest = deepcopy(load_claim_review_manifest())
+    claim_manifest["review_event_fingerprint"] = review_set_fingerprint(
+        [claim_event]
+    )
 
     with pytest.raises(
         EvidenceSourceClaimRegistryError,
@@ -211,7 +229,7 @@ def test_independent_claim_cannot_attach_to_excluded_publisher() -> None:
             source_manifest=source_manifest,
             claim_candidates=claim_candidates,
             claim_review_events=[claim_event],
-            claim_manifest=load_claim_review_manifest(),
+            claim_manifest=claim_manifest,
         )
 
 
@@ -224,5 +242,6 @@ def test_markdown_reports_the_shadow_adoption_boundary() -> None:
     assert "Shadow contract ready: `true`" in rendered
     assert "Operational adoption ready: `false`" in rendered
     assert "Claim records: `10`" in rendered
-    assert "Claims pending: `10`" in rendered
+    assert "Claims reviewed: `10`" in rendered
+    assert "Claims pending: `0`" in rendered
     assert "Source-global corroboration decisions: `0`" in rendered

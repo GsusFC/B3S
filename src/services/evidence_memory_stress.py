@@ -72,6 +72,9 @@ from src.services.evidence_accepted_memory import (
 from src.services.evidence_memory_snapshot import (
     build_evidence_memory_snapshot,
 )
+from src.services.evidence_reviewed_claim_tile_memory import (
+    build_reviewed_claim_tile_memory_shadow,
+)
 from src.services.evidence_source_review_set import (
     DEFAULT_REVIEW_ROOT as SOURCE_REVIEW_ROOT,
     EVIDENCE_SOURCE_REVIEW_DATASET_VERSION,
@@ -100,7 +103,7 @@ from src.sv9_flow.contracts import (
 
 
 EVIDENCE_MEMORY_STRESS_VERSION = "evidence-memory-stress-v2"
-EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v14"
+EVIDENCE_MEMORY_STRESS_POLICY_VERSION = "evidence-memory-stress-policy-v16"
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 
 
@@ -1392,6 +1395,37 @@ def _controlled_probes(
         ],
         mode="shadow",
     )
+    reviewed_tile_packet = "a" * 64
+    reviewed_tile_mappings = sorted(
+        versioned_claim_tile_ledger["mappings"],
+        key=lambda row: str(row["mapping_id"]),
+    )
+    reviewed_tile_events = [
+        _reviewed_claim_tile_event(
+            mapping,
+            decision=(
+                "accepted" if index == 0 else "rejected"
+            ),
+            packet_fingerprint=reviewed_tile_packet,
+        )
+        for index, mapping in enumerate(reviewed_tile_mappings)
+    ]
+    reviewed_tile_memory = build_reviewed_claim_tile_memory_shadow(
+        versioned_claim_tile_ledger,
+        reviewed_tile_events,
+        review_packet_fingerprint=reviewed_tile_packet,
+        rubric_version="baldosas-v3-1",
+        evaluator_version="reviewed-memory-shadow-v1",
+    )
+    changed_reviewed_tile_evaluation = (
+        build_reviewed_claim_tile_memory_shadow(
+            versioned_claim_tile_ledger,
+            reversed(reviewed_tile_events),
+            review_packet_fingerprint=reviewed_tile_packet,
+            rubric_version="baldosas-v3-1",
+            evaluator_version="reviewed-memory-shadow-v2",
+        )
+    )
     unanchored_claim_tile_report = _claim_tile_report(
         "claim-tile-unanchored",
         "2026-01-01T00:00:00Z",
@@ -2001,7 +2035,7 @@ def _controlled_probes(
                 claim_corroboration_review_set["runtime_effect"] is False
                 and claim_corroboration_review_set["authority"] is False
                 and claim_corroboration_review_set["provenance_verified"] is True
-                and claim_corroboration_review_set["review_gate_ready"] is False
+                and claim_corroboration_review_set["review_gate_ready"] is True
                 and claim_corroboration_review_set["promotion_ready"] is False
                 and claim_corroboration_review_set["summary"][
                     "candidate_count"
@@ -2020,15 +2054,23 @@ def _controlled_probes(
                 ]
                 == 1
                 and claim_corroboration_review_set["summary"]["reviewed_count"]
-                == 0
-                and claim_corroboration_review_set["summary"]["pending_count"]
                 == 10
+                and claim_corroboration_review_set["summary"]["pending_count"]
+                == 0
+                and claim_corroboration_review_set["summary"][
+                    "decision_counts"
+                ]
+                == {
+                    "disputed": 7,
+                    "independently_corroborated": 1,
+                    "mixed": 2,
+                }
             ),
             (
                 "Ten literal Vercel claim cases across five reviewed "
                 "editorial sources reproduce from immutable capture spans. "
-                "All remain pending human review with no runtime or "
-                "corroboration authority."
+                "All ten have attributable human decisions while runtime and "
+                "corroboration authority remain disabled."
             ),
         ),
         _probe(
@@ -2059,9 +2101,17 @@ def _controlled_probes(
                 and source_claim_registry["summary"]["claim_record_count"]
                 == 10
                 and source_claim_registry["summary"]["claim_reviewed_count"]
-                == 0
-                and source_claim_registry["summary"]["claim_pending_count"]
                 == 10
+                and source_claim_registry["summary"]["claim_pending_count"]
+                == 0
+                and source_claim_registry["summary"][
+                    "claim_decision_counts"
+                ]
+                == {
+                    "disputed": 7,
+                    "independently_corroborated": 1,
+                    "mixed": 2,
+                }
                 and source_claim_registry["summary"][
                     "source_global_claim_corroboration_decision_count"
                 ]
@@ -2069,9 +2119,9 @@ def _controlled_probes(
             ),
             (
                 "Registry v2 projects six reviewed publisher decisions and "
-                "ten claim-scoped records on separate axes. Pending claims "
-                "inherit no corroboration decision and the projection remains "
-                "shadow-only."
+                "ten reviewed claim-scoped records on separate axes. "
+                "Source-global corroboration remains empty and the projection "
+                "stays shadow-only."
             ),
         ),
         _probe(
@@ -2080,12 +2130,23 @@ def _controlled_probes(
                 claim_tile_review_set["runtime_effect"] is False
                 and claim_tile_review_set["authority"] is False
                 and claim_tile_review_set["promotion_ready"] is False
+                and claim_tile_review_set["review_gate_ready"] is False
                 and claim_tile_review_set["summary"][
                     "candidate_count"
                 ]
                 == 8
                 and claim_tile_review_set["summary"]["reviewed_count"]
+                == 8
+                and claim_tile_review_set["summary"]["pending_count"]
                 == 0
+                and claim_tile_review_set["summary"]["accepted_count"]
+                == 7
+                and claim_tile_review_set["summary"]["rejected_count"]
+                == 1
+                and claim_tile_review_set["summary"][
+                    "confirmed_mapping_precision"
+                ]
+                == 0.875
                 and claim_tile_review_set["summary"][
                     "candidate_brand_count"
                 ]
@@ -2102,12 +2163,63 @@ def _controlled_probes(
             (
                 "Eight real deterministic mappings are frozen with their "
                 "claim text and tile contracts. Seven Vercel mappings reuse "
-                "one mission claim across mission and core-purpose tiles; no "
-                "candidate has review or scoring authority."
+                "one mission claim across mission and core-purpose tiles; the "
+                "human rejection of M2 exposes one false mapping without "
+                "granting review or scoring authority."
+            ),
+        ),
+        _probe(
+            "reviewed_claim_tile_memory_filters_non_accepts_shadow_only",
+            (
+                reviewed_tile_memory["selection_ready"] is True
+                and reviewed_tile_memory["shadow_evaluation_ready"] is True
+                and reviewed_tile_memory["evaluation_ready"] is False
+                and reviewed_tile_memory["summary"][
+                    "candidate_mapping_count"
+                ]
+                == 2
+                and reviewed_tile_memory["summary"][
+                    "reviewed_mapping_count"
+                ]
+                == 2
+                and reviewed_tile_memory["summary"][
+                    "accepted_mapping_count"
+                ]
+                == 1
+                and reviewed_tile_memory["summary"][
+                    "rejected_mapping_count"
+                ]
+                == 1
+                and len(reviewed_tile_memory["accepted_mappings"]) == 1
+                and reviewed_tile_memory[
+                    "reviewed_memory_candidate_version"
+                ]
+                == changed_reviewed_tile_evaluation[
+                    "reviewed_memory_candidate_version"
+                ]
+                and reviewed_tile_memory["shadow_evaluation_identity"]
+                != changed_reviewed_tile_evaluation[
+                    "shadow_evaluation_identity"
+                ]
+                and reviewed_tile_memory["score"] is None
+                and reviewed_tile_memory["runtime_effect"] is False
+                and reviewed_tile_memory["authority"] is False
+                and reviewed_tile_memory[
+                    "automatic_scoring_effect"
+                ]
+                is False
+            ),
+            (
+                "Reviewed claim-to-tile memory includes only explicit human "
+                "acceptances, excludes a rejected mapping, and changes its "
+                "shadow evaluation identity only when the evaluator version "
+                "changes; score and runtime authority remain absent."
             ),
         ),
         {
-            "id": "source_corroboration_pending_claim_level_review",
+            "id": (
+                "source_corroboration_cross_brand_and_operational_gates_pending"
+            ),
             "kind": "promotion_blocker",
             "status": "blocked",
             "observation": (
@@ -2135,9 +2247,9 @@ def _controlled_probes(
                 "registry."
             ),
             "required_capability": (
-                "review the ten frozen claim cases, expand cross-brand coverage, "
-                "measure semantic-paraphrase recall, and authorize operational "
-                "adoption of the v2 contract only after those gates pass"
+                "expand cross-brand claim coverage, measure semantic-paraphrase "
+                "recall, and authorize operational adoption of the v2 contract "
+                "only after those gates pass"
             ),
         },
         {
@@ -2159,7 +2271,9 @@ def _controlled_probes(
             ),
         },
         {
-            "id": "tile_mapping_pending_reviewed_promotion_policy",
+            "id": (
+                "tile_mapping_false_positive_and_coverage_block_promotion"
+            ),
             "kind": "promotion_blocker",
             "status": "blocked",
             "observation": (
@@ -2177,9 +2291,10 @@ def _controlled_probes(
                 "policy has not been adopted."
             ),
             "required_capability": (
-                "review the frozen real mappings, expand coverage across brands, "
-                "claim variants and polarities, then adopt a canonical promotion "
-                "policy without granting repeated evidence extra breadth or points"
+                "correct the observed false mapping, expand coverage across "
+                "brands, claim variants and polarities, then adopt a canonical "
+                "promotion policy without granting repeated evidence extra "
+                "breadth or points"
             ),
         },
         {
@@ -2770,6 +2885,44 @@ def _report(
         },
     }
     return report
+
+
+def _reviewed_claim_tile_event(
+    mapping: dict[str, Any],
+    *,
+    decision: str,
+    packet_fingerprint: str,
+) -> dict[str, Any]:
+    return {
+        **{
+            field: str(mapping.get(field) or "")
+            for field in (
+                "mapping_id",
+                "mapping_series_id",
+                "source_evidence_id",
+                "claim_variant_id",
+                "component_key",
+                "tile_id",
+                "tile_key",
+                "polarity",
+            )
+        },
+        "subject_id": str(mapping.get("mapping_id") or ""),
+        "event_id": (
+            f"review-{str(mapping.get('mapping_id') or '')[:12]}"
+        ),
+        "sequence": 1,
+        "decision": decision,
+        "reviewer_id": "gsus",
+        "rationale": "Controlled human tile-contract review.",
+        "reviewed_at": "2026-07-30T09:49:51+02:00",
+        "evaluator_version": "manual-review-v1",
+        "review_packet_fingerprint": packet_fingerprint,
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_tile_effect": False,
+        "automatic_scoring_effect": False,
+    }
 
 
 def _claim_tile_report(

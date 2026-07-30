@@ -2,17 +2,18 @@
 
 ## Verdict
 
-The five Vercel editorial sources that previously required claim-level review
-now have a concrete, reproducible review queue. The queue contains ten literal
-claim cases: two per source.
+The five Vercel editorial sources that required claim-level review now have a
+completed, reproducible review set containing ten literal claim cases: two per
+source.
 
-No corroboration decision has been inferred automatically. All ten cases are
-pending human review.
+No corroboration decision was inferred automatically. All ten cases now carry
+attributable human decisions: seven `disputed`, two `mixed`, and one
+`independently_corroborated`.
 
-Stress policy v13 consumes this queue as its 28th controlled invariant and its
-two-axis shadow projection as the 29th. It verifies the literal provenance,
-counts `10 candidates / 5 sources / 10 claims / 0 reviewed / 10 pending`, and
-keeps the claim-corroboration promotion gate blocked.
+The stress harness verifies literal provenance, counts
+`10 candidates / 5 sources / 10 claims / 10 reviewed / 0 pending`, and keeps
+the promotion gate blocked without treating review completion as operational
+authority.
 
 ## What is frozen
 
@@ -53,8 +54,8 @@ The ten cases cover:
 - TechInformed: d0 skill count and absence of audited impact measures.
 
 This is one real brand, five real sources, and ten unique claim subjects. It is
-enough to make the pending human task concrete, but not enough to demonstrate
-cross-brand generalization.
+enough to complete the first human calibration task, but not enough to
+demonstrate cross-brand generalization.
 
 ## Review decisions
 
@@ -83,17 +84,23 @@ unresolved
 Every decision requires reviewer ID, rationale, timestamp, version, and an
 append-only event ID. Decisions can be revoked without editing history.
 
-Each generated decision row also carries the frozen
-`candidate_fingerprint`. Loading fails closed if rows mix fingerprints, if the
-fingerprint differs from the manifest, or if the manifest fingerprint no
-longer matches the canonical candidate content. The reviewer signs decisions
-for that exact candidate set, never an isolated JSONL file.
+Each generated decision row carries the frozen `candidate_fingerprint` and
+`review_packet_fingerprint`. The latter binds the normalized manifest, the
+complete candidate set, and all applicable schema versions. Loading fails
+closed if rows mix fingerprints, if either fingerprint differs from the
+manifest, or if the manifest and canonical candidate content no longer
+produce the declared packet identity. The reviewer signs decisions for that
+exact packet, never an isolated JSONL file.
 
-While the queue is pending, an external review file can be evaluated while
-`review_event_fingerprint` remains unfrozen in the manifest. The
-`candidate_fingerprint` is still mandatory. This remains non-authoritative.
-When the completed reviews are accepted into a dataset version, their exact
-event fingerprint must be frozen in the manifest.
+Mutable lifecycle fields and the completed-event fingerprint are excluded
+from packet identity to avoid a self-hash cycle. Completed events are frozen
+separately with `review_event_fingerprint`.
+
+Before a queue is frozen, an external review file can be evaluated while
+`review_event_fingerprint` is null. Both candidate and packet fingerprints
+remain mandatory. The completed v1 events are now stored in
+`review_events.jsonl`, and their exact event fingerprint is frozen in the
+manifest.
 
 ## Prepare the review file
 

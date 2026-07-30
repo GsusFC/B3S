@@ -458,6 +458,9 @@ def create_evidence_claim_tile_review(
         "evaluator_version": str(
             request_payload.get("evaluator_version") or ""
         ).strip(),
+        "review_packet_fingerprint": str(
+            request_payload.get("review_packet_fingerprint") or ""
+        ).strip().lower(),
         "actor_id": str(client_id or "").strip(),
     }
     command = EvidenceClaimTileReviewCommand(
@@ -470,6 +473,9 @@ def create_evidence_claim_tile_review(
         reason_code=normalized["reason_code"],
         rationale=normalized["rationale"],
         evaluator_version=normalized["evaluator_version"],
+        review_packet_fingerprint=normalized[
+            "review_packet_fingerprint"
+        ],
         actor_id=normalized["actor_id"],
         idempotency_key_hash=key_hash,
         request_fingerprint=_request_fingerprint(normalized),

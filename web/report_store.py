@@ -390,9 +390,20 @@ def evidence_claim_tile_ledger_for_domain(
         return {
             **derived,
             "persistence": {"stored": False, "backend": "disabled"},
+            "reviewed_memory": _unavailable_reviewed_claim_tile_memory(
+                "claim_tile_ledger_disabled"
+            ),
         }
 
     repository = _postgres_repository()
+    selected = derived
+    persistence = {
+        "stored": False,
+        "backend": "history_derived",
+    }
+    reviewed_memory = _unavailable_reviewed_claim_tile_memory(
+        "durable_review_journal_unavailable"
+    )
     if repository is not None:
         try:
             stored = repository.get_evidence_claim_tile_ledger(domain)
@@ -403,24 +414,76 @@ def evidence_claim_tile_ledger_for_domain(
                 and stored.get("latest_report_id")
                 == derived.get("latest_report_id")
             ):
-                return {
-                    **stored,
-                    "persistence": {
-                        "stored": True,
-                        "backend": "postgres",
-                    },
+                selected = stored
+                persistence = {
+                    "stored": True,
+                    "backend": "postgres",
                 }
         except Exception:
             _LOG.exception(
                 "failed to load evidence claim tile ledger",
                 extra={"domain": domain_key(domain)},
             )
+        if persistence["stored"]:
+            try:
+                reviewed = (
+                    repository.get_reviewed_claim_tile_memory_shadow(
+                        domain
+                    )
+                )
+                if isinstance(reviewed, dict):
+                    reviewed_memory = {
+                        **reviewed,
+                        "available": True,
+                        "persistence": {
+                            "stored": True,
+                            "backend": (
+                                "postgres_ledger_and_review_journal"
+                            ),
+                        },
+                    }
+                else:
+                    reviewed_memory = (
+                        _unavailable_reviewed_claim_tile_memory(
+                            "no_current_packet_bound_reviews"
+                        )
+                    )
+            except Exception:
+                _LOG.exception(
+                    "failed to rebuild reviewed claim tile memory",
+                    extra={"domain": domain_key(domain)},
+                )
+                reviewed_memory = (
+                    _unavailable_reviewed_claim_tile_memory(
+                        "reviewed_memory_validation_failed",
+                        status="invalid",
+                    )
+                )
+        else:
+            reviewed_memory = _unavailable_reviewed_claim_tile_memory(
+                "claim_tile_ledger_not_current"
+            )
     return {
-        **derived,
-        "persistence": {
-            "stored": False,
-            "backend": "history_derived",
-        },
+        **selected,
+        "persistence": persistence,
+        "reviewed_memory": reviewed_memory,
+    }
+
+
+def _unavailable_reviewed_claim_tile_memory(
+    reason: str,
+    *,
+    status: str = "unavailable",
+) -> dict[str, Any]:
+    return {
+        "available": False,
+        "status": status,
+        "reason": reason,
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_tile_effect": False,
+        "automatic_scoring_effect": False,
+        "accepted_mappings": [],
     }
 
 

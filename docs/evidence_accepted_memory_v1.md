@@ -102,7 +102,7 @@ Las regresiones prueban:
 11. autoridad y scoring siempre deshabilitados.
 
 El stress harness incorpora la misma propiedad como su garantía ejecutable
-número 30 bajo `evidence-memory-stress-policy-v14`.
+número 30 bajo `evidence-memory-stress-policy-v16`.
 
 ## Límite de promoción
 

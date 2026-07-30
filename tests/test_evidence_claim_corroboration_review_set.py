@@ -60,8 +60,8 @@ def test_frozen_candidates_reproduce_from_real_capture() -> None:
 def test_empty_review_set_exposes_pending_work_without_authority() -> None:
     result = evaluate_claim_corroboration_review_set(
         load_review_candidates(),
-        load_review_events(),
-        manifest=load_review_manifest(),
+        [],
+        manifest=_unfrozen_manifest(),
     )
 
     assert result["review_gate_ready"] is False
@@ -106,12 +106,38 @@ def test_review_template_contains_no_automatic_decisions() -> None:
     assert {
         row["candidate_fingerprint"] for row in template
     } == {manifest["candidate_fingerprint"]}
+    assert {
+        row["review_packet_fingerprint"] for row in template
+    } == {manifest["review_packet_fingerprint"]}
     assert all(row["event_id"] is None for row in template)
     assert all(row["decision"] is None for row in template)
     assert all(row["corroboration_bases"] == [] for row in template)
     assert all(row["reviewer_id"] is None for row in template)
     assert all(row["runtime_effect"] is False for row in template)
     assert all(row["authority"] is False for row in template)
+
+
+def test_frozen_human_reviews_close_only_the_review_gate() -> None:
+    result = evaluate_claim_corroboration_review_set(
+        load_review_candidates(),
+        load_review_events(),
+        manifest=load_review_manifest(),
+    )
+
+    assert result["review_gate_ready"] is True
+    assert result["promotion_ready"] is False
+    assert result["summary"]["reviewed_count"] == 10
+    assert result["summary"]["pending_count"] == 0
+    assert result["summary"]["decision_counts"] == {
+        "disputed": 7,
+        "independently_corroborated": 1,
+        "mixed": 2,
+    }
+    assert result["promotion_blockers"] == [
+        "insufficient_reviewed_real_brands",
+        "operational_two_axis_contract_not_adopted",
+        "semantic_paraphrase_recall_unmeasured",
+    ]
 
 
 def test_manifest_exposes_stable_upstream_exclusion_for_v6() -> None:
@@ -169,7 +195,7 @@ def test_complete_reviews_close_review_gate_but_not_promotion() -> None:
     result = evaluate_claim_corroboration_review_set(
         candidates,
         events,
-        manifest=load_review_manifest(),
+        manifest=_manifest_for_events(events),
     )
 
     assert result["review_gate_ready"] is True
@@ -357,6 +383,21 @@ def test_fingerprint_and_capture_tampering_fail_closed() -> None:
         )
 
 
+def test_packet_fingerprint_rejects_manifest_contract_drift() -> None:
+    manifest = deepcopy(load_review_manifest())
+    manifest["decision_semantics"]["mixed"] = "Changed after review."
+
+    with pytest.raises(
+        EvidenceClaimCorroborationReviewSetError,
+        match="review packet fingerprint mismatch",
+    ):
+        evaluate_claim_corroboration_review_set(
+            load_review_candidates(),
+            [],
+            manifest=manifest,
+        )
+
+
 def test_review_fingerprint_must_match_candidates_and_be_uniform() -> None:
     candidates = load_review_candidates()
     manifest = load_review_manifest()
@@ -403,13 +444,55 @@ def test_review_fingerprint_must_match_candidates_and_be_uniform() -> None:
             manifest=manifest,
         )
 
+    mismatched_packet = _decision(
+        candidates[0]["case_id"],
+        event_id="mismatched-packet",
+        decision="disputed",
+        bases=["unresolved"],
+    )
+    mismatched_packet["review_packet_fingerprint"] = "0" * 64
+    with pytest.raises(
+        EvidenceClaimCorroborationReviewSetError,
+        match="review packet fingerprint mismatch",
+    ):
+        evaluate_claim_corroboration_review_set(
+            candidates,
+            [mismatched_packet],
+            manifest=manifest,
+        )
+
+    mixed_packets = [
+        _decision(
+            candidates[0]["case_id"],
+            event_id="first-review-packet",
+            decision="disputed",
+            bases=["unresolved"],
+        ),
+        _decision(
+            candidates[1]["case_id"],
+            event_id="second-review-packet",
+            decision="disputed",
+            bases=["unresolved"],
+        ),
+    ]
+    mixed_packets[1]["review_packet_fingerprint"] = "0" * 64
+    with pytest.raises(
+        EvidenceClaimCorroborationReviewSetError,
+        match="mix review packet fingerprints",
+    ):
+        evaluate_claim_corroboration_review_set(
+            candidates,
+            mixed_packets,
+            manifest=manifest,
+        )
+
 
 def test_markdown_reports_claim_scoped_queue() -> None:
     rendered = render_claim_corroboration_review_set_markdown(
         evaluate_claim_corroboration_review_set(
             load_review_candidates(),
             [],
-            manifest=load_review_manifest(),
+            manifest=_unfrozen_manifest(),
         )
     )
 
@@ -424,6 +507,12 @@ def test_markdown_reports_claim_scoped_queue() -> None:
 def _manifest_for_events(events: list[dict]) -> dict:
     manifest = deepcopy(load_review_manifest())
     manifest["review_event_fingerprint"] = review_set_fingerprint(events)
+    return manifest
+
+
+def _unfrozen_manifest() -> dict:
+    manifest = deepcopy(load_review_manifest())
+    manifest["review_event_fingerprint"] = None
     return manifest
 
 
@@ -445,6 +534,9 @@ def _decision(
         ),
         "candidate_fingerprint": load_review_manifest()[
             "candidate_fingerprint"
+        ],
+        "review_packet_fingerprint": load_review_manifest()[
+            "review_packet_fingerprint"
         ],
         "event_id": event_id,
         "case_id": case_id,
@@ -479,6 +571,9 @@ def _revocation(
         ),
         "candidate_fingerprint": load_review_manifest()[
             "candidate_fingerprint"
+        ],
+        "review_packet_fingerprint": load_review_manifest()[
+            "review_packet_fingerprint"
         ],
         "event_id": event_id,
         "case_id": case_id,

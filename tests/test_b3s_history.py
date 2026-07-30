@@ -297,7 +297,7 @@ def test_claim_reconciliation_migration_is_packaged_and_non_authoritative() -> N
         .read_text(encoding="utf-8")
     )
 
-    assert filenames[-4:-2] == [
+    assert filenames[4:6] == [
         "005_evidence_claim_reconciliations.sql",
         "006_evidence_claim_tile_ledger.sql",
     ]
@@ -318,7 +318,7 @@ def test_claim_tile_ledger_migration_is_versioned_and_non_authoritative() -> Non
         .read_text(encoding="utf-8")
     )
 
-    assert filenames[-3] == "006_evidence_claim_tile_ledger.sql"
+    assert filenames[5] == "006_evidence_claim_tile_ledger.sql"
     assert "evidence_claim_tile_mapping_series" in sql
     assert "evidence_claim_tile_mapping_observations" in sql
     assert "runtime_effect = false" in sql
@@ -338,7 +338,7 @@ def test_scoring_recovery_review_migration_is_append_only_and_safe() -> None:
         .read_text(encoding="utf-8")
     )
 
-    assert filenames[-2] == (
+    assert filenames[6] == (
         "007_evidence_scoring_recovery_reviews.sql"
     )
     assert "subject_type = 'scoring_recovery'" in sql
@@ -360,7 +360,19 @@ def test_claim_tile_review_migration_is_append_only_and_safe() -> None:
         .read_text(encoding="utf-8")
     )
 
-    assert filenames[-1] == "008_evidence_claim_tile_reviews.sql"
+    packet_sql = (
+        resources.files("src.history")
+        .joinpath(
+            "migrations/"
+            "009_evidence_claim_tile_review_packet_fingerprint.sql"
+        )
+        .read_text(encoding="utf-8")
+    )
+
+    assert filenames[-2] == "008_evidence_claim_tile_reviews.sql"
+    assert filenames[-1] == (
+        "009_evidence_claim_tile_review_packet_fingerprint.sql"
+    )
     assert "subject_type = 'claim_tile_mapping'" in sql
     assert "mapping_id = subject_id" in sql
     assert "evidence_claim_tile_mappings" in sql
@@ -370,6 +382,38 @@ def test_claim_tile_review_migration_is_append_only_and_safe() -> None:
     assert "authority = false" in sql
     assert "automatic_tile_effect = false" in sql
     assert "automatic_scoring_effect = false" in sql
+    assert "ADD COLUMN review_packet_fingerprint text" in packet_sql
+    assert "review_packet_fingerprint IS NULL" in packet_sql
+    assert "'^[0-9a-f]{64}$'" in packet_sql
+    assert (
+        "schema_version <> 'evidence-claim-tile-review-event-v2'"
+        in packet_sql
+    )
+
+
+def test_claim_tile_review_requires_packet_fingerprint() -> None:
+    from dataclasses import replace
+
+    from src.history.repository import (
+        _validate_claim_tile_review_command,
+    )
+
+    valid = _claim_tile_review_command(
+        "a" * 64,
+        decision="accepted",
+        expected_current_event_id=None,
+        key_hash="b" * 64,
+        fingerprint="c" * 64,
+    )
+
+    _validate_claim_tile_review_command(valid)
+    with pytest.raises(
+        ValueError,
+        match="review_packet_fingerprint",
+    ):
+        _validate_claim_tile_review_command(
+            replace(valid, review_packet_fingerprint="")
+        )
 
 
 def test_claim_reconciliation_repository_validation_rejects_bad_subjects() -> None:
@@ -582,6 +626,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "006_evidence_claim_tile_ledger.sql",
             "007_evidence_scoring_recovery_reviews.sql",
             "008_evidence_claim_tile_reviews.sql",
+            "009_evidence_claim_tile_review_packet_fingerprint.sql",
         ]
         assert repository.migrate() == []
 
@@ -1149,6 +1194,21 @@ def test_postgres_claim_tile_review_survives_restart_and_revocation(
             )["state_fingerprint"]
             == ledger["state_fingerprint"]
         )
+        reviewed_memory = (
+            restarted.get_reviewed_claim_tile_memory_shadow(
+                "memory.example"
+            )
+        )
+        assert reviewed_memory is not None
+        assert reviewed_memory["selection_ready"] is True
+        assert reviewed_memory["summary"][
+            "accepted_mapping_count"
+        ] == 1
+        assert reviewed_memory["accepted_mappings"][0][
+            "mapping_id"
+        ] == mapping["mapping_id"]
+        assert reviewed_memory["runtime_effect"] is False
+        assert reviewed_memory["automatic_scoring_effect"] is False
 
         revoked, replayed = (
             restarted.append_evidence_claim_tile_review(
@@ -1178,6 +1238,18 @@ def test_postgres_claim_tile_review_survives_restart_and_revocation(
             for event in revoked_journal["events"]
         ] == ["revoked", "superseded"]
         assert revoked_journal["current"] == [revoked]
+        revoked_memory = (
+            restarted_again.get_reviewed_claim_tile_memory_shadow(
+                "memory.example"
+            )
+        )
+        assert revoked_memory is not None
+        assert revoked_memory["selection_ready"] is False
+        assert revoked_memory["summary"][
+            "reviewed_mapping_count"
+        ] == 0
+        assert revoked_memory["summary"]["pending_mapping_count"] == 1
+        assert revoked_memory["accepted_mappings"] == []
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
@@ -1222,6 +1294,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "006_evidence_claim_tile_ledger.sql",
             "007_evidence_scoring_recovery_reviews.sql",
             "008_evidence_claim_tile_reviews.sql",
+            "009_evidence_claim_tile_review_packet_fingerprint.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0
@@ -1250,7 +1323,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
         assert stored[1] == (
             "b3s_history.evidence_claim_tile_review_events"
         )
-        assert stored[2] == 8
+        assert stored[2] == 9
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
@@ -1347,6 +1420,7 @@ def _claim_tile_review_command(
         reason_code="tile_contract_reviewed",
         rationale="The reviewer checked the claim-to-tile contract.",
         evaluator_version="manual-review-v1",
+        review_packet_fingerprint="e" * 64,
         actor_id="gsus",
         idempotency_key_hash=key_hash,
         request_fingerprint=fingerprint,

@@ -2,7 +2,11 @@
   "schema_version": "evidence-claim-tile-review-v1",
   "dataset_version": "evidence-claim-tile-review-2026-07-v1",
   "candidate_fingerprint": "c9081e2284c7ba755e12782ddb91165cce77edd7355c981f9c015bb307ee1307",
-  "status": "candidates_frozen_human_review_pending_shadow_only",
+  "review_packet_schema_version": "evidence-review-packet-v1",
+  "review_packet_fingerprint": "6db02f748f9e900da76e37334d2b01ea8069aa0b5c03c07c5e5532aeba0987c5",
+  "review_fingerprint": "00b051c3f13ea80560183de0b760ec99922c76b372f0018144cbea8d4358d5a0",
+  "review_status": "frozen_human_review_completed",
+  "status": "candidates_frozen_human_review_completed_shadow_only",
   "reviewer_mode": "single_attributable_reviewer",
   "decision_semantics": {
     "accepted": "The cited evidence and claim satisfy the specific tile contract.",

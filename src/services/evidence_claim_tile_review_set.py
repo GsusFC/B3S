@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlsplit
 
+from src.services.evidence_review_packet import (
+    EVIDENCE_REVIEW_PACKET_SCHEMA_VERSION,
+    review_packet_fingerprint,
+)
+
 
 EVIDENCE_CLAIM_TILE_REVIEW_SCHEMA_VERSION = (
     "evidence-claim-tile-review-v1"
@@ -60,6 +65,23 @@ def load_review_manifest(path: Path | None = None) -> dict[str, Any]:
         payload.get("candidate_fingerprint"),
         field="candidate_fingerprint",
     )
+    if (
+        payload.get("review_packet_schema_version")
+        != EVIDENCE_REVIEW_PACKET_SCHEMA_VERSION
+    ):
+        raise EvidenceClaimTileReviewSetError(
+            "unsupported claim-tile review packet schema version"
+        )
+    _required_sha256(
+        payload.get("review_packet_fingerprint"),
+        field="review_packet_fingerprint",
+    )
+    review_fingerprint = payload.get("review_fingerprint")
+    if review_fingerprint is not None:
+        _required_sha256(
+            review_fingerprint,
+            field="review_fingerprint",
+        )
     return payload
 
 
@@ -87,6 +109,7 @@ def load_reviews(path: Path | None = None) -> list[dict[str, Any]]:
     rows = _load_jsonl(target, label="claim-tile review")
     seen: set[str] = set()
     candidate_fingerprints: set[str] = set()
+    review_packet_fingerprints: set[str] = set()
     for row in rows:
         _validate_review(row)
         case_id = str(row["case_id"])
@@ -98,9 +121,16 @@ def load_reviews(path: Path | None = None) -> list[dict[str, Any]]:
         candidate_fingerprints.add(
             str(row["candidate_fingerprint"])
         )
+        review_packet_fingerprints.add(
+            str(row["review_packet_fingerprint"])
+        )
     if len(candidate_fingerprints) > 1:
         raise EvidenceClaimTileReviewSetError(
             "claim-tile reviews mix candidate fingerprints"
+        )
+    if len(review_packet_fingerprints) > 1:
+        raise EvidenceClaimTileReviewSetError(
+            "claim-tile reviews mix review packet fingerprints"
         )
     return sorted(rows, key=lambda row: str(row["case_id"]))
 
@@ -116,6 +146,9 @@ def build_review_template(
     candidate_fingerprint = _validate_candidate_fingerprint(
         manifest, candidate_rows
     )
+    packet_fingerprint = _validate_review_packet_fingerprint(
+        manifest, candidate_rows
+    )
     return [
         {
             "schema_version": (
@@ -126,6 +159,7 @@ def build_review_template(
             ),
             "case_id": str(candidate["case_id"]),
             "candidate_fingerprint": candidate_fingerprint,
+            "review_packet_fingerprint": packet_fingerprint,
             "decision": None,
             "reviewer_id": None,
             "rationale": None,
@@ -160,10 +194,28 @@ def evaluate_claim_tile_review_set(
     candidate_fingerprint = _validate_candidate_fingerprint(
         manifest, candidate_rows
     )
+    packet_fingerprint = _validate_review_packet_fingerprint(
+        manifest, candidate_rows
+    )
     _validate_candidate_fingerprint_bindings(
         review_rows,
         expected=candidate_fingerprint,
     )
+    _validate_review_packet_fingerprint_bindings(
+        review_rows,
+        expected=packet_fingerprint,
+    )
+    review_fingerprint = review_candidate_fingerprint(review_rows)
+    expected_review_fingerprint = str(
+        manifest.get("review_fingerprint") or ""
+    )
+    if (
+        expected_review_fingerprint
+        and expected_review_fingerprint != review_fingerprint
+    ):
+        raise EvidenceClaimTileReviewSetError(
+            "claim-tile review fingerprint mismatch"
+        )
     unknown_reviews = sorted(set(reviews_by_id) - set(candidates_by_id))
     if unknown_reviews:
         raise EvidenceClaimTileReviewSetError(
@@ -273,6 +325,8 @@ def evaluate_claim_tile_review_set(
         "schema_version": EVIDENCE_CLAIM_TILE_REVIEW_SCHEMA_VERSION,
         "dataset_version": EVIDENCE_CLAIM_TILE_REVIEW_DATASET_VERSION,
         "dataset_fingerprint": candidate_fingerprint,
+        "review_packet_fingerprint": packet_fingerprint,
+        "review_fingerprint": review_fingerprint,
         "runtime_effect": False,
         "authority": False,
         "review_gate_ready": review_gate_ready,
@@ -337,6 +391,22 @@ def review_candidate_fingerprint(
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def claim_tile_review_packet_fingerprint(
+    manifest: dict[str, Any],
+    candidates: Iterable[dict[str, Any]],
+) -> str:
+    return review_packet_fingerprint(
+        packet_kind="claim_tile",
+        manifest=manifest,
+        candidates=candidates,
+        schema_versions={
+            "candidate_and_review": (
+                EVIDENCE_CLAIM_TILE_REVIEW_SCHEMA_VERSION
+            ),
+        },
+    )
 
 
 def render_claim_tile_review_set_markdown(
@@ -559,6 +629,7 @@ def _validate_review(row: dict[str, Any]) -> None:
         "dataset_version",
         "case_id",
         "candidate_fingerprint",
+        "review_packet_fingerprint",
         "decision",
         "reviewer_id",
         "rationale",
@@ -601,6 +672,10 @@ def _validate_review(row: dict[str, Any]) -> None:
         row.get("candidate_fingerprint"),
         field="candidate_fingerprint",
     )
+    _required_sha256(
+        row.get("review_packet_fingerprint"),
+        field="review_packet_fingerprint",
+    )
     try:
         datetime.fromisoformat(
             str(row["reviewed_at"]).replace("Z", "+00:00")
@@ -642,6 +717,43 @@ def _validate_candidate_fingerprint_bindings(
     if fingerprints and fingerprints != {expected}:
         raise EvidenceClaimTileReviewSetError(
             "claim-tile review candidate fingerprint mismatch"
+        )
+
+
+def _validate_review_packet_fingerprint(
+    manifest: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> str:
+    fingerprint = claim_tile_review_packet_fingerprint(
+        manifest,
+        candidates,
+    )
+    if (
+        str(manifest.get("review_packet_fingerprint") or "")
+        != fingerprint
+    ):
+        raise EvidenceClaimTileReviewSetError(
+            "claim-tile review packet fingerprint mismatch"
+        )
+    return fingerprint
+
+
+def _validate_review_packet_fingerprint_bindings(
+    reviews: Iterable[dict[str, Any]],
+    *,
+    expected: str,
+) -> None:
+    fingerprints = {
+        str(row.get("review_packet_fingerprint") or "")
+        for row in reviews
+    }
+    if len(fingerprints) > 1:
+        raise EvidenceClaimTileReviewSetError(
+            "claim-tile reviews mix review packet fingerprints"
+        )
+    if fingerprints and fingerprints != {expected}:
+        raise EvidenceClaimTileReviewSetError(
+            "claim-tile review packet fingerprint mismatch"
         )
 
 

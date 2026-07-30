@@ -21,6 +21,9 @@ Key properties, all enforced by contract or policy data:
 - Absence is evidence: crawled strategic pages without values/vision terms emit `acquisition.absence.*` records, and failed external acquisition leaves `acquisition.attempt.*` records.
 - `verified_absent` is derived deterministically — the LLM cannot self-certify an absence.
 - Keyword policies are versioned data with a justified changelog (`src/sv9_flow/policy_data/calibration_terms.json`), not code drift.
+- New owned-web observations bypass Firecrawl's shared cache (`max_age=0`) and persist `web-capture-provenance-v1`: requested/final URL, UTC fetch time, provider, and SHA-256 of the captured aggregate. Re-analysis should reuse that frozen raw input rather than silently fetching a different page.
+- Owned page selection combines observed navigation with same-domain URLs published through robots/sitemaps, keeps an eight-page budget (six strategic roles plus two bounded sitemap-only exploration slots), filters disallowed/resource URLs, and persists `owned-page-selection-v2` with discovery source, navigation status, strategic role, capture outcome, `lastmod`, and the visited/known coverage denominator.
+- Each interpreted component is joined back to its exact cited surfaces so the report distinguishes homepage, linked, sitemap-only, and external evidence without changing the Brand3 Score. Captured pages also carry bounded English/Spanish language evidence (`owned-page-language-en-es-v1`); unsupported or short text remains undetermined, and mixed-language findings are diagnostic rather than scoring authority.
 
 ## Layout
 
@@ -189,9 +192,9 @@ it through
 [`docs/evidence_claim_tile_ledger_v1.md`](docs/evidence_claim_tile_ledger_v1.md).
 Semantic mapping decisions now use a separate append-only PostgreSQL journal
 with idempotency, optimistic concurrency, server-bound reviewer identity, and
-revocation. The event freezes the exact evidence, claim variant, tile, polarity,
-and mapping-series identities, while database constraints keep tile and scoring
-effects disabled. Review it through
+revocation. The event freezes the exact review-packet fingerprint, evidence,
+claim variant, tile, polarity, and mapping-series identities, while database
+constraints keep tile and scoring effects disabled. Review it through
 `GET|POST /api/v1/brands/{domain}/evidence-claim-tile-reviews`; see
 [`docs/evidence_claim_tile_review_v1.md`](docs/evidence_claim_tile_review_v1.md).
 

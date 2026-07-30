@@ -36,8 +36,8 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["promotion_ready"] is False
     assert report["executable_failures"] == []
     assert report["schema_version"] == "evidence-memory-stress-v2"
-    assert report["policy_version"] == "evidence-memory-stress-policy-v14"
-    assert report["summary"]["executable_invariant_count"] == 30
+    assert report["policy_version"] == "evidence-memory-stress-policy-v16"
+    assert report["summary"]["executable_invariant_count"] == 31
     assert report["summary"]["promotion_blocker_count"] == 4
     assert probes[
         "accepted_evidence_memory_adds_without_silent_replacement"
@@ -72,23 +72,23 @@ def test_controlled_stress_supports_foundation_but_blocks_promotion() -> None:
     assert report["summary"]["claim_corroboration_candidate_count"] == 10
     assert report["summary"]["claim_corroboration_candidate_source_count"] == 5
     assert report["summary"]["claim_corroboration_candidate_claim_count"] == 10
-    assert report["summary"]["claim_corroboration_reviewed_count"] == 0
-    assert report["summary"]["claim_corroboration_pending_count"] == 10
+    assert report["summary"]["claim_corroboration_reviewed_count"] == 10
+    assert report["summary"]["claim_corroboration_pending_count"] == 0
     assert report["summary"]["source_claim_registry_source_count"] == 6
     assert (
         report["summary"]["source_claim_registry_publisher_reviewed_count"]
         == 6
     )
     assert report["summary"]["source_claim_registry_claim_record_count"] == 10
-    assert report["summary"]["source_claim_registry_claim_reviewed_count"] == 0
-    assert report["summary"]["source_claim_registry_claim_pending_count"] == 10
+    assert report["summary"]["source_claim_registry_claim_reviewed_count"] == 10
+    assert report["summary"]["source_claim_registry_claim_pending_count"] == 0
     assert (
         report["summary"]["source_claim_registry_global_corroboration_count"]
         == 0
     )
     assert report["summary"]["claim_tile_review_candidate_count"] == 8
-    assert report["summary"]["claim_tile_review_reviewed_count"] == 0
-    assert report["summary"]["claim_tile_review_pending_count"] == 8
+    assert report["summary"]["claim_tile_review_reviewed_count"] == 8
+    assert report["summary"]["claim_tile_review_pending_count"] == 0
     assert report["summary"]["claim_tile_review_candidate_brand_count"] == 2
     assert (
         report["summary"][
@@ -109,7 +109,7 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
 
     identity_v4 = probes["identity_v4_matches_frozen_human_reviews"]
     source_independence = probes[
-        "source_corroboration_pending_claim_level_review"
+        "source_corroboration_cross_brand_and_operational_gates_pending"
     ]
     assert identity_v4["status"] == "pass"
     assert "14 unchanged human decisions" in identity_v4["observation"]
@@ -121,7 +121,7 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
     assert "10 claim candidates across 5 sources" in (
         source_independence["observation"]
     )
-    assert "0 reviewed and 10 pending" in source_independence["observation"]
+    assert "10 reviewed and 0 pending" in source_independence["observation"]
     assert probes["source_review_axes_are_separate_and_shadow_only"][
         "status"
     ] == "pass"
@@ -181,6 +181,9 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
         "claim_tile_review_set_freezes_real_mappings_without_authority"
     ]["status"] == "pass"
     assert probes[
+        "reviewed_claim_tile_memory_filters_non_accepts_shadow_only"
+    ]["status"] == "pass"
+    assert probes[
         "shadow_memory_version_is_stable_and_versioned"
     ]["status"] == "pass"
     memory_evaluator = probes[
@@ -194,12 +197,12 @@ def test_stress_exposes_poisoning_and_syndication_instead_of_false_green() -> No
         "required_capability"
     ]
     tile_mapping = probes[
-        "tile_mapping_pending_reviewed_promotion_policy"
+        "tile_mapping_false_positive_and_coverage_block_promotion"
     ]
     assert tile_mapping["status"] == "blocked"
     assert "8 candidates" in tile_mapping["observation"]
-    assert "0 reviews" in tile_mapping["observation"]
-    assert "review the frozen real mappings" in tile_mapping[
+    assert "8 reviews" in tile_mapping["observation"]
+    assert "correct the observed false mapping" in tile_mapping[
         "required_capability"
     ]
     claim_relation = probes["changed_claim_has_no_canonical_resolution"]
