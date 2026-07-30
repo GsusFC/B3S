@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from datetime import datetime
 from typing import Any
 
 from web.report_store import domain_key
@@ -62,6 +63,24 @@ _VALUE_TERMS = (
     ("eficiencia", ("eficien",)),
 )
 
+_HIERARCHY_LABELS = {
+    "homepage": "evidencia visible en portada",
+    "linked_from_home": "evidencia en páginas enlazadas desde la portada",
+    "mixed_with_sitemap_only": "parte de la evidencia está fuera de navegación",
+    "sitemap_only": "evidencia propia localizable solo mediante sitemap",
+    "owned_unknown": "evidencia propia sin jerarquía de navegación verificada",
+    "external_only": "evidencia citada únicamente en fuentes externas",
+    "unlocated": "evidencia sin superficie localizable",
+    "not_detected": "componente no detectado",
+}
+
+_LANGUAGE_LABELS = {
+    "en": "inglés",
+    "es": "español",
+    "mixed_en_es": "mezcla inglés/español",
+    "und": "indeterminado",
+}
+
 
 def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
     """Build the stable UI contract consumed by `report.html.j2`."""
@@ -93,6 +112,7 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
             ordered_components.append(component)
 
     acquisition = _acquisition_view_model(report)
+    stability = _stability_view_model(report)
     score = report.get("score")
     editorial = report.get("editorial") if isinstance(report.get("editorial"), dict) else {}
     insufficient_evidence = _coverage_limited_keys(report)
@@ -102,6 +122,8 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
         "id": str(report.get("id") or ""),
         "brand_name": str(report.get("brand_name") or ""),
         "url": str(report.get("url") or ""),
+        "created_at": str(report.get("created_at") or ""),
+        "created_at_display": _display_timestamp(report.get("created_at")),
         "lang": "es",
         "build": {
             "commit_sha": pipeline_commit_sha,
@@ -133,6 +155,7 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
             for row_class, keys in COMPONENT_ROWS
         ],
         "acquisition": acquisition,
+        "stability": stability,
         "absences": list(report.get("absences") or []),
         "attempts": list(report.get("attempts") or []),
         "export": {
@@ -142,6 +165,83 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
         "raw_refs": {
             "has_raw": isinstance(report.get("raw"), dict) and bool(report.get("raw")),
         },
+    }
+
+
+def _stability_view_model(report: dict[str, Any]) -> dict[str, Any]:
+    raw = report.get("stability") if isinstance(report.get("stability"), dict) else {}
+    classification = _clean_text(raw.get("classification"))
+    canonical_status = _clean_text(
+        report.get("canonical_status") or raw.get("canonical_status")
+    )
+    comparison = (
+        raw.get("baseline_comparison")
+        if isinstance(raw.get("baseline_comparison"), dict)
+        else {}
+    )
+    delta = (
+        comparison.get("delta")
+        if isinstance(comparison.get("delta"), dict)
+        else {}
+    )
+    changed_components = []
+    for row in delta.get("changed_components") or []:
+        if not isinstance(row, dict):
+            continue
+        key = _clean_text(row.get("component"))
+        meta = SV9_COMPONENTS.get(key) or {}
+        changed_components.append(
+            {
+                "key": key,
+                "label": _clean_text(meta.get("label")) or key,
+                "score_before": row.get("score_before"),
+                "score_after": row.get("score_after"),
+                "status_before": _clean_text(row.get("status_before")),
+                "status_after": _clean_text(row.get("status_after")),
+                "changed_tiles": [
+                    _clean_text(tile)
+                    for tile in row.get("changed_tiles") or []
+                    if _clean_text(tile)
+                ],
+            }
+        )
+    if classification == "evaluation_drift":
+        title = "Deriva de evaluación detectada"
+        message = (
+            "La evidencia material es equivalente al baseline, pero la "
+            "interpretación o las baldosas cambiaron. Este resultado no "
+            "sustituye al canónico."
+        )
+    elif classification == "provisional":
+        title = "Resultado provisional"
+        message = (
+            "Es el primer baseline no inválido de este historial. Necesita "
+            "una evaluación estable antes de convertirse en canónico."
+        )
+    elif canonical_status == "non_canonical":
+        title = "Resultado no canónico"
+        message = "El historial impide que este resultado sustituya al baseline."
+    else:
+        title = ""
+        message = ""
+    return {
+        "show": bool(title),
+        "classification": classification,
+        "canonical_status": canonical_status,
+        "title": title,
+        "message": message,
+        "chip_class": (
+            "bad" if canonical_status in {"non_canonical", "invalid"} else "warn"
+        ),
+        "reason_codes": [
+            _clean_text(code)
+            for code in raw.get("reason_codes") or []
+            if _clean_text(code)
+        ],
+        "baseline_report_id": _clean_text(
+            comparison.get("baseline_report_id")
+        ),
+        "changed_components": changed_components,
     }
 
 
@@ -172,6 +272,9 @@ def _component_view_model(component: dict[str, Any]) -> dict[str, Any]:
     evidence = _evidence_items(component)
     brand_quote = _lit_evidence_quote(tile_profile, evidence)
     block = component.get("block") if isinstance(component.get("block"), dict) else {}
+    surface_hierarchy = _surface_hierarchy_view_model(
+        component.get("surface_hierarchy")
+    )
     drawer = {
         "summary": {
             "primary_text": primary.get("text") or "",
@@ -185,6 +288,7 @@ def _component_view_model(component: dict[str, Any]) -> dict[str, Any]:
         "off_tiles": off_tiles,
         "blind_spots": blind_spots,
         "evidence": evidence,
+        "surface_hierarchy": surface_hierarchy,
         "coverage": {
             "status": str(block.get("coverage_status") or ""),
             "source_layers": list(component.get("source_layers") or []),
@@ -211,6 +315,7 @@ def _component_view_model(component: dict[str, Any]) -> dict[str, Any]:
             drawer["evaluator_verdict"],
             block.get("rejected_content"),
             block.get("coverage_status"),
+            surface_hierarchy.get("status"),
         )
     )
     return {
@@ -226,6 +331,7 @@ def _component_view_model(component: dict[str, Any]) -> dict[str, Any]:
             "primary": primary,
             "support": support,
             "brand_quote": brand_quote,
+            "surface_hierarchy": surface_hierarchy,
             "meta": {
                 "lit": lit,
                 "off": off,
@@ -236,6 +342,60 @@ def _component_view_model(component: dict[str, Any]) -> dict[str, Any]:
         },
         "drawer": drawer,
         "export": {},
+    }
+
+
+def _surface_hierarchy_view_model(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    status = _clean_text(raw.get("hierarchy_status"))
+    counts_raw = raw.get("counts") if isinstance(raw.get("counts"), dict) else {}
+    counts = {
+        key: int(counts_raw.get(key) or 0)
+        for key in (
+            "homepage",
+            "linked_from_home",
+            "sitemap_only",
+            "owned_unknown",
+            "external",
+        )
+    }
+    surfaces = []
+    for row in raw.get("owned_surfaces") or []:
+        if not isinstance(row, dict):
+            continue
+        url = _clean_text(row.get("url"))
+        if not url:
+            continue
+        surfaces.append(
+            {
+                "url": url,
+                "navigation_status": _clean_text(
+                    row.get("navigation_status")
+                ),
+                "captured": bool(row.get("captured")),
+                "cited_ref_count": len(
+                    [
+                        ref
+                        for ref in row.get("cited_refs") or []
+                        if _clean_text(ref)
+                    ]
+                ),
+            }
+        )
+    return {
+        "schema_version": _clean_text(raw.get("schema_version")),
+        "presence_status": _clean_text(raw.get("presence_status")),
+        "status": status,
+        "label": _HIERARCHY_LABELS.get(status, status),
+        "warns_hidden_content": status
+        in {"mixed_with_sitemap_only", "sitemap_only"},
+        "owned_surface_count": int(raw.get("owned_surface_count") or 0),
+        "external_ref_count": int(raw.get("external_ref_count") or 0),
+        "uncategorized_ref_count": int(
+            raw.get("uncategorized_ref_count") or 0
+        ),
+        "counts": counts,
+        "owned_surfaces": surfaces,
     }
 
 
@@ -550,6 +710,31 @@ def _acquisition_view_model(report: dict[str, Any]) -> dict[str, Any]:
             }
         )
     coverage = report.get("coverage_acquisition") if isinstance(report.get("coverage_acquisition"), dict) else {}
+    owned_page_coverage = (
+        coverage.get("owned_page_coverage")
+        if isinstance(coverage.get("owned_page_coverage"), dict)
+        else {}
+    )
+    known_page_count = int(owned_page_coverage.get("known_page_count") or 0)
+    captured_page_count = int(
+        owned_page_coverage.get("captured_page_count")
+        or coverage.get("owned_url_count")
+        or 0
+    )
+    ratio = (
+        float(owned_page_coverage.get("coverage_ratio") or 0.0)
+        if known_page_count
+        else 0.0
+    )
+    visited_pages = _coverage_page_rows(
+        owned_page_coverage.get("visited_pages"),
+    )
+    not_visited_pages = _coverage_page_rows(
+        owned_page_coverage.get("not_visited_pages"),
+    )
+    language_detection = _language_detection_view_model(
+        owned_page_coverage.get("language_detection")
+    )
     return {
         "state": _clean_text(gate.get("state")) or "unknown",
         "warnings": list(gate.get("warnings") or []),
@@ -558,8 +743,35 @@ def _acquisition_view_model(report: dict[str, Any]) -> dict[str, Any]:
         "user_decision": _clean_text(gate.get("user_decision")),
         "decision_source": _clean_text(gate.get("decision_source")),
         "artifacts": artifacts,
+        "owned_pages": {
+            "selection_version": _clean_text(
+                owned_page_coverage.get("selection_version")
+            ),
+            "known_page_count": known_page_count,
+            "captured_page_count": captured_page_count,
+            "attempted_page_count": int(
+                owned_page_coverage.get("attempted_page_count")
+                or len(visited_pages)
+            ),
+            "coverage_ratio": ratio,
+            "coverage_percent": int(round(ratio * 100)),
+            "coverage_label": (
+                f"{captured_page_count} de {known_page_count}"
+                if known_page_count
+                else str(captured_page_count)
+            ),
+            "visited_pages": visited_pages,
+            "not_visited_pages": not_visited_pages,
+            "excluded_pages": _coverage_page_rows(
+                owned_page_coverage.get("excluded_pages"),
+            ),
+            "latest_lastmod": _clean_text(
+                owned_page_coverage.get("latest_lastmod")
+            ),
+            "language_detection": language_detection,
+        },
         "metrics": {
-            "owned_url_count": int(coverage.get("owned_url_count") or 0),
+            "owned_url_count": captured_page_count,
             "external_proof_count": int(
                 coverage.get("external_proof_count")
                 or coverage.get("external_source_count")
@@ -578,6 +790,98 @@ def _acquisition_view_model(report: dict[str, Any]) -> dict[str, Any]:
             "evidence_record_count": int(coverage.get("evidence_record_count") or 0),
         },
     }
+
+
+def _coverage_page_rows(value: Any) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for raw in value or []:
+        if not isinstance(raw, dict):
+            continue
+        url = _clean_text(raw.get("url"))
+        if not url:
+            continue
+        rows.append(
+            {
+                "url": url,
+                "role": _clean_text(raw.get("role")),
+                "source": _clean_text(raw.get("source")),
+                "navigation_status": _clean_text(
+                    raw.get("navigation_status")
+                ),
+                "status": _clean_text(raw.get("status")),
+                "reason": _clean_text(raw.get("reason")),
+                "lastmod": _clean_text(raw.get("lastmod")),
+                "observed_language": _clean_text(
+                    raw.get("observed_language")
+                ),
+                "observed_language_label": _LANGUAGE_LABELS.get(
+                    _clean_text(raw.get("observed_language")),
+                    _clean_text(raw.get("observed_language")),
+                ),
+                "language_confidence": _clean_text(
+                    raw.get("language_confidence")
+                ),
+                "declared_language": _clean_text(
+                    raw.get("declared_language")
+                ),
+                "declared_language_mismatch": bool(
+                    raw.get("declared_language_mismatch")
+                ),
+            }
+        )
+    return rows
+
+
+def _language_detection_view_model(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    distribution = []
+    for row in raw.get("distribution") or []:
+        if not isinstance(row, dict):
+            continue
+        language = _clean_text(row.get("language"))
+        count = int(row.get("page_count") or 0)
+        if not language or not count:
+            continue
+        distribution.append(
+            {
+                "language": language,
+                "label": _LANGUAGE_LABELS.get(language, language),
+                "page_count": count,
+                "share_percent": int(
+                    round(float(row.get("share") or 0.0) * 100)
+                ),
+            }
+        )
+    summary = " · ".join(
+        f"{row['label']} {row['page_count']}"
+        for row in distribution
+        if row["language"] != "und"
+    )
+    return {
+        "version": _clean_text(raw.get("version")),
+        "status": _clean_text(raw.get("status")),
+        "mixed_language_site": bool(raw.get("mixed_language_site")),
+        "captured_page_count": int(raw.get("captured_page_count") or 0),
+        "evaluated_page_count": int(raw.get("evaluated_page_count") or 0),
+        "unknown_page_count": int(raw.get("unknown_page_count") or 0),
+        "declared_mismatch_count": int(
+            raw.get("declared_mismatch_count") or 0
+        ),
+        "distribution": distribution,
+        "summary": summary or "sin texto suficiente",
+    }
+
+
+def _display_timestamp(value: Any) -> str:
+    raw = _clean_text(value)
+    if not raw:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    suffix = " UTC" if parsed.utcoffset() is not None else ""
+    return parsed.strftime("%Y-%m-%d %H:%M:%S") + suffix
 
 
 def _tile_counts(component: dict[str, Any], tile_profile: list[Any]) -> tuple[int, int, int]:

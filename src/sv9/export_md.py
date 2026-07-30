@@ -60,6 +60,8 @@ def build_scan_markdown(scan: dict[str, Any], *, lang: str = "es") -> str:
     lines.append(f"- Brand3 Score: **{scan.get('brand3_score', 0)}/100**")
     lines.append(f"- Modelo: {model}")
     lines.append(f"- Build: `{scan.get('pipeline_commit_sha') or 'unknown'}`")
+    if scan.get("created_at"):
+        lines.append(f"- Escaneado: {scan.get('created_at')}")
     if scan.get("reliability_status"):
         lines.append(f"- Confiabilidad: **{spanish_status_label(scan.get('reliability_status'))}**")
         reason_codes = scan.get("reliability_reason_codes") or []
@@ -77,6 +79,49 @@ def build_scan_markdown(scan: dict[str, Any], *, lang: str = "es") -> str:
         lines.append("")
         lines.append(f"> {reading}")
     lines.append("")
+
+    stability = (
+        scan.get("stability")
+        if isinstance(scan.get("stability"), dict)
+        else {}
+    )
+    if str(stability.get("classification") or "") == "evaluation_drift":
+        lines.append("## Estabilidad de la evaluación")
+        lines.append("")
+        lines.append(
+            "**Resultado no canónico:** la evidencia material es equivalente "
+            "al baseline, pero la interpretación o las baldosas cambiaron."
+        )
+        comparison = (
+            stability.get("baseline_comparison")
+            if isinstance(stability.get("baseline_comparison"), dict)
+            else {}
+        )
+        if comparison.get("baseline_report_id"):
+            lines.append(
+                f"- Baseline: `{comparison.get('baseline_report_id')}`"
+            )
+        delta = (
+            comparison.get("delta")
+            if isinstance(comparison.get("delta"), dict)
+            else {}
+        )
+        for changed in delta.get("changed_components") or []:
+            if not isinstance(changed, dict):
+                continue
+            key = str(changed.get("component") or "")
+            label = str((COMPONENTS.get(key) or {}).get("label") or key)
+            tiles = [
+                str(tile)
+                for tile in changed.get("changed_tiles") or []
+                if str(tile)
+            ]
+            suffix = f" · baldosas {', '.join(tiles)}" if tiles else ""
+            lines.append(
+                f"- {label}: **{changed.get('score_before')} → "
+                f"{changed.get('score_after')}**{suffix}"
+            )
+        lines.append("")
 
     for key in PRESENTATION_ORDER:
         component = components.get(key)
@@ -114,6 +159,33 @@ def build_scan_markdown(scan: dict[str, Any], *, lang: str = "es") -> str:
             f"- Nota: **{score}/{spec['scale']}**{multiplier} "
             f"({component.get('points', 0)}/{component_max_points(key)} pts) · confianza {confidence}"
         )
+        hierarchy = (
+            component.get("surface_hierarchy")
+            if isinstance(component.get("surface_hierarchy"), dict)
+            else {}
+        )
+        hierarchy_status = str(hierarchy.get("hierarchy_status") or "")
+        hierarchy_label = {
+            "homepage": "evidencia visible en portada",
+            "linked_from_home": "evidencia en páginas enlazadas desde la portada",
+            "mixed_with_sitemap_only": "parte de la evidencia está fuera de navegación",
+            "sitemap_only": "evidencia propia localizable solo mediante sitemap",
+            "owned_unknown": "evidencia propia sin jerarquía verificada",
+            "external_only": "evidencia citada únicamente en fuentes externas",
+            "unlocated": "evidencia sin superficie localizable",
+        }.get(hierarchy_status)
+        if hierarchy_label:
+            lines.append(f"- Jerarquía: **{hierarchy_label}**")
+            counts = (
+                hierarchy.get("counts")
+                if isinstance(hierarchy.get("counts"), dict)
+                else {}
+            )
+            if int(counts.get("sitemap_only") or 0):
+                lines.append(
+                    "- Superficies propias fuera de navegación: "
+                    f"**{int(counts.get('sitemap_only') or 0)}**"
+                )
 
         verdicts = {
             str(verdict.get("id") or verdict.get("tile_id") or ""): verdict
@@ -162,6 +234,127 @@ def build_scan_markdown(scan: dict[str, Any], *, lang: str = "es") -> str:
                 lines.append(detail)
         else:
             lines.append("- (ninguno)")
+        lines.append("")
+
+    coverage = (
+        scan.get("coverage_acquisition")
+        if isinstance(scan.get("coverage_acquisition"), dict)
+        else {}
+    )
+    owned = (
+        coverage.get("owned_page_coverage")
+        if isinstance(coverage.get("owned_page_coverage"), dict)
+        else {}
+    )
+    known_count = int(owned.get("known_page_count") or 0)
+    captured_count = int(
+        owned.get("captured_page_count")
+        or coverage.get("owned_url_count")
+        or 0
+    )
+    if known_count or owned.get("visited_pages") or owned.get("not_visited_pages"):
+        percentage = (
+            int(round((captured_count / known_count) * 100))
+            if known_count
+            else 0
+        )
+        lines.append("## Cobertura de adquisición")
+        lines.append("")
+        if known_count:
+            lines.append(
+                f"- Páginas propias capturadas: **{captured_count} de "
+                f"{known_count} ({percentage}%)**"
+            )
+        else:
+            lines.append(
+                f"- Páginas propias capturadas: **{captured_count}**"
+            )
+        if owned.get("selection_version"):
+            lines.append(
+                f"- Política de selección: `{owned.get('selection_version')}`"
+            )
+        if owned.get("latest_lastmod"):
+            lines.append(
+                f"- Último `lastmod` observado: {owned.get('latest_lastmod')}"
+            )
+        language_detection = (
+            owned.get("language_detection")
+            if isinstance(owned.get("language_detection"), dict)
+            else {}
+        )
+        language_labels = {
+            "en": "inglés",
+            "es": "español",
+            "mixed_en_es": "mezcla inglés/español",
+            "und": "indeterminado",
+        }
+        language_rows = [
+            row
+            for row in language_detection.get("distribution") or []
+            if isinstance(row, dict)
+            and str(row.get("language") or "") != "und"
+            and int(row.get("page_count") or 0)
+        ]
+        if language_rows:
+            summary = " · ".join(
+                f"{language_labels.get(str(row.get('language')), row.get('language'))} "
+                f"{int(row.get('page_count') or 0)}"
+                for row in language_rows
+            )
+            lines.append(f"- Idiomas observados por página: **{summary}**")
+        if language_detection.get("mixed_language_site") is True:
+            lines.append(
+                "- Hallazgo de coherencia: **mezcla de idiomas dentro del "
+                "mismo dominio**"
+            )
+        mismatch_count = int(
+            language_detection.get("declared_mismatch_count") or 0
+        )
+        if mismatch_count:
+            lines.append(
+                "- Páginas cuyo idioma observado no coincide con el declarado "
+                f"en HTML: **{mismatch_count}**"
+            )
+
+        visited_pages = [
+            row
+            for row in owned.get("visited_pages") or []
+            if isinstance(row, dict) and str(row.get("url") or "").strip()
+        ]
+        if visited_pages:
+            lines.append("")
+            lines.append("### Páginas visitadas")
+            for row in visited_pages:
+                status = str(row.get("status") or "visited")
+                navigation = str(row.get("navigation_status") or "")
+                suffix = f" · {navigation}" if navigation else ""
+                observed_language = str(
+                    row.get("observed_language") or ""
+                )
+                if observed_language:
+                    suffix += (
+                        " · idioma "
+                        f"{language_labels.get(observed_language, observed_language)}"
+                    )
+                lines.append(
+                    f"- `{status}` · {row.get('url')}{suffix}"
+                )
+
+        not_visited_pages = [
+            row
+            for row in owned.get("not_visited_pages") or []
+            if isinstance(row, dict) and str(row.get("url") or "").strip()
+        ]
+        if not_visited_pages:
+            lines.append("")
+            lines.append("### Páginas conocidas no visitadas")
+            for row in not_visited_pages:
+                reason = str(row.get("reason") or "not_visited")
+                navigation = str(row.get("navigation_status") or "")
+                suffix = f" · {navigation}" if navigation else ""
+                lines.append(
+                    f"- `{reason}` · {row.get('url')}{suffix}"
+                )
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"

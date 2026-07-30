@@ -49,6 +49,11 @@
   <p class="card-evidence"><em>“{{ bq.snippet | truncate(180) }}”</em>{% if bq.url %} · <a class="source-link" href="{{ bq.url }}" target="_blank" rel="noopener noreferrer">fuente</a>{% endif %}</p>
   {% endif %}
 
+  {% set hierarchy = component.card.surface_hierarchy %}
+  {% if hierarchy.warns_hidden_content %}
+  <p class="card-evidence"><span class="chip warn">jerarquía</span> {{ hierarchy.label }}{% if hierarchy.counts.sitemap_only %} · {{ hierarchy.counts.sitemap_only }} página{% if hierarchy.counts.sitemap_only != 1 %}s{% endif %}{% endif %}</p>
+  {% endif %}
+
   {% if meta.has_drawer %}
   <dialog class="report-drawer" id="drawer-{{ component.key }}" aria-labelledby="drawer-title-{{ component.key }}">
     <div class="report-drawer-head">
@@ -88,6 +93,20 @@
           {% if item.snippet %}<div class="muted snippet">{{ item.snippet }}</div>{% endif %}
         </div>
         {% endfor %}
+      </section>
+      {% endif %}
+
+      {% if drawer.surface_hierarchy.status %}
+      <section class="drawer-section">
+        <h4>Presencia y jerarquía</h4>
+        <p>{{ drawer.surface_hierarchy.label }}.</p>
+        {% if drawer.surface_hierarchy.owned_surfaces %}
+        <ul class="plain">
+          {% for surface in drawer.surface_hierarchy.owned_surfaces %}
+          <li><span class="chip{% if surface.navigation_status == 'sitemap_only' %} warn{% endif %}">{{ surface.navigation_status }}</span> <a class="source-link" href="{{ surface.url }}" target="_blank" rel="noopener noreferrer">{{ surface.url }}</a>{% if not surface.captured %} <span class="muted">· obtenida por otra fuente</span>{% endif %}</li>
+          {% endfor %}
+        </ul>
+        {% endif %}
       </section>
       {% endif %}
 
@@ -182,6 +201,9 @@
   <div class="report-hero-main">
     <h1 class="report-hero-title">{{ report.brand_name }}</h1>
     <a class="report-hero-url" href="{{ report.url }}" target="_blank" rel="noopener noreferrer">{{ report.url }}</a>
+    {% if report.created_at_display %}
+    <div class="muted mono">Escaneado: {{ report.created_at_display }}</div>
+    {% endif %}
   </div>
   <div class="report-hero-metric">
     <div class="report-hero-label">{{ report.hero.score_label }}</div>
@@ -213,6 +235,23 @@
     {% endif %}
   </div>
 </div>
+
+{% if report.stability.show %}
+<section class="panel report-reading">
+  <div class="ref"><span class="chip {{ report.stability.chip_class }}">{{ report.stability.canonical_status }}</span> {{ report.stability.title }}</div>
+  <p>{{ report.stability.message }}</p>
+  {% if report.stability.baseline_report_id %}
+  <p class="muted">Baseline: <span class="mono">{{ report.stability.baseline_report_id }}</span></p>
+  {% endif %}
+  {% if report.stability.changed_components %}
+  <ul class="plain">
+    {% for changed in report.stability.changed_components %}
+    <li><strong>{{ changed.label }}</strong>: {{ changed.score_before }} → {{ changed.score_after }}{% if changed.changed_tiles %} <span class="muted">· baldosas {{ changed.changed_tiles | join(", ") }}</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endif %}
 
 {% if report.hero.executive_reading %}
 <section class="panel report-reading">
@@ -259,12 +298,43 @@
 </div>
 {% endif %}
 <div class="acquisition-metrics">
-  <div class="cell acquisition-metric"><div class="k">páginas propias</div><div class="v">{{ report.acquisition.metrics.owned_url_count }}</div></div>
+  <div class="cell acquisition-metric"><div class="k">páginas propias capturadas</div><div class="v">{{ report.acquisition.owned_pages.coverage_label }}</div>{% if report.acquisition.owned_pages.known_page_count %}<div class="muted">{{ report.acquisition.owned_pages.coverage_percent }}% de las conocidas</div>{% endif %}</div>
   <div class="cell acquisition-metric"><div class="k">pruebas externas</div><div class="v">{{ report.acquisition.metrics.external_proof_count }}</div></div>
   <div class="cell acquisition-metric"><div class="k">intentos externos</div><div class="v">{{ report.acquisition.metrics.external_attempt_count }}</div></div>
   <div class="cell acquisition-metric"><div class="k">registros de ausencia</div><div class="v">{{ report.acquisition.metrics.absence_ref_count }}</div></div>
   <div class="cell acquisition-metric"><div class="k">registros de evidencia</div><div class="v">{{ report.acquisition.metrics.evidence_record_count }}</div></div>
+  {% if report.acquisition.owned_pages.language_detection.evaluated_page_count %}
+  <div class="cell acquisition-metric"><div class="k">idiomas observados</div><div class="v">{{ report.acquisition.owned_pages.language_detection.summary }}</div></div>
+  {% endif %}
 </div>
+
+{% if report.acquisition.owned_pages.visited_pages or report.acquisition.owned_pages.not_visited_pages %}
+<details class="panel acquisition-panel">
+  <summary>Cobertura propia · {{ report.acquisition.owned_pages.coverage_label }} páginas capturadas</summary>
+  {% if report.acquisition.owned_pages.selection_version %}
+  <p class="muted">Política: <span class="mono">{{ report.acquisition.owned_pages.selection_version }}</span>{% if report.acquisition.owned_pages.latest_lastmod %} · último <span class="mono">lastmod</span> observado: {{ report.acquisition.owned_pages.latest_lastmod }}{% endif %}</p>
+  {% endif %}
+  {% if report.acquisition.owned_pages.language_detection.mixed_language_site %}
+  <p><span class="chip warn">mezcla de idiomas</span> Las páginas capturadas cambian de idioma dentro del mismo dominio{% if report.acquisition.owned_pages.language_detection.declared_mismatch_count %}; {{ report.acquisition.owned_pages.language_detection.declared_mismatch_count }} no coincide{% if report.acquisition.owned_pages.language_detection.declared_mismatch_count != 1 %}n{% endif %} con el idioma declarado en HTML{% endif %}.</p>
+  {% endif %}
+  {% if report.acquisition.owned_pages.visited_pages %}
+  <h3 class="acquisition-subhead">Visitadas</h3>
+  <ul class="plain">
+    {% for page in report.acquisition.owned_pages.visited_pages %}
+    <li><span class="chip {% if page.status == 'captured' %}ok{% else %}warn{% endif %}">{{ page.status or "visitada" }}</span> <a href="{{ page.url }}" target="_blank" rel="noopener noreferrer">{{ page.url }}</a>{% if page.navigation_status %} <span class="muted">· {{ page.navigation_status }}</span>{% endif %}{% if page.observed_language_label %} <span class="muted">· idioma {{ page.observed_language_label }} ({{ page.language_confidence }})</span>{% endif %}{% if page.declared_language_mismatch %} <span class="chip warn">HTML {{ page.declared_language }}</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if report.acquisition.owned_pages.not_visited_pages %}
+  <h3 class="acquisition-subhead">Conocidas y no visitadas</h3>
+  <ul class="plain">
+    {% for page in report.acquisition.owned_pages.not_visited_pages %}
+    <li><span class="chip">{{ page.reason or "not_visited" }}</span> <a href="{{ page.url }}" target="_blank" rel="noopener noreferrer">{{ page.url }}</a>{% if page.navigation_status %} <span class="muted">· {{ page.navigation_status }}</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</details>
+{% endif %}
 
 {% if report.absences %}
 <h3 class="acquisition-subhead">Miramos y no estaba</h3>
