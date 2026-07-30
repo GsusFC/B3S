@@ -1970,7 +1970,10 @@ Tabular foundation models for real-world data.
         with patch.object(WebCollector, "_run_firecrawl", return_value={"content": ""}):
             with patch.object(WebCollector, "_fetch_html_fallback", return_value=(html, "")):
                 with patch.object(WebCollector, "_fetch_browser_fallback") as browser_fallback:
-                    data = collector.scrape("https://poetiq.ai/")
+                    data = collector.scrape(
+                        "https://poetiq.ai/",
+                        crawl_subpages=False,
+                    )
 
         self.assertEqual(data.title, "Poetiq")
         self.assertIn("safe super intelligence", data.markdown_content.lower())
@@ -1998,7 +2001,10 @@ Tabular foundation models for real-world data.
         with patch.object(WebCollector, "_run_firecrawl", return_value={"error": "blocked"}):
             with patch.object(WebCollector, "_fetch_html_fallback", return_value=("", "403")):
                 with patch.object(WebCollector, "_fetch_browser_fallback", return_value=(payload, "")):
-                    data = collector.scrape("https://claude.ai/")
+                    data = collector.scrape(
+                        "https://claude.ai/",
+                        crawl_subpages=False,
+                    )
 
         self.assertEqual(data.title, "Claude")
         self.assertEqual(data.content_source, "browser_fallback")
@@ -2028,7 +2034,10 @@ Tabular foundation models for real-world data.
         with patch.object(WebCollector, "_run_firecrawl", return_value={"content": content, "html": html}):
             with patch.object(WebCollector, "_fetch_html_fallback") as html_fallback:
                 with patch.object(WebCollector, "_fetch_browser_fallback") as browser_fallback:
-                    data = collector.scrape("https://claude.ai/")
+                    data = collector.scrape(
+                        "https://claude.ai/",
+                        crawl_subpages=False,
+                    )
 
         self.assertIn("Claude helps people solve problems", data.markdown_content)
         self.assertEqual(data.html, html)
@@ -2196,7 +2205,7 @@ Tabular foundation models for real-world data.
 
     def test_scrape_recursive_crawling(self):
         from unittest.mock import patch
-        collector = WebCollector()
+        collector = WebCollector(sitemap_discovery=False)
         
         main_content = (
             "# Main Page\n\nWelcome to our company page. "
@@ -2231,7 +2240,7 @@ Tabular foundation models for real-world data.
 
     def test_scrape_recursive_crawling_uses_html_links_when_markdown_has_none(self):
         from unittest.mock import patch
-        collector = WebCollector()
+        collector = WebCollector(sitemap_discovery=False)
 
         main_content = "# Main Page\n\nPlain homepage copy without markdown links. " * 10
         main_html = """
@@ -2268,7 +2277,7 @@ Tabular foundation models for real-world data.
     def test_scrape_recursive_crawling_handles_internal_links_with_spaces(self):
         from unittest.mock import patch
 
-        collector = WebCollector()
+        collector = WebCollector(sitemap_discovery=False)
 
         main_content = (
             "# Main Page\n\n"

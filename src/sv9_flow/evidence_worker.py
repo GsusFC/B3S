@@ -14,11 +14,41 @@ from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
 from src.visual_signature.acquisition_contract import is_visual_acquisition_source
 
 _RAW_INPUT_CONTENT_CHARS = 700
-_WEB_CHUNK_CHARS = 900
+# Keep generated web chunks within the record limit. If chunks are larger
+# than records, truncation can create blind gaps between overlapping chunks.
+_WEB_CHUNK_CHARS = _RAW_INPUT_CONTENT_CHARS
 _WEB_CHUNK_OVERLAP = 100
 _MAX_WEB_HOMEPAGE_CHUNKS = 12
 _MAX_WEB_SUBPAGE_CHUNKS = 6
 _BOILERPLATE_MIN_PAGES = 3
+_STRATEGIC_CHUNK_TERMS: tuple[tuple[str, int], ...] = (
+    ("our mission", 12),
+    ("nuestra misión", 12),
+    ("our vision", 12),
+    ("nuestra visión", 12),
+    ("core purpose", 12),
+    ("why we", 10),
+    ("why do", 10),
+    ("why,", 10),
+    ("propósito", 10),
+    ("purpose", 10),
+    ("values", 9),
+    ("valores", 9),
+    ("principles", 9),
+    ("principios", 9),
+    ("pillars", 9),
+    ("pillar", 8),
+    ("pilares", 9),
+    ("pilar", 8),
+    ("manifesto", 8),
+    ("manifiesto", 8),
+    ("culture", 7),
+    ("cultura", 7),
+    ("how we", 7),
+    ("how do", 7),
+    ("scientific method", 7),
+    ("método científico", 7),
+)
 _STRATEGIC_SECTION_MARKERS = (
     "about", "company", "careers", "jobs", "culture", "values", "valores",
     "value", "mission", "missão", "missao", "vision", "visão", "visao",
@@ -614,6 +644,16 @@ def _evidence_from_web_payload(*, index: int, source: str, payload: dict[str, An
     homepage, subpages, missing_subpages = _split_web_subpages(text)
     subpages = _strip_cross_page_boilerplate(homepage, subpages)
     records: list[EvidenceRecord] = []
+    page_selection = payload.get("page_selection")
+    if isinstance(page_selection, dict) and page_selection:
+        records.append(
+            _page_selection_record(
+                index=index,
+                source=source,
+                url=url,
+                selection=page_selection,
+            )
+        )
     if homepage:
         homepage_chunks, homepage_total = _chunk_text_by_section(homepage, homepage=True)
         for chunk_index, chunk in enumerate(homepage_chunks, start=1):
@@ -661,7 +701,7 @@ def _evidence_from_web_payload(*, index: int, source: str, payload: dict[str, An
                     url=subpage_url or url,
                     total_chunks=subpage_total,
                     selected_chunks=len(subpage_chunks),
-                    prioritized=False,
+                    prioritized=True,
                     subpage_index=subpage_index,
                 )
             )
@@ -747,6 +787,35 @@ def _evidence_sampling_record(
             "selected_chunks": selected_chunks,
             "strategic_prioritization": prioritized,
             "subpage_index": subpage_index,
+        },
+    )
+
+
+def _page_selection_record(
+    *,
+    index: int,
+    source: str,
+    url: str,
+    selection: dict[str, Any],
+) -> EvidenceRecord:
+    known = int(selection.get("known_page_count") or 0)
+    captured = int(selection.get("captured_page_count") or 0)
+    attempted = int(selection.get("attempted_page_count") or 0)
+    return EvidenceRecord(
+        ref=f"raw_inputs.{index}.diagnostics.page_selection",
+        source=source,
+        evidence_type="acquisition.page_selection",
+        content=(
+            f"Owned page selection captured {captured} of {known} known pages "
+            f"after attempting {attempted}; policy="
+            f"{selection.get('version') or 'unknown'}."
+        )[:_RAW_INPUT_CONTENT_CHARS],
+        url=url,
+        confidence="high",
+        metadata={
+            "source_class": "acquisition_metadata",
+            "provider": "web",
+            "page_selection": selection,
         },
     )
 
@@ -959,24 +1028,48 @@ def _chunk_text_by_section(text: str, *, homepage: bool = False) -> tuple[list[s
     if not clean:
         return [], 0
     chunks: list[str] = []
-    for section in _markdown_sections(clean):
-        if len(section) <= _WEB_CHUNK_CHARS:
-            chunks.append(section)
-        else:
+    sections = _markdown_sections(clean)
+    pending_sections: list[str] = []
+    pending_chars = 0
+
+    def flush_pending() -> None:
+        nonlocal pending_chars
+        if pending_sections:
+            chunks.append("\n\n".join(pending_sections))
+            pending_sections.clear()
+            pending_chars = 0
+
+    for section in sections:
+        if len(section) > _WEB_CHUNK_CHARS:
+            flush_pending()
             chunks.extend(_fixed_size_chunks(section))
+            continue
+        separator_chars = 2 if pending_sections else 0
+        if pending_sections and pending_chars + separator_chars + len(section) > _WEB_CHUNK_CHARS:
+            flush_pending()
+            separator_chars = 0
+        pending_sections.append(section)
+        pending_chars += separator_chars + len(section)
+    flush_pending()
+
     total_chunks = len(chunks)
     limit = _MAX_WEB_HOMEPAGE_CHUNKS if homepage else _MAX_WEB_SUBPAGE_CHUNKS
     if total_chunks <= limit:
         return chunks, total_chunks
-    if not homepage:
-        return chunks[:limit], total_chunks
 
-    # Preserve the first-fold narrative while reserving slots for strategic
-    # sections that normally appear below long product copy.
-    selected_indexes: list[int] = []
-    for index, chunk in enumerate(chunks):
-        if index < 2 or _contains_strategic_surface_marker(chunk):
-            selected_indexes.append(index)
+    # Preserve first-fold context while reserving the remaining budget for
+    # explicit strategic copy that often appears at the end of About pages.
+    selected_indexes = list(range(min(2, total_chunks)))
+    strategic_indexes = sorted(
+        range(2, total_chunks),
+        key=lambda index: (-_strategic_chunk_score(chunks[index]), index),
+    )
+    for index in strategic_indexes:
+        if _strategic_chunk_score(chunks[index]) <= 0:
+            break
+        selected_indexes.append(index)
+        if len(selected_indexes) >= limit:
+            break
     for index in range(total_chunks):
         if index not in selected_indexes:
             selected_indexes.append(index)
@@ -986,6 +1079,15 @@ def _chunk_text_by_section(text: str, *, homepage: bool = False) -> tuple[list[s
     return [chunks[index] for index in selected_indexes[:limit]], total_chunks
 
 
+def _strategic_chunk_score(text: str) -> int:
+    normalized = " ".join(str(text or "").casefold().split())
+    return sum(
+        weight
+        for term, weight in _STRATEGIC_CHUNK_TERMS
+        if term.casefold() in normalized
+    )
+
+
 def _fixed_size_chunks(text: str) -> list[str]:
     chunks: list[str] = []
     step = max(1, _WEB_CHUNK_CHARS - _WEB_CHUNK_OVERLAP)
@@ -993,7 +1095,7 @@ def _fixed_size_chunks(text: str) -> list[str]:
         chunk = text[start : start + _WEB_CHUNK_CHARS].strip()
         if chunk:
             chunks.append(chunk)
-        if len(chunks) >= _MAX_WEB_SUBPAGE_CHUNKS or start + _WEB_CHUNK_CHARS >= len(text):
+        if start + _WEB_CHUNK_CHARS >= len(text):
             break
     return chunks
 
