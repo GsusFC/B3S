@@ -290,6 +290,15 @@ class WebCollector(
                         "reason": "discovery_exception",
                         "errors": [str(exc)[:160]],
                     }
+            sitemap_page_metadata = {
+                str(row.get("url") or "").rstrip("/"): row
+                for row in discovery.get("known_pages") or []
+                if isinstance(row, dict) and str(row.get("url") or "").strip()
+            }
+            sitemap_lastmod = {
+                page_url: str(row.get("lastmod") or "")
+                for page_url, row in sitemap_page_metadata.items()
+            }
             all_candidates = list(
                 dict.fromkeys([*observed_links, *sitemap_links])
             )
@@ -303,6 +312,7 @@ class WebCollector(
                     for candidate in sitemap_links
                     if candidate not in observed_set
                 ],
+                sitemap_lastmod=sitemap_lastmod,
             )[:MAX_OWNED_SUBPAGES]
             selected_rows = [
                 {
@@ -363,11 +373,6 @@ class WebCollector(
                         data.owned_fallback_urls + owned_fallback_urls
                     )
                 )
-            sitemap_page_metadata = {
-                str(row.get("url") or "").rstrip("/"): row
-                for row in discovery.get("known_pages") or []
-                if isinstance(row, dict) and str(row.get("url") or "").strip()
-            }
             known_urls = list(dict.fromkeys([url, *all_candidates]))
             known_pages = [
                 {
@@ -454,6 +459,9 @@ class WebCollector(
                     continue
                 eligible = bool(
                     self._score_internal_links([known_url], url)
+                ) or (
+                    known_url in sitemap_set
+                    and self._is_sitemap_exploration_candidate(known_url)
                 )
                 not_visited_pages.append(
                     {

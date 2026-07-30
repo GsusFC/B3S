@@ -149,6 +149,47 @@ def test_owned_page_selection_reserves_two_sitemap_only_exploration_slots() -> N
     assert len(selected) == 8
 
 
+def test_owned_page_selection_backfills_unused_budget_with_recent_sitemap_pages() -> None:
+    collector = WebCollector(api_key=())
+    root = "https://altitude.example"
+    recent_articles = [
+        f"{root}/blog/cross-border-payments",
+        f"{root}/blog/close-books-faster",
+        f"{root}/blog/automate-expenses",
+        f"{root}/blog/corporate-card",
+        f"{root}/blog/stablecoin-transfers",
+    ]
+    links = [
+        f"{root}/about-us",
+        f"{root}/card",
+        f"{root}/law",
+        *recent_articles,
+        f"{root}/legal/terms-of-service",
+        f"{root}/privacy",
+    ]
+    lastmod = {
+        url: f"2026-07-{31 - index:02d}T00:00:00.000Z"
+        for index, url in enumerate(recent_articles)
+    }
+
+    selected = collector._select_internal_links_to_crawl(
+        links,
+        root,
+        sitemap_only_links=[
+            link for link in links if link != f"{root}/card"
+        ],
+        sitemap_lastmod=lastmod,
+    )
+
+    assert len(selected) == 8
+    assert set(recent_articles).issubset(selected)
+    assert f"{root}/legal/terms-of-service" not in selected
+    assert f"{root}/privacy" not in selected
+    assert selected.index(recent_articles[0]) < selected.index(
+        recent_articles[-1]
+    )
+
+
 def test_scrape_persists_page_selection_sources_and_capture_status(
     monkeypatch,
 ) -> None:

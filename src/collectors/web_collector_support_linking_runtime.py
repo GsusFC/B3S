@@ -458,6 +458,7 @@ class WebCollectorLinkingSupport:
         base_url: str,
         *,
         sitemap_only_links: list[str] | None = None,
+        sitemap_lastmod: dict[str, str] | None = None,
     ) -> list[str]:
         scored_links = self._score_internal_links(links, base_url)
         selected: list[str] = []
@@ -473,14 +474,22 @@ class WebCollectorLinkingSupport:
                 break
 
         exploration_added = 0
-        sitemap_exploration = self._score_internal_links(
-            sitemap_only_links or [],
-            base_url,
+        lastmod_by_url = {
+            str(url).rstrip("/"): str(lastmod or "")
+            for url, lastmod in (sitemap_lastmod or {}).items()
+        }
+        sitemap_exploration = [
+            link
+            for link in sitemap_only_links or []
+            if self._link_role(link) == "other"
+            and self._is_sitemap_exploration_candidate(link)
+        ]
+        sitemap_exploration.sort(
+            key=lambda link: lastmod_by_url.get(link.rstrip("/"), ""),
+            reverse=True,
         )
         for link in sitemap_exploration:
             if link in selected:
-                continue
-            if self._link_role(link) != "other":
                 continue
             selected.append(link)
             exploration_added += 1
@@ -500,7 +509,33 @@ class WebCollectorLinkingSupport:
             if len(selected) >= MAX_OWNED_SUBPAGES:
                 break
 
+        # A site with few recognized strategic routes should not leave the
+        # capture budget unused while recent, public sitemap pages remain.
+        for link in sitemap_exploration:
+            if link in selected:
+                continue
+            selected.append(link)
+            if len(selected) >= MAX_OWNED_SUBPAGES:
+                break
+
         return selected
+
+    @staticmethod
+    def _is_sitemap_exploration_candidate(link: str) -> bool:
+        path = urlparse(link).path.casefold()
+        excluded_markers = (
+            "/legal",
+            "privacy",
+            "cookie",
+            "terms",
+            "/login",
+            "/signin",
+            "/signup",
+            "/register",
+            "/404",
+            "/qr",
+        )
+        return not any(marker in path for marker in excluded_markers)
 
     @staticmethod
     def _link_role(link: str) -> str:
