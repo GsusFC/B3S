@@ -766,10 +766,23 @@ def _cookie_banner_snippet_from_web_data(web_data: Any | None) -> str:
         payload = _to_payload(web_data)
     except Exception:
         return ""
+    if str(payload.get("capture_obstruction") or "").strip().lower() == "cookie_banner":
+        return "cookie_banner"
+    markdown = str(
+        payload.get("markdown")
+        or payload.get("markdown_content")
+        or payload.get("content")
+        or payload.get("text")
+        or ""
+    )
+    # WebData appends crawled subpages to the homepage markdown. Cookie/privacy
+    # policy pages and harmless controls near the footer must not make an
+    # otherwise usable homepage look obstructed.
+    homepage_markdown = markdown.partition("\n\n---\n## Subpage:")[0]
     candidates = [
         str(payload.get("title") or ""),
-        str(payload.get("body_text") or ""),
-        str(payload.get("markdown") or payload.get("markdown_content") or payload.get("content") or payload.get("text") or ""),
+        str(payload.get("body_text") or "")[:800],
+        homepage_markdown[:800],
     ]
     text = " ".join(part for part in candidates if part).strip()
     if not text:

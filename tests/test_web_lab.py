@@ -1484,6 +1484,41 @@ def test_acquisition_gate_warns_when_web_capture_looks_like_cookie_banner():
     assert "cookie_banner_snippet: Valoramos tu privacidad" in warning["detail"]
 
 
+def test_web_cookie_signal_ignores_footer_controls_and_crawled_policy_pages():
+    from src.collectors.web_collector import WebData
+    from web.scan_runner import _cookie_banner_snippet_from_web_data
+
+    homepage = (
+        "# The app that makes money work\n\n"
+        + ("Send, save, invest, and move money globally. " * 30)
+        + "\n\nDeclineAccept"
+    )
+    web_data = WebData(
+        url="https://example.com",
+        title="The app that makes money work",
+        markdown_content=(
+            homepage
+            + "\n\n---\n## Subpage: https://example.com/cookie-policy\n"
+            + "We use cookies. Accept Reject Preferences."
+        ),
+    )
+
+    assert _cookie_banner_snippet_from_web_data(web_data) == ""
+
+
+def test_web_cookie_signal_keeps_banner_dominated_homepage_warning():
+    from src.collectors.web_collector import WebData
+    from web.scan_runner import _cookie_banner_snippet_from_web_data
+
+    web_data = WebData(
+        url="https://example.com",
+        title="Privacy preferences",
+        markdown_content="We value your privacy. Accept Reject Preferences.",
+    )
+
+    assert "We value your privacy" in _cookie_banner_snippet_from_web_data(web_data)
+
+
 def test_acquisition_artifacts_include_screenshot_and_visual_obstruction(tmp_path, monkeypatch):
     from web.scan_runner import _acquisition_artifacts_from_snapshot
 
