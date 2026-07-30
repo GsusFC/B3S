@@ -18,7 +18,7 @@ from typing import Any, Iterable
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 
-EVIDENCE_COMPARISON_VERSION = "evidence-comparison-v1"
+EVIDENCE_COMPARISON_VERSION = "evidence-comparison-v2"
 CANONICAL_POLICY_VERSION = "brand-canonical-policy-v1"
 ENFORCEMENT_ENV = "B3S_CANONICAL_ENFORCEMENT_MODE"
 ENFORCEMENT_MODES = {"observe", "repeated", "all"}
@@ -527,15 +527,25 @@ def canonical_evidence_records(
     candidate = flow.get("candidate") if isinstance(flow.get("candidate"), dict) else {}
     pack = candidate.get("evidence_pack") if isinstance(candidate.get("evidence_pack"), dict) else {}
     rows = pack.get("evidence") if isinstance(pack.get("evidence"), list) else []
+    quarantined_refs = _identity_quarantined_refs(flow)
+    subject_host = _normalized_host(str(report.get("url") or ""))
     records: dict[str, CanonicalEvidenceRecord] = {}
     for row in rows:
         if not isinstance(row, dict):
+            continue
+        ref = str(row.get("ref") or "").strip()
+        if ref and ref in quarantined_refs:
             continue
         source = str(row.get("source") or "unknown").strip().lower()
         evidence_type = str(row.get("evidence_type") or "unknown").strip().lower()
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         source_class = str(metadata.get("source_class") or _infer_source_class(source, evidence_type)).strip().lower()
         url = _normalize_url(str(row.get("url") or ""))
+        if (
+            source_class == "external_proof"
+            and _is_subject_domain(url, subject_host=subject_host)
+        ):
+            source_class = "owned_copy"
         normalized_content = _normalize_text(row.get("content"))
         if not normalized_content:
             continue
@@ -569,11 +579,53 @@ def canonical_evidence_records(
     return tuple(sorted(records.values(), key=lambda item: (item.locator, item.fingerprint)))
 
 
+def _identity_quarantined_refs(flow: dict[str, Any]) -> set[str]:
+    debug = (
+        flow.get("interpretation_debug")
+        if isinstance(flow.get("interpretation_debug"), dict)
+        else {}
+    )
+    gate = (
+        debug.get("block_evidence_identity_gate")
+        if isinstance(debug.get("block_evidence_identity_gate"), dict)
+        else {}
+    )
+    return {
+        str(row.get("ref") or "").strip()
+        for row in gate.get("records") or []
+        if isinstance(row, dict) and str(row.get("ref") or "").strip()
+    }
+
+
+def _is_subject_domain(url: str, *, subject_host: str) -> bool:
+    source_host = _normalized_host(url)
+    return bool(
+        subject_host
+        and source_host
+        and (
+            source_host == subject_host
+            or source_host.endswith(f".{subject_host}")
+        )
+    )
+
+
+def _normalized_host(value: str) -> str:
+    try:
+        parsed = urlparse(value if "://" in value else f"https://{value}")
+    except (TypeError, ValueError):
+        return ""
+    return str(parsed.hostname or "").strip().lower().removeprefix("www.")
+
+
 def _component_fingerprints(
     report: dict[str, Any],
     records: tuple[CanonicalEvidenceRecord, ...],
 ) -> dict[str, str]:
     raw_rows = _raw_evidence_rows(report)
+    raw = report.get("raw") if isinstance(report.get("raw"), dict) else {}
+    flow = raw.get("flow") if isinstance(raw.get("flow"), dict) else {}
+    quarantined_refs = _identity_quarantined_refs(flow)
+    subject_host = _normalized_host(str(report.get("url") or ""))
     fingerprint_by_ref: dict[str, str] = {}
     canonical_by_identity = {
         (
@@ -585,18 +637,26 @@ def _component_fingerprints(
         for record in records
     }
     for row in raw_rows:
+        ref = str(row.get("ref") or "").strip()
+        if ref and ref in quarantined_refs:
+            continue
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         source = str(row.get("source") or "unknown").strip().lower()
         evidence_type = str(row.get("evidence_type") or "unknown").strip().lower()
         source_class = str(metadata.get("source_class") or _infer_source_class(source, evidence_type)).strip().lower()
+        url = _normalize_url(str(row.get("url") or ""))
+        if (
+            source_class == "external_proof"
+            and _is_subject_domain(url, subject_host=subject_host)
+        ):
+            source_class = "owned_copy"
         identity = (
             source_class,
             evidence_type,
-            _normalize_url(str(row.get("url") or "")),
+            url,
             _text_hash(_normalize_text(row.get("content"))),
         )
         fingerprint = canonical_by_identity.get(identity)
-        ref = str(row.get("ref") or "").strip()
         if ref and fingerprint:
             fingerprint_by_ref[ref] = fingerprint
 
