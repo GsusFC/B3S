@@ -1,8 +1,9 @@
 """Semantic evidence labeling pass for SV9 Flow.
 
-This worker enriches evidence records with advisory metadata only. It does not
-change the BrandEvidencePack shape, scoring, or runtime contracts; unavailable
-or failing labeling falls back to the deterministic evidence path.
+This worker preserves the BrandEvidencePack shape and enriches its records.
+Block relevance remains advisory; an explicit external-identity mismatch is a
+fail-closed shortlist signal. Unavailable labeling still falls back to the
+deterministic identity gate.
 """
 
 from __future__ import annotations
@@ -21,9 +22,13 @@ from src.sv9_flow.evidence_identity import (
     normalize_evidence_url,
     stable_artifact_digest,
 )
-from src.sv9_flow.evidence_source import SOURCE_CLASS_ACQUISITION_METADATA, source_class_for_record
+from src.sv9_flow.evidence_source import (
+    SOURCE_CLASS_ACQUISITION_METADATA,
+    SOURCE_CLASS_OWNED_COPY,
+    source_class_for_record,
+)
 
-EVIDENCE_LABELING_VERSION = "sv9-flow-evidence-labeling-v2"
+EVIDENCE_LABELING_VERSION = "sv9-flow-evidence-labeling-v3"
 
 _BLOCKS = tuple(block_evidence_policy()["block_terms"].keys())
 _STANCES = {"supports", "contradicts", "neutral"}
@@ -31,6 +36,8 @@ _IDENTITY_MATCHES = {"domain", "brand_name", "none", "unverified"}
 _SPECIFICITIES = {"explicit", "implied", "incidental"}
 _MAX_RECORDS = 80
 _CONTENT_CHARS = 900
+_IDENTITY_CONTEXT_RECORDS = 4
+_IDENTITY_CONTEXT_CHARS = 500
 
 _LABEL_SCHEMA = {
     "type": "object",
@@ -102,8 +109,6 @@ def label_evidence_pack(
     for label in labels:
         record = evidence_record_for_ref(label.get("ref") or "", evidence_pack)
         if record is None:
-            continue
-        if not label["relevant_blocks"] and label["stance"] == "neutral" and label["specificity"] == "incidental":
             continue
         record.metadata["relevant_blocks"] = list(label["relevant_blocks"])
         record.metadata["stance"] = label["stance"]
@@ -205,7 +210,10 @@ def _system_prompt() -> str:
         "You label Brand3 evidence records for an advisory semantic pass. "
         "Return strict JSON only. Do not infer facts not present in the record. "
         "Only mark a block relevant when the record actually speaks to that strategic block. "
-        "Use contradicts only when the record works against the brand's own claim."
+        "Use contradicts only when the record works against the brand's own claim. "
+        "Resolve identity against the supplied owned identity context, not the "
+        "brand name alone: same-name companies are `none`; use `unverified` "
+        "when the record lacks enough entity anchors to decide."
     )
 
 
@@ -228,6 +236,7 @@ def _user_prompt(*, evidence_pack: BrandEvidencePack, records: list[EvidenceReco
             "prompt_version": EVIDENCE_LABELING_VERSION,
             "task": "Label evidence records for semantic relevance to canonical Brand3 blocks.",
             "brand": {"name": evidence_pack.brand_name, "url": evidence_pack.url},
+            "owned_identity_context": _identity_context(evidence_pack),
             "canonical_blocks": list(_BLOCKS),
             "labels_required": {
                 "relevant_blocks": "subset of canonical_blocks; empty if the record is not useful for any block",
@@ -241,6 +250,26 @@ def _user_prompt(*, evidence_pack: BrandEvidencePack, records: list[EvidenceReco
         indent=2,
         sort_keys=True,
     )
+
+
+def _identity_context(
+    evidence_pack: BrandEvidencePack,
+) -> list[dict[str, str]]:
+    owned = [
+        record
+        for record in canonical_evidence_records(evidence_pack.evidence)
+        if source_class_for_record(record) == SOURCE_CLASS_OWNED_COPY
+        and record.content.strip()
+    ]
+    return [
+        {
+            "url": normalize_evidence_url(record.url),
+            "content": normalize_evidence_text(record.content)[
+                :_IDENTITY_CONTEXT_CHARS
+            ],
+        }
+        for record in owned[:_IDENTITY_CONTEXT_RECORDS]
+    ]
 
 
 def _normalize_label(item: dict[str, Any]) -> dict[str, Any]:
@@ -281,6 +310,7 @@ def _record_label_cache_key(
                 "name": normalize_evidence_text(evidence_pack.brand_name).casefold(),
                 "url": normalize_evidence_url(evidence_pack.url),
             },
+            "owned_identity_context": _identity_context(evidence_pack),
             "record": canonical_evidence_payload(record),
             "deterministic_identity_match": str(
                 (record.metadata if isinstance(record.metadata, dict) else {}).get("identity_match")

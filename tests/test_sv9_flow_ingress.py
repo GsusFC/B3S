@@ -76,9 +76,19 @@ class _TileLLM:
             if schema_name == f"baldosas_{key}":
                 ids = tile_ids(key)
                 break
+        if schema_name == "baldosas_coherencia":
+            literal_quote = "Tone is operational and precise."
+        elif "Acme now helps legal teams review contracts." in user:
+            literal_quote = "Acme now helps legal teams review contracts."
+        else:
+            literal_quote = "Acme helps finance teams close the books faster."
         payload = {
             "baldosas": [
-                {"id": tile_id, "estado": "ok", "evidencia": f"quote {tile_id}"}
+                {
+                    "id": tile_id,
+                    "estado": "ok",
+                    "evidencia": literal_quote,
+                }
                 for tile_id in ids
             ]
         }
@@ -127,7 +137,18 @@ def test_detection_blocks_resolve_refs_to_citable_snippets() -> None:
             "Tone is operational and precise.",
         ],
         "evidence_refs": ["raw_inputs.0.text", "features.0"],
+        "evaluation_evidence_refs": ["raw_inputs.0.text", "features.0"],
+        "evaluation_evidence_version": "",
         "evidence_source_summary": {
+            "owned_copy": 1,
+            "external_proof": 0,
+            "visual_signal": 0,
+            "derived_strategy": 0,
+            "acquisition_metadata": 0,
+            "other": 1,
+            "total": 2,
+        },
+        "citation_source_summary": {
             "owned_copy": 1,
             "external_proof": 0,
             "visual_signal": 0,
@@ -238,6 +259,88 @@ def test_evaluator_prompt_reuses_semantically_identical_component_evidence() -> 
     assert changed_prompt != first_prompt
 
 
+def test_values_prompt_uses_frozen_evaluator_refs_not_variable_interpretation_refs() -> None:
+    evidence = [
+        EvidenceRecord(
+            ref="raw_inputs.1.subpage.3.chunk.4",
+            source="web",
+            evidence_type="raw_input",
+            content="Our 11 pillars. Be Service means serving before selling.",
+        ),
+        EvidenceRecord(
+            ref="raw_inputs.1.subpage.3.chunk.5",
+            source="web",
+            evidence_type="raw_input",
+            content="Be Ownership. Be Happy. Be WYSIWYG.",
+        ),
+        EvidenceRecord(
+            ref="raw_inputs.1.subpage.3.chunk.6",
+            source="web",
+            evidence_type="raw_input",
+            content="Why we exist. How we work. What we build.",
+        ),
+    ]
+
+    def candidate(citation_ref: str) -> Sv9FlowCandidate:
+        return Sv9FlowCandidate(
+            evidence_pack=BrandEvidencePack(
+                brand_name="SoccerSolver",
+                url="https://soccersolver.com",
+                evidence=evidence,
+            ),
+            interpretation=BrandInterpretation(
+                brand_name="SoccerSolver",
+                url="https://soccersolver.com",
+                blocks={
+                    "values": {
+                        "detected": True,
+                        "content": "Service, ownership, happiness, and transparency.",
+                        "confidence": "high",
+                        "rationale": "The about page states operational principles.",
+                    }
+                },
+                evidence_refs={"values": [citation_ref]},
+            ),
+            evaluation_evidence_refs={
+                "values": [
+                    "raw_inputs.1.subpage.3.chunk.5",
+                    "raw_inputs.1.subpage.3.chunk.4",
+                    "raw_inputs.1.subpage.3.chunk.6",
+                ]
+            },
+            evaluation_evidence_version="sv9-flow-evaluation-evidence-refs-v1",
+        )
+
+    first_blocks = detection_blocks_from_flow_candidate(
+        candidate("raw_inputs.1.subpage.3.chunk.5")
+    )
+    second_blocks = detection_blocks_from_flow_candidate(
+        candidate("raw_inputs.1.subpage.3.chunk.4")
+    )
+
+    assert first_blocks["values"]["evidence_refs"] != second_blocks["values"]["evidence_refs"]
+    assert (
+        first_blocks["values"]["evaluation_evidence_refs"]
+        == second_blocks["values"]["evaluation_evidence_refs"]
+    )
+    assert first_blocks["values"]["evidence"] == second_blocks["values"]["evidence"]
+    assert _build_component_prompt(
+        "values",
+        block=first_blocks["values"],
+        signals=[],
+        tldr=first_blocks,
+        brand_name="SoccerSolver",
+        url="https://soccersolver.com",
+    ) == _build_component_prompt(
+        "values",
+        block=second_blocks["values"],
+        signals=[],
+        tldr=second_blocks,
+        brand_name="SoccerSolver",
+        url="https://soccersolver.com",
+    )
+
+
 def test_native_evaluator_reuses_components_when_only_provenance_refs_change() -> None:
     first = _candidate()
     second = _candidate()
@@ -258,7 +361,9 @@ def test_native_evaluator_reuses_components_when_only_provenance_refs_change() -
     second.evidence_pack.evidence[1].content = "Acme now helps legal teams review contracts."
     run_sv9_from_audit_snapshot(snapshot, llm=llm, sv9_flow_candidate=second)
 
-    assert llm.provider_calls == provider_calls_after_first + 1
+    # A material quote change invalidates both the affected component and
+    # Coherencia, whose prompt now exposes the literal sources it may cite.
+    assert llm.provider_calls == provider_calls_after_first + 2
 
 
 def test_ingress_demotes_detected_blocks_without_evidence_refs() -> None:

@@ -12,8 +12,14 @@ from src.sv9_flow import (
     EvidenceRecord,
     Sv9FlowCandidate,
 )
+from src.sv9_flow.block_evidence_worker import EVALUATION_EVIDENCE_REFS_VERSION
 from src.sv9_flow.contracts import interpretation_contract_violations
-from src.sv9_flow.evidence_coverage import acquisition_coverage, block_coverage, coverage_limitations
+from src.sv9_flow.evidence_coverage import (
+    acquisition_coverage,
+    block_coverage,
+    component_surface_hierarchy,
+    coverage_limitations,
+)
 from scripts.sv9_flow_legacy_compat import build_flow_candidate_from_current_outputs
 from src.sv9_flow.orchestrator import build_flow_candidate
 from src.sv9_flow.reporting import SV9_FLOW_REPORT_VERSION, build_flow_report
@@ -68,6 +74,107 @@ def test_flow_candidate_builds_evidence_interpretation_and_tile_signals_without_
     assert {signal["source"] for signal in signals} == {"brand_interpretation"}
     by_component = {signal["component"]: signal for signal in signals}
     assert by_component["value_proposition"]["tile"] == "value_proposition.P1"
+
+
+def test_component_surface_hierarchy_joins_exact_refs_with_navigation() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="acquisition.page_selection",
+                source="web",
+                evidence_type="acquisition.page_selection",
+                content="Page selection manifest.",
+                url="https://acme.example",
+                metadata={
+                    "page_selection": {
+                        "known_pages": [
+                            {
+                                "url": "https://acme.example",
+                                "navigation_status": "homepage",
+                            },
+                            {
+                                "url": "https://acme.example/about",
+                                "navigation_status": "linked_from_home",
+                            },
+                            {
+                                "url": "https://acme.example/thesis",
+                                "navigation_status": "sitemap_only",
+                            },
+                        ],
+                        "visited_pages": [
+                            {
+                                "url": "https://acme.example",
+                                "status": "captured",
+                            },
+                            {
+                                "url": "https://acme.example/about",
+                                "status": "captured",
+                            },
+                            {
+                                "url": "https://acme.example/thesis",
+                                "status": "captured",
+                            },
+                        ],
+                    }
+                },
+            ),
+            EvidenceRecord(
+                ref="owned.home",
+                source="web",
+                evidence_type="owned.claim",
+                content="Acme promise.",
+                url="https://acme.example/",
+            ),
+            EvidenceRecord(
+                ref="owned.about",
+                source="web",
+                evidence_type="owned.claim",
+                content="Acme purpose.",
+                url="https://acme.example/about",
+            ),
+            EvidenceRecord(
+                ref="owned.thesis",
+                source="web",
+                evidence_type="owned.claim",
+                content="Acme category thesis.",
+                url="https://acme.example/thesis",
+            ),
+            EvidenceRecord(
+                ref="external.profile",
+                source="exa",
+                evidence_type="external.profile",
+                content="Acme profile.",
+                url="https://example.org/acme",
+            ),
+        ],
+    )
+    interpretation = BrandInterpretation(
+        brand_name="Acme",
+        url="https://acme.example",
+        blocks={
+            "brand_idea": {"detected": True, "content": "Acme promise."},
+            "mission": {"detected": True, "content": "Acme purpose and thesis."},
+            "attributes": {"detected": True, "content": "External profile."},
+            "vision": {"detected": False, "content": ""},
+        },
+        evidence_refs={
+            "brand_idea": ["owned.home"],
+            "mission": ["owned.about", "owned.thesis"],
+            "attributes": ["external.profile"],
+        },
+    )
+
+    hierarchy = component_surface_hierarchy(pack, interpretation)
+
+    assert hierarchy["brand_idea"]["hierarchy_status"] == "homepage"
+    assert hierarchy["mission"]["hierarchy_status"] == "mixed_with_sitemap_only"
+    assert hierarchy["mission"]["counts"]["linked_from_home"] == 1
+    assert hierarchy["mission"]["counts"]["sitemap_only"] == 1
+    assert hierarchy["mission"]["owned_surfaces"][1]["captured"] is True
+    assert hierarchy["attributes"]["hierarchy_status"] == "external_only"
+    assert hierarchy["vision"]["hierarchy_status"] == "not_detected"
 
 
 def test_interpretation_tile_signals_use_valid_sv9_tile_ids() -> None:
@@ -844,6 +951,43 @@ def test_acquisition_coverage_summarizes_external_attempts_and_absence_refs() ->
                 url="https://acme.example/about",
                 metadata={"source_class": "acquisition_metadata"},
             ),
+            EvidenceRecord(
+                ref="raw_inputs.0.diagnostics.page_selection",
+                source="web",
+                evidence_type="acquisition.page_selection",
+                content="Owned page selection captured 2 of 3 known pages.",
+                metadata={
+                    "source_class": "acquisition_metadata",
+                    "page_selection": {
+                        "version": "owned-page-selection-v2",
+                        "known_page_count": 3,
+                        "attempted_page_count": 2,
+                        "captured_page_count": 2,
+                        "known_pages": [
+                            {"url": "https://acme.example"},
+                            {"url": "https://acme.example/about"},
+                            {"url": "https://acme.example/orphan"},
+                        ],
+                        "visited_pages": [
+                            {
+                                "url": "https://acme.example",
+                                "status": "captured",
+                            },
+                            {
+                                "url": "https://acme.example/about",
+                                "status": "captured",
+                            },
+                        ],
+                        "not_visited_pages": [
+                            {
+                                "url": "https://acme.example/orphan",
+                                "reason": "page_budget",
+                            }
+                        ],
+                        "latest_lastmod": "2026-07-30",
+                    },
+                },
+            ),
         ],
     )
 
@@ -867,6 +1011,31 @@ def test_acquisition_coverage_summarizes_external_attempts_and_absence_refs() ->
             "url": "https://acme.example/about",
         }
     ]
+    assert coverage["owned_page_coverage"] == {
+        "selection_version": "owned-page-selection-v2",
+        "known_page_count": 3,
+        "attempted_page_count": 2,
+        "captured_page_count": 2,
+        "coverage_ratio": 0.6667,
+        "known_pages": [
+            {"url": "https://acme.example"},
+            {"url": "https://acme.example/about"},
+            {"url": "https://acme.example/orphan"},
+        ],
+        "visited_pages": [
+            {"url": "https://acme.example", "status": "captured"},
+            {"url": "https://acme.example/about", "status": "captured"},
+        ],
+        "not_visited_pages": [
+            {
+                "url": "https://acme.example/orphan",
+                "reason": "page_budget",
+            }
+        ],
+        "excluded_pages": [],
+        "latest_lastmod": "2026-07-30",
+        "language_detection": {},
+    }
 
 
 def test_canonical_orchestrator_builds_candidate_from_evidence_and_llm() -> None:
@@ -917,6 +1086,15 @@ def test_canonical_orchestrator_builds_candidate_from_evidence_and_llm() -> None
     )
     assert debug["gate_authority"] == "veto_only"
     assert "raw_inputs.0" in debug["block_evidence_shortlists"]["mission"]
+    assert candidate.evaluation_evidence_refs["mission"]
+    assert (
+        candidate.evaluation_evidence_version
+        == EVALUATION_EVIDENCE_REFS_VERSION
+    )
+    assert (
+        candidate.to_dict()["evaluation_evidence_refs"]
+        == candidate.evaluation_evidence_refs
+    )
     assert not [item for item in candidate.limitations if item.startswith("contract_violation:")]
 
 
