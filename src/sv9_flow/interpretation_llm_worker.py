@@ -29,6 +29,32 @@ FLOW_INTERPRETATION_PROMPT_VERSION = "sv9-flow-brand-interpretation-v1.2"
 _BLOCK_MAX_TOKENS = 1800
 GateAuthority = Literal["veto_only", "warn", "disabled"]
 
+_VISION_ADJUDICATION_DIRECTION_TERMS = (
+    "our vision",
+    "nuestra visión",
+    "future",
+    "futuro",
+    "will become",
+    "se convertirá",
+    "aspire",
+    "aspira",
+    "envision",
+    "imaginamos",
+    "ambition",
+    "ambición",
+    "long-term",
+    "long term",
+    "largo plazo",
+    "moving toward",
+    "avanzamos hacia",
+    "goal is",
+    "objetivo es",
+    "if we succeed",
+    "cuando logremos",
+    "next generation",
+    "próxima generación",
+)
+
 _BLOCK_KEYS = (
     "mission",
     "vision",
@@ -904,6 +930,7 @@ def _adjudicate_gate_rejection(
     inference_type = str(payload.get("inference_type") or "").strip().lower()
     reason = str(payload.get("reason") or "").strip()[:500]
     validation_error = _adjudication_validation_error(
+        block_name=block_name,
         evidence_pack=evidence_pack,
         allowed_refs=evidence_refs,
         state=state,
@@ -931,6 +958,7 @@ def _adjudicate_gate_rejection(
 
 def _adjudication_validation_error(
     *,
+    block_name: str,
     evidence_pack: BrandEvidencePack,
     allowed_refs: list[str],
     state: str,
@@ -951,7 +979,20 @@ def _adjudication_validation_error(
         return "ref_not_found"
     if quote not in record.content:
         return "quote_not_literal_substring"
+    if (
+        block_name == "vision"
+        and not _quote_has_vision_direction(quote)
+    ):
+        return "vision_quote_lacks_future_direction"
     return ""
+
+
+def _quote_has_vision_direction(quote: str) -> bool:
+    normalized = " ".join(str(quote or "").casefold().split())
+    return any(
+        term.casefold() in normalized
+        for term in _VISION_ADJUDICATION_DIRECTION_TERMS
+    )
 
 
 def _adjudicator_system_prompt() -> str:
