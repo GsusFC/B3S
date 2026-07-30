@@ -1,6 +1,10 @@
+import gzip
 from dataclasses import asdict
 
 from src.collectors.web_collector import WebCollector
+from src.collectors.web_collector_capture_runtime import (
+    _MAX_DISCOVERY_RESOURCE_BYTES,
+)
 from src.services.input_collection_payloads import from_web_payload
 
 
@@ -83,6 +87,45 @@ def test_sitemap_discovery_reads_robots_index_and_filters_disallowed_urls(
         "https://example.com/pages.xml",
     ]
     assert "https://external.example/foreign.xml" not in requested
+
+
+def test_discovery_rejects_gzip_content_that_expands_past_limit(
+    monkeypatch,
+) -> None:
+    collector = WebCollector(api_key=())
+    compressed = gzip.compress(
+        b"x" * (_MAX_DISCOVERY_RESOURCE_BYTES + 1)
+    )
+
+    class Headers:
+        @staticmethod
+        def get_content_charset() -> str:
+            return "utf-8"
+
+    class Response:
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def read(_limit: int) -> bytes:
+            return compressed
+
+    monkeypatch.setattr(
+        "src.collectors.web_collector_capture_runtime.urlopen",
+        lambda *_args, **_kwargs: Response(),
+    )
+
+    text, error = collector._fetch_text_resource(
+        "https://example.com/sitemap.xml.gz"
+    )
+
+    assert text == ""
+    assert error == "discovery_resource_too_large"
 
 
 def test_owned_page_selection_covers_soccersolver_strategic_roles() -> None:
