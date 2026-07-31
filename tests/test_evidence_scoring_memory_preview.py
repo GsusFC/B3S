@@ -103,6 +103,223 @@ def test_explicit_latest_negative_retains_history_without_overriding_it() -> Non
     assert preview["scoring"]["score_delta"] == 0
 
 
+def test_tile_version_is_stable_when_evidence_is_repeated() -> None:
+    preview = build_evidence_scoring_memory_preview(
+        [
+            _report(
+                "older",
+                "2026-07-01T08:00:00Z",
+                target_state="ok",
+            ),
+            _report(
+                "newer",
+                "2026-07-02T08:00:00Z",
+                target_state="ok",
+            ),
+        ]
+    )
+
+    assert _target_changes(preview) == []
+    assert preview["tile_evolution"]["summary"] == {
+        "tile_count": 80,
+        "stable_tile_count": 80,
+        "changed_tile_count": 0,
+        "pending_review_count": 0,
+        "score_affecting_change_count": 0,
+        "evidence_quality_change_count": 0,
+        "ignored_non_material_change_count": 0,
+        "incompatible_report_count": 0,
+    }
+    assert all(
+        tile["evidence_eligible"] is False
+        for tile in preview["tile_evolution"]["tiles"]
+        if tile["state"] == "no"
+    )
+
+
+def test_evaluator_change_is_not_reported_as_evidence_change() -> None:
+    preview = build_evidence_scoring_memory_preview(
+        [
+            _report(
+                "older",
+                "2026-07-01T08:00:00Z",
+                target_state="ok",
+                evaluator_model="evaluator-a",
+            ),
+            _report(
+                "newer",
+                "2026-07-02T08:00:00Z",
+                target_state="no",
+                evaluator_model="evaluator-b",
+            ),
+        ]
+    )
+
+    assert preview["tile_evolution"]["previous_report_id"] is None
+    assert preview["tile_evolution"]["changes"] == []
+    assert preview["tile_evolution"]["summary"][
+        "incompatible_report_count"
+    ] == 1
+
+
+def test_no_to_missing_without_evidence_is_not_queued() -> None:
+    preview = build_evidence_scoring_memory_preview(
+        [
+            _report(
+                "older",
+                "2026-07-01T08:00:00Z",
+                target_state="no",
+            ),
+            _report(
+                "newer",
+                "2026-07-02T08:00:00Z",
+                target_state="sin_evidencia",
+            ),
+        ]
+    )
+
+    assert _target_changes(preview) == []
+    assert preview["tile_evolution"]["summary"][
+        "ignored_non_material_change_count"
+    ] == 1
+
+
+def test_new_source_reinforces_evidence_without_adding_points() -> None:
+    reports = [
+        _report(
+            "older",
+            "2026-07-01T08:00:00Z",
+            target_state="ok",
+        ),
+        _report(
+            "newer",
+            "2026-07-02T08:00:00Z",
+            target_state="ok",
+            extra_support_source=True,
+        ),
+    ]
+    preview = build_evidence_scoring_memory_preview(reports)
+
+    change = _target_changes(preview)[0]
+    assert change["impact_kind"] == "evidence_reinforced"
+    assert change["candidate_effect"] == "improves"
+    assert change["validation_channel"] == "claim_corroboration_review"
+    assert change["validation_state"] == "pending_review"
+    assert change["review_priority"] == "evidence_quality"
+    assert preview["scoring"]["score_delta"] == 0
+
+
+def test_reviewed_claim_tile_change_becomes_validated_shadow_state() -> None:
+    reports = [
+        _report(
+            "older",
+            "2026-07-01T08:00:00Z",
+            target_state="ok",
+        ),
+        _report(
+            "newer",
+            "2026-07-02T08:00:00Z",
+            target_state="ok",
+            quote="signal survived",
+        ),
+    ]
+    preview = build_evidence_scoring_memory_preview(reports)
+    change = _target_changes(preview)[0]
+    assert change["impact_kind"] == "evidence_changed"
+    assert change["validation_channel"] == "claim_tile_review"
+
+    reviewed = build_reviewed_scoring_memory_shadow(
+        reports,
+        reviewed_claim_tile_memory={
+            "runtime_effect": False,
+            "authority": False,
+            "automatic_scoring_effect": False,
+            "reviewed_mappings": [
+                {
+                    "tile_key": "magnetism.MG1",
+                    "polarity": "supports",
+                    "source_evidence_id": change[
+                        "current_source_evidence_ids"
+                    ][0],
+                    "decision": "accepted",
+                }
+            ],
+        },
+    )
+    assert _target_changes(reviewed["reviewed_shadow"])[0][
+        "validation_state"
+    ] == "accepted_claim_tile_mapping"
+
+
+def test_negative_evidence_marks_a_reviewable_score_worsening() -> None:
+    preview = build_evidence_scoring_memory_preview(
+        [
+            _report(
+                "older",
+                "2026-07-01T08:00:00Z",
+                target_state="ok",
+            ),
+            _report(
+                "newer",
+                "2026-07-02T08:00:00Z",
+                target_state="no",
+                include_negative_quote=True,
+            ),
+        ]
+    )
+
+    change = _target_changes(preview)[0]
+    assert change["impact_kind"] == "tile_worsened"
+    assert change["candidate_effect"] == "worsens"
+    assert change["validation_channel"] == "claim_tile_review"
+    assert change["review_priority"] == "score_affecting"
+    assert preview["tile_evolution"]["score_trajectory"] == {
+        "status": "available",
+        "previous_score": 2,
+        "latest_score": 0,
+        "score_delta_latest_minus_previous": -2.0,
+    }
+
+
+def test_accepted_recovery_validates_gap_only_in_shadow_score() -> None:
+    reports = [
+        _report(
+            "older",
+            "2026-07-01T08:00:00Z",
+            target_state="ok",
+        ),
+        _report(
+            "newer",
+            "2026-07-02T08:00:00Z",
+            target_state="sin_evidencia",
+        ),
+    ]
+    candidate = build_reviewed_scoring_memory_shadow(reports)[
+        "recovery_review_candidates"
+    ][0]
+    accepted = _durable_current_review_event(
+        candidate,
+        decision="accepted",
+        sequence=1,
+    )
+
+    reviewed = build_reviewed_scoring_memory_shadow(
+        reports,
+        recovery_review_events=[accepted],
+        review_events_are_current=True,
+    )
+
+    assert _target_changes(reviewed)[0]["validation_state"] == (
+        "pending_review"
+    )
+    assert _target_changes(reviewed["reviewed_shadow"])[0][
+        "validation_state"
+    ] == "accepted_recovery"
+    assert reviewed["reviewed_shadow"]["scoring"]["score_delta"] == 2
+    assert reviewed["runtime_effect"] is False
+    assert reviewed["authority"] is False
+
+
 def test_non_literal_or_rejected_identity_never_enters_scoring_memory() -> None:
     non_literal = _report(
         "non-literal",
@@ -316,6 +533,11 @@ def test_repository_preview_rebuilds_from_durable_inputs(
         "list_current_evidence_scoring_recovery_reviews",
         lambda *_args, **_kwargs: [],
     )
+    monkeypatch.setattr(
+        repository,
+        "get_reviewed_claim_tile_memory_shadow",
+        lambda *_args, **_kwargs: None,
+    )
 
     first = repository.get_evidence_scoring_memory_preview(
         "example.com"
@@ -373,6 +595,11 @@ def test_repository_preview_applies_current_review_after_restart(
         repository,
         "list_current_evidence_scoring_recovery_reviews",
         lambda *_args, **_kwargs: [deepcopy(current_event)],
+    )
+    monkeypatch.setattr(
+        repository,
+        "get_reviewed_claim_tile_memory_shadow",
+        lambda *_args, **_kwargs: None,
     )
 
     rebuilt = repository.get_evidence_scoring_memory_preview(
@@ -445,6 +672,11 @@ def test_repository_preview_revocation_and_stale_events_fail_closed(
         "list_current_evidence_scoring_recovery_reviews",
         lambda *_args, **_kwargs: [deepcopy(revoked), deepcopy(stale)],
     )
+    monkeypatch.setattr(
+        repository,
+        "get_reviewed_claim_tile_memory_shadow",
+        lambda *_args, **_kwargs: None,
+    )
 
     rebuilt = repository.get_evidence_scoring_memory_preview(
         "example.com"
@@ -516,6 +748,9 @@ def _report(
     target_state: str,
     quote: str = "The signal survived the next acquisition.",
     rubric_version: str = "baldosas-v3-1",
+    extra_support_source: bool = False,
+    include_negative_quote: bool = False,
+    evaluator_model: str = "evaluator-a",
 ) -> dict:
     source_text = "The signal survived the next acquisition."
     evidence_record = {
@@ -527,15 +762,27 @@ def _report(
         "confidence": "high",
         "metadata": {"source_class": "owned_copy"},
     }
+    evidence_records = [evidence_record]
+    if extra_support_source:
+        evidence_records.append(
+            {
+                **evidence_record,
+                "ref": "web.proof.0",
+                "url": "https://example.com/proof",
+            }
+        )
     components: dict[str, dict] = {}
     current_score = 0
     for component_key, spec in COMPONENTS.items():
         profile = []
         for tile in spec["tiles"]:
+            is_target = (
+                component_key == "magnetism"
+                and tile["id"] == "MG1"
+            )
             state = (
                 target_state
-                if component_key == "magnetism"
-                and tile["id"] == "MG1"
+                if is_target
                 else "no"
             )
             profile.append(
@@ -543,7 +790,13 @@ def _report(
                     "id": tile["id"],
                     "estado": state,
                     "evidencia": (
-                        quote if state == "ok" else ""
+                        quote
+                        if state == "ok"
+                        or (
+                            is_target
+                            and include_negative_quote
+                        )
+                        else ""
                     ),
                     "motivo": (
                         "" if state == "ok" else "not present"
@@ -571,16 +824,26 @@ def _report(
             "flow": {
                 "candidate": {
                     "evidence_pack": {
-                        "evidence": [evidence_record]
+                        "evidence": evidence_records
                     }
                 }
             },
             "sv9": {
+                "evaluator_model": evaluator_model,
                 "result": {
                     "rubric_version": rubric_version,
+                    "evaluator_model": evaluator_model,
                     "brand3_score": current_score,
                     "components": components,
                 }
             },
         },
     }
+
+
+def _target_changes(container: dict) -> list[dict]:
+    return [
+        change
+        for change in container["tile_evolution"]["changes"]
+        if change["tile_key"] == "magnetism.MG1"
+    ]

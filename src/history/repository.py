@@ -1269,10 +1269,17 @@ class PostgresHistoryRepository:
                 workspace_slug=workspace_slug,
             )
         )
+        reviewed_claim_tile_memory = (
+            self.get_reviewed_claim_tile_memory_shadow(
+                domain_or_url,
+                workspace_slug=workspace_slug,
+            )
+        )
         return build_reviewed_scoring_memory_shadow(
             reports,
             evidence_adjudications=adjudications,
             recovery_review_events=recovery_reviews,
+            reviewed_claim_tile_memory=reviewed_claim_tile_memory,
             ignore_stale_review_events=True,
             review_events_are_current=True,
         )

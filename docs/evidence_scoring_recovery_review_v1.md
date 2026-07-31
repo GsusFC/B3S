@@ -26,6 +26,40 @@ ambas lecturas desde los informes persistidos. Mientras no exista un evento
 semántico aceptado, el preview candidato puede mostrar un delta, pero
 `reviewed_shadow.scoring.score_delta` permanece en `0`.
 
+## Evolución persistente de baldosas
+
+El mismo recurso expone ahora `tile_evolution`, una proyección derivada de los
+informes inmutables. Cada baldosa recibe un `tile_version_id` que cambia solo
+cuando cambia su estado, la cita o la identidad de la evidencia. Repetir el
+mismo scan conserva la versión y no añade puntos.
+
+La comparación usa únicamente un informe anterior con el mismo contrato de
+evaluación: pipeline, rúbrica, prompt y modelo evaluador. Los informes
+incompatibles se cuentan, pero no generan falsos cambios de evidencia. Dentro
+de un contrato comparable se clasifican únicamente cambios observables:
+
+- `evidence_reinforced`: aparece otra fuente para la misma cita;
+- `evidence_weakened`: desaparece parte de la procedencia;
+- `evidence_changed`: cambia la cita o su anclaje;
+- `tile_improved` / `tile_worsened`: cambia el estado puntuable;
+- `acquisition_gap`: el scanner deja de capturar una evidencia histórica;
+- `unvalidated_negative`: aparece un `no` sin evidencia reproducible.
+
+Estas etiquetas son candidatos, no conclusiones automáticas. La corroboración
+adicional queda pendiente de revisión claim-scoped; los cambios de cita usan
+las decisiones claim→tile ya persistidas; y un `acquisition_gap` solo entra en
+`reviewed_shadow.scoring` mediante el journal de recuperación. El campo
+`score_trajectory` muestra el delta cronológico del scanner, mientras
+`reviewed_shadow.scoring` sigue siendo el único candidato validado de sombra.
+Los cambios sin ninguna evidencia reproducible en ninguno de los dos informes,
+incluidas las oscilaciones `no` ↔ `sin_evidencia`, se cuentan como no
+materiales y no entran en la cola.
+Los cambios que pueden mover puntos se ordenan como `score_affecting`; los que
+solo alteran la calidad o procedencia quedan como `evidence_quality`.
+
+No se añadió tabla, migración ni motor de scoring: las versiones se reconstruyen
+de forma determinista desde el historial PostgreSQL y los journals existentes.
+
 ## Journal PostgreSQL y API
 
 La revisión operativa se guarda en

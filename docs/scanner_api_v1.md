@@ -388,6 +388,11 @@ only current, human-accepted evidence-to-tile mappings. Both are experimental:
 `runtime_effect=false`, `authority=false`, and
 `automatic_scoring_effect=false`.
 
+`tile_evolution` exposes stable versions of the latest tiles and compares only
+reports with the same pipeline, rubric, prompt, and evaluator. Its `changes`
+queue separates score-affecting changes from evidence-quality changes; scans
+with no reproducible evidence on either side do not create review work.
+
 Each candidate exposes a stable `candidate_fingerprint` and `case_id`. A write
 must send those exact values, an `Idempotency-Key`, and an explicit
 `expected_current_event_id`. The dedicated reviewer credential supplies the

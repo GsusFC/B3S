@@ -52,6 +52,13 @@ EVIDENCE_SCORING_MEMORY_VERSION = "evidence-scoring-memory-v1"
 EVIDENCE_SCORING_MEMORY_ENTRY_VERSION = (
     "evidence-scoring-memory-entry-v1"
 )
+EVIDENCE_TILE_EVOLUTION_SHADOW_VERSION = (
+    "evidence-tile-evolution-shadow-v1"
+)
+EVIDENCE_TILE_VERSION_ID_VERSION = "evidence-tile-version-id-v1"
+EVIDENCE_TILE_EVALUATION_CONTRACT_VERSION = (
+    "evidence-tile-evaluation-contract-v1"
+)
 
 
 class EvidenceScoringMemoryPreviewError(ValueError):
@@ -299,6 +306,11 @@ def build_evidence_scoring_memory_preview(
             for row in recoveries
         },
     )
+    tile_evolution = _build_tile_evolution(
+        ordered,
+        brand_domain=brand_domain,
+        identity_by_id=identity_by_id,
+    )
     memory_version = stable_artifact_digest(
         EVIDENCE_SCORING_MEMORY_VERSION,
         {
@@ -348,6 +360,7 @@ def build_evidence_scoring_memory_preview(
             "recoveries": recoveries,
             "conflicts": conflicts,
             "scoring": scoring,
+            "tile_evolution": tile_evolution,
         }
     )
     result["state_fingerprint"] = _state_fingerprint(result)
@@ -359,6 +372,7 @@ def apply_recovery_review_gate(
     latest_report: dict[str, Any],
     *,
     accepted_tile_evidence_ids: Iterable[str],
+    reviewed_claim_tile_mappings: Iterable[dict[str, Any]] = (),
 ) -> dict[str, Any]:
     """Compute a non-authoritative shadow score from reviewed recoveries only."""
 
@@ -418,6 +432,11 @@ def apply_recovery_review_gate(
         "accepted_recovery_count": len(approved_recoveries),
         "recoveries": gated_recoveries,
         "scoring": reviewed_scoring,
+        "tile_evolution": _reviewed_tile_evolution(
+            preview.get("tile_evolution"),
+            approved_recoveries=approved_recoveries,
+            reviewed_claim_tile_mappings=reviewed_claim_tile_mappings,
+        ),
         "warnings": [
             "only_explicitly_accepted_semantic_mappings_are_scored",
             "reviewed_score_remains_shadow_only",
@@ -425,6 +444,67 @@ def apply_recovery_review_gate(
     }
     result["state_fingerprint"] = _state_fingerprint(result)
     return result
+
+
+def _reviewed_tile_evolution(
+    evolution: Any,
+    *,
+    approved_recoveries: list[dict[str, Any]],
+    reviewed_claim_tile_mappings: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    reviewed = (
+        deepcopy(evolution)
+        if isinstance(evolution, dict)
+        else _empty_tile_evolution()
+    )
+    approved_tile_keys = {
+        f"{row.get('component_key')}.{row.get('tile_id')}"
+        for row in approved_recoveries
+    }
+    mapping_rows = [
+        row
+        for row in reviewed_claim_tile_mappings
+        if isinstance(row, dict)
+    ]
+    for change in reviewed.get("changes") or []:
+        if (
+            change.get("impact_kind") == "acquisition_gap"
+            and change.get("tile_key") in approved_tile_keys
+        ):
+            change["validation_state"] = "accepted_recovery"
+            continue
+        if change.get("validation_channel") != "claim_tile_review":
+            continue
+        expected_polarity = {
+            "ok": "supports",
+            "no": "weakens",
+            "sin_evidencia": "insufficient_evidence",
+        }.get(str(change.get("current_state") or ""))
+        relevant_sources = set(
+            change.get("added_source_evidence_ids")
+            or change.get("current_source_evidence_ids")
+            or []
+        )
+        decisions = {
+            str(row.get("decision") or "")
+            for row in mapping_rows
+            if str(row.get("tile_key") or "")
+            == str(change.get("tile_key") or "")
+            and str(row.get("polarity") or "") == expected_polarity
+            and str(row.get("source_evidence_id") or "")
+            in relevant_sources
+        }
+        if "accepted" in decisions:
+            change["validation_state"] = "accepted_claim_tile_mapping"
+        elif "disputed" in decisions:
+            change["validation_state"] = "disputed_claim_tile_mapping"
+        elif "rejected" in decisions:
+            change["validation_state"] = "rejected_claim_tile_mapping"
+    reviewed["summary"]["pending_review_count"] = sum(
+        change.get("validation_state") == "pending_review"
+        for change in reviewed.get("changes") or []
+    )
+    return reviewed
 
 
 def _empty_result(*, mode: str, report_count: int) -> dict[str, Any]:
@@ -453,6 +533,7 @@ def _empty_result(*, mode: str, report_count: int) -> dict[str, Any]:
         "accepted_evidence": [],
         "recoveries": [],
         "conflicts": [],
+        "tile_evolution": _empty_tile_evolution(),
         "scoring": {
             "status": "unavailable",
             "current_score": None,
@@ -469,6 +550,416 @@ def _empty_result(*, mode: str, report_count: int) -> dict[str, Any]:
             "only_latest_blind_spots_can_be_recovered",
             "explicit_latest_negative_is_never_overridden",
         ],
+    }
+
+
+def _empty_tile_evolution() -> dict[str, Any]:
+    return {
+        "schema_version": EVIDENCE_TILE_EVOLUTION_SHADOW_VERSION,
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_scoring_effect": False,
+        "tile_memory_version": None,
+        "evaluation_contract_id": None,
+        "previous_report_id": None,
+        "latest_report_id": None,
+        "summary": {
+            "tile_count": 0,
+            "stable_tile_count": 0,
+            "changed_tile_count": 0,
+            "pending_review_count": 0,
+            "score_affecting_change_count": 0,
+            "evidence_quality_change_count": 0,
+            "ignored_non_material_change_count": 0,
+            "incompatible_report_count": 0,
+        },
+        "tiles": [],
+        "changes": [],
+        "score_trajectory": {
+            "status": "unavailable",
+            "previous_score": None,
+            "latest_score": None,
+            "score_delta_latest_minus_previous": None,
+        },
+    }
+
+
+def _build_tile_evolution(
+    reports: list[dict[str, Any]],
+    *,
+    brand_domain: str,
+    identity_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    if not reports:
+        return _empty_tile_evolution()
+    latest = reports[-1]
+    rubric_version = _rubric_version(latest)
+    evaluation_contract_id = _evaluation_contract_id(latest)
+    compatible = [
+        report
+        for report in reports
+        if _evaluation_contract_id(report) == evaluation_contract_id
+    ]
+    previous = compatible[-2] if len(compatible) > 1 else None
+    latest_tiles = _tile_snapshot(
+        latest,
+        brand_domain=brand_domain,
+        rubric_version=rubric_version,
+        identity_by_id=identity_by_id,
+    )
+    previous_tiles = (
+        _tile_snapshot(
+            previous,
+            brand_domain=brand_domain,
+            rubric_version=rubric_version,
+            identity_by_id=identity_by_id,
+        )
+        if isinstance(previous, dict)
+        else []
+    )
+    previous_by_key = {
+        str(tile["tile_key"]): tile for tile in previous_tiles
+    }
+    latest_by_key = {
+        str(tile["tile_key"]): tile for tile in latest_tiles
+    }
+    changes = []
+    observed_version_change_count = 0
+    for tile_key in sorted(set(previous_by_key) | set(latest_by_key)):
+        prior = previous_by_key.get(tile_key)
+        current = latest_by_key.get(tile_key)
+        if (
+            prior is not None
+            and current is not None
+            and prior["tile_version_id"] == current["tile_version_id"]
+        ):
+            continue
+        if previous is None:
+            continue
+        observed_version_change_count += 1
+        change = _tile_change(prior, current)
+        if change is not None:
+            changes.append(change)
+    changes.sort(
+        key=lambda change: (
+            change["review_priority"] != "score_affecting",
+            str(change["tile_key"]),
+        )
+    )
+
+    result = _empty_tile_evolution()
+    result.update(
+        {
+            "tile_memory_version": stable_artifact_digest(
+                EVIDENCE_TILE_EVOLUTION_SHADOW_VERSION,
+                {
+                    "brand_domain": brand_domain,
+                    "rubric_version": rubric_version,
+                    "evaluation_contract_id": evaluation_contract_id,
+                    "tile_version_ids": [
+                        tile["tile_version_id"]
+                        for tile in latest_tiles
+                    ],
+                },
+            ),
+            "evaluation_contract_id": evaluation_contract_id,
+            "previous_report_id": (
+                str(previous.get("id") or "")
+                if isinstance(previous, dict)
+                else None
+            ),
+            "latest_report_id": str(latest.get("id") or ""),
+            "summary": {
+                "tile_count": len(latest_tiles),
+                "stable_tile_count": max(
+                    0,
+                    len(latest_tiles) - observed_version_change_count,
+                ),
+                "changed_tile_count": len(changes),
+                "pending_review_count": len(changes),
+                "score_affecting_change_count": sum(
+                    change["review_priority"] == "score_affecting"
+                    for change in changes
+                ),
+                "evidence_quality_change_count": sum(
+                    change["review_priority"] == "evidence_quality"
+                    for change in changes
+                ),
+                "ignored_non_material_change_count": (
+                    observed_version_change_count - len(changes)
+                ),
+                "incompatible_report_count": (
+                    len(reports) - len(compatible)
+                ),
+            },
+            "tiles": latest_tiles,
+            "changes": changes,
+            "score_trajectory": _score_trajectory(previous, latest),
+        }
+    )
+    return result
+
+
+def _evaluation_contract_id(report: dict[str, Any]) -> str:
+    raw = report.get("raw") if isinstance(report.get("raw"), dict) else {}
+    sv9 = raw.get("sv9") if isinstance(raw.get("sv9"), dict) else {}
+    result = _evaluation_result(report)
+    flow = raw.get("flow") if isinstance(raw.get("flow"), dict) else {}
+    debug = (
+        flow.get("interpretation_debug")
+        if isinstance(flow.get("interpretation_debug"), dict)
+        else {}
+    )
+    return stable_artifact_digest(
+        EVIDENCE_TILE_EVALUATION_CONTRACT_VERSION,
+        {
+            "pipeline_version": str(
+                raw.get("schema_version") or "unknown"
+            ),
+            "rubric_version": _rubric_version(report),
+            "prompt_version": str(
+                debug.get("prompt_version") or "unknown"
+            ),
+            "evaluator_model": str(
+                result.get("evaluator_model")
+                or sv9.get("evaluator_model")
+                or "unknown"
+            ),
+        },
+    )
+
+
+def _tile_snapshot(
+    report: dict[str, Any],
+    *,
+    brand_domain: str,
+    rubric_version: str,
+    identity_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    source_records = _source_records(
+        report,
+        identity_by_id=identity_by_id,
+    )
+    tiles = []
+    for component_key, verdict in _tile_verdicts(report):
+        tile_id = str(
+            verdict.get("id") or verdict.get("tile_id") or ""
+        ).strip()
+        state = str(verdict.get("estado") or "")
+        quote = normalize_evidence_text(verdict.get("evidencia"))
+        literal = [
+            source
+            for source in source_records
+            if quote
+            and quote.casefold()
+            in str(source.get("content") or "").casefold()
+        ]
+        eligible = (
+            _match_source_records(
+                quote,
+                source_records=source_records,
+            )[0]
+            if quote
+            else []
+        )
+        source_evidence_ids = sorted(
+            {str(source["evidence_id"]) for source in literal}
+        )
+        quote_fingerprint = (
+            stable_artifact_digest(
+                "evidence-tile-quote-v1",
+                {"quote": quote.casefold()},
+            )
+            if quote
+            else None
+        )
+        material = {
+            "brand_domain": brand_domain,
+            "rubric_version": rubric_version,
+            "component_key": component_key,
+            "tile_id": tile_id,
+            "state": state,
+            "quote_hash": quote_fingerprint,
+            "source_evidence_ids": source_evidence_ids,
+        }
+        tiles.append(
+            {
+                "tile_version_id": stable_artifact_digest(
+                    EVIDENCE_TILE_VERSION_ID_VERSION,
+                    material,
+                ),
+                "component_key": component_key,
+                "tile_id": tile_id,
+                "tile_key": f"{component_key}.{tile_id}",
+                "state": state,
+                "quote_fingerprint": quote_fingerprint,
+                "source_evidence_ids": source_evidence_ids,
+                "evidence_reproducible": bool(literal),
+                "evidence_eligible": bool(eligible),
+            }
+        )
+    return sorted(tiles, key=lambda tile: str(tile["tile_key"]))
+
+
+def _tile_change(
+    previous: dict[str, Any] | None,
+    current: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if previous is None or current is None:
+        return None
+    previous_state = str((previous or {}).get("state") or "not_evaluated")
+    current_state = str((current or {}).get("state") or "not_evaluated")
+    previous_sources = set(
+        (previous or {}).get("source_evidence_ids") or []
+    )
+    current_sources = set(
+        (current or {}).get("source_evidence_ids") or []
+    )
+    if not previous_sources and not current_sources:
+        return None
+    added_sources = sorted(current_sources - previous_sources)
+    removed_sources = sorted(previous_sources - current_sources)
+    quote_changed = (
+        (previous or {}).get("quote_fingerprint")
+        != (current or {}).get("quote_fingerprint")
+    )
+    if (
+        current_state == previous_state
+        and not quote_changed
+        and previous_sources < current_sources
+    ):
+        kind, effect, score, channel = (
+            "evidence_reinforced",
+            "improves",
+            "none",
+            "claim_corroboration_review",
+        )
+    elif (
+        current_state == previous_state
+        and not quote_changed
+        and current_sources < previous_sources
+    ):
+        kind, effect, score, channel = (
+            "evidence_weakened",
+            "worsens",
+            "none",
+            "evidence_gap_review",
+        )
+    elif current_state == previous_state and not quote_changed:
+        kind, effect, score, channel = (
+            "evidence_sources_changed",
+            "unknown",
+            "none",
+            "claim_corroboration_review",
+        )
+    elif current_state == previous_state:
+        kind, effect, score, channel = (
+            "evidence_changed",
+            "unknown",
+            "none",
+            "claim_tile_review",
+        )
+    elif current_state == "ok":
+        kind, effect, score, channel = (
+            "tile_improved",
+            "improves",
+            "increase",
+            "claim_tile_review",
+        )
+    elif previous_state == "ok" and current_state == "sin_evidencia":
+        kind, effect, score, channel = (
+            "acquisition_gap",
+            "no_automatic_change",
+            "pending_recovery_review",
+            "scoring_recovery_review",
+        )
+    elif previous_state == "ok" and current_state == "no":
+        reproducible = bool(
+            current and current.get("evidence_reproducible")
+        )
+        kind, effect, score, channel = (
+            (
+                "tile_worsened"
+                if reproducible
+                else "unvalidated_negative"
+            ),
+            "worsens" if reproducible else "unknown",
+            "decrease_unvalidated",
+            (
+                "claim_tile_review"
+                if reproducible
+                else "evidence_gap_review"
+            ),
+        )
+    else:
+        kind, effect, score, channel = (
+            "tile_state_changed",
+            "unknown",
+            "none",
+            "claim_tile_review",
+        )
+    return {
+        "tile_key": str(
+            (current or previous or {}).get("tile_key") or ""
+        ),
+        "previous_tile_version_id": (
+            (previous or {}).get("tile_version_id")
+        ),
+        "current_tile_version_id": (
+            (current or {}).get("tile_version_id")
+        ),
+        "previous_state": previous_state,
+        "current_state": current_state,
+        "previous_source_evidence_ids": sorted(previous_sources),
+        "current_source_evidence_ids": sorted(current_sources),
+        "added_source_evidence_ids": added_sources,
+        "removed_source_evidence_ids": removed_sources,
+        "impact_kind": kind,
+        "candidate_effect": effect,
+        "score_direction": score,
+        "review_priority": (
+            "score_affecting"
+            if score != "none"
+            else "evidence_quality"
+        ),
+        "validation_channel": channel,
+        "validation_state": "pending_review",
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_scoring_effect": False,
+    }
+
+
+def _score_trajectory(
+    previous: dict[str, Any] | None,
+    latest: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(previous, dict):
+        return {
+            "status": "no_previous_comparable_report",
+            "previous_score": None,
+            "latest_score": _number(latest.get("score")),
+            "score_delta_latest_minus_previous": None,
+        }
+    before = _scoring_preview(previous, recovered_tiles=set())
+    after = _scoring_preview(latest, recovered_tiles=set())
+    available = (
+        before["status"] == "preview_available"
+        and after["status"] == "preview_available"
+    )
+    previous_score = before.get("current_score")
+    latest_score = after.get("current_score")
+    return {
+        "status": "available" if available else "unavailable",
+        "previous_score": previous_score,
+        "latest_score": latest_score,
+        "score_delta_latest_minus_previous": (
+            float(latest_score) - float(previous_score)
+            if available
+            and previous_score is not None
+            and latest_score is not None
+            else None
+        ),
     }
 
 
