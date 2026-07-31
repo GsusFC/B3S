@@ -227,6 +227,7 @@ def _dom_obstruction(html: str) -> ViewportObstructionEvidence:
     overlay_local_newsletter = bool(newsletter_overlay_hits)
     overlay_local_promo = bool(promo_overlay_hits)
     overlay_local_cookie = bool(cookie_overlay_hits)
+    visible_candidate_snapshot = "<visible-candidate" in text
     if overlay_local_login and strong_overlay:
         obstruction_type = "login_wall"
     elif overlay_local_newsletter and strong_overlay:
@@ -235,9 +236,13 @@ def _dom_obstruction(html: str) -> ViewportObstructionEvidence:
         obstruction_type = "promo_modal"
     elif overlay_local_cookie and strong_overlay:
         obstruction_type = "cookie_modal" if not bottom_like else "cookie_banner"
-    elif overlay_level_signals and (fixed_like or high_z or full_like or bottom_like):
+    elif (
+        visible_candidate_snapshot
+        and overlay_level_signals
+        and (fixed_like or high_z or full_like or bottom_like)
+    ):
         obstruction_type = "unknown_overlay"
-    elif fixed_like and bottom_like and high_z:
+    elif visible_candidate_snapshot and fixed_like and bottom_like and high_z:
         obstruction_type = "unknown_overlay"
 
     present = obstruction_type != "none"

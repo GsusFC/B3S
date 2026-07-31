@@ -244,6 +244,10 @@ BRAND3_EVIDENCE_LLM_NATIVE_STRUCTURED_OUTPUT = os.environ.get(
 
 # Screenshot capture provider.
 SCREENSHOT_PROVIDER = os.environ.get("SCREENSHOT_PROVIDER", "playwright").strip().lower() or "playwright"
+BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS = max(
+    1,
+    int(os.environ.get("BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS", "60")),
+)
 
 # Screenshots are evidence: they must outlive the OS temp dir cleanup.
 BRAND3_SCREENSHOT_DIR = os.environ.get(

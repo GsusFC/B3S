@@ -10,7 +10,11 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
-from src.config import BRAND3_SCREENSHOT_DIR, SCREENSHOT_PROVIDER
+from src.config import (
+    BRAND3_SCREENSHOT_DIR,
+    BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS,
+    SCREENSHOT_PROVIDER,
+)
 from src.features.visual_analyzer import VisualAnalyzer
 
 _MAX_REMOTE_SCREENSHOT_BYTES = 20 * 1024 * 1024
@@ -303,7 +307,7 @@ def _screenshot_capture_worker(
 def _take_screenshot_with_budget(
     url: str,
     *,
-    timeout_seconds: int = 60,
+    timeout_seconds: int = BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS,
     provider: str | None = None,
     normalized_screenshot_provider=_normalized_screenshot_provider,
     take_playwright_screenshot=_take_playwright_screenshot,

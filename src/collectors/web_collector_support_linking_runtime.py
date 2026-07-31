@@ -13,7 +13,7 @@ _MAX_STRATEGIC_ROLE_PAGES = 6
 _MAX_SITEMAP_EXPLORATION_PAGES = 2
 _MAX_SITEMAP_FILES = 4
 _MAX_SITEMAP_CANDIDATES = 200
-OWNED_PAGE_SELECTION_VERSION = "owned-page-selection-v2"
+OWNED_PAGE_SELECTION_VERSION = "owned-page-selection-v3"
 _OWNED_PAGE_ROLE_PRIORITY = (
     "product",
     "solutions",
@@ -472,6 +472,17 @@ class WebCollectorLinkingSupport:
                     break
             if len(selected) >= _MAX_STRATEGIC_ROLE_PAGES:
                 break
+
+        # A recognized strategic page is stronger evidence than an untyped
+        # sitemap-only discovery. Keep role diversity first, then use any
+        # remaining budget for additional strategic candidates before
+        # exploring pages whose role is still unknown.
+        for link in scored_links:
+            if link in selected or self._link_role(link) == "other":
+                continue
+            selected.append(link)
+            if len(selected) >= MAX_OWNED_SUBPAGES:
+                return selected
 
         exploration_added = 0
         lastmod_by_url = {
