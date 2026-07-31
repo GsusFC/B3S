@@ -17,6 +17,10 @@ The vault intentionally runs the same application image and scanner behavior
 as production. Its separation comes from infrastructure and data, not from a
 second scanner implementation.
 
+The vault permits a 90-second visual capture budget for field diagnostics;
+production remains at 60 seconds. Both values use the same bounded capture
+path and are controlled by `BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS`.
+
 The current database branch is `b3s-vault`, derived once from the Neon
 `production` branch. Provider credentials for LLM, Exa, and Firecrawl may be
 shared so field scans remain comparable. `B3S_DATABASE_URL`, the Fly volume,

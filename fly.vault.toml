@@ -21,7 +21,7 @@ kill_timeout = "30s"
   B3S_EVIDENCE_LEDGER_MODE = "shadow"
   B3S_EVIDENCE_CLAIM_TILE_LEDGER_MODE = "shadow"
   SCREENSHOT_PROVIDER = "playwright"
-  BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS = "60"
+  BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS = "90"
 
 [[mounts]]
   source = "b3s_vault_data"

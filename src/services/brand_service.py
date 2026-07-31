@@ -27,6 +27,7 @@ from src.config import (
     BRAND3_NICHE_AUTO_APPLY_MIN_CONFIDENCE,
     BRAND3_PROMOTION_MAX_COMPOSITE_DROP,
     BRAND3_PROMOTION_MAX_DIMENSION_DROPS,
+    BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS,
     LLM_CHEAP_MODEL,
 )
 from src.discovery.enrichment import build_discovery_enrichment
@@ -297,7 +298,7 @@ _take_playwright_screenshot = _take_playwright_screenshot_impl
 def _take_screenshot_with_budget(
     url: str,
     *,
-    timeout_seconds: int = 45,
+    timeout_seconds: int = BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS,
     provider: str | None = None,
     normalized_screenshot_provider=None,
     take_playwright_screenshot=None,

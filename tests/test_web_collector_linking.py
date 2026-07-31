@@ -143,11 +143,17 @@ def test_owned_page_selection_covers_soccersolver_strategic_roles() -> None:
         "https://soccersolver.com/detected-players",
         "https://soccersolver.com/club-simulations",
         "https://soccersolver.com/collaborate",
+        "https://soccersolver.com/breakout-worldcup",
+        "https://soccersolver.com/austria-assets",
     ]
 
     selected = collector._select_internal_links_to_crawl(
         links,
         "https://soccersolver.com",
+        sitemap_only_links=[
+            "https://soccersolver.com/breakout-worldcup",
+            "https://soccersolver.com/austria-assets",
+        ],
     )
 
     assert selected == [
@@ -163,7 +169,7 @@ def test_owned_page_selection_covers_soccersolver_strategic_roles() -> None:
     assert "https://soccersolver.com/laprovincia" not in selected
 
 
-def test_owned_page_selection_reserves_two_sitemap_only_exploration_slots() -> None:
+def test_owned_page_selection_only_explores_after_strategic_candidates() -> None:
     collector = WebCollector(api_key=())
     strategic = [
         "https://example.com/product",
@@ -188,7 +194,8 @@ def test_owned_page_selection_reserves_two_sitemap_only_exploration_slots() -> N
 
     assert selected[:5] == strategic[:5]
     assert selected[5] == overflow[0]
-    assert selected[-2:] == orphaned[:2]
+    assert selected[6] == strategic[5]
+    assert selected[7] == orphaned[0]
     assert len(selected) == 8
 
 
@@ -295,7 +302,7 @@ def test_scrape_persists_page_selection_sources_and_capture_status(
     data = collector.scrape(root, crawl_subpages=True)
 
     assert data.owned_fallback_urls == sitemap_links
-    assert data.page_selection["version"] == "owned-page-selection-v2"
+    assert data.page_selection["version"] == "owned-page-selection-v3"
     assert data.page_selection["maximum_budget"] == 8
     assert data.page_selection["observed_candidate_count"] == 1
     assert data.page_selection["sitemap_candidate_count"] == 6

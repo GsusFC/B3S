@@ -11,6 +11,7 @@ from src.collectors.web_collector import WebData
 from src.services import brand_service
 from src.config import (
     AUDIT_ANALYST_MODEL,
+    BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS,
     DEFAULT_LLM_CHEAP_MODEL,
     DEFAULT_LLM_MODEL,
     DEFAULT_LLM_PREMIUM_MODEL,
@@ -1651,6 +1652,18 @@ class BrandServiceContentFallbackTests(unittest.TestCase):
 
     def test_default_screenshot_provider_is_playwright(self):
         self.assertEqual(SCREENSHOT_PROVIDER, "playwright")
+
+    def test_default_screenshot_budget_uses_runtime_configuration(self):
+        with patch(
+            "src.services.brand_service._take_screenshot_with_budget_impl",
+            return_value=({}, None),
+        ) as capture:
+            _take_screenshot_with_budget("https://example.com")
+
+        self.assertEqual(
+            capture.call_args.kwargs["timeout_seconds"],
+            BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS,
+        )
 
     def test_playwright_provider_routes_to_playwright_capture(self):
         with patch(

@@ -774,6 +774,49 @@ def test_viewport_obstruction_resists_sale_copy_below_sticky_header():
     assert "dom_keyword:sale" in obstruction["page_level_signals"]
 
 
+def test_viewport_obstruction_does_not_combine_unrelated_full_document_cues():
+    obstruction = analyze_viewport_obstruction(
+        dom_html="""
+        <html>
+          <head>
+            <style>
+              .site-header { position: fixed; top: 0; z-index: 1000; }
+              .hero { min-height: 100vh; }
+              .carousel-overlay { position: absolute; inset: 0; }
+              .footer-bar { position: sticky; bottom: 0; }
+            </style>
+          </head>
+          <body>
+            <header class="site-header"><a href="/signin">Sign in</a></header>
+            <main>
+              <section class="hero"><p>We offer better forecasting.</p></section>
+              <section><div class="carousel-overlay" data-name="Overlay"></div></section>
+            </main>
+            <footer class="footer-bar"><a href="/newsletter">Subscribe to our newsletter</a></footer>
+          </body>
+        </html>
+        """
+    ).to_dict()
+
+    assert obstruction["present"] is False
+    assert obstruction["type"] == "none"
+    assert obstruction["first_impression_valid"] is True
+
+
+def test_viewport_obstruction_keeps_visible_unknown_overlay_candidate():
+    obstruction = analyze_viewport_obstruction(
+        dom_html="""
+        <visible-candidate class=generic-overlay position=fixed z-index=1000 width=1200 height=700>
+          Overlay content
+        </visible-candidate>
+        """
+    ).to_dict()
+
+    assert obstruction["present"] is True
+    assert obstruction["type"] == "unknown_overlay"
+    assert obstruction["first_impression_valid"] is False
+
+
 def test_same_capture_clean_observation_overrides_unrelated_web_html(tmp_path):
     width, height = 80, 60
     pixels = [
