@@ -309,6 +309,7 @@ persistence.
 ```text
 POST /api/v1/brands/{domain}/evidence-claim-tile-review-packets
 GET  /api/v1/brands/{domain}/evidence-claim-tile-review-packets/{fingerprint}
+GET  /api/v1/brands/{domain}/evidence-claim-tile-review-packets/{fingerprint}/queue
 GET  /api/v1/brands/{domain}/evidence-claim-tile-reviews
 POST /api/v1/brands/{domain}/evidence-claim-tile-reviews
 ```
@@ -318,6 +319,14 @@ reconstruct the private claim, source passage, citation, tile contract, and
 mapping identity from immutable report snapshots. PostgreSQL stores the exact
 manifest and candidates append-only; the public ledger continues to omit raw
 claim and quote text.
+
+The queue endpoint is private and computed on read from the immutable packet
+registry plus the current append-only review events. It adds no table or
+second copy of the evidence. Exact repeated observations reuse a semantic
+decision; changes to the source passage, claim, tile contract, evidence quote,
+or matching method return that mapping to `pending_review`. A `revoked`
+decision also returns to pending. Observation state such as `repeated` or
+`not_reacquired` remains visible without granting runtime authority.
 
 The review subject is a 64-character `mapping_id` already present in the
 brand's persistent claim-to-tile ledger. A write requires the dedicated

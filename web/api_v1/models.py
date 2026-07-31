@@ -519,6 +519,33 @@ class EvidenceClaimTileReviewPacketResponse(StrictModel):
     created_at: str
 
 
+class EvidenceClaimTileReviewQueueResponse(StrictModel):
+    object: Literal["evidence_claim_tile_review_queue"] = (
+        "evidence_claim_tile_review_queue"
+    )
+    api_version: Literal["v1"] = "v1"
+    domain: str
+    schema_version: str
+    policy_version: str
+    queue_kind: Literal["claim_tile_human_review"] = (
+        "claim_tile_human_review"
+    )
+    packet_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    mapping_series_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    queue_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    automatic_tile_effect: Literal[False] = False
+    automatic_scoring_effect: Literal[False] = False
+    review_complete: bool
+    summary: dict[str, Any]
+    pending_subject_ids: list[str] = Field(default_factory=list)
+    reviewed_subject_ids: list[str] = Field(default_factory=list)
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class EvidenceClaimTileReviewEvent(StrictModel):
     id: str
     event_id: str

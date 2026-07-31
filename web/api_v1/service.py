@@ -44,6 +44,7 @@ from web.report_store import (
     append_evidence_memory_adjudication_for_domain,
     append_evidence_scoring_recovery_review_for_domain,
     get_evidence_claim_tile_review_packet_for_domain,
+    get_evidence_claim_tile_review_queue_for_domain,
     list_evidence_claim_reconciliations_for_domain,
     list_evidence_claim_tile_reviews_for_domain,
     list_evidence_memory_adjudications_for_domain,
@@ -586,6 +587,34 @@ def get_evidence_claim_tile_review_packet(
             "claim_tile_review_packet_store_unavailable",
             "The durable claim-to-tile review packet registry is "
             "temporarily unavailable.",
+        ) from exc
+
+
+def get_evidence_claim_tile_review_queue(
+    domain: str,
+    packet_fingerprint: str,
+) -> dict[str, Any]:
+    """Read the mutable review status derived for one immutable packet."""
+
+    try:
+        return get_evidence_claim_tile_review_queue_for_domain(
+            domain,
+            packet_fingerprint,
+        )
+    except EvidenceClaimTileReviewPacketNotFoundError as exc:
+        raise ApiError(
+            404,
+            "claim_tile_review_packet_not_found",
+            str(exc),
+            details={
+                "review_packet_fingerprint": packet_fingerprint,
+            },
+        ) from exc
+    except EvidenceClaimTileReviewUnavailableError as exc:
+        raise ApiError(
+            503,
+            "claim_tile_review_queue_unavailable",
+            "The claim-to-tile review queue is temporarily unavailable.",
         ) from exc
 
 

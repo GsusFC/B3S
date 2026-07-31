@@ -644,6 +644,34 @@ def get_evidence_claim_tile_review_packet_for_domain(
         ) from exc
 
 
+def get_evidence_claim_tile_review_queue_for_domain(
+    domain: str,
+    packet_fingerprint: str,
+) -> dict[str, Any]:
+    """Read the derived private review queue for one exact packet."""
+
+    repository = _postgres_repository()
+    if repository is None:
+        raise EvidenceClaimTileReviewUnavailableError(
+            "The durable claim-to-tile review packet registry is not "
+            "configured."
+        )
+    try:
+        return repository.get_evidence_claim_tile_review_queue(
+            domain,
+            packet_fingerprint,
+        )
+    except (
+        EvidenceClaimTileReviewPacketNotFoundError,
+        EvidenceClaimTileReviewUnavailableError,
+    ):
+        raise
+    except Exception as exc:
+        raise EvidenceClaimTileReviewUnavailableError(
+            "The claim-to-tile review queue is unavailable."
+        ) from exc
+
+
 def list_evidence_claim_tile_reviews_for_domain(
     domain: str,
     *,

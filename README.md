@@ -67,6 +67,7 @@ GET  /api/v1/brands/{domain}/evidence-claim-memory-shadow
 GET  /api/v1/brands/{domain}/evidence-claim-tile-ledger-shadow
 POST /api/v1/brands/{domain}/evidence-claim-tile-review-packets
 GET  /api/v1/brands/{domain}/evidence-claim-tile-review-packets/{fingerprint}
+GET  /api/v1/brands/{domain}/evidence-claim-tile-review-packets/{fingerprint}/queue
 GET  /api/v1/brands/{domain}/evidence-claim-tile-reviews
 POST /api/v1/brands/{domain}/evidence-claim-tile-reviews
 GET  /api/v1/brands/{domain}/evidence-claim-reconciliations

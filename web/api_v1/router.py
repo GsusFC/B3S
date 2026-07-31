@@ -37,6 +37,7 @@ from .models import (
     EvidenceClaimTileReviewCreateResponse,
     EvidenceClaimTileReviewJournalResponse,
     EvidenceClaimTileReviewPacketResponse,
+    EvidenceClaimTileReviewQueueResponse,
     EvidenceLedgerShadowResponse,
     EvidenceMemoryAdjudicationCreateRequest,
     EvidenceMemoryAdjudicationCreateResponse,
@@ -60,6 +61,7 @@ from .service import (
     create_scan_job,
     get_completed_report,
     get_evidence_claim_tile_review_packet,
+    get_evidence_claim_tile_review_queue,
     get_evidence_claim_reconciliations,
     get_evidence_claim_tile_reviews,
     get_evidence_memory_adjudications,
@@ -489,6 +491,41 @@ def read_brand_evidence_claim_tile_review_packet(
         "domain": normalized,
         "replayed": False,
         **packet,
+    }
+
+
+@router.get(
+    (
+        "/brands/{domain}/evidence-claim-tile-review-packets/"
+        "{packet_fingerprint}/queue"
+    ),
+    response_model=EvidenceClaimTileReviewQueueResponse,
+    operation_id="getBrandEvidenceClaimTileReviewQueue",
+    responses=_ERRORS,
+)
+def read_brand_evidence_claim_tile_review_queue(
+    domain: str,
+    packet_fingerprint: str,
+    response: Response,
+    _principal: AdjudicationPrincipal,
+) -> dict[str, Any]:
+    normalized = domain_key(domain)
+    if not normalized:
+        raise ApiError(
+            400,
+            "invalid_domain",
+            "A valid brand domain is required.",
+        )
+    queue = get_evidence_claim_tile_review_queue(
+        normalized,
+        packet_fingerprint,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "object": "evidence_claim_tile_review_queue",
+        "api_version": "v1",
+        "domain": normalized,
+        **queue,
     }
 
 
