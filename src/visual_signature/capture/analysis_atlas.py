@@ -33,12 +33,23 @@ def build_analysis_atlas(
             "source_path": str(viewport_screenshot_path),
         }
     ]
-    for section in (section_manifest.get("sections") or [])[:ATLAS_MAX_SECTION_PANELS]:
+    captured_page_segments = [
+        row
+        for row in section_manifest.get("page_segments") or []
+        if isinstance(row, dict) and str(row.get("capture_path") or "").strip()
+    ]
+    content_rows = captured_page_segments or [
+        row
+        for row in section_manifest.get("sections") or []
+        if isinstance(row, dict) and str(row.get("capture_path") or "").strip()
+    ]
+    content_role = "page_segment" if captured_page_segments else "page_section"
+    for section in content_rows[:ATLAS_MAX_SECTION_PANELS]:
         if not isinstance(section, dict) or not str(section.get("capture_path") or "").strip():
             continue
         source_panels.append(
             {
-                "role": "page_section",
+                "role": content_role,
                 "section_id": str(section.get("id") or ""),
                 "label": str(section.get("label") or section.get("id") or "SECTION"),
                 "kind": str(section.get("kind") or "section"),
@@ -58,10 +69,7 @@ def build_analysis_atlas(
                 max_width = ATLAS_WIDTH - ATLAS_MARGIN * 2
                 max_height = 780
             else:
-                max_width = (
-                    ATLAS_WIDTH
-                    - ATLAS_MARGIN * (ATLAS_SECTION_COLUMNS + 1)
-                ) // ATLAS_SECTION_COLUMNS
+                max_width = (ATLAS_WIDTH - ATLAS_MARGIN * (ATLAS_SECTION_COLUMNS + 1)) // ATLAS_SECTION_COLUMNS
                 max_height = 760
             image.thumbnail(
                 (max_width, max_height),
@@ -80,16 +88,13 @@ def build_analysis_atlas(
         raise ValueError("analysis_atlas_has_no_readable_source_panels")
 
     viewport_panels = [panel for panel in prepared if panel["role"] == "first_viewport"]
-    section_panels = [panel for panel in prepared if panel["role"] == "page_section"]
+    section_panels = [panel for panel in prepared if panel["role"] != "first_viewport"]
     rows: list[list[dict[str, Any]]] = []
     rows.extend([[panel] for panel in viewport_panels])
     for offset in range(0, len(section_panels), ATLAS_SECTION_COLUMNS):
-        rows.append(section_panels[offset:offset + ATLAS_SECTION_COLUMNS])
+        rows.append(section_panels[offset : offset + ATLAS_SECTION_COLUMNS])
 
-    row_heights = [
-        ATLAS_LABEL_HEIGHT + max(panel["image"].height for panel in row)
-        for row in rows
-    ]
+    row_heights = [ATLAS_LABEL_HEIGHT + max(panel["image"].height for panel in row) for row in rows]
     atlas_height = ATLAS_MARGIN + sum(height + ATLAS_MARGIN for height in row_heights)
     atlas = Image.new("RGB", (ATLAS_WIDTH, atlas_height), color=(241, 242, 244))
     draw = ImageDraw.Draw(atlas)
@@ -105,21 +110,18 @@ def build_analysis_atlas(
         cell_width = (
             ATLAS_WIDTH - ATLAS_MARGIN * 2
             if full_width
-            else (
-                ATLAS_WIDTH
-                - ATLAS_MARGIN * (ATLAS_SECTION_COLUMNS + 1)
-            ) // ATLAS_SECTION_COLUMNS
+            else (ATLAS_WIDTH - ATLAS_MARGIN * (ATLAS_SECTION_COLUMNS + 1)) // ATLAS_SECTION_COLUMNS
         )
         for column, panel in enumerate(row):
             x = ATLAS_MARGIN if full_width else ATLAS_MARGIN + column * (cell_width + ATLAS_MARGIN)
             if panel["role"] == "first_viewport":
                 label = "FIRST VIEWPORT - use this panel for first impression"
+            elif panel["role"] == "page_segment":
+                section_number += 1
+                label = f"PAGE SEGMENT {section_number:02d} - {panel['label']} [{panel['kind']}]"
             else:
                 section_number += 1
-                label = (
-                    f"SECTION {section_number:02d} - "
-                    f"{panel['label']} [{panel['kind']}]"
-                )
+                label = f"SECTION {section_number:02d} - {panel['label']} [{panel['kind']}]"
             label = " ".join(label.split())[:110]
             draw.rectangle(
                 (x, y, x + cell_width, y + ATLAS_LABEL_HEIGHT),
@@ -171,14 +173,9 @@ def build_analysis_atlas(
         "file_size_bytes": output.stat().st_size,
         "panel_count": len(panel_manifest),
         "section_panel_count": len(section_panels),
-        "page_capture_variant": str(
-            section_manifest.get("capture_variant") or ""
-        ),
+        "page_segment_panel_count": sum(1 for panel in panel_manifest if panel["role"] == "page_segment"),
+        "page_capture_variant": str(section_manifest.get("capture_variant") or ""),
         "layout": "first_viewport_full_width_then_two_column_sections",
         "panels": panel_manifest,
-        "limitations": (
-            ["section_panel_limit_reached"]
-            if len(section_manifest.get("sections") or []) > ATLAS_MAX_SECTION_PANELS
-            else []
-        ),
+        "limitations": (["section_panel_limit_reached"] if len(content_rows) > ATLAS_MAX_SECTION_PANELS else []),
     }

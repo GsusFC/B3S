@@ -181,6 +181,14 @@ These variables are used by scoring, collection, learning, or calibration paths.
 | `BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS` | `60` | Hard budget for viewport, structural captures, atlas generation, and provider fallback |
 | `BRAND3_BLOCKED_DOMAINS` | empty | Optional comma-separated URL validation blocklist for the web app |
 
+Chromium structural capture uses rendered HTML boundaries to group adjacent
+sections into vertical segments of at most 1,800 CSS pixels. The segments are
+persisted with coordinates and section references, then reassembled into the
+full-page master. Geometric cuts are used only when the rendered DOM has no
+reliable boundary or to cover a remaining gap. Segment capture, reconstruction,
+semantic crops, and atlas generation all remain inside the single screenshot
+budget above.
+
 Changing these can affect scoring behavior or local run behavior. Do not change defaults in code or shared docs without explicit review.
 
 ## Visual Signature Variables
