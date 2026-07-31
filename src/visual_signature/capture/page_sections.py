@@ -7,6 +7,8 @@ the shipped page exposes after rendering.
 
 from __future__ import annotations
 
+import base64
+import io
 import math
 import re
 from pathlib import Path
@@ -16,9 +18,11 @@ from src.visual_signature.capture.analysis_atlas import build_analysis_atlas
 
 
 SECTION_MANIFEST_VERSION = "rendered-page-section-manifest-v1"
+PAGE_SEGMENT_CAPTURE_VERSION = "html-section-segmented-page-v1"
 SECTION_ANALYSIS_MAX_CAPTURES = 16
 SECTION_MAX_HEIGHT = 1800
 SECTION_MIN_HEIGHT = 120
+PAGE_SEGMENT_MAX_HEIGHT = 1800
 
 
 _RENDERED_SECTION_SNAPSHOT_JS = r"""
@@ -338,6 +342,197 @@ def build_section_manifest(
     }
 
 
+def build_page_segment_plan(
+    section_manifest: dict[str, Any],
+    *,
+    max_segment_height: int = PAGE_SEGMENT_MAX_HEIGHT,
+) -> list[dict[str, Any]]:
+    """Group adjacent HTML sections into bounded, full-width capture segments."""
+
+    document = section_manifest.get("document") if isinstance(section_manifest.get("document"), dict) else {}
+    viewport = section_manifest.get("viewport") if isinstance(section_manifest.get("viewport"), dict) else {}
+    document_height = max(1, _int(document.get("height"), 1))
+    viewport_width = max(1, _int(viewport.get("width"), 1440))
+    max_segment_height = max(1, int(max_segment_height))
+    raw_sections = [
+        row
+        for row in section_manifest.get("sections") or []
+        if isinstance(row, dict) and isinstance(row.get("bbox"), dict)
+    ]
+    html_boundaries_available = str(section_manifest.get("detection_strategy") or "") != "geometric_viewport_fallback"
+
+    semantic_boundaries = {0, document_height}
+    for section in raw_sections:
+        bbox = section["bbox"]
+        top = max(0, min(document_height, _int(bbox.get("top"), 0)))
+        bottom = max(
+            top,
+            min(document_height, top + max(1, _int(bbox.get("height"), 1))),
+        )
+        semantic_boundaries.update((top, bottom))
+
+    ordered_boundaries = sorted(semantic_boundaries)
+    segments: list[dict[str, Any]] = []
+    cursor = 0
+    while cursor < document_height:
+        hard_end = min(document_height, cursor + max_segment_height)
+        minimum_group_height = max(1, max_segment_height // 3)
+        eligible_boundaries = [
+            boundary
+            for boundary in ordered_boundaries
+            if cursor < boundary <= hard_end
+            and (boundary == document_height or boundary - cursor >= minimum_group_height)
+        ]
+        end = max(eligible_boundaries) if eligible_boundaries else hard_end
+        if end <= cursor:
+            end = hard_end
+
+        included_sections = []
+        included_labels = []
+        for section in raw_sections:
+            bbox = section["bbox"]
+            section_top = max(0, _int(bbox.get("top"), 0))
+            section_bottom = section_top + max(1, _int(bbox.get("height"), 1))
+            if section_top < end and section_bottom > cursor:
+                section_id = str(section.get("id") or "")
+                label = str(section.get("label") or "").strip()
+                if section_id and section_id not in included_sections:
+                    included_sections.append(section_id)
+                if label and label not in included_labels:
+                    included_labels.append(label)
+
+        if included_labels:
+            label = included_labels[0]
+            if len(included_labels) > 1:
+                label = f"{included_labels[0]} → {included_labels[-1]}"
+        else:
+            label = f"Page segment {len(segments) + 1}"
+        segments.append(
+            {
+                "id": f"page-segment-{len(segments) + 1:02d}",
+                "index": len(segments),
+                "label": label,
+                "kind": (
+                    "html_section_group"
+                    if included_sections and html_boundaries_available
+                    else "geometric_gap_fallback"
+                ),
+                "source": (
+                    "html_section_boundaries"
+                    if end in semantic_boundaries and included_sections and html_boundaries_available
+                    else "geometric_height_fallback"
+                ),
+                "bbox": {
+                    "left": 0,
+                    "top": cursor,
+                    "width": viewport_width,
+                    "height": end - cursor,
+                },
+                "semantic_section_ids": included_sections,
+                "capture_path": None,
+            }
+        )
+        cursor = end
+
+    return segments
+
+
+def _capture_page_segments(
+    page: Any,
+    *,
+    base_path: Path,
+    section_manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Capture bounded Chromium slices and reconstruct one deterministic master."""
+
+    context = getattr(page, "context", None)
+    new_cdp_session = getattr(context, "new_cdp_session", None)
+    if not callable(new_cdp_session):
+        raise RuntimeError("chromium_cdp_session_unavailable")
+
+    from PIL import Image
+
+    document = section_manifest.get("document") if isinstance(section_manifest.get("document"), dict) else {}
+    viewport = section_manifest.get("viewport") if isinstance(section_manifest.get("viewport"), dict) else {}
+    document_height = max(1, _int(document.get("height"), 1))
+    viewport_width = max(1, _int(viewport.get("width"), 1440))
+    segments = build_page_segment_plan(section_manifest)
+    session = new_cdp_session(page)
+    master = Image.new("RGB", (viewport_width, document_height), color=(255, 255, 255))
+    captured_height = 0
+    errors: list[str] = []
+    try:
+        for segment in segments:
+            bbox = segment["bbox"]
+            segment_path = _derived_path(base_path, str(segment["id"]))
+            try:
+                payload = session.send(
+                    "Page.captureScreenshot",
+                    {
+                        "format": "png",
+                        "fromSurface": True,
+                        "captureBeyondViewport": True,
+                        "optimizeForSpeed": True,
+                        "clip": {
+                            "x": int(bbox["left"]),
+                            "y": int(bbox["top"]),
+                            "width": int(bbox["width"]),
+                            "height": int(bbox["height"]),
+                            "scale": 1,
+                        },
+                    },
+                )
+                encoded = str(payload.get("data") or "") if isinstance(payload, dict) else ""
+                raw = base64.b64decode(encoded, validate=True)
+                with Image.open(io.BytesIO(raw)) as image:
+                    rendered = image.convert("RGB")
+                    try:
+                        expected_size = (int(bbox["width"]), int(bbox["height"]))
+                        if rendered.size != expected_size:
+                            raise ValueError(
+                                "segment_dimensions_mismatch:"
+                                f"expected={expected_size[0]}x{expected_size[1]};"
+                                f"actual={rendered.width}x{rendered.height}"
+                            )
+                        segment_path.write_bytes(raw)
+                        master.paste(rendered, (int(bbox["left"]), int(bbox["top"])))
+                    finally:
+                        rendered.close()
+                segment["capture_path"] = str(segment_path)
+                segment["file_size_bytes"] = segment_path.stat().st_size
+                captured_height += int(bbox["height"])
+            except Exception as exc:
+                segment["capture_path"] = None
+                segment["capture_error"] = f"{type(exc).__name__}:{exc}"
+                errors.append(f"{segment['id']}_capture_failed:{type(exc).__name__}:{exc}")
+                break
+    finally:
+        detach = getattr(session, "detach", None)
+        if callable(detach):
+            try:
+                detach()
+            except Exception:
+                pass
+
+    complete = captured_height == document_height and not errors
+    full_page_path = _derived_path(base_path, "full-page")
+    if complete:
+        master.save(full_page_path, format="PNG", compress_level=1)
+    master.close()
+    return {
+        "schema_version": PAGE_SEGMENT_CAPTURE_VERSION,
+        "strategy": "html_boundaries_grouped_into_bounded_chromium_segments",
+        "status": "complete" if complete else "partial" if captured_height else "failed",
+        "max_segment_height": PAGE_SEGMENT_MAX_HEIGHT,
+        "segment_count": len(segments),
+        "captured_segment_count": sum(1 for segment in segments if str(segment.get("capture_path") or "").strip()),
+        "coverage_ratio": round(min(1.0, captured_height / document_height), 4),
+        "full_page_screenshot_path": str(full_page_path) if complete else None,
+        "segments": segments,
+        "errors": errors,
+    }
+
+
 def capture_structured_page_evidence(
     page: Any,
     *,
@@ -363,11 +558,7 @@ def capture_structured_page_evidence(
                 "successful": False,
                 "error": f"{type(exc).__name__}:{exc}",
             }
-    structural_variant = (
-        "post_hydration_clean_attempt"
-        if post_hydration.get("successful") is True
-        else capture_variant
-    )
+    structural_variant = "post_hydration_clean_attempt" if post_hydration.get("successful") is True else capture_variant
     snapshot = rendered_section_snapshot(page)
     manifest = build_section_manifest(
         snapshot,
@@ -380,50 +571,99 @@ def capture_structured_page_evidence(
 
     full_page_path = _derived_path(base_path, "full-page")
     try:
-        page.screenshot(
-            path=str(full_page_path),
-            full_page=True,
-            animations="disabled",
-            timeout=12000,
+        segment_capture = _capture_page_segments(
+            page,
+            base_path=base_path,
+            section_manifest=manifest,
         )
-        manifest["full_page_screenshot_path"] = str(full_page_path)
+        manifest["page_segment_capture"] = {key: value for key, value in segment_capture.items() if key != "segments"}
+        manifest["page_segments"] = list(segment_capture.get("segments") or [])
+        manifest["full_page_screenshot_path"] = segment_capture.get("full_page_screenshot_path")
+        errors.extend(str(item) for item in segment_capture.get("errors") or [])
     except Exception as exc:
-        manifest["full_page_screenshot_path"] = None
-        errors.append(f"full_page_capture_failed:{type(exc).__name__}:{exc}")
+        # Test doubles and non-Chromium adapters retain the public Playwright
+        # path. Production Chromium captures use the segmented strategy above.
+        try:
+            page.screenshot(
+                path=str(full_page_path),
+                full_page=True,
+                animations="disabled",
+                timeout=12000,
+            )
+            manifest["full_page_screenshot_path"] = str(full_page_path)
+            manifest["page_segment_capture"] = {
+                "schema_version": PAGE_SEGMENT_CAPTURE_VERSION,
+                "strategy": "playwright_full_page_compatibility_fallback",
+                "status": "complete",
+                "segment_count": 0,
+                "captured_segment_count": 0,
+                "coverage_ratio": 1.0,
+                "fallback_reason": f"{type(exc).__name__}:{exc}",
+                "errors": [],
+            }
+            manifest["page_segments"] = []
+        except Exception as fallback_exc:
+            manifest["full_page_screenshot_path"] = None
+            manifest["page_segment_capture"] = {
+                "schema_version": PAGE_SEGMENT_CAPTURE_VERSION,
+                "strategy": "playwright_full_page_compatibility_fallback",
+                "status": "failed",
+                "segment_count": 0,
+                "captured_segment_count": 0,
+                "coverage_ratio": 0.0,
+                "fallback_reason": f"{type(exc).__name__}:{exc}",
+                "errors": [f"{type(fallback_exc).__name__}:{fallback_exc}"],
+            }
+            manifest["page_segments"] = []
+            errors.append(f"full_page_capture_failed:{type(fallback_exc).__name__}:{fallback_exc}")
 
     captured = 0
     full_page_available = bool(manifest.get("full_page_screenshot_path"))
-    for section in manifest.get("sections") or []:
-        section_path = _derived_path(
-            base_path,
-            str(section.get("id") or f"section-{captured + 1:02d}"),
-        )
-        if not full_page_available:
-            section["capture_path"] = None
-            section["capture_error"] = "full_page_master_unavailable"
-            continue
+    master_image = None
+    if full_page_available:
         try:
-            _crop_section_from_master(
-                full_page_path=full_page_path,
-                section_path=section_path,
-                bbox=section.get("bbox") if isinstance(section.get("bbox"), dict) else {},
-                viewport=manifest.get("viewport") if isinstance(manifest.get("viewport"), dict) else {},
-                document=manifest.get("document") if isinstance(manifest.get("document"), dict) else {},
-            )
-            section["capture_path"] = str(section_path)
-            section["file_size_bytes"] = section_path.stat().st_size
-            captured += 1
+            from PIL import Image
+
+            master_image = Image.open(full_page_path)
         except Exception as exc:
-            section["capture_path"] = None
-            section["capture_error"] = f"{type(exc).__name__}:{exc}"
-            errors.append(f"{section.get('id')}_capture_failed:{type(exc).__name__}:{exc}")
+            full_page_available = False
+            errors.append(f"full_page_master_open_failed:{type(exc).__name__}:{exc}")
+    try:
+        for section in manifest.get("sections") or []:
+            section_path = _derived_path(
+                base_path,
+                str(section.get("id") or f"section-{captured + 1:02d}"),
+            )
+            if not full_page_available or master_image is None:
+                section["capture_path"] = None
+                section["capture_error"] = "full_page_master_unavailable"
+                continue
+            try:
+                _crop_section_from_master_image(
+                    master=master_image,
+                    section_path=section_path,
+                    bbox=section.get("bbox") if isinstance(section.get("bbox"), dict) else {},
+                    viewport=manifest.get("viewport") if isinstance(manifest.get("viewport"), dict) else {},
+                    document=manifest.get("document") if isinstance(manifest.get("document"), dict) else {},
+                )
+                section["capture_path"] = str(section_path)
+                section["file_size_bytes"] = section_path.stat().st_size
+                captured += 1
+            except Exception as exc:
+                section["capture_path"] = None
+                section["capture_error"] = f"{type(exc).__name__}:{exc}"
+                errors.append(f"{section.get('id')}_capture_failed:{type(exc).__name__}:{exc}")
+    finally:
+        if master_image is not None:
+            master_image.close()
 
     manifest["captured_section_count"] = captured
+    captured_segment_count = int((manifest.get("page_segment_capture") or {}).get("captured_segment_count") or 0)
     manifest["capture_status"] = (
         "complete"
         if captured == manifest.get("section_count") and manifest.get("full_page_screenshot_path")
         else "partial"
-        if captured or manifest.get("full_page_screenshot_path")
+        if captured or captured_segment_count or manifest.get("full_page_screenshot_path")
         else "failed"
     )
     if errors:
@@ -440,6 +680,7 @@ def capture_structured_page_evidence(
         analysis_atlas_status = (
             "complete"
             if int(atlas_manifest.get("section_panel_count") or 0) > 0
+            and str((manifest.get("page_segment_capture") or {}).get("status") or "complete") == "complete"
             else "partial"
         )
     except Exception as exc:
@@ -459,32 +700,30 @@ def capture_structured_page_evidence(
     }
 
 
-def _crop_section_from_master(
+def _crop_section_from_master_image(
     *,
-    full_page_path: Path,
+    master: Any,
     section_path: Path,
     bbox: dict[str, Any],
     viewport: dict[str, Any],
     document: dict[str, Any],
 ) -> None:
-    from PIL import Image
-
-    with Image.open(full_page_path) as master:
-        viewport_width = max(1, _int(viewport.get("width"), master.width))
-        document_height = max(1, _int(document.get("height"), master.height))
-        scale_x = master.width / viewport_width
-        scale_y = master.height / document_height
-        left = max(0, min(master.width - 1, math.floor(_int(bbox.get("left"), 0) * scale_x)))
-        top = max(0, min(master.height - 1, math.floor(_int(bbox.get("top"), 0) * scale_y)))
-        right = max(
-            left + 1,
-            min(master.width, math.ceil((_int(bbox.get("left"), 0) + _int(bbox.get("width"), 1)) * scale_x)),
-        )
-        bottom = max(
-            top + 1,
-            min(master.height, math.ceil((_int(bbox.get("top"), 0) + _int(bbox.get("height"), 1)) * scale_y)),
-        )
-        master.crop((left, top, right, bottom)).save(section_path, format="PNG")
+    viewport_width = max(1, _int(viewport.get("width"), master.width))
+    document_height = max(1, _int(document.get("height"), master.height))
+    scale_x = master.width / viewport_width
+    scale_y = master.height / document_height
+    left = max(0, min(master.width - 1, math.floor(_int(bbox.get("left"), 0) * scale_x)))
+    top = max(0, min(master.height - 1, math.floor(_int(bbox.get("top"), 0) * scale_y)))
+    right = max(
+        left + 1,
+        min(master.width, math.ceil((_int(bbox.get("left"), 0) + _int(bbox.get("width"), 1)) * scale_x)),
+    )
+    bottom = max(
+        top + 1,
+        min(master.height, math.ceil((_int(bbox.get("top"), 0) + _int(bbox.get("height"), 1)) * scale_y)),
+    )
+    with master.crop((left, top, right, bottom)) as crop:
+        crop.save(section_path, format="PNG")
 
 
 def _document_metrics(page: Any) -> dict[str, int]:
@@ -523,7 +762,9 @@ def _normalized_anchors(
         candidate["priority"] = _int(raw.get("priority"), 0)
         valid.append(candidate)
 
-    valid.sort(key=lambda item: (_int(item.get("top"), 0), -_int(item.get("priority"), 0), -_int(item.get("height"), 0)))
+    valid.sort(
+        key=lambda item: (_int(item.get("top"), 0), -_int(item.get("priority"), 0), -_int(item.get("height"), 0))
+    )
     deduplicated: list[dict[str, Any]] = []
     for candidate in valid:
         if deduplicated and abs(_int(candidate.get("top"), 0) - _int(deduplicated[-1].get("top"), 0)) <= 64:
@@ -538,7 +779,11 @@ def _normalized_anchors(
     for index, candidate in enumerate(deduplicated):
         if index + 1 < len(deduplicated):
             distance = _int(deduplicated[index + 1].get("top"), 0) - _int(candidate.get("top"), 0)
-            if distance < min_section_height and str(candidate.get("kind") or "") not in {"header", "footer", "navigation"}:
+            if distance < min_section_height and str(candidate.get("kind") or "") not in {
+                "header",
+                "footer",
+                "navigation",
+            }:
                 continue
         compact.append(candidate)
     return compact
@@ -546,7 +791,13 @@ def _normalized_anchors(
 
 def _anchor_score(candidate: dict[str, Any]) -> tuple[int, int, int]:
     landmark = 1 if str(candidate.get("kind") or "") in {"header", "footer", "hero", "navigation"} else 0
-    named = 1 if any(str(candidate.get(key) or "").strip() for key in ("heading", "aria_label", "data_section", "data_component")) else 0
+    named = (
+        1
+        if any(
+            str(candidate.get(key) or "").strip() for key in ("heading", "aria_label", "data_section", "data_component")
+        )
+        else 0
+    )
     return (_int(candidate.get("priority"), 0), landmark, named)
 
 
