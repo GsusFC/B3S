@@ -20,6 +20,7 @@ from src.services.evidence_claim_tile_review import (
     EvidenceClaimTileReviewConflictError,
     EvidenceClaimTileReviewInvalidTransitionError,
     EvidenceClaimTileReviewNotFoundError,
+    EvidenceClaimTileReviewPacketNotFoundError,
     EvidenceClaimTileReviewUnavailableError,
 )
 from src.services.evidence_memory_adjudication import (
@@ -42,12 +43,14 @@ from web.report_store import (
     append_evidence_claim_tile_review_for_domain,
     append_evidence_memory_adjudication_for_domain,
     append_evidence_scoring_recovery_review_for_domain,
+    get_evidence_claim_tile_review_packet_for_domain,
     list_evidence_claim_reconciliations_for_domain,
     list_evidence_claim_tile_reviews_for_domain,
     list_evidence_memory_adjudications_for_domain,
     list_evidence_scoring_recovery_reviews_for_domain,
     load_report,
     new_scan_id,
+    register_evidence_claim_tile_review_packet_for_domain,
 )
 from web.scan_runner import default_brand_name, normalize_url, scan_status, start_scan
 
@@ -485,6 +488,17 @@ def create_evidence_claim_tile_review(
             domain,
             command,
         )
+    except EvidenceClaimTileReviewPacketNotFoundError as exc:
+        raise ApiError(
+            404,
+            "claim_tile_review_packet_not_found",
+            str(exc),
+            details={
+                "review_packet_fingerprint": (
+                    command.review_packet_fingerprint
+                )
+            },
+        ) from exc
     except EvidenceClaimTileReviewNotFoundError as exc:
         raise ApiError(
             404,
@@ -519,6 +533,59 @@ def create_evidence_claim_tile_review(
             503,
             "claim_tile_review_store_unavailable",
             "The durable claim-to-tile review journal is temporarily unavailable.",
+        ) from exc
+
+
+def register_evidence_claim_tile_review_packet(
+    domain: str,
+) -> tuple[dict[str, Any], bool]:
+    """Build and append one exact, private, non-authoritative packet."""
+
+    try:
+        return register_evidence_claim_tile_review_packet_for_domain(
+            domain
+        )
+    except EvidenceClaimTileReviewPacketNotFoundError as exc:
+        raise ApiError(
+            404,
+            "claim_tile_review_packet_source_not_found",
+            str(exc),
+        ) from exc
+    except EvidenceClaimTileReviewUnavailableError as exc:
+        raise ApiError(
+            503,
+            "claim_tile_review_packet_store_unavailable",
+            "The durable claim-to-tile review packet registry is "
+            "temporarily unavailable.",
+        ) from exc
+
+
+def get_evidence_claim_tile_review_packet(
+    domain: str,
+    packet_fingerprint: str,
+) -> dict[str, Any]:
+    """Read one exact registered private reviewer packet."""
+
+    try:
+        return get_evidence_claim_tile_review_packet_for_domain(
+            domain,
+            packet_fingerprint,
+        )
+    except EvidenceClaimTileReviewPacketNotFoundError as exc:
+        raise ApiError(
+            404,
+            "claim_tile_review_packet_not_found",
+            str(exc),
+            details={
+                "review_packet_fingerprint": packet_fingerprint,
+            },
+        ) from exc
+    except EvidenceClaimTileReviewUnavailableError as exc:
+        raise ApiError(
+            503,
+            "claim_tile_review_packet_store_unavailable",
+            "The durable claim-to-tile review packet registry is "
+            "temporarily unavailable.",
         ) from exc
 
 

@@ -496,6 +496,29 @@ class EvidenceClaimTileReviewCreateRequest(
         return value.strip() if isinstance(value, str) else value
 
 
+class EvidenceClaimTileReviewPacketResponse(StrictModel):
+    object: Literal["evidence_claim_tile_review_packet"] = (
+        "evidence_claim_tile_review_packet"
+    )
+    api_version: Literal["v1"] = "v1"
+    domain: str
+    replayed: bool
+    id: str
+    packet_kind: Literal["claim_tile"] = "claim_tile"
+    packet_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    manifest: dict[str, Any]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
+    review_template: list[dict[str, Any]] = Field(
+        default_factory=list
+    )
+    runtime_effect: Literal[False] = False
+    authority: Literal[False] = False
+    automatic_tile_effect: Literal[False] = False
+    automatic_scoring_effect: Literal[False] = False
+    created_at: str
+
+
 class EvidenceClaimTileReviewEvent(StrictModel):
     id: str
     event_id: str

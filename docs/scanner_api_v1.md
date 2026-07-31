@@ -307,15 +307,24 @@ persistence.
 ## Evidence claim-to-tile review journal
 
 ```text
+POST /api/v1/brands/{domain}/evidence-claim-tile-review-packets
+GET  /api/v1/brands/{domain}/evidence-claim-tile-review-packets/{fingerprint}
 GET  /api/v1/brands/{domain}/evidence-claim-tile-reviews
 POST /api/v1/brands/{domain}/evidence-claim-tile-reviews
 ```
 
+The packet endpoints require the dedicated reviewer credential. They
+reconstruct the private claim, source passage, citation, tile contract, and
+mapping identity from immutable report snapshots. PostgreSQL stores the exact
+manifest and candidates append-only; the public ledger continues to omit raw
+claim and quote text.
+
 The review subject is a 64-character `mapping_id` already present in the
 brand's persistent claim-to-tile ledger. A write requires the dedicated
 reviewer credential, an `Idempotency-Key`, and an explicit
-`expected_current_event_id`. The server binds reviewer identity and resolves
-the mapping metadata from PostgreSQL.
+`expected_current_event_id`. Its `review_packet_fingerprint` must name a
+registered packet containing that exact mapping. The server binds reviewer
+identity and resolves the mapping metadata from PostgreSQL.
 
 Every event freezes the exact `source_evidence_id`, `claim_variant_id`,
 `mapping_series_id`, tile, and polarity. Decisions are `accepted`, `disputed`,
