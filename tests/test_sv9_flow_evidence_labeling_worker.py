@@ -70,20 +70,18 @@ def test_label_evidence_pack_enriches_metadata_without_changing_pack_shape() -> 
             )
         ],
     )
-    debug = label_evidence_pack(
-        pack,
-        llm=StubLabelingLLM(
-            [
-                {
-                    "ref": "raw_inputs.0",
-                    "relevant_blocks": ["mission"],
-                    "stance": "supports",
-                    "identity_match": "domain",
-                    "specificity": "implied",
-                }
-            ]
-        ),
+    llm = StubLabelingLLM(
+        [
+            {
+                "ref": "raw_inputs.0",
+                "relevant_blocks": ["mission"],
+                "stance": "supports",
+                "identity_match": "domain",
+                "specificity": "implied",
+            }
+        ]
     )
+    debug = label_evidence_pack(pack, llm=llm)
 
     assert debug["status"] == "labeled"
     assert debug["records_labeled"] == 1
@@ -93,6 +91,13 @@ def test_label_evidence_pack_enriches_metadata_without_changing_pack_shape() -> 
     assert pack.evidence[0].metadata["identity_match_llm"] == "domain"
     assert pack.evidence[0].metadata["specificity"] == "implied"
     assert pack.evidence[0].metadata["semantic_labeling_version"] == EVIDENCE_LABELING_VERSION
+    prompt = json.loads(llm.calls[0]["user"])
+    assert prompt["owned_identity_context"] == [
+        {
+            "url": "",
+            "content": "We turn every training ride into a reward loop.",
+        }
+    ]
 
 
 def test_label_evidence_pack_skips_when_llm_unavailable() -> None:
@@ -140,12 +145,13 @@ def test_label_evidence_pack_logs_identity_divergence_without_overwriting_determ
                     "relevant_blocks": [],
                     "stance": "neutral",
                     "identity_match": "none",
-                    "specificity": "explicit",
+                    "specificity": "incidental",
                 }
             ]
         ),
     )
 
+    assert debug["records_labeled"] == 1
     assert pack.evidence[0].metadata["identity_match"] == "brand_name"
     assert pack.evidence[0].metadata["identity_match_llm"] == "none"
     assert debug["identity_divergences"] == [
@@ -202,7 +208,7 @@ def test_label_cache_reuses_equivalent_records_across_ref_and_order_changes() ->
     assert all(record.metadata["relevant_blocks"] == ["mission"] for record in second.evidence)
 
 
-def test_label_cache_only_sends_materially_new_records_to_provider() -> None:
+def test_label_cache_invalidates_records_when_owned_identity_context_changes() -> None:
     llm = ArtifactCachingLabelingLLM()
     shared = EvidenceRecord(
         ref="raw_inputs.0",
@@ -240,10 +246,10 @@ def test_label_cache_only_sends_materially_new_records_to_provider() -> None:
 
     debug = label_evidence_pack(second, llm=llm)
 
-    assert debug["artifact_cache_hits"] == 1
-    assert debug["provider_records"] == 1
+    assert debug["artifact_cache_hits"] == 0
+    assert debug["provider_records"] == 2
     assert len(llm.provider_calls) == 2
-    assert len(llm.provider_calls[-1]["records"]) == 1
+    assert len(llm.provider_calls[-1]["records"]) == 2
 
 
 def test_label_cache_does_not_store_neutral_artifacts_after_provider_failure() -> None:

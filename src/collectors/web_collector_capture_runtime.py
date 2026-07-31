@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gzip
+import io
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -10,10 +12,43 @@ _DESKTOP_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/123.0.0.0 Safari/537.36"
 )
+_MAX_DISCOVERY_RESOURCE_BYTES = 2_000_000
+_DISCOVERY_RESOURCE_TIMEOUT_SECONDS = 5
 
 
 class WebCollectorCaptureSupport:
     """Fallback HTML/JS rendering capture helpers for web collector."""
+
+    def _fetch_text_resource(self, url: str) -> tuple[str, str]:
+        """Fetch a small public discovery resource such as robots or sitemap."""
+
+        url = self._normalize_request_url(url)
+        request = Request(
+            url,
+            headers={
+                "User-Agent": _DESKTOP_USER_AGENT,
+                "Accept": "text/plain, application/xml, text/xml;q=0.9, */*;q=0.1",
+            },
+        )
+        try:
+            with urlopen(
+                request,
+                timeout=_DISCOVERY_RESOURCE_TIMEOUT_SECONDS,
+            ) as response:
+                raw = response.read(_MAX_DISCOVERY_RESOURCE_BYTES + 1)
+                if len(raw) > _MAX_DISCOVERY_RESOURCE_BYTES:
+                    return "", "discovery_resource_too_large"
+                if raw.startswith(b"\x1f\x8b"):
+                    with gzip.GzipFile(fileobj=io.BytesIO(raw)) as compressed:
+                        raw = compressed.read(
+                            _MAX_DISCOVERY_RESOURCE_BYTES + 1
+                        )
+                    if len(raw) > _MAX_DISCOVERY_RESOURCE_BYTES:
+                        return "", "discovery_resource_too_large"
+                charset = response.headers.get_content_charset() or "utf-8"
+                return raw.decode(charset, errors="replace"), ""
+        except (EOFError, OSError, URLError, TimeoutError, ValueError) as exc:
+            return "", str(exc)
 
     def _fetch_html_fallback(self, url: str) -> tuple[str, str]:
         """Fetch raw HTML directly when Firecrawl returns no useful markdown."""

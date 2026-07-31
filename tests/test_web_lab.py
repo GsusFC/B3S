@@ -1508,6 +1508,41 @@ def test_acquisition_gate_warns_when_web_capture_looks_like_cookie_banner():
     assert "cookie_banner_snippet: Valoramos tu privacidad" in warning["detail"]
 
 
+def test_web_cookie_signal_ignores_footer_controls_and_crawled_policy_pages():
+    from src.collectors.web_collector import WebData
+    from web.scan_runner import _cookie_banner_snippet_from_web_data
+
+    homepage = (
+        "# The app that makes money work\n\n"
+        + ("Send, save, invest, and move money globally. " * 30)
+        + "\n\nDeclineAccept"
+    )
+    web_data = WebData(
+        url="https://example.com",
+        title="The app that makes money work",
+        markdown_content=(
+            homepage
+            + "\n\n---\n## Subpage: https://example.com/cookie-policy\n"
+            + "We use cookies. Accept Reject Preferences."
+        ),
+    )
+
+    assert _cookie_banner_snippet_from_web_data(web_data) == ""
+
+
+def test_web_cookie_signal_keeps_banner_dominated_homepage_warning():
+    from src.collectors.web_collector import WebData
+    from web.scan_runner import _cookie_banner_snippet_from_web_data
+
+    web_data = WebData(
+        url="https://example.com",
+        title="Privacy preferences",
+        markdown_content="We value your privacy. Accept Reject Preferences.",
+    )
+
+    assert "We value your privacy" in _cookie_banner_snippet_from_web_data(web_data)
+
+
 def test_acquisition_artifacts_include_screenshot_and_visual_obstruction(tmp_path, monkeypatch):
     from web.scan_runner import _acquisition_artifacts_from_snapshot
 
@@ -1730,6 +1765,7 @@ def test_scan_view_uses_structured_layout(monkeypatch):
             "id": scan_id,
             "brand_name": "Mercury",
             "url": "https://mercury.com",
+            "created_at": "2026-07-30T13:48:00+00:00",
             "state": "running",
             "phases": [
                 {"key": "capture", "label": "Capture evidence", "state": "running"},
@@ -1821,9 +1857,33 @@ def test_report_view_renders_report(monkeypatch):
             "id": scan_id,
             "brand_name": "Mercury",
             "url": "https://mercury.com",
+            "created_at": "2026-07-30T13:48:00+00:00",
             "score": 81,
             "base_average": 72,
             "reliability_status": "shadow",
+            "canonical_status": "non_canonical",
+            "stability": {
+                "classification": "evaluation_drift",
+                "canonical_status": "non_canonical",
+                "reason_codes": [
+                    "evaluation_changed_without_material_evidence_delta"
+                ],
+                "baseline_comparison": {
+                    "baseline_report_id": "baseline123",
+                    "delta": {
+                        "changed_components": [
+                            {
+                                "component": "core_purpose",
+                                "score_before": 4,
+                                "score_after": 8,
+                                "status_before": "scored",
+                                "status_after": "scored",
+                                "changed_tiles": ["PR3", "PR4"],
+                            }
+                        ]
+                    },
+                },
+            },
             "detected_count": 1,
             "block_count": 1,
             "not_detected": [],
@@ -1832,6 +1892,43 @@ def test_report_view_renders_report(monkeypatch):
             "total_blind_spots": 0,
             "coverage_acquisition": {
                 "owned_url_count": 1,
+                "owned_page_coverage": {
+                    "selection_version": "owned-page-selection-v2",
+                    "known_page_count": 2,
+                    "attempted_page_count": 1,
+                    "captured_page_count": 1,
+                    "coverage_ratio": 0.5,
+                    "visited_pages": [
+                        {
+                            "url": "https://mercury.com",
+                            "status": "captured",
+                            "navigation_status": "homepage",
+                            "observed_language": "en",
+                            "language_confidence": "high",
+                            "declared_language": "en",
+                        }
+                    ],
+                    "not_visited_pages": [
+                        {
+                            "url": "https://mercury.com/orphan",
+                            "reason": "page_budget",
+                            "navigation_status": "sitemap_only",
+                        }
+                    ],
+                    "language_detection": {
+                        "version": "owned-page-language-en-es-v1",
+                        "status": "mixed",
+                        "mixed_language_site": True,
+                        "captured_page_count": 2,
+                        "evaluated_page_count": 2,
+                        "unknown_page_count": 0,
+                        "declared_mismatch_count": 1,
+                        "distribution": [
+                            {"language": "en", "page_count": 1, "share": 0.5},
+                            {"language": "es", "page_count": 1, "share": 0.5},
+                        ],
+                    },
+                },
                 "external_source_count": 0,
                 "absence_record_count": 0,
                 "attempt_record_count": 0,
@@ -1855,6 +1952,27 @@ def test_report_view_renders_report(monkeypatch):
                             "evidencia": "Texto de apoyo.",
                         }
                     ],
+                    "surface_hierarchy": {
+                        "schema_version": "component-surface-hierarchy-v1",
+                        "presence_status": "detected",
+                        "hierarchy_status": "sitemap_only",
+                        "owned_surface_count": 1,
+                        "counts": {
+                            "homepage": 0,
+                            "linked_from_home": 0,
+                            "sitemap_only": 1,
+                            "owned_unknown": 0,
+                            "external": 0,
+                        },
+                        "owned_surfaces": [
+                            {
+                                "url": "https://mercury.com/orphan",
+                                "navigation_status": "sitemap_only",
+                                "captured": True,
+                                "cited_refs": ["owned.orphan"],
+                            }
+                        ],
+                    },
                     "block": None,
                 },
                 {
@@ -1895,6 +2013,10 @@ def test_report_view_renders_report(monkeypatch):
     assert response.status_code == 200
     assert "Mercury" in response.text
     assert "https://mercury.com" in response.text
+    assert "Escaneado: 2026-07-30 13:48:00 UTC" in response.text
+    assert "1 de 2" in response.text
+    assert "https://mercury.com/orphan" in response.text
+    assert "page_budget" in response.text
     assert "report-hero" in response.text
     assert "Brand3 Score" in response.text
     assert "--score-width: 81%;" in response.text
@@ -1907,6 +2029,14 @@ def test_report_view_renders_report(monkeypatch):
     assert 'class="tiles"' not in response.text
     assert "PX9" not in response.text
     assert "P2" in response.text
+    assert "evidencia propia localizable solo mediante sitemap" in response.text
+    assert "https://mercury.com/orphan" in response.text
+    assert "inglés 1 · español 1" in response.text
+    assert "mezcla de idiomas" in response.text
+    assert "idioma inglés (high)" in response.text
+    assert "Deriva de evaluación detectada" in response.text
+    assert "baseline123" in response.text
+    assert "Propósito</strong>: 4 → 8" in response.text
     assert 'id="brand_idea"' in response.text
     assert "component-card--third" in response.text
     assert 'id="coherencia"' in response.text
@@ -1996,7 +2126,33 @@ def test_compose_report_preserves_canonical_sv9_tile_profile(monkeypatch):
         "source_run_id": 1,
         "flow": {
             "candidate": {"interpretation": {"blocks": {}}, "evidence_pack": {"evidence": []}},
-            "interpretation_debug": {},
+            "interpretation_debug": {
+                "evidence_coverage": {
+                    "component_hierarchy": {
+                        "magnetism": {
+                            "schema_version": "component-surface-hierarchy-v1",
+                            "presence_status": "detected",
+                            "hierarchy_status": "sitemap_only",
+                            "owned_surface_count": 1,
+                            "counts": {
+                                "homepage": 0,
+                                "linked_from_home": 0,
+                                "sitemap_only": 1,
+                                "owned_unknown": 0,
+                                "external": 0,
+                            },
+                            "owned_surfaces": [
+                                {
+                                    "url": "https://optiak.com/thesis",
+                                    "navigation_status": "sitemap_only",
+                                    "captured": True,
+                                    "cited_refs": ["owned.thesis"],
+                                }
+                            ],
+                        }
+                    }
+                }
+            },
         },
         "sv9": {
             "brand3_score": 61,
@@ -2045,6 +2201,7 @@ def test_compose_report_preserves_canonical_sv9_tile_profile(monkeypatch):
     assert "tensión narrativa" in magnetism["veredicto"]
     assert magnetism["tiles"][0]["id"] == ids[3]
     assert magnetism["tiles"][1]["contexto_requerido"] == "Aporta entrevistas o métricas de adopción."
+    assert magnetism["surface_hierarchy"]["hierarchy_status"] == "sitemap_only"
 
 
 def test_attach_sv9_editorial_only_requests_components_with_unusable_prose():
@@ -2352,7 +2509,18 @@ def test_report_markdown_exports_raw_sv9_contract(monkeypatch):
             "brand_name": "Optiak",
             "url": "https://optiak.com",
             "score": 61,
-            "components": [],
+            "components": [
+                {
+                    "key": "magnetism",
+                    "surface_hierarchy": {
+                        "hierarchy_status": "mixed_with_sitemap_only",
+                        "counts": {
+                            "linked_from_home": 1,
+                            "sitemap_only": 1,
+                        },
+                    },
+                }
+            ],
             "raw": {
                 "sv9": {
                     "result": {
@@ -2393,6 +2561,8 @@ def test_report_markdown_exports_raw_sv9_contract(monkeypatch):
     assert "Brand3 Score: **61/100**" in response.text
     assert "## Magnetism" in response.text
     assert "Lectura editorial de Magnetism." in response.text
+    assert "Jerarquía: **parte de la evidencia está fuera de navegación**" in response.text
+    assert "Superficies propias fuera de navegación: **1**" in response.text
 
 
 def test_report_view_renders_coherencia_once_and_prioritizes_editorial_message(monkeypatch):

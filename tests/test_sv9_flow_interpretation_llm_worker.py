@@ -990,6 +990,116 @@ def test_adjudicator_rejects_rescue_when_quote_is_not_literal() -> None:
     assert adjudicator["validation_error"] == "quote_not_literal_substring"
 
 
+def test_vision_adjudicator_rejects_research_title_without_future_direction() -> None:
+    class AdjudicatorLLM:
+        api_key = "test"
+
+        def _call_json(self, *args, **kwargs):
+            return {
+                "state": "ok",
+                "quote": "Redefining Scouting Intelligence",
+                "ref": "raw_inputs.0",
+                "reason": "The research title implies a future category direction.",
+                "confidence": "high",
+                "inference_type": "explicit_statement",
+            }
+
+    pack = BrandEvidencePack(
+        brand_name="SoccerSolver",
+        url="https://soccersolver.com",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content=(
+                    "Redefining Scouting Intelligence: A Quantitative "
+                    "Framework for Player Similarity."
+                ),
+            )
+        ],
+    )
+    raw = {
+        "blocks": {
+            "vision": {
+                "detected": True,
+                "content": "Redefine scouting through quantitative methods.",
+                "confidence": "high",
+                "evidence_refs": ["raw_inputs.0"],
+                "rationale": "The research title implies category change.",
+            }
+        },
+        "limitations": [],
+    }
+
+    interpretation = normalize_llm_interpretation_response(
+        raw,
+        pack,
+        adjudicator_llm=AdjudicatorLLM(),
+        block_evidence_shortlists={"vision": ["raw_inputs.0"]},
+    )
+
+    provenance = interpretation.blocks["vision"]["detection_provenance"]
+    assert interpretation.blocks["vision"]["detected"] is False
+    assert provenance["final_source"] == "gate_rejected"
+    assert (
+        provenance["adjudicator"]["validation_error"]
+        == "vision_quote_lacks_future_direction"
+    )
+
+
+def test_vision_adjudicator_accepts_literal_future_direction() -> None:
+    class AdjudicatorLLM:
+        api_key = "test"
+
+        def _call_json(self, *args, **kwargs):
+            return {
+                "state": "ok",
+                "quote": "We are moving toward a world of autonomous scouting.",
+                "ref": "raw_inputs.0",
+                "reason": "The quote states the future world the brand seeks.",
+                "confidence": "high",
+                "inference_type": "explicit_statement",
+            }
+
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content="We are moving toward a world of autonomous scouting.",
+            )
+        ],
+    )
+    raw = {
+        "blocks": {
+            "vision": {
+                "detected": True,
+                "content": "A world of autonomous scouting.",
+                "confidence": "high",
+                "evidence_refs": ["raw_inputs.0"],
+                "rationale": "The page states a future world.",
+            }
+        },
+        "limitations": [],
+    }
+
+    interpretation = normalize_llm_interpretation_response(
+        raw,
+        pack,
+        adjudicator_llm=AdjudicatorLLM(),
+        block_evidence_shortlists={"vision": ["raw_inputs.0"]},
+    )
+
+    provenance = interpretation.blocks["vision"]["detection_provenance"]
+    assert interpretation.blocks["vision"]["detected"] is True
+    assert provenance["final_source"] == "adjudicator_rescued_gate_rejection"
+    assert provenance["adjudicator"]["validation_error"] == ""
+
+
 def test_warn_gate_disagreement_detects_when_adjudicator_verifies_literal_quote() -> None:
     class AdjudicatorLLM:
         api_key = "test"

@@ -302,14 +302,16 @@ def _sanitize_report_language(report: dict[str, Any] | None) -> dict[str, Any]:
 
 def _scan_payload_for_markdown(report: dict[str, Any]) -> dict[str, Any]:
     result = dict(_raw_sv9_result(report))
+    projected_components = {
+        str(component.get("key") or component.get("component") or ""): component
+        for component in report.get("components") or []
+        if isinstance(component, dict)
+        and str(component.get("key") or component.get("component") or "")
+    }
     if not result:
         components = {}
-        for component in report.get("components") or []:
-            if not isinstance(component, dict):
-                continue
-            key = str(component.get("key") or component.get("component") or "")
-            if key:
-                components[key] = dict(component)
+        for key, component in projected_components.items():
+            components[key] = dict(component)
         result = {
             "brand3_score": report.get("score"),
             "base_average": report.get("base_average"),
@@ -318,11 +320,42 @@ def _scan_payload_for_markdown(report: dict[str, Any]) -> dict[str, Any]:
             "reliability_status": report.get("reliability_status"),
             "components": components,
         }
+    elif isinstance(result.get("components"), dict):
+        components = {}
+        for key, component in result["components"].items():
+            if not isinstance(component, dict):
+                continue
+            merged = dict(component)
+            projection = projected_components.get(str(key)) or {}
+            if isinstance(projection.get("surface_hierarchy"), dict):
+                merged["surface_hierarchy"] = dict(
+                    projection["surface_hierarchy"]
+                )
+            components[str(key)] = merged
+        result["components"] = components
     result.setdefault("display_name", report.get("brand_name"))
     result.setdefault("brand_name", report.get("brand_name"))
     result.setdefault("url", report.get("url"))
     result.setdefault("brand3_score", report.get("score"))
     result.setdefault("pipeline_commit_sha", report.get("pipeline_commit_sha") or "unknown")
+    result.setdefault("created_at", report.get("created_at"))
+    result.setdefault(
+        "canonical_status",
+        report.get("canonical_status")
+        or (report.get("stability") or {}).get("canonical_status"),
+    )
+    result.setdefault(
+        "canonical_reason_codes",
+        (report.get("stability") or {}).get("reason_codes") or [],
+    )
+    result.setdefault(
+        "stability",
+        report.get("stability") or {},
+    )
+    result.setdefault(
+        "coverage_acquisition",
+        report.get("coverage_acquisition") or {},
+    )
     return result
 
 

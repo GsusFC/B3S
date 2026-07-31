@@ -9,9 +9,9 @@ Evaluation principles:
   x2 multipliers and the Magnetism cap are computed by code, never by the model.
 
 The evidence/motive contract:
-- `ok` requires a verbatim `evidencia` quote from the snapshot. An `ok` without a
-  quote is invalid and triggers a retry; if it survives the last attempt it is
-  demoted to `no`.
+- `ok` requires a verbatim `evidencia` quote from the snapshot. A missing or
+  non-verbatim quote is invalid and triggers a retry; if it survives the last
+  attempt it is demoted to `no`.
 - `no` and `sin_evidencia` require a `motivo`; a missing motivo is auto-filled
   rather than retried, to avoid burning attempts on cheap omissions.
 - Out-of-catalogue states or missing tile coverage trigger a retry with the
@@ -21,6 +21,7 @@ The evidence/motive contract:
 from __future__ import annotations
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -49,10 +50,14 @@ from src.sv9.rubric import (
     tile_ids,
 )
 
-SV9_EVALUATOR_PROMPT_VERSION = "baldosas-v3.1-evaluator-v1"
+SV9_EVALUATOR_PROMPT_VERSION = "baldosas-v3.1-evaluator-v2"
 SV9_EVALUATOR_TIMEOUT_SECONDS = 90
 SV9_EVALUATOR_MAX_WORKERS = 4
 SV9_EVALUATOR_MAX_ATTEMPTS = 2
+_MIN_EMBEDDED_LITERAL_CHARS = 8
+_EMBEDDED_QUOTE_RE = re.compile(
+    r"""["'“”‘’`]([^"'“”‘’`]+)["'“”‘’`]"""
+)
 # Greedy decoding: the tile evaluator must be deterministic. At temperature 0.1
 # borderline components collapsed 0<->5 across identical frozen inputs (pure
 # sampling noise, sd=0 at temp 0 over 32 runs). Only this role changes; other
@@ -70,7 +75,14 @@ _TILES_JSON_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "id": {"type": "string"},
                     "estado": {"type": "string", "enum": list(TILE_ESTADOS)},
-                    "evidencia": {"type": "string"},
+                    "evidencia": {
+                        "type": "string",
+                        "description": (
+                            "Solo el substring literal exacto copiado del "
+                            "snapshot cuando estado=ok; sin explicación, "
+                            "prefijo, paráfrasis ni comillas añadidas."
+                        ),
+                    },
                     "motivo": {"type": "string"},
                     "contexto_requerido": {"type": "string"},
                 },
@@ -102,7 +114,7 @@ REGLAS ANTI-SESGO
 
 # Three-state protocol (briefing sections 1 and 4): shared by all evaluators.
 _PROTOCOL = """PROTOCOLO DE BALDOSAS (tres estados, dos significados de cero)
-- "ok": baldosa encendida. La marca lo comunica o lo cumple. Requiere "evidencia": cita LITERAL del snapshot. Sin cita literal, no es ok.
+- "ok": baldosa encendida. La marca lo comunica o lo cumple. Requiere "evidencia": cita LITERAL del snapshot. El campo debe contener SOLO el substring exacto copiado: sin introducción, explicación, paráfrasis ni comillas añadidas. Sin cita literal, no es ok.
 - "no": baldosa apagada. El snapshot demuestra que la marca NO lo comunica o NO lo cumple. Es un fallo de marca. Requiere "motivo".
 - "sin_evidencia": punto ciego. La prueba que encendería la baldosa el snapshot estructuralmente NO puede contenerla (cohorte competitivo, experiencia real de producto, dinámica interna de comunidad). No es un fallo de marca. Requiere "motivo" y, si procede, "contexto_requerido": qué aportaría el usuario para iluminarlo.
 
@@ -240,6 +252,7 @@ def evaluate_component(
         detection_limitations=[str(item) for item in block.get("limitations") or []],
         evidence_source_summary=_int_dict(block.get("evidence_source_summary")),
         evidence=[str(e) for e in (block.get("evidence") or [])],
+        literal_sources=_component_literal_sources(block, signals),
     )
 
 
@@ -260,18 +273,21 @@ def evaluate_coherencia(
             error="llm_unavailable",
         )
 
+    literal_sources = _coherencia_literal_sources(components, tldr)
     user_prompt = _build_coherencia_prompt(
         components=components,
         tldr=tldr,
         signals=signals,
         brand_name=brand_name,
         url=url,
+        literal_sources=literal_sources,
     )
     return _run_tile_call(
         "coherencia",
         system=_COHERENCIA_SYSTEM_PROMPT,
         user=user_prompt,
         llm=llm,
+        literal_sources=literal_sources,
     )
 
 
@@ -288,6 +304,7 @@ def _run_tile_call(
     detection_limitations: list[str] | None = None,
     evidence_source_summary: dict[str, int] | None = None,
     evidence: list[str] | None = None,
+    literal_sources: list[str] | None = None,
 ) -> ComponentResult:
     ids = tile_ids(key)
     requires_veredicto = key == "coherencia"
@@ -311,7 +328,16 @@ def _run_tile_call(
             last_error = f"evaluator_exception: {exc}"
             break
 
-        verdicts, error = _normalize_tiles(raw, ids, lenient=is_last)
+        verdicts, error = _normalize_tiles(
+            raw,
+            ids,
+            lenient=is_last,
+            literal_sources=(
+                evidence
+                if literal_sources is None
+                else literal_sources
+            ),
+        )
         veredicto = str((raw or {}).get("veredicto") or "").strip() if isinstance(raw, dict) else ""
         message = spanish_generated_text((raw or {}).get("message")) if isinstance(raw, dict) else ""
         if verdicts is not None:
@@ -349,7 +375,10 @@ def _run_tile_call(
         user_with_feedback = (
             f"{user}\n\nTu respuesta anterior fue inválida: {error}. "
             "Corrige y devuelve JSON estricto con una baldosa por cada id, "
-            "evidencia literal en cada 'ok' y motivo en cada 'no' y 'sin_evidencia'."
+            "evidencia literal en cada 'ok' y motivo en cada 'no' y 'sin_evidencia'. "
+            "En cada 'ok', `evidencia` debe ser SOLO el substring exacto copiado "
+            "de CITAS DE EVIDENCIA: sin explicación, introducción, paráfrasis "
+            "ni comillas añadidas."
             + (" Incluye el campo 'veredicto'." if requires_veredicto else "")
         )
 
@@ -399,6 +428,55 @@ def _int_dict(value: Any) -> dict[str, int]:
         except (TypeError, ValueError):
             continue
     return out
+
+
+def _component_literal_sources(
+    block: dict[str, Any],
+    signals: list[dict[str, Any]],
+) -> list[str]:
+    sources = [
+        str(item)
+        for item in block.get("evidence") or []
+        if str(item or "").strip()
+    ]
+    for signal in signals:
+        for key in ("value", "detail", "rationale"):
+            value = str(signal.get(key) or "").strip()
+            if value and value not in sources:
+                sources.append(value)
+    return sources
+
+
+def _coherencia_literal_sources(
+    components: dict[str, ComponentResult],
+    tldr: dict[str, Any],
+    *,
+    limit: int = 16,
+) -> list[str]:
+    sources: list[str] = []
+    for key in PRESENTATION_ORDER:
+        component = components.get(key)
+        if component is None:
+            continue
+        for item in component.evidence:
+            value = str(item or "").strip()
+            if value and value not in sources:
+                sources.append(value)
+            if len(sources) >= limit:
+                return sources
+    for key in PRESENTATION_ORDER:
+        spec = COMPONENTS[key]
+        tldr_key = spec.get("tldr_key")
+        block = tldr.get(tldr_key) if tldr_key else None
+        if not isinstance(block, dict):
+            continue
+        for item in block.get("evidence") or []:
+            value = str(item or "").strip()
+            if value and value not in sources:
+                sources.append(value)
+            if len(sources) >= limit:
+                return sources
+    return sources
 
 
 def _apply_sv9_flow_tile_signal_overrides(
@@ -499,13 +577,15 @@ def _normalize_tiles(
     ids: list[str],
     *,
     lenient: bool,
+    literal_sources: list[str],
 ) -> tuple[list[TileVerdict] | None, str]:
     """Validate the LLM payload into one verdict per tile.
 
     Returns (verdicts, "") on success or (None, error) when the payload should
     be retried. On the last attempt (`lenient`), recoverable problems are fixed
     in place rather than retried: `ok` without evidence is demoted to `no`,
-    missing motivos are auto-filled.
+    missing motivos are auto-filled. `ok` evidence must be a normalized
+    substring of one of the exact evidence snippets supplied to the evaluator.
     """
     if not isinstance(raw, dict):
         return None, "la respuesta no es un objeto JSON"
@@ -540,7 +620,10 @@ def _normalize_tiles(
         by_id.setdefault(tile_id, TileVerdict(
             tile_id=tile_id,
             estado=estado if estado in TILE_ESTADOS else ESTADO_NO,
-            evidencia=str(item.get("evidencia") or "").strip(),
+            evidencia=_canonical_literal_quote(
+                str(item.get("evidencia") or "").strip(),
+                literal_sources,
+            ),
             motivo=str(item.get("motivo") or "").strip(),
             contexto_requerido=str(item.get("contexto_requerido") or "").strip(),
         ))
@@ -558,8 +641,24 @@ def _normalize_tiles(
         no_quote = [
             tid for tid, v in by_id.items() if v.estado == ESTADO_OK and not v.evidencia
         ]
-        if no_quote:
-            return None, f"'ok' sin evidencia literal en: {', '.join(no_quote)}"
+        non_literal_quote = [
+            tid
+            for tid, verdict in by_id.items()
+            if (
+                verdict.estado == ESTADO_OK
+                and verdict.evidencia
+                and not _literal_quote_in_sources(
+                    verdict.evidencia,
+                    literal_sources,
+                )
+            )
+        ]
+        invalid_quote = no_quote + non_literal_quote
+        if invalid_quote:
+            return None, (
+                "'ok' sin evidencia literal verificable en: "
+                f"{', '.join(invalid_quote)}"
+            )
 
     # Lenient pass (last attempt): fill the gaps instead of failing.
     if missing and not lenient:
@@ -575,11 +674,20 @@ def _normalize_tiles(
                 TileVerdict(tile_id=tid, estado=ESTADO_NO, motivo="sin veredicto del evaluador")
             )
             continue
-        if verdict.estado == ESTADO_OK and not verdict.evidencia:
+        if (
+            verdict.estado == ESTADO_OK
+            and (
+                not verdict.evidencia
+                or not _literal_quote_in_sources(
+                    verdict.evidencia,
+                    literal_sources,
+                )
+            )
+        ):
             verdict = TileVerdict(
                 tile_id=tid,
                 estado=ESTADO_NO,
-                motivo="degradada: 'ok' sin evidencia literal citada",
+                motivo="degradada: 'ok' sin evidencia literal verificable",
             )
         if verdict.estado in (ESTADO_NO, ESTADO_SIN_EVIDENCIA) and not verdict.motivo:
             verdict.motivo = (
@@ -593,6 +701,46 @@ def _normalize_tiles(
             verdict.contexto_requerido = spanish_tile_contexto(verdict.contexto_requerido)
         normalized.append(verdict)
     return normalized, ""
+
+
+def _literal_quote_in_sources(
+    quote: str,
+    sources: list[str],
+) -> bool:
+    normalized_quote = " ".join(str(quote or "").split()).casefold()
+    if not normalized_quote:
+        return False
+    return any(
+        normalized_quote
+        in " ".join(str(source or "").split()).casefold()
+        for source in sources
+        if str(source or "").strip()
+    )
+
+
+def _canonical_literal_quote(
+    value: str,
+    sources: list[str],
+) -> str:
+    evidence = str(value or "").strip()
+    if not evidence or _literal_quote_in_sources(evidence, sources):
+        return evidence
+    fragments = sorted(
+        {
+            fragment.strip()
+            for fragment in _EMBEDDED_QUOTE_RE.findall(evidence)
+            if len(" ".join(fragment.split())) >= _MIN_EMBEDDED_LITERAL_CHARS
+        },
+        key=lambda fragment: (-len(fragment), fragment.casefold()),
+    )
+    return next(
+        (
+            fragment
+            for fragment in fragments
+            if _literal_quote_in_sources(fragment, sources)
+        ),
+        evidence,
+    )
 
 
 def _block_content_text(block: dict[str, Any]) -> str:
@@ -757,6 +905,7 @@ def _build_coherencia_prompt(
     signals: list[dict[str, Any]],
     brand_name: str,
     url: str,
+    literal_sources: list[str],
 ) -> str:
     spec = COMPONENTS["coherencia"]
     pieces = []
@@ -784,6 +933,9 @@ EJE INTERNO — LAS 9 PIEZAS SOBRE LA MESA (textos detectados):
 
 EJE EXTERNO — SEÑALES DE CONSISTENCIA CROSS-SURFACE:
 {_signals_lines(signals)}
+
+CITAS DE EVIDENCIA DISPONIBLES:
+{chr(10).join(f"- {quote}" for quote in literal_sources) if literal_sources else "(none)"}
 
 RÚBRICA DE BALDOSAS (evalúa cada una de forma independiente):
 {_tiles_lines('coherencia')}

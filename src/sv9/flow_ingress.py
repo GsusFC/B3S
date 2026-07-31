@@ -18,6 +18,7 @@ from src.sv9_flow.contracts import EvidenceRecord, Sv9FlowCandidate
 SV9_FLOW_INGRESS_VERSION = "sv9-flow-ingress-v1"
 SV9_FLOW_DETECTION_MODE = "sv9_flow"
 _MAX_EVIDENCE_ITEMS = 5
+_MAX_EVALUATION_EVIDENCE_ITEMS = 8
 _MAX_EVIDENCE_CHARS = 700
 _SOURCE_CLASS_OWNED_COPY = "owned_copy"
 _SOURCE_CLASS_EXTERNAL_PROOF = "external_proof"
@@ -42,6 +43,12 @@ def detection_blocks_from_flow_candidate(candidate: Sv9FlowCandidate) -> dict[st
         if not isinstance(block, dict):
             continue
         refs = _unique_strings(candidate.interpretation.evidence_refs.get(block_name, []))
+        evaluation_refs = _existing_refs(
+            candidate.evaluation_evidence_refs.get(block_name, []),
+            evidence_by_ref,
+        )
+        if not evaluation_refs:
+            evaluation_refs = refs
         content = str(block.get("content") or "").strip()
         # SV9 must never score a detected block without evidence refs,
         # regardless of which producer built the candidate.
@@ -56,13 +63,39 @@ def detection_blocks_from_flow_candidate(candidate: Sv9FlowCandidate) -> dict[st
             "mode": SV9_FLOW_DETECTION_MODE,
             "rationale": str(block.get("rationale") or "").strip(),
             "limitations": limitations,
-            "evidence": _evidence_snippets(refs, evidence_by_ref),
+            "evidence": _evidence_snippets(
+                evaluation_refs,
+                evidence_by_ref,
+                limit=_MAX_EVALUATION_EVIDENCE_ITEMS,
+            ),
             "evidence_refs": refs[:_MAX_EVIDENCE_ITEMS],
-            "evidence_source_summary": _source_summary(refs, evidence_by_ref),
+            "evaluation_evidence_refs": evaluation_refs,
+            "evaluation_evidence_version": (
+                candidate.evaluation_evidence_version
+            ),
+            "evidence_source_summary": _source_summary(
+                evaluation_refs,
+                evidence_by_ref,
+            ),
+            "citation_source_summary": _source_summary(
+                refs,
+                evidence_by_ref,
+            ),
             "source": "sv9_flow",
             "ingress_version": SV9_FLOW_INGRESS_VERSION,
         }
     return blocks
+
+
+def _existing_refs(
+    refs: list[str],
+    evidence_by_ref: dict[str, EvidenceRecord],
+) -> list[str]:
+    return [
+        ref
+        for ref in _unique_strings(refs)
+        if ref in evidence_by_ref
+    ][:_MAX_EVALUATION_EVIDENCE_ITEMS]
 
 
 def flow_candidate_extra_signals(candidate: Sv9FlowCandidate) -> dict[str, list[dict[str, Any]]]:
@@ -121,6 +154,8 @@ def _canonical_signal_refs(
 def _evidence_snippets(
     refs: list[str],
     evidence_by_ref: dict[str, EvidenceRecord],
+    *,
+    limit: int = _MAX_EVIDENCE_ITEMS,
 ) -> list[str]:
     snippets: list[str] = []
     for ref in refs:
@@ -131,7 +166,7 @@ def _evidence_snippets(
         if not content:
             continue
         snippets.append(content[:_MAX_EVIDENCE_CHARS])
-    return _unique_strings(snippets)[:_MAX_EVIDENCE_ITEMS]
+    return _unique_strings(snippets)[:limit]
 
 
 def _source_summary(

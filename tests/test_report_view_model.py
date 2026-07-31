@@ -158,6 +158,195 @@ def test_acquisition_artifact_uses_safe_visible_label_instead_of_raw_url():
     assert artifact["chip_class"] == "ok"
 
 
+def test_acquisition_view_model_exposes_owned_page_denominator_and_reasons():
+    vm = build_report_view_model(
+        {
+            "id": "r1",
+            "brand_name": "Optiak",
+            "url": "https://optiak.com",
+            "created_at": "2026-07-30T13:48:00+00:00",
+            "score": 64,
+            "components": [],
+            "coverage_acquisition": {
+                "owned_url_count": 5,
+                "owned_page_coverage": {
+                    "selection_version": "owned-page-selection-v2",
+                    "known_page_count": 4,
+                    "attempted_page_count": 3,
+                    "captured_page_count": 3,
+                    "coverage_ratio": 0.75,
+                    "visited_pages": [
+                        {
+                            "url": "https://optiak.com",
+                            "status": "captured",
+                            "navigation_status": "homepage",
+                        }
+                    ],
+                    "not_visited_pages": [
+                        {
+                            "url": "https://optiak.com/orphan",
+                            "reason": "page_budget",
+                            "navigation_status": "sitemap_only",
+                        }
+                    ],
+                    "latest_lastmod": "2026-07-29",
+                    "language_detection": {
+                        "version": "owned-page-language-en-es-v1",
+                        "status": "mixed",
+                        "mixed_language_site": True,
+                        "captured_page_count": 3,
+                        "evaluated_page_count": 3,
+                        "unknown_page_count": 0,
+                        "declared_mismatch_count": 1,
+                        "distribution": [
+                            {
+                                "language": "en",
+                                "page_count": 2,
+                                "share": 0.6667,
+                            },
+                            {
+                                "language": "es",
+                                "page_count": 1,
+                                "share": 0.3333,
+                            },
+                        ],
+                    },
+                },
+            },
+        }
+    )
+
+    assert vm["created_at_display"] == "2026-07-30 13:48:00 UTC"
+    assert vm["acquisition"]["metrics"]["owned_url_count"] == 3
+    assert vm["acquisition"]["owned_pages"]["coverage_label"] == "3 de 4"
+    assert vm["acquisition"]["owned_pages"]["coverage_percent"] == 75
+    assert vm["acquisition"]["owned_pages"]["not_visited_pages"] == [
+        {
+            "url": "https://optiak.com/orphan",
+            "role": "",
+            "source": "",
+            "navigation_status": "sitemap_only",
+            "status": "",
+            "reason": "page_budget",
+            "lastmod": "",
+            "observed_language": "",
+            "observed_language_label": "",
+            "language_confidence": "",
+            "declared_language": "",
+            "declared_language_mismatch": False,
+        }
+    ]
+    language = vm["acquisition"]["owned_pages"]["language_detection"]
+    assert language["summary"] == "inglés 2 · español 1"
+    assert language["mixed_language_site"] is True
+
+
+def test_component_view_model_exposes_hidden_evidence_hierarchy():
+    vm = build_report_view_model(
+        {
+            "id": "r1",
+            "brand_name": "Optiak",
+            "url": "https://optiak.com",
+            "score": 64,
+            "components": [
+                {
+                    "key": "mission",
+                    "label": "Misión",
+                    "score": 4,
+                    "scale": 5,
+                    "status": "scored",
+                    "detected_content": "Misión detectada.",
+                    "surface_hierarchy": {
+                        "schema_version": "component-surface-hierarchy-v1",
+                        "presence_status": "detected",
+                        "hierarchy_status": "mixed_with_sitemap_only",
+                        "owned_surface_count": 2,
+                        "counts": {
+                            "linked_from_home": 1,
+                            "sitemap_only": 1,
+                        },
+                        "owned_surfaces": [
+                            {
+                                "url": "https://optiak.com/about",
+                                "navigation_status": "linked_from_home",
+                                "captured": True,
+                                "cited_refs": ["owned.about"],
+                            },
+                            {
+                                "url": "https://optiak.com/thesis",
+                                "navigation_status": "sitemap_only",
+                                "captured": False,
+                                "cited_refs": ["owned.thesis"],
+                            },
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+
+    hierarchy = vm["components"][0]["card"]["surface_hierarchy"]
+    assert hierarchy["label"] == "parte de la evidencia está fuera de navegación"
+    assert hierarchy["warns_hidden_content"] is True
+    assert hierarchy["counts"]["sitemap_only"] == 1
+    assert hierarchy["owned_surfaces"][1] == {
+        "url": "https://optiak.com/thesis",
+        "navigation_status": "sitemap_only",
+        "captured": False,
+        "cited_ref_count": 1,
+    }
+
+
+def test_report_view_model_exposes_evaluation_drift_against_baseline():
+    vm = build_report_view_model(
+        {
+            "id": "candidate",
+            "brand_name": "Optiak",
+            "url": "https://optiak.com",
+            "score": 66,
+            "canonical_status": "non_canonical",
+            "components": [],
+            "stability": {
+                "classification": "evaluation_drift",
+                "canonical_status": "non_canonical",
+                "reason_codes": [
+                    "evaluation_changed_without_material_evidence_delta"
+                ],
+                "baseline_comparison": {
+                    "baseline_report_id": "baseline",
+                    "delta": {
+                        "changed_components": [
+                            {
+                                "component": "core_purpose",
+                                "score_before": 4,
+                                "score_after": 8,
+                                "status_before": "scored",
+                                "status_after": "scored",
+                                "changed_tiles": ["PR3", "PR4"],
+                            }
+                        ]
+                    },
+                },
+            },
+        }
+    )
+
+    assert vm["stability"]["show"] is True
+    assert vm["stability"]["title"] == "Deriva de evaluación detectada"
+    assert vm["stability"]["baseline_report_id"] == "baseline"
+    assert vm["stability"]["changed_components"] == [
+        {
+            "key": "core_purpose",
+            "label": "Propósito",
+            "score_before": 4,
+            "score_after": 8,
+            "status_before": "scored",
+            "status_after": "scored",
+            "changed_tiles": ["PR3", "PR4"],
+        }
+    ]
+
+
 def test_attributes_and_values_cards_expose_compact_terms():
     vm = build_report_view_model(
         {

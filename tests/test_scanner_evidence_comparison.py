@@ -135,6 +135,136 @@ def test_missing_previous_sources_under_warning_is_acquisition_regression() -> N
     assert comparison.delta["verified_removed_urls"] == []
 
 
+def test_snapshot_excludes_identity_quarantine_from_material_comparison() -> None:
+    owned = _evidence(
+        "web",
+        "web",
+        "owned_copy",
+        "https://example.com",
+        "Owned copy.",
+    )
+    proof = _evidence(
+        "proof",
+        "exa",
+        "external_proof",
+        "https://press.test/story",
+        "Independent proof.",
+    )
+    baseline = _report(
+        "baseline",
+        "2026-07-26T00:00:00Z",
+        evidence=[
+            owned,
+            proof,
+            _evidence(
+                "homonym.old",
+                "exa",
+                "external_proof",
+                "https://other-example.test",
+                "A different same-name company.",
+            ),
+        ],
+    )
+    candidate = _report(
+        "candidate",
+        "2026-07-27T00:00:00Z",
+        evidence=[
+            owned,
+            proof,
+            _evidence(
+                "homonym.new",
+                "exa",
+                "external_proof",
+                "https://another-example.test",
+                "Another different same-name company.",
+            ),
+        ],
+    )
+    _set_identity_quarantine(baseline, "homonym.old")
+    _set_identity_quarantine(candidate, "homonym.new")
+
+    baseline_snapshot = build_evidence_snapshot(baseline)
+    candidate_snapshot = build_evidence_snapshot(candidate)
+    comparison = compare_reports(baseline, candidate)
+
+    assert baseline_snapshot.external_count == 1
+    assert candidate_snapshot.external_count == 1
+    assert comparison.classification == "stable"
+    assert comparison.acquisition_comparable is True
+
+
+def test_same_domain_exa_result_is_owned_not_independent_external() -> None:
+    report = _report(
+        "candidate",
+        "2026-07-27T00:00:00Z",
+        evidence=[
+            _evidence(
+                "web",
+                "web",
+                "owned_copy",
+                "https://example.com",
+                "Owned homepage.",
+            ),
+            _evidence(
+                "exa.owned",
+                "exa",
+                "external_proof",
+                "https://www.example.com/about",
+                "Official about page discovered by Exa.",
+            ),
+            _evidence(
+                "exa.press",
+                "exa",
+                "external_proof",
+                "https://press.test/story",
+                "Independent press coverage.",
+            ),
+        ],
+    )
+
+    snapshot = build_evidence_snapshot(report)
+
+    assert snapshot.owned_count == 2
+    assert snapshot.external_count == 1
+    assert snapshot.independent_external_cluster_count == 1
+
+
+def test_lost_same_domain_exa_result_is_owned_evidence_loss() -> None:
+    shared = _evidence(
+        "web",
+        "web",
+        "owned_copy",
+        "https://example.com",
+        "Owned homepage.",
+    )
+    baseline = _report(
+        "baseline",
+        "2026-07-26T00:00:00Z",
+        evidence=[
+            shared,
+            _evidence(
+                "exa.owned",
+                "exa",
+                "external_proof",
+                "https://example.com/features/product",
+                "Official product page discovered by Exa.",
+            ),
+        ],
+    )
+    candidate = _report(
+        "candidate",
+        "2026-07-27T00:00:00Z",
+        evidence=[shared],
+    )
+
+    comparison = compare_reports(baseline, candidate)
+
+    assert comparison.classification == "acquisition_regression"
+    assert "owned_evidence_lost" in comparison.reason_codes
+    assert "external_evidence_lost" not in comparison.reason_codes
+    assert "independent_external_coverage_lost" not in comparison.reason_codes
+
+
 def test_history_keeps_first_shadow_scan_provisional_and_quarantines_drift() -> None:
     first = _report(
         "first",
@@ -238,6 +368,21 @@ def _evidence(
         "url": url,
         "confidence": "medium",
         "metadata": {"source_class": source_class},
+    }
+
+
+def _set_identity_quarantine(report: dict, *refs: str) -> None:
+    report["raw"]["flow"]["interpretation_debug"] = {
+        "block_evidence_identity_gate": {
+            "version": "sv9-flow-block-evidence-identity-gate-v1",
+            "records": [
+                {
+                    "ref": ref,
+                    "reason_codes": ["semantic_identity_mismatch"],
+                }
+                for ref in refs
+            ],
+        }
     }
 
 

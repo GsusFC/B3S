@@ -26,7 +26,10 @@ def tldr_block(content: str, *, detected: bool = True, evidence: list[str] | Non
 
 def full_tldr() -> dict:
     return {
-        key: tldr_block(f"{key} detected text", evidence=[f"{key} quote"])
+        key: tldr_block(
+            f"{key} detected text",
+            evidence=[f"quote {tile_id}" for tile_id in tile_ids(key)],
+        )
         for key in [
             "core_purpose",
             "magnetism",
@@ -69,7 +72,8 @@ class FakeLLM:
         baldosas = []
         for i, tid in enumerate(ids):
             if i < self.ok_up_to:
-                baldosas.append({"id": tid, "estado": "ok", "evidencia": f"quote {tid}"})
+                quote = "quote M1" if schema_name == "baldosas_coherencia" else f"quote {tid}"
+                baldosas.append({"id": tid, "estado": "ok", "evidencia": quote})
             else:
                 baldosas.append({"id": tid, "estado": "no", "motivo": "falta"})
         payload = {"componente": schema_name, "baldosas": baldosas}
@@ -330,6 +334,112 @@ class EvaluateComponentTests(unittest.TestCase):
         self.assertEqual(result.score, 0)  # all demoted to `no`
         self.assertTrue(all(v.estado == "no" for v in result.tile_profile))
 
+    def test_non_literal_evidence_retries_then_accepts_exact_quote(self):
+        class CorrectedQuoteLLM(FakeLLM):
+            def __init__(self):
+                super().__init__()
+                self.attempt = 0
+
+            def _call_json(self, system, user, max_tokens=8000, **kwargs):
+                self.calls.append({"user": user})
+                self.attempt += 1
+                ids = self._tiles_for(kwargs.get("schema_name"))
+                quote = (
+                    "La marca demuestra claramente su misión."
+                    if self.attempt == 1
+                    else "quote M1"
+                )
+                return {
+                    "baldosas": [
+                        {"id": tile_id, "estado": "ok", "evidencia": quote}
+                        for tile_id in ids
+                    ]
+                }
+
+        llm = CorrectedQuoteLLM()
+        result = evaluate_component(
+            "mission",
+            tldr=full_tldr(),
+            signals=[],
+            brand_name="Acme",
+            url="u",
+            llm=llm,
+        )
+
+        self.assertEqual(llm.attempt, 2)
+        self.assertIn("sin evidencia literal verificable", llm.calls[1]["user"])
+        self.assertEqual(result.score, 5)
+        self.assertTrue(
+            all(verdict.evidencia == "quote M1" for verdict in result.tile_profile)
+        )
+
+    def test_non_literal_evidence_is_demoted_after_retry(self):
+        class AlwaysAnalyticalQuoteLLM(FakeLLM):
+            def _call_json(self, system, user, max_tokens=8000, **kwargs):
+                self.calls.append({"user": user})
+                ids = self._tiles_for(kwargs.get("schema_name"))
+                return {
+                    "baldosas": [
+                        {
+                            "id": tile_id,
+                            "estado": "ok",
+                            "evidencia": "La marca demuestra claramente su misión.",
+                        }
+                        for tile_id in ids
+                    ]
+                }
+
+        llm = AlwaysAnalyticalQuoteLLM()
+        result = evaluate_component(
+            "mission",
+            tldr=full_tldr(),
+            signals=[],
+            brand_name="Acme",
+            url="u",
+            llm=llm,
+        )
+
+        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(result.score, 0)
+        self.assertTrue(
+            all(verdict.estado == "no" for verdict in result.tile_profile)
+        )
+
+    def test_embedded_literal_quote_is_canonicalized_without_retry(self):
+        class EmbeddedQuoteLLM(FakeLLM):
+            def _call_json(self, system, user, max_tokens=8000, **kwargs):
+                self.calls.append({"user": user})
+                ids = self._tiles_for(kwargs.get("schema_name"))
+                return {
+                    "baldosas": [
+                        {
+                            "id": tile_id,
+                            "estado": "ok",
+                            "evidencia": (
+                                "La marca lo demuestra mediante "
+                                "'quote M1'."
+                            ),
+                        }
+                        for tile_id in ids
+                    ]
+                }
+
+        llm = EmbeddedQuoteLLM()
+        result = evaluate_component(
+            "mission",
+            tldr=full_tldr(),
+            signals=[],
+            brand_name="Acme",
+            url="u",
+            llm=llm,
+        )
+
+        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(result.score, 5)
+        self.assertTrue(
+            all(verdict.evidencia == "quote M1" for verdict in result.tile_profile)
+        )
+
     def test_duplicate_tile_ids_are_rejected_and_retried(self):
         class DuplicateLLM(FakeLLM):
             def __init__(self):
@@ -453,7 +563,27 @@ class EvaluateComponentTests(unittest.TestCase):
 
 class BrandIdeaSignalEvaluationTests(unittest.TestCase):
     def test_brand_idea_evaluates_from_visual_signals_without_detection(self):
-        llm = FakeLLM(ok_up_to=3)
+        class SignalQuoteLLM(FakeLLM):
+            def _call_json(self, system, user, max_tokens=8000, **kwargs):
+                self.calls.append({"user": user})
+                ids = self._tiles_for(kwargs.get("schema_name"))
+                return {
+                    "baldosas": [
+                        {
+                            "id": tile_id,
+                            "estado": "ok" if index < 3 else "no",
+                            "evidencia": (
+                                "professional-generic"
+                                if index < 3
+                                else ""
+                            ),
+                            "motivo": "" if index < 3 else "falta",
+                        }
+                        for index, tile_id in enumerate(ids)
+                    ]
+                }
+
+        llm = SignalQuoteLLM(ok_up_to=3)
         tldr = full_tldr()
         tldr["brand_idea"] = tldr_block("", detected=False)
         signals = [
@@ -597,7 +727,7 @@ class EvaluateCoherenciaTests(unittest.TestCase):
                         {
                             "id": tile_id,
                             "estado": "ok" if index < 6 else "sin_evidencia",
-                            "evidencia": "evidencia literal" if index < 6 else "",
+                            "evidencia": "quote M1" if index < 6 else "",
                             "motivo": "" if index < 6 else "captura insuficiente",
                         }
                         for index, tile_id in enumerate(ids)

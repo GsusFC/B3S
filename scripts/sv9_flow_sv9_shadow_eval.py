@@ -207,6 +207,7 @@ def _compact_interpretation_debug(debug: dict[str, Any]) -> dict[str, Any]:
             "gate_disagreements",
             "detection_provenance",
             "evidence_labeling",
+            "block_evidence_identity_gate",
             "evidence_coverage",
             "failure_reason",
             "failure",

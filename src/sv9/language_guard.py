@@ -128,6 +128,7 @@ _STATUS_LABELS_ES = {
     "broken": "rota",
     "canonical": "canónico",
     "non_canonical": "no canónico",
+    "provisional": "provisional",
     "invalid": "inválido",
 }
 
@@ -141,6 +142,13 @@ _REASON_LABELS_ES = {
     "usable_not_canonical": "usable, no canónico",
     "shadow_not_canonical": "sombra, no canónico",
     "invalid_scan_state": "estado de scan inválido",
+    "first_non_invalid_baseline_is_provisional": "primer baseline válido: resultado provisional",
+    "interpretation_changed_without_material_evidence_delta": (
+        "la interpretación cambió sin cambios materiales en la evidencia"
+    ),
+    "evaluation_changed_without_material_evidence_delta": (
+        "la evaluación cambió sin cambios materiales en la evidencia"
+    ),
 }
 
 

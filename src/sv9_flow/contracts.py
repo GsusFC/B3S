@@ -109,6 +109,8 @@ class Sv9FlowCandidate:
     limitations: list[str] = field(default_factory=list)
     schema_version: str = SV9_FLOW_CANDIDATE_VERSION
     claim_memory_evidence: list[EvidenceRecord] = field(default_factory=list)
+    evaluation_evidence_refs: dict[str, list[str]] = field(default_factory=dict)
+    evaluation_evidence_version: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -119,5 +121,12 @@ class Sv9FlowCandidate:
             "claim_memory_evidence": [
                 record.to_dict() for record in self.claim_memory_evidence
             ],
+            "evaluation_evidence_refs": {
+                block: list(refs)
+                for block, refs in sorted(
+                    self.evaluation_evidence_refs.items()
+                )
+            },
+            "evaluation_evidence_version": self.evaluation_evidence_version,
             "limitations": list(self.limitations),
         }

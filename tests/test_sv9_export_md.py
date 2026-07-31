@@ -67,6 +67,102 @@ class ExportMarkdownTests(unittest.TestCase):
         self.assertIn("# Brand3 Scanner — Acme", md)
         self.assertNotIn("# Brand3 Scanner — https://acme.test", md)
 
+    def test_export_includes_scan_time_and_owned_page_denominator(self):
+        scan = self._scan()
+        scan["created_at"] = "2026-07-30T13:48:00+00:00"
+        scan["coverage_acquisition"] = {
+            "owned_page_coverage": {
+                "selection_version": "owned-page-selection-v2",
+                "known_page_count": 4,
+                "captured_page_count": 3,
+                "coverage_ratio": 0.75,
+                "visited_pages": [
+                    {
+                        "url": "https://acme.test",
+                        "status": "captured",
+                        "navigation_status": "homepage",
+                        "observed_language": "en",
+                    }
+                ],
+                "not_visited_pages": [
+                    {
+                        "url": "https://acme.test/orphan",
+                        "reason": "page_budget",
+                        "navigation_status": "sitemap_only",
+                    }
+                ],
+                "language_detection": {
+                    "status": "mixed",
+                    "mixed_language_site": True,
+                    "declared_mismatch_count": 1,
+                    "distribution": [
+                        {"language": "en", "page_count": 2, "share": 0.6667},
+                        {"language": "es", "page_count": 1, "share": 0.3333},
+                    ],
+                },
+            }
+        }
+
+        md = build_scan_markdown(scan)
+
+        self.assertIn("Escaneado: 2026-07-30T13:48:00+00:00", md)
+        self.assertIn("Páginas propias capturadas: **3 de 4 (75%)**", md)
+        self.assertIn("https://acme.test/orphan · sitemap_only", md)
+        self.assertIn("Idiomas observados por página: **inglés 2 · español 1**", md)
+        self.assertIn("mezcla de idiomas dentro del mismo dominio", md)
+        self.assertIn("no coincide con el declarado en HTML: **1**", md)
+        self.assertIn("https://acme.test · homepage · idioma inglés", md)
+
+    def test_export_exposes_component_evidence_hierarchy_without_rescoring(self):
+        scan = self._scan()
+        scan["components"]["mission"]["surface_hierarchy"] = {
+            "hierarchy_status": "mixed_with_sitemap_only",
+            "counts": {"linked_from_home": 1, "sitemap_only": 2},
+        }
+
+        md = build_scan_markdown(scan)
+
+        self.assertIn(
+            "Jerarquía: **parte de la evidencia está fuera de navegación**",
+            md,
+        )
+        self.assertIn("Superficies propias fuera de navegación: **2**", md)
+
+    def test_export_exposes_non_canonical_evaluation_drift(self):
+        scan = self._scan()
+        scan["canonical_status"] = "non_canonical"
+        scan["canonical_reason_codes"] = [
+            "interpretation_changed_without_material_evidence_delta",
+            "evaluation_changed_without_material_evidence_delta",
+        ]
+        scan["stability"] = {
+            "classification": "evaluation_drift",
+            "baseline_comparison": {
+                "baseline_report_id": "baseline",
+                "delta": {
+                    "changed_components": [
+                        {
+                            "component": "core_purpose",
+                            "score_before": 4,
+                            "score_after": 8,
+                            "changed_tiles": ["PR3", "PR4"],
+                        }
+                    ]
+                },
+            },
+        }
+
+        md = build_scan_markdown(scan)
+
+        self.assertIn("Canonicidad: **no canónico**", md)
+        self.assertIn(
+            "la evaluación cambió sin cambios materiales en la evidencia",
+            md,
+        )
+        self.assertIn("## Estabilidad de la evaluación", md)
+        self.assertIn("Baseline: `baseline`", md)
+        self.assertIn("Propósito: **4 → 8** · baldosas PR3, PR4", md)
+
     def test_coherencia_verdict_is_the_section_header(self):
         md = build_scan_markdown(self._scan())
         coh = md.index("## Coherencia")

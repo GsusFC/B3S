@@ -192,9 +192,72 @@ def test_evidence_worker_chunks_one_page_site_without_subpage_marker() -> None:
     assert any("We value direct evidence" in record.content for record in pack.evidence)
 
 
+def test_evidence_worker_preserves_copy_across_fixed_size_chunk_boundaries() -> None:
+    strategic_copy = "To redefine football as a discipline of science."
+    markdown = "# Long section\n" + ("x" * 635) + strategic_copy + ("y" * 900)
+    pack = build_evidence_pack_from_snapshot(
+        {
+            "run": {"brand_name": "SoccerSolver", "url": "https://soccersolver.com/about-us"},
+            "raw_inputs": [
+                {
+                    "source": "web",
+                    "payload": {
+                        "url": "https://soccersolver.com/about-us",
+                        "markdown_content": markdown,
+                    },
+                }
+            ],
+        }
+    )
+
+    assert any(strategic_copy in record.content for record in pack.evidence)
+
+
+def test_evidence_worker_packs_small_sections_before_sampling_late_copy() -> None:
+    sections = [
+        f"## Operating principle {index}\n" + ("Evidence-rich supporting copy. " * 4)
+        for index in range(1, 40)
+    ]
+    purpose = "To redefine football as a discipline of science."
+    method = "We apply the scientific method to football."
+    sections.extend(
+        [
+            f"## Why we do?\n{purpose}",
+            f"## How we do?\n{method}",
+        ]
+    )
+    pack = build_evidence_pack_from_snapshot(
+        {
+            "run": {
+                "brand_name": "SoccerSolver",
+                "url": "https://soccersolver.com/about-us",
+            },
+            "raw_inputs": [
+                {
+                    "source": "web",
+                    "payload": {
+                        "url": "https://soccersolver.com/about-us",
+                        "markdown_content": "\n\n".join(sections),
+                    },
+                }
+            ],
+        }
+    )
+
+    assert any(purpose in record.content for record in pack.evidence)
+    assert any(method in record.content for record in pack.evidence)
+    assert not any(
+        record.evidence_type == "acquisition.evidence_sampling"
+        for record in pack.evidence
+    )
+
+
 def test_evidence_worker_prioritizes_late_homepage_values_section() -> None:
     sections = ["# Hero\nOpening copy."]
-    sections.extend(f"## Product {index}\nProduct detail." for index in range(1, 12))
+    sections.extend(
+        f"## Product {index}\n" + ("Product detail. " * 40)
+        for index in range(1, 13)
+    )
     sections.append("## Valores\nAcreditamos en salud, consistencia y confianza.")
     markdown = "\n\n".join(sections)
 
@@ -257,10 +320,127 @@ def test_evidence_worker_chunks_owned_subpages_by_markdown_sections() -> None:
     )
 
     subpage_chunks = [record.content for record in pack.evidence if ".subpage.1.chunk." in record.ref]
+    joined = "\n".join(subpage_chunks)
 
-    assert any(chunk.startswith("# About Acme") for chunk in subpage_chunks)
-    assert any(chunk.startswith("## Our values") and "craft, clarity" in chunk for chunk in subpage_chunks)
-    assert any(chunk.startswith("## Careers") for chunk in subpage_chunks)
+    assert joined.startswith("# About Acme")
+    assert "## Our values" in joined
+    assert "craft, clarity" in joined
+    assert "## Careers" in joined
+
+
+def test_evidence_worker_prioritizes_late_strategy_on_long_owned_subpage() -> None:
+    sections = [
+        f"## Operating detail {index}\n" + ("Supporting product copy. " * 5)
+        for index in range(1, 40)
+    ]
+    purpose = "To redefine football as a discipline of science."
+    method = "We apply the scientific method to football."
+    sections.extend(
+        [
+            f"## Why we do?\n{purpose}",
+            f"## How we do?\n{method}",
+        ]
+    )
+    markdown = (
+        "Homepage copy.\n"
+        "\n---\n## Subpage: https://soccersolver.com/about-us\n"
+        + "\n\n".join(sections)
+    )
+
+    pack = build_evidence_pack_from_snapshot(
+        {
+            "run": {
+                "brand_name": "SoccerSolver",
+                "url": "https://soccersolver.com",
+            },
+            "raw_inputs": [
+                {
+                    "source": "web",
+                    "payload": {
+                        "url": "https://soccersolver.com",
+                        "markdown_content": markdown,
+                    },
+                }
+            ],
+        }
+    )
+
+    assert any(purpose in record.content for record in pack.evidence)
+    assert any(method in record.content for record in pack.evidence)
+    sampling = next(
+        record
+        for record in pack.evidence
+        if record.evidence_type == "acquisition.evidence_sampling"
+    )
+    assert sampling.metadata["subpage_index"] == 1
+    assert sampling.metadata["selected_chunks"] == 6
+    assert sampling.metadata["strategic_prioritization"] is True
+
+
+def test_evidence_worker_persists_owned_page_selection_as_acquisition_metadata() -> None:
+    selection = {
+        "version": "owned-page-selection-v2",
+        "known_page_count": 4,
+        "attempted_page_count": 3,
+        "captured_page_count": 3,
+        "coverage_ratio": 0.75,
+        "known_pages": [
+            {"url": "https://acme.example", "role": "homepage"},
+            {"url": "https://acme.example/about", "role": "about"},
+            {"url": "https://acme.example/product", "role": "product"},
+            {"url": "https://acme.example/orphan", "role": "other"},
+        ],
+        "visited_pages": [
+            {
+                "url": "https://acme.example",
+                "role": "homepage",
+                "status": "captured",
+            },
+            {
+                "url": "https://acme.example/about",
+                "role": "about",
+                "status": "captured",
+            },
+            {
+                "url": "https://acme.example/product",
+                "role": "product",
+                "status": "captured",
+            },
+        ],
+        "not_visited_pages": [
+            {
+                "url": "https://acme.example/orphan",
+                "role": "other",
+                "reason": "page_budget",
+            }
+        ],
+    }
+    pack = build_evidence_pack_from_snapshot(
+        {
+            "run": {
+                "brand_name": "Acme",
+                "url": "https://acme.example",
+            },
+            "raw_inputs": [
+                {
+                    "source": "web",
+                    "payload": {
+                        "url": "https://acme.example",
+                        "markdown_content": "# Acme\nUseful homepage evidence.",
+                        "page_selection": selection,
+                    },
+                }
+            ],
+        }
+    )
+
+    record = next(
+        row
+        for row in pack.evidence
+        if row.evidence_type == "acquisition.page_selection"
+    )
+    assert record.metadata["source_class"] == "acquisition_metadata"
+    assert record.metadata["page_selection"] == selection
 
 
 def test_evidence_worker_records_absence_on_crawled_strategic_surfaces() -> None:

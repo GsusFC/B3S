@@ -1,7 +1,12 @@
+from src.external_identity_provenance import build_external_identity_provenance
 from src.sv9_flow.block_evidence_worker import (
+    BLOCK_EVIDENCE_IDENTITY_GATE_VERSION,
     BLOCK_EVIDENCE_SHORTLIST_VERSION,
+    EVALUATION_EVIDENCE_REFS_VERSION,
     BlockEvidenceShortlist,
+    build_block_evidence_identity_quarantine,
     build_block_evidence_shortlists,
+    build_evaluation_evidence_refs,
 )
 from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
 from src.sv9_flow.evidence_identity import canonical_evidence_id
@@ -85,6 +90,300 @@ def test_shortlist_is_invariant_to_provider_order_refs_and_volatile_metadata() -
     assert first_ids == second_ids
 
 
+def test_shortlist_quarantines_external_profiles_without_deleting_them() -> None:
+    profile = EvidenceRecord(
+        ref="raw_inputs.2.exa.profiles.0",
+        source="exa",
+        evidence_type="external_proof.external_profiles",
+        content=(
+            "Altitude is an AI automation company with a mission, values, "
+            "vision, and distinctive platform."
+        ),
+        url="https://getaltitudeai.com",
+        metadata={
+            "source_class": "external_proof",
+            "identity_match": "brand_name",
+            "result_group": "profiles",
+            "intent": "external_profiles",
+        },
+    )
+    owned = EvidenceRecord(
+        ref="raw_inputs.1",
+        source="web",
+        evidence_type="raw_input",
+        content="Our mission is to make business money programmable.",
+        url="https://altitude.xyz",
+    )
+    pack = BrandEvidencePack(
+        brand_name="Altitude",
+        url="https://altitude.xyz",
+        evidence=[profile, owned],
+    )
+
+    shortlists = build_block_evidence_shortlists(
+        pack,
+        blocks=("mission",),
+        limit=5,
+    )
+    quarantine = build_block_evidence_identity_quarantine(pack)
+
+    assert shortlists["mission"] == ["raw_inputs.1"]
+    assert profile in pack.evidence
+    assert quarantine == [
+        {
+            "ref": profile.ref,
+            "url": profile.url,
+            "reason_codes": ["external_profile_not_strategic_evidence"],
+        }
+    ]
+    assert (
+        BLOCK_EVIDENCE_IDENTITY_GATE_VERSION
+        == "sv9-flow-block-evidence-identity-gate-v1"
+    )
+
+
+def test_shortlist_quarantines_review_gated_external_identity_provenance() -> None:
+    provenance = build_external_identity_provenance(
+        provider="exa",
+        subject_url="https://altitude.xyz",
+        source_url="https://altitude.fi",
+        matched_alias="Altitude",
+        match_method="alias_in_host",
+        match_score=1.0,
+        collector_source_class="related_unresolved",
+        collector_relation="unresolved",
+        requires_human_review=True,
+    )
+    record = EvidenceRecord(
+        ref="raw_inputs.2.exa.news.0",
+        source="exa",
+        evidence_type="external_proof.news",
+        content="Altitude announces its mission and platform.",
+        url="https://altitude.fi",
+        metadata={
+            "source_class": "external_proof",
+            "identity_match": "brand_name",
+            "result_group": "news",
+            "external_identity_provenance": provenance,
+        },
+    )
+    pack = BrandEvidencePack(
+        brand_name="Altitude",
+        url="https://altitude.xyz",
+        evidence=[record],
+    )
+
+    shortlists = build_block_evidence_shortlists(
+        pack,
+        blocks=("mission",),
+    )
+    quarantine = build_block_evidence_identity_quarantine(pack)
+
+    assert shortlists["mission"] == []
+    assert "external_identity_requires_human_review" in quarantine[0][
+        "reason_codes"
+    ]
+
+
+def test_shortlist_keeps_reproducible_external_press_identity() -> None:
+    provenance = build_external_identity_provenance(
+        provider="exa",
+        subject_url="https://example.com",
+        source_url="https://press.test/story",
+        matched_alias="Example",
+        match_method="alias_in_title",
+        match_score=0.95,
+        collector_source_class="external",
+        collector_relation="external",
+        requires_human_review=False,
+    )
+    record = EvidenceRecord(
+        ref="raw_inputs.2.exa.news.0",
+        source="exa",
+        evidence_type="external_proof.news",
+        content="Example launches a platform that advances its mission.",
+        url="https://press.test/story",
+        metadata={
+            "source_class": "external_proof",
+            "identity_match": "brand_name",
+            "result_group": "news",
+            "external_identity_provenance": provenance,
+        },
+    )
+    pack = BrandEvidencePack(
+        brand_name="Example",
+        url="https://example.com",
+        evidence=[record],
+    )
+
+    shortlists = build_block_evidence_shortlists(
+        pack,
+        blocks=("mission",),
+    )
+
+    assert shortlists["mission"] == [record.ref]
+    assert build_block_evidence_identity_quarantine(pack) == []
+
+
+def test_shortlist_quarantines_semantic_mismatch_and_legacy_name_collision() -> None:
+    semantic_mismatch = EvidenceRecord(
+        ref="raw_inputs.2.exa.news.0",
+        source="exa",
+        evidence_type="external_proof.news",
+        content="Liminal launches a GTM intelligence platform.",
+        url="https://journal.test/liminal-launch",
+        metadata={
+            "source_class": "external_proof",
+            "identity_match": "brand_name",
+            "identity_match_llm": "none",
+            "result_group": "news",
+        },
+    )
+    legacy_collision = EvidenceRecord(
+        ref="raw_inputs.2.exa.ai_visibility_results.3",
+        source="exa",
+        evidence_type="external_proof.ai_visibility",
+        content="Altitude Consulting Services describes its mission.",
+        url="https://altitudeconsultingservices.com",
+        metadata={
+            "source_class": "external_proof",
+            "identity_match": "brand_name",
+            "result_group": "ai_visibility_results",
+        },
+    )
+    liminal = BrandEvidencePack(
+        brand_name="Liminal",
+        url="https://becomeliminal.com",
+        evidence=[semantic_mismatch],
+    )
+    altitude = BrandEvidencePack(
+        brand_name="Altitude",
+        url="https://altitude.xyz",
+        evidence=[legacy_collision],
+    )
+
+    assert build_block_evidence_shortlists(
+        liminal,
+        blocks=("mission",),
+    )["mission"] == []
+    assert build_block_evidence_shortlists(
+        altitude,
+        blocks=("mission",),
+    )["mission"] == []
+    assert build_block_evidence_identity_quarantine(liminal)[0][
+        "reason_codes"
+    ] == ["semantic_identity_mismatch"]
+    assert build_block_evidence_identity_quarantine(altitude)[0][
+        "reason_codes"
+    ] == ["legacy_same_name_different_root_unresolved"]
+
+
+def test_shortlist_keeps_unverified_name_only_identity_when_no_mismatch_is_proven() -> None:
+    record = EvidenceRecord(
+        ref="raw_inputs.2.exa.news.0",
+        source="exa",
+        evidence_type="external_proof.news",
+        content="Liminal announces a new platform and mission.",
+        url="https://journal.test/liminal",
+        metadata={
+            "source_class": "external_proof",
+            "identity_match": "brand_name",
+            "identity_match_llm": "unverified",
+            "result_group": "news",
+            "relevant_blocks": ["mission"],
+            "stance": "supports",
+            "specificity": "explicit",
+            "semantic_labeling_version": "sv9-flow-evidence-labeling-v3",
+        },
+    )
+    pack = BrandEvidencePack(
+        brand_name="Liminal",
+        url="https://becomeliminal.com",
+        evidence=[record],
+    )
+
+    assert build_block_evidence_shortlists(
+        pack,
+        blocks=("mission",),
+    )["mission"] == [record.ref]
+    assert build_block_evidence_identity_quarantine(pack) == []
+
+
+def test_shortlist_excludes_semantically_incidental_unverified_external_noise() -> None:
+    unrelated = EvidenceRecord(
+        ref="raw_inputs.2.exa.news.0",
+        source="exa",
+        evidence_type="external_proof.news",
+        content=(
+            "Altitude is a trading infrastructure platform with fast execution, "
+            "advanced market data, and tools that help retail traders invest."
+        ),
+        url="https://airdrops.example/altitude",
+        metadata={
+            "source_class": "external_proof",
+            "identity_match": "brand_name",
+            "identity_match_llm": "unverified",
+            "result_group": "news",
+            "relevant_blocks": [],
+            "stance": "neutral",
+            "specificity": "incidental",
+            "semantic_labeling_version": "sv9-flow-evidence-labeling-v3",
+        },
+    )
+    owned = EvidenceRecord(
+        ref="raw_inputs.1",
+        source="web",
+        evidence_type="raw_input",
+        content="Run your business on stablecoins with one financial operating system.",
+        url="https://altitude.xyz",
+        metadata={"source_class": "owned_copy"},
+    )
+    pack = BrandEvidencePack(
+        brand_name="Altitude",
+        url="https://altitude.xyz",
+        evidence=[unrelated, owned],
+    )
+
+    shortlists = build_block_evidence_shortlists(
+        pack,
+        blocks=("mission", "value_proposition"),
+    )
+
+    assert unrelated.ref not in shortlists["mission"]
+    assert unrelated.ref not in shortlists["value_proposition"]
+    assert owned.ref in shortlists["mission"]
+
+
+def test_explicit_subject_domain_anchor_overrides_semantic_false_negative() -> None:
+    record = EvidenceRecord(
+        ref="raw_inputs.2.exa.mentions.10",
+        source="exa",
+        evidence_type="external_proof.external_mentions",
+        content=(
+            "Liminal GitHub repository and open source projects. "
+            "Official blog: https://becomeliminal.com"
+        ),
+        url="https://github.com/becomeliminal",
+        metadata={
+            "source_class": "external_proof",
+            "identity_match": "brand_name",
+            "identity_match_llm": "none",
+            "result_group": "mentions",
+        },
+    )
+    pack = BrandEvidencePack(
+        brand_name="Liminal",
+        url="https://becomeliminal.com",
+        evidence=[record],
+    )
+
+    assert build_block_evidence_shortlists(
+        pack,
+        blocks=("magnetism",),
+    )["magnetism"] == [record.ref]
+    assert build_block_evidence_identity_quarantine(pack) == []
+
+
 def test_repository_proof_ranks_into_magnetism_shortlist() -> None:
     filler = [
         EvidenceRecord(
@@ -140,6 +439,44 @@ def test_product_embodied_mission_evidence_ranks_above_product_navigation() -> N
     assert shortlists["mission"][0] == "raw_inputs.1"
 
 
+def test_explicit_owned_mission_heading_ranks_above_generic_product_copy() -> None:
+    explicit = EvidenceRecord(
+        ref="raw_inputs.1.subpage.2.chunk.1",
+        source="web",
+        evidence_type="raw_input",
+        content="# On a mission to democratise finance\n\nFrom Singapore to London.",
+        url="https://example.com/about",
+        metadata={"source_class": "owned_copy"},
+    )
+    generic = [
+        EvidenceRecord(
+            ref=f"raw_inputs.1.subpage.{index}.chunk.2",
+            source="web",
+            evidence_type="raw_input",
+            content=(
+                "Build a global account that helps people invest, "
+                "convert currencies, and enable instant transfers."
+            ),
+            url=f"https://example.com/features/{index}",
+            metadata={"source_class": "owned_copy"},
+        )
+        for index in range(3, 9)
+    ]
+    pack = BrandEvidencePack(
+        brand_name="Example",
+        url="https://example.com",
+        evidence=[*generic, explicit],
+    )
+
+    shortlist = build_block_evidence_shortlists(
+        pack,
+        blocks=("mission",),
+        limit=5,
+    )["mission"]
+
+    assert shortlist[0] == explicit.ref
+
+
 def test_values_shortlist_prefers_operational_principle_evidence_over_product_benefits() -> None:
     product_refs = [
         EvidenceRecord(
@@ -181,6 +518,62 @@ def test_values_shortlist_prefers_operational_principle_evidence_over_product_be
     shortlists = build_block_evidence_shortlists(pack, blocks=("values",), limit=3)
 
     assert shortlists["values"][:2] == ["raw_inputs.legal.0", "raw_inputs.docs.0"]
+
+
+def test_values_evaluation_refs_freeze_shortlist_with_adjacent_page_context() -> None:
+    records = [
+        EvidenceRecord(
+            ref="raw_inputs.1.subpage.3.chunk.4",
+            source="web",
+            evidence_type="raw_input",
+            content="Our 11 pillars. Be Service means serving before selling.",
+        ),
+        EvidenceRecord(
+            ref="raw_inputs.1.subpage.3.chunk.5",
+            source="web",
+            evidence_type="raw_input",
+            content="Be Ownership. Be Happy. Be WYSIWYG.",
+        ),
+        EvidenceRecord(
+            ref="raw_inputs.1.subpage.3.chunk.6",
+            source="web",
+            evidence_type="raw_input",
+            content="Why we exist. How we work. What we build.",
+        ),
+        EvidenceRecord(
+            ref="raw_inputs.0.chunk.2",
+            source="web",
+            evidence_type="raw_input",
+            content="A product benefit that also mentions values.",
+        ),
+    ]
+    pack = BrandEvidencePack(
+        brand_name="SoccerSolver",
+        url="https://soccersolver.com",
+        evidence=records,
+    )
+    shortlists = {
+        "values": [
+            "raw_inputs.1.subpage.3.chunk.5",
+            "raw_inputs.0.chunk.2",
+        ]
+    }
+
+    evaluation_refs = build_evaluation_evidence_refs(pack, shortlists)
+    reordered_pack = BrandEvidencePack(
+        brand_name=pack.brand_name,
+        url=pack.url,
+        evidence=list(reversed(records)),
+    )
+
+    assert evaluation_refs["values"] == [
+        "raw_inputs.1.subpage.3.chunk.5",
+        "raw_inputs.1.subpage.3.chunk.4",
+        "raw_inputs.1.subpage.3.chunk.6",
+        "raw_inputs.0.chunk.2",
+    ]
+    assert build_evaluation_evidence_refs(reordered_pack, shortlists) == evaluation_refs
+    assert EVALUATION_EVIDENCE_REFS_VERSION == "sv9-flow-evaluation-evidence-refs-v1"
 
 
 def test_vision_shortlist_promotes_agent_network_target_state() -> None:
