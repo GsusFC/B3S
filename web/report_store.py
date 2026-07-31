@@ -33,6 +33,7 @@ from src.services.evidence_claim_tile_ledger import (
 from src.services.evidence_claim_tile_review import (
     EvidenceClaimTileReviewCommand,
     EvidenceClaimTileReviewJournalError,
+    EvidenceClaimTileReviewPacketNotFoundError,
     EvidenceClaimTileReviewUnavailableError,
 )
 from src.services.evidence_memory_adjudication import (
@@ -587,6 +588,59 @@ def append_evidence_claim_tile_review_for_domain(
     except Exception as exc:
         raise EvidenceClaimTileReviewUnavailableError(
             "The durable claim-to-tile review journal is unavailable."
+        ) from exc
+
+
+def register_evidence_claim_tile_review_packet_for_domain(
+    domain: str,
+) -> tuple[dict[str, Any], bool]:
+    """Build and append the exact private reviewer packet to PostgreSQL."""
+
+    repository = _postgres_repository()
+    if repository is None:
+        raise EvidenceClaimTileReviewUnavailableError(
+            "The durable claim-to-tile review packet registry is not "
+            "configured."
+        )
+    try:
+        return repository.register_evidence_claim_tile_review_packet(
+            domain
+        )
+    except EvidenceClaimTileReviewJournalError:
+        raise
+    except Exception as exc:
+        raise EvidenceClaimTileReviewUnavailableError(
+            "The durable claim-to-tile review packet registry is "
+            "unavailable."
+        ) from exc
+
+
+def get_evidence_claim_tile_review_packet_for_domain(
+    domain: str,
+    packet_fingerprint: str,
+) -> dict[str, Any]:
+    """Read one exact registered private reviewer packet."""
+
+    repository = _postgres_repository()
+    if repository is None:
+        raise EvidenceClaimTileReviewUnavailableError(
+            "The durable claim-to-tile review packet registry is not "
+            "configured."
+        )
+    try:
+        return repository.get_evidence_claim_tile_review_packet(
+            domain,
+            packet_fingerprint,
+        )
+    except (
+        EvidenceClaimTileReviewPacketNotFoundError,
+        EvidenceClaimTileReviewUnavailableError,
+    ):
+        raise
+    except Exception as exc:
+        raise EvidenceClaimTileReviewUnavailableError(
+            "The durable claim-to-tile review packet registry is "
+            "unavailable."
         ) from exc
 
 

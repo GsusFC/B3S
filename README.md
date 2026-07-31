@@ -65,6 +65,8 @@ GET  /api/v1/brands/{domain}/evidence-ledger-shadow
 GET  /api/v1/brands/{domain}/evidence-memory-identity-v2-shadow
 GET  /api/v1/brands/{domain}/evidence-claim-memory-shadow
 GET  /api/v1/brands/{domain}/evidence-claim-tile-ledger-shadow
+POST /api/v1/brands/{domain}/evidence-claim-tile-review-packets
+GET  /api/v1/brands/{domain}/evidence-claim-tile-review-packets/{fingerprint}
 GET  /api/v1/brands/{domain}/evidence-claim-tile-reviews
 POST /api/v1/brands/{domain}/evidence-claim-tile-reviews
 GET  /api/v1/brands/{domain}/evidence-claim-reconciliations
@@ -195,6 +197,7 @@ with idempotency, optimistic concurrency, server-bound reviewer identity, and
 revocation. The event freezes the exact review-packet fingerprint, evidence,
 claim variant, tile, polarity, and mapping-series identities, while database
 constraints keep tile and scoring effects disabled. Review it through
+the reviewer-only packet endpoints, then persist decisions through
 `GET|POST /api/v1/brands/{domain}/evidence-claim-tile-reviews`; see
 [`docs/evidence_claim_tile_review_v1.md`](docs/evidence_claim_tile_review_v1.md).
 

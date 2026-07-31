@@ -1291,6 +1291,79 @@ def test_create_claim_tile_review_is_attributable_and_non_authoritative(
     assert "reviewer" not in captured["payload"]
 
 
+def test_reviewer_can_register_and_read_exact_claim_tile_packet(
+    monkeypatch,
+):
+    _configure_evidence_reviewer(monkeypatch)
+    packet = _claim_tile_review_packet()
+    captured = {}
+
+    def fake_register(domain):
+        captured["registered_domain"] = domain
+        return packet, True
+
+    def fake_get(domain, packet_fingerprint):
+        captured["read"] = (domain, packet_fingerprint)
+        return packet
+
+    monkeypatch.setattr(
+        "web.api_v1.router."
+        "register_evidence_claim_tile_review_packet",
+        fake_register,
+    )
+    monkeypatch.setattr(
+        "web.api_v1.router.get_evidence_claim_tile_review_packet",
+        fake_get,
+    )
+
+    created = TestClient(app).post(
+        "/api/v1/brands/example.com/"
+        "evidence-claim-tile-review-packets",
+        headers=REVIEW_AUTH,
+    )
+
+    assert created.status_code == 201
+    assert created.headers["cache-control"] == "no-store"
+    assert created.headers["idempotent-replayed"] == "true"
+    assert created.json()["candidates"][0]["claim"]["content"] == (
+        "Exact private claim"
+    )
+    assert captured["registered_domain"] == "example.com"
+
+    read = TestClient(app).get(
+        "/api/v1/brands/example.com/"
+        "evidence-claim-tile-review-packets/"
+        f"{REVIEW_PACKET_FINGERPRINT}",
+        headers=REVIEW_AUTH,
+    )
+
+    assert read.status_code == 200
+    assert read.headers["cache-control"] == "no-store"
+    assert read.json()["replayed"] is False
+    assert captured["read"] == (
+        "example.com",
+        REVIEW_PACKET_FINGERPRINT,
+    )
+
+
+def test_scanner_token_cannot_read_private_claim_tile_packet(
+    monkeypatch,
+):
+    _configure_evidence_reviewer(monkeypatch)
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/"
+        "evidence-claim-tile-review-packets/"
+        f"{REVIEW_PACKET_FINGERPRINT}",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["details"]["required_scope"] == (
+        "evidence:adjudicate"
+    )
+
+
 def test_claim_tile_review_requires_idempotency_key(monkeypatch):
     _configure_evidence_reviewer(monkeypatch)
 
@@ -1967,6 +2040,47 @@ def _claim_tile_review_event() -> dict:
     }
 
 
+def _claim_tile_review_packet() -> dict:
+    return {
+        "id": "00000000-0000-0000-0000-000000000041",
+        "packet_kind": "claim_tile",
+        "packet_fingerprint": REVIEW_PACKET_FINGERPRINT,
+        "candidate_fingerprint": "8" * 64,
+        "manifest": {
+            "review_packet_fingerprint": (
+                REVIEW_PACKET_FINGERPRINT
+            ),
+            "candidate_fingerprint": "8" * 64,
+        },
+        "candidates": [
+            {
+                "case_id": (
+                    "claim-tile-example-com-mission-m1-cccccccccccc"
+                ),
+                "subject_id": "c" * 64,
+                "claim": {"content": "Exact private claim"},
+            }
+        ],
+        "review_template": [
+            {
+                "case_id": (
+                    "claim-tile-example-com-mission-m1-cccccccccccc"
+                ),
+                "subject_id": "c" * 64,
+                "review_packet_fingerprint": (
+                    REVIEW_PACKET_FINGERPRINT
+                ),
+                "decision": None,
+            }
+        ],
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_tile_effect": False,
+        "automatic_scoring_effect": False,
+        "created_at": "2026-07-31T10:00:00+00:00",
+    }
+
+
 def _scoring_recovery_review_event() -> dict:
     event_id = "00000000-0000-0000-0000-000000000021"
     return {
@@ -2063,6 +2177,15 @@ def test_openapi_is_dedicated_to_v1_routes():
     )
     assert (
         "/api/v1/brands/{domain}/evidence-claim-tile-reviews"
+        in response.json()["paths"]
+    )
+    assert (
+        "/api/v1/brands/{domain}/evidence-claim-tile-review-packets"
+        in response.json()["paths"]
+    )
+    assert (
+        "/api/v1/brands/{domain}/evidence-claim-tile-review-packets/"
+        "{packet_fingerprint}"
         in response.json()["paths"]
     )
     assert (

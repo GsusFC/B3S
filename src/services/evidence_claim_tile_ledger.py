@@ -390,6 +390,19 @@ def _claim_contexts_for_report(
                 "claim_slot_id": str(
                     occurrence.get("claim_slot_id") or ""
                 ),
+                "claim_slot_key": str(
+                    metadata.get("claim_slot_key")
+                    or metadata.get("claim_id")
+                    or ""
+                ),
+                "claim_type": str(
+                    metadata.get("claim_type") or "unknown"
+                ),
+                "claim_derivation_mode": str(
+                    occurrence.get("claim_slot_derivation_mode")
+                    or metadata.get("claim_slot_derivation_mode")
+                    or "upstream_unknown"
+                ),
                 "claim_variant_id": str(
                     occurrence.get("claim_variant_id") or ""
                 ),
@@ -399,6 +412,9 @@ def _claim_contexts_for_report(
                 ),
                 "source_evidence_id": source_evidence_id,
                 "source_evidence_ref": source_evidence_ref,
+                "source_url": str(
+                    source_identity.get("url") or ""
+                ),
                 "source_content": normalize_evidence_text(
                     source_row.get("content")
                 ),

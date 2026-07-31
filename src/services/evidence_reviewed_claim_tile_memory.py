@@ -12,10 +12,10 @@ from src.evidence_identity import stable_artifact_digest
 
 
 EVIDENCE_REVIEWED_CLAIM_TILE_MEMORY_VERSION = (
-    "evidence-reviewed-claim-tile-memory-v1"
+    "evidence-reviewed-claim-tile-memory-v2"
 )
 EVIDENCE_REVIEWED_CLAIM_TILE_MEMORY_POLICY_VERSION = (
-    "evidence-reviewed-claim-tile-memory-policy-v1"
+    "evidence-reviewed-claim-tile-memory-policy-v2"
 )
 EVIDENCE_REVIEWED_CLAIM_TILE_MEMORY_SEMANTIC_VERSION = (
     "evidence-reviewed-claim-tile-semantic-version-v1"
@@ -53,6 +53,7 @@ def build_reviewed_claim_tile_memory_shadow(
     review_packet_fingerprint: str,
     rubric_version: str,
     evaluator_version: str,
+    _allowed_review_packet_fingerprints: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Select accepted mappings without granting canonical or score authority."""
 
@@ -60,6 +61,23 @@ def build_reviewed_claim_tile_memory_shadow(
         review_packet_fingerprint,
         field="review_packet_fingerprint",
     )
+    packet_fingerprints = sorted(
+        {
+            _required_sha256(
+                value,
+                field="review_packet_fingerprint",
+            )
+            for value in (
+                _allowed_review_packet_fingerprints
+                if _allowed_review_packet_fingerprints is not None
+                else (packet_fingerprint,)
+            )
+        }
+    )
+    if not packet_fingerprints:
+        raise EvidenceReviewedClaimTileMemoryError(
+            "at least one review packet fingerprint is required"
+        )
     normalized_rubric = _required_text(
         rubric_version,
         field="rubric_version",
@@ -73,7 +91,7 @@ def build_reviewed_claim_tile_memory_shadow(
     reviews_by_mapping = _validated_reviews(
         reviews,
         mappings=mappings,
-        packet_fingerprint=packet_fingerprint,
+        packet_fingerprints=set(packet_fingerprints),
     )
 
     reviewed_mappings: list[dict[str, Any]] = []
@@ -90,6 +108,9 @@ def build_reviewed_claim_tile_memory_shadow(
             **_semantic_mapping(mapping),
             "decision": decision,
             "review_event_id": str(review["event_id"]),
+            "review_packet_fingerprint": (
+                _review_packet_fingerprint(review)
+            ),
             "reviewer_id": str(review["reviewer_id"]),
             "reviewed_at": str(review["reviewed_at"]),
         }
@@ -119,6 +140,10 @@ def build_reviewed_claim_tile_memory_shadow(
             "evaluator_version": normalized_evaluator,
         },
     )
+    packet_set_fingerprint = stable_artifact_digest(
+        "evidence-reviewed-claim-tile-packet-set-v1",
+        packet_fingerprints,
+    )
     mapping_count = len(mappings)
     reviewed_count = sum(
         1
@@ -143,7 +168,13 @@ def build_reviewed_claim_tile_memory_shadow(
         "authority": False,
         "automatic_tile_effect": False,
         "automatic_scoring_effect": False,
-        "review_packet_fingerprint": packet_fingerprint,
+        "review_packet_fingerprint": (
+            packet_fingerprints[0]
+            if len(packet_fingerprints) == 1
+            else None
+        ),
+        "review_packet_fingerprints": packet_fingerprints,
+        "review_packet_set_fingerprint": packet_set_fingerprint,
         "rubric_version": normalized_rubric,
         "evaluator_version": normalized_evaluator,
         "brand": brand,
@@ -191,10 +222,43 @@ def build_reviewed_claim_tile_memory_from_journal_shadow(
     """Rebuild reviewed memory from a packet-bound durable review journal."""
 
     _validate_ledger(ledger)
+    latest_series_id = str(
+        ledger.get("latest_mapping_series_id") or ""
+    )
+    scoped_ledger = dict(ledger)
+    if latest_series_id:
+        scoped_ledger["mapping_series"] = [
+            dict(series)
+            for series in ledger.get("mapping_series") or []
+            if isinstance(series, dict)
+            and str(series.get("mapping_series_id") or "")
+            == latest_series_id
+        ]
+        scoped_ledger["mappings"] = [
+            dict(mapping)
+            for mapping in ledger.get("mappings") or []
+            if isinstance(mapping, dict)
+            and str(mapping.get("mapping_series_id") or "")
+            == latest_series_id
+        ]
+    scoped_mapping_ids = {
+        str(mapping.get("mapping_id") or "")
+        for mapping in scoped_ledger.get("mappings") or []
+        if isinstance(mapping, dict)
+    }
     review_rows = [
         dict(review)
         for review in reviews
         if isinstance(review, dict)
+        and (
+            not latest_series_id
+            or str(
+                review.get("mapping_id")
+                or review.get("subject_id")
+                or ""
+            )
+            in scoped_mapping_ids
+        )
     ]
     if not review_rows:
         raise EvidenceReviewedClaimTileMemoryError(
@@ -205,15 +269,11 @@ def build_reviewed_claim_tile_memory_from_journal_shadow(
         _review_packet_fingerprint(review)
         for review in review_rows
     }
-    if len(packet_fingerprints) != 1:
-        raise EvidenceReviewedClaimTileMemoryError(
-            "current claim-tile reviews reference mixed packets"
-        )
-    packet_fingerprint = next(iter(packet_fingerprints))
+    normalized_packet_fingerprints = sorted(packet_fingerprints)
 
     series_by_id = {
         str(series.get("mapping_series_id") or ""): series
-        for series in ledger.get("mapping_series") or []
+        for series in scoped_ledger.get("mapping_series") or []
         if isinstance(series, dict)
         and str(series.get("mapping_series_id") or "")
     }
@@ -235,11 +295,14 @@ def build_reviewed_claim_tile_memory_from_journal_shadow(
         )
 
     return build_reviewed_claim_tile_memory_shadow(
-        ledger,
+        scoped_ledger,
         review_rows,
-        review_packet_fingerprint=packet_fingerprint,
+        review_packet_fingerprint=normalized_packet_fingerprints[0],
         rubric_version=next(iter(rubric_versions)),
         evaluator_version=evaluator_version,
+        _allowed_review_packet_fingerprints=(
+            normalized_packet_fingerprints
+        ),
     )
 
 
@@ -298,7 +361,7 @@ def _validated_reviews(
     rows: Iterable[dict[str, Any]],
     *,
     mappings: dict[str, dict[str, Any]],
-    packet_fingerprint: str,
+    packet_fingerprints: set[str],
 ) -> dict[str, dict[str, Any]]:
     reviews: dict[str, dict[str, Any]] = {}
     for raw in rows:
@@ -319,7 +382,7 @@ def _validated_reviews(
         _validate_review_shape(
             review,
             mapping=mappings[mapping_id],
-            packet_fingerprint=packet_fingerprint,
+            packet_fingerprints=packet_fingerprints,
         )
         reviews[mapping_id] = review
     return reviews
@@ -329,7 +392,7 @@ def _validate_review_shape(
     review: dict[str, Any],
     *,
     mapping: dict[str, Any],
-    packet_fingerprint: str,
+    packet_fingerprints: set[str],
 ) -> None:
     event_id = str(review.get("event_id") or "")
     decision = str(review.get("decision") or "")
@@ -352,7 +415,7 @@ def _validate_review_shape(
         raise EvidenceReviewedClaimTileMemoryError(
             f"claim-tile review is authoritative: {event_id}"
         )
-    if _review_packet_fingerprint(review) != packet_fingerprint:
+    if _review_packet_fingerprint(review) not in packet_fingerprints:
         raise EvidenceReviewedClaimTileMemoryError(
             f"claim-tile review packet mismatch: {event_id}"
         )

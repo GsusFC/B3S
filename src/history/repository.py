@@ -39,7 +39,16 @@ from src.services.evidence_claim_tile_review import (
     EvidenceClaimTileReviewConflictError,
     EvidenceClaimTileReviewInvalidTransitionError,
     EvidenceClaimTileReviewNotFoundError,
+    EvidenceClaimTileReviewPacketNotFoundError,
+    EvidenceClaimTileReviewUnavailableError,
     claim_tile_review_case_id,
+)
+from src.services.evidence_claim_tile_review_packet import (
+    EvidenceClaimTileReviewPacketError,
+    build_evidence_claim_tile_review_packet,
+    build_review_template,
+    packet_candidate_for_subject,
+    validate_evidence_claim_tile_review_packet,
 )
 from src.services.evidence_memory_adjudication import (
     ADJUDICATION_DECISIONS,
@@ -492,6 +501,225 @@ class PostgresHistoryRepository:
             reviews,
         )
 
+    def register_evidence_claim_tile_review_packet(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Append the exact current private reviewer packet, idempotently."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceClaimTileReviewPacketNotFoundError(
+                "The brand domain does not exist in durable history."
+            )
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id,
+                       workspaces.id AS workspace_id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceClaimTileReviewPacketNotFoundError(
+                    "The brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand["workspace_id"],
+                        "brand",
+                        brand_id,
+                    ),
+                ),
+            )
+            report_rows = conn.execute(
+                f"""
+                SELECT report_snapshots.payload
+                FROM {_SCHEMA}.report_snapshots
+                JOIN {_SCHEMA}.evaluation_runs
+                  ON evaluation_runs.id =
+                     report_snapshots.evaluation_run_id
+                JOIN {_SCHEMA}.captures
+                  ON captures.id = evaluation_runs.capture_id
+                WHERE report_snapshots.workspace_id = %s
+                  AND captures.brand_id = %s
+                ORDER BY report_snapshots.created_at,
+                         report_snapshots.source_report_id
+                """,
+                (brand["workspace_id"], brand_id),
+            ).fetchall()
+            reports = [
+                dict(row["payload"])
+                for row in report_rows
+                if isinstance(row["payload"], dict)
+            ]
+            packet = build_evidence_claim_tile_review_packet(reports)
+            manifest = packet["manifest"]
+            ledger_state = conn.execute(
+                f"""
+                SELECT state_fingerprint
+                FROM {_SCHEMA}.evidence_claim_tile_ledger_states
+                WHERE brand_id = %s
+                """,
+                (brand_id,),
+            ).fetchone()
+            if (
+                ledger_state is None
+                or str(ledger_state["state_fingerprint"])
+                != str(manifest["ledger_state_fingerprint"])
+            ):
+                raise EvidenceClaimTileReviewUnavailableError(
+                    "The persisted claim-to-tile ledger does not match "
+                    "the immutable snapshots."
+                )
+            candidate_subject_ids = [
+                str(candidate["subject_id"])
+                for candidate in packet["candidates"]
+            ]
+            mapping_rows = (
+                conn.execute(
+                    f"""
+                    SELECT *
+                    FROM {_SCHEMA}.evidence_claim_tile_mappings
+                    WHERE brand_id = %s
+                      AND mapping_id = ANY(%s::text[])
+                    """,
+                    (brand_id, candidate_subject_ids),
+                ).fetchall()
+                if candidate_subject_ids
+                else []
+            )
+            mappings_by_id = {
+                str(mapping["mapping_id"]): mapping
+                for mapping in mapping_rows
+            }
+            for candidate in packet["candidates"]:
+                mapping = mappings_by_id.get(
+                    str(candidate["subject_id"])
+                )
+                if mapping is None or not _packet_mapping_matches(
+                    candidate,
+                    mapping,
+                ):
+                    raise EvidenceClaimTileReviewUnavailableError(
+                        "A packet candidate does not match the durable "
+                        "claim-to-tile mapping."
+                    )
+            packet_fingerprint = str(
+                manifest["review_packet_fingerprint"]
+            )
+            packet_id = _stable_uuid(
+                brand_id,
+                "evidence-claim-tile-review-packet",
+                packet_fingerprint,
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_claim_tile_review_packets (
+                    id, brand_id, packet_kind, packet_fingerprint,
+                    candidate_fingerprint, schema_version,
+                    packet_schema_version, candidate_schema_version,
+                    ledger_state_fingerprint, mapping_series_id,
+                    rubric_version, candidate_count, manifest, candidates,
+                    runtime_effect, authority, automatic_tile_effect,
+                    automatic_scoring_effect
+                ) VALUES (
+                    %s, %s, 'claim_tile', %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, false, false, false, false
+                )
+                ON CONFLICT (brand_id, packet_fingerprint) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    packet_id,
+                    brand_id,
+                    packet_fingerprint,
+                    str(manifest["candidate_fingerprint"]),
+                    str(manifest["schema_version"]),
+                    str(manifest["review_packet_schema_version"]),
+                    str(manifest["candidate_schema_version"]),
+                    str(manifest["ledger_state_fingerprint"]),
+                    str(manifest["mapping_series_id"]),
+                    str(manifest["rubric_version"]),
+                    int(manifest["candidate_count"]),
+                    _jsonb(manifest),
+                    _jsonb(packet["candidates"]),
+                ),
+            ).fetchone()
+            replayed = inserted is None
+            row = inserted
+            if row is None:
+                row = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM {_SCHEMA}.evidence_claim_tile_review_packets
+                    WHERE brand_id = %s
+                      AND packet_fingerprint = %s
+                    """,
+                    (brand_id, packet_fingerprint),
+                ).fetchone()
+            if row is None:
+                raise EvidenceClaimTileReviewUnavailableError(
+                    "The review packet could not be registered."
+                )
+            stored = _claim_tile_review_packet_record(row)
+        return stored, replayed
+
+    def get_evidence_claim_tile_review_packet(
+        self,
+        domain_or_url: str,
+        packet_fingerprint: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any]:
+        """Read and revalidate one exact private reviewer packet."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        normalized_fingerprint = str(
+            packet_fingerprint or ""
+        ).strip().lower()
+        if not domain or not _is_sha256(normalized_fingerprint):
+            raise EvidenceClaimTileReviewPacketNotFoundError(
+                "The registered claim-to-tile review packet does not exist."
+            )
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT packets.*
+                FROM {_SCHEMA}.evidence_claim_tile_review_packets
+                     AS packets
+                JOIN {_SCHEMA}.brands
+                  ON brands.id = packets.brand_id
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                  AND packets.packet_fingerprint = %s
+                """,
+                (
+                    workspace_slug,
+                    domain,
+                    normalized_fingerprint,
+                ),
+            ).fetchone()
+        if row is None:
+            raise EvidenceClaimTileReviewPacketNotFoundError(
+                "The registered claim-to-tile review packet does not exist."
+            )
+        return _claim_tile_review_packet_record(row)
+
     def append_evidence_claim_tile_review(
         self,
         domain_or_url: str,
@@ -546,6 +774,36 @@ class PostgresHistoryRepository:
                     ),
                 ),
             )
+            packet_row = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_claim_tile_review_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                """,
+                (brand_id, command.review_packet_fingerprint),
+            ).fetchone()
+            if packet_row is None:
+                raise EvidenceClaimTileReviewPacketNotFoundError(
+                    "The exact registered review packet does not exist "
+                    "for this brand."
+                )
+            try:
+                packet = _claim_tile_review_packet_record(packet_row)
+                packet_candidate = packet_candidate_for_subject(
+                    packet,
+                    command.subject_id,
+                )
+            except EvidenceClaimTileReviewPacketError as exc:
+                raise EvidenceClaimTileReviewUnavailableError(
+                    "The registered claim-to-tile review packet failed "
+                    "canonical validation."
+                ) from exc
+            if packet_candidate is None:
+                raise EvidenceClaimTileReviewConflictError(
+                    "The mapping subject is not part of the exact "
+                    "registered review packet."
+                )
             existing = conn.execute(
                 f"""
                 SELECT *
@@ -604,6 +862,14 @@ class PostgresHistoryRepository:
                 raise EvidenceClaimTileReviewNotFoundError(
                     "The claim-to-tile mapping does not exist in this "
                     "brand's immutable history."
+                )
+            if not _packet_mapping_matches(
+                packet_candidate,
+                mapping,
+            ):
+                raise EvidenceClaimTileReviewConflictError(
+                    "The registered packet mapping does not match the "
+                    "durable claim-to-tile mapping."
                 )
 
             current = conn.execute(
@@ -718,6 +984,11 @@ class PostgresHistoryRepository:
                 SELECT DISTINCT ON (events.subject_type, events.subject_id)
                        events.*
                 FROM {_SCHEMA}.evidence_claim_tile_review_events AS events
+                JOIN {_SCHEMA}.evidence_claim_tile_review_packets
+                     AS packets
+                  ON packets.brand_id = events.brand_id
+                 AND packets.packet_fingerprint =
+                     events.review_packet_fingerprint
                 JOIN {_SCHEMA}.brands
                   ON brands.id = events.brand_id
                 JOIN {_SCHEMA}.workspaces
@@ -2079,6 +2350,7 @@ class PostgresHistoryRepository:
             "evidence_claim_reconciliation_events",
             "evidence_scoring_recovery_review_events",
             "evidence_claim_tile_review_events",
+            "evidence_claim_tile_review_packets",
             "evidence_claim_tile_ledger_states",
             "evidence_claim_tile_mapping_series",
             "evidence_claim_tile_mappings",
@@ -3484,6 +3756,103 @@ def _claim_tile_review_event(
         "created_at": timestamp,
         "reviewed_at": timestamp,
     }
+
+
+def _claim_tile_review_packet_record(row: Any) -> dict[str, Any]:
+    manifest = (
+        dict(row["manifest"])
+        if isinstance(row["manifest"], dict)
+        else {}
+    )
+    candidates = [
+        dict(candidate)
+        for candidate in row["candidates"] or []
+        if isinstance(candidate, dict)
+    ]
+    packet = {
+        "manifest": manifest,
+        "candidates": candidates,
+    }
+    validate_evidence_claim_tile_review_packet(packet)
+    column_bindings = {
+        "packet_fingerprint": "review_packet_fingerprint",
+        "candidate_fingerprint": "candidate_fingerprint",
+        "schema_version": "schema_version",
+        "packet_schema_version": "review_packet_schema_version",
+        "candidate_schema_version": "candidate_schema_version",
+        "ledger_state_fingerprint": "ledger_state_fingerprint",
+        "mapping_series_id": "mapping_series_id",
+        "rubric_version": "rubric_version",
+    }
+    for column, manifest_field in column_bindings.items():
+        if str(row[column]) != str(manifest.get(manifest_field) or ""):
+            raise EvidenceClaimTileReviewPacketError(
+                f"registered review packet {column} mismatch"
+            )
+    if (
+        str(row["packet_kind"]) != "claim_tile"
+        or int(row["candidate_count"]) != len(candidates)
+        or row["runtime_effect"] is not False
+        or row["authority"] is not False
+        or row["automatic_tile_effect"] is not False
+        or row["automatic_scoring_effect"] is not False
+    ):
+        raise EvidenceClaimTileReviewPacketError(
+            "registered review packet metadata mismatch"
+        )
+    created_at = row["created_at"]
+    timestamp = (
+        created_at.isoformat()
+        if hasattr(created_at, "isoformat")
+        else str(created_at)
+    )
+    return {
+        "id": str(row["id"]),
+        "packet_kind": "claim_tile",
+        "packet_fingerprint": str(row["packet_fingerprint"]),
+        "candidate_fingerprint": str(row["candidate_fingerprint"]),
+        "manifest": manifest,
+        "candidates": candidates,
+        "review_template": build_review_template(
+            manifest,
+            candidates,
+        ),
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_tile_effect": False,
+        "automatic_scoring_effect": False,
+        "created_at": timestamp,
+    }
+
+
+def _packet_mapping_matches(
+    candidate: dict[str, Any],
+    mapping: Any,
+) -> bool:
+    candidate_mapping = candidate.get("mapping")
+    if not isinstance(candidate_mapping, dict):
+        return False
+    return all(
+        str(candidate_mapping.get(field) or "")
+        == str(mapping[field])
+        for field in (
+            "mapping_id",
+            "mapping_series_id",
+            "source_evidence_id",
+            "claim_variant_id",
+            "component_key",
+            "tile_id",
+            "tile_key",
+            "polarity",
+        )
+    )
+
+
+def _is_sha256(value: Any) -> bool:
+    text = str(value or "")
+    return len(text) == 64 and all(
+        character in "0123456789abcdef" for character in text
+    )
 
 
 def _scoring_recovery_review_event(

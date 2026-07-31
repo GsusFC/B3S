@@ -39,9 +39,19 @@ claim or quote text.
 ## API
 
 ```text
+POST /api/v1/brands/{domain}/evidence-claim-tile-review-packets
+GET  /api/v1/brands/{domain}/evidence-claim-tile-review-packets/{fingerprint}
 GET  /api/v1/brands/{domain}/evidence-claim-tile-reviews
 POST /api/v1/brands/{domain}/evidence-claim-tile-reviews
 ```
+
+The first endpoint reconstructs a private atomic packet from immutable report
+snapshots and the current persisted mapping series. Its candidates contain the
+claim, source passage and URL, tile quote, and the versioned tile evidence
+contract. The public ledger remains hash-only. Registering the same canonical
+packet is idempotent; a changed snapshot, mapping series, rubric, manifest, or
+candidate set produces a different fingerprint. Only the evidence-reviewer
+credential can create or read these private packets.
 
 Writes require the dedicated evidence-reviewer credential and an
 `Idempotency-Key`. Example:
@@ -68,8 +78,17 @@ writing against a stale current event returns `409`.
 event. It binds the decision to the exact normalized manifest, candidates, and
 schema presented to the reviewer. It is deliberately separate from
 `evaluator_version`; the latter identifies the reviewing procedure, not the
-reviewed data. Migration `009` leaves the field nullable only for legacy v1
-events, which remain readable but fail closed when rebuilding reviewed memory.
+reviewed data. Migration `010` adds the append-only packet registry and a
+foreign key that rejects every new event whose packet was not registered.
+Migration `009` leaves the field nullable only for legacy v1 events, which
+remain readable but fail closed when rebuilding reviewed memory.
+
+Reviewed memory is scoped to the latest mapping series. Decisions for its
+individual mappings may come from different registered packets as evidence is
+added over time; each mapping keeps its own exact packet fingerprint and the
+memory exposes the sorted packet set plus a deterministic set fingerprint.
+Changing evaluator, mapping policy, or rubric creates another series instead
+of silently reusing decisions from an incompatible contract.
 
 The server derives the reviewer from the authenticated principal and derives
 the human-readable `case_id` plus all mapping metadata from PostgreSQL. A
@@ -110,16 +129,19 @@ does not count as a completed active review.
 
 The PostgreSQL integration test:
 
-1. applies migrations through `009`;
+1. applies migrations through `010`;
 2. imports a valid immutable report fixture that produces one claim-to-tile
    mapping;
-3. appends `accepted`;
-4. recreates the repository and reconstructs the accepted reviewed memory;
-5. appends `revoked`;
-6. recreates the repository again and verifies that the reviewed memory has no
+3. rejects an unregistered packet fingerprint;
+4. registers and re-reads the exact reviewer packet idempotently;
+5. verifies that the packet cannot be updated;
+6. appends `accepted`;
+7. recreates the repository and reconstructs the accepted reviewed memory;
+8. appends `revoked`;
+9. recreates the repository again and verifies that the reviewed memory has no
    accepted mapping and reports the subject as pending;
-7. reads `revoked` plus the superseded acceptance from the journal;
-8. verifies that the ledger fingerprint did not change.
+10. reads `revoked` plus the superseded acceptance from the journal;
+11. verifies that the ledger fingerprint did not change.
 
 PR #29 ran the same test against PostgreSQL 16 and completed with
 `2298 passed, 1 skipped`. A local isolated PostgreSQL 14 run on 2026-07-29 also

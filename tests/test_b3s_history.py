@@ -26,6 +26,7 @@ from src.services.evidence_claim_reconciliation import (
 )
 from src.services.evidence_claim_tile_review import (
     EvidenceClaimTileReviewCommand,
+    EvidenceClaimTileReviewPacketNotFoundError,
 )
 from src.services.evidence_memory_adjudication import (
     EvidenceMemoryAdjudicationCommand,
@@ -369,9 +370,20 @@ def test_claim_tile_review_migration_is_append_only_and_safe() -> None:
         .read_text(encoding="utf-8")
     )
 
-    assert filenames[-2] == "008_evidence_claim_tile_reviews.sql"
-    assert filenames[-1] == (
+    registry_sql = (
+        resources.files("src.history")
+        .joinpath(
+            "migrations/010_evidence_claim_tile_review_packets.sql"
+        )
+        .read_text(encoding="utf-8")
+    )
+
+    assert filenames[-3] == "008_evidence_claim_tile_reviews.sql"
+    assert filenames[-2] == (
         "009_evidence_claim_tile_review_packet_fingerprint.sql"
+    )
+    assert filenames[-1] == (
+        "010_evidence_claim_tile_review_packets.sql"
     )
     assert "subject_type = 'claim_tile_mapping'" in sql
     assert "mapping_id = subject_id" in sql
@@ -389,6 +401,18 @@ def test_claim_tile_review_migration_is_append_only_and_safe() -> None:
         "schema_version <> 'evidence-claim-tile-review-event-v2'"
         in packet_sql
     )
+    assert "evidence_claim_tile_review_packets" in registry_sql
+    assert "BEFORE UPDATE OR DELETE" in registry_sql
+    assert "packet_fingerprint ~ '^[0-9a-f]{64}$'" in registry_sql
+    assert "runtime_effect = false" in registry_sql
+    assert "authority = false" in registry_sql
+    assert "automatic_tile_effect = false" in registry_sql
+    assert "automatic_scoring_effect = false" in registry_sql
+    assert (
+        "evidence_claim_tile_review_registered_packet_fk"
+        in registry_sql
+    )
+    assert "NOT VALID" in registry_sql
 
 
 def test_claim_tile_review_requires_packet_fingerprint() -> None:
@@ -624,10 +648,11 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "004_evidence_memory_adjudications.sql",
             "005_evidence_claim_reconciliations.sql",
             "006_evidence_claim_tile_ledger.sql",
-            "007_evidence_scoring_recovery_reviews.sql",
-            "008_evidence_claim_tile_reviews.sql",
-            "009_evidence_claim_tile_review_packet_fingerprint.sql",
-        ]
+                "007_evidence_scoring_recovery_reviews.sql",
+                "008_evidence_claim_tile_reviews.sql",
+                "009_evidence_claim_tile_review_packet_fingerprint.sql",
+                "010_evidence_claim_tile_review_packets.sql",
+            ]
         assert repository.migrate() == []
 
         older = _report("scan-older", "2026-07-01T08:00:00Z", score=61)
@@ -714,6 +739,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "evidence_claim_reconciliation_events": 0,
             "evidence_scoring_recovery_review_events": 0,
             "evidence_claim_tile_review_events": 0,
+            "evidence_claim_tile_review_packets": 0,
             "evidence_claim_tile_ledger_states": 1,
             "evidence_claim_tile_mapping_series": 1,
             "evidence_claim_tile_mappings": 0,
@@ -1157,6 +1183,52 @@ def test_postgres_claim_tile_review_survives_restart_and_revocation(
         assert ledger["authority"] is False
         assert ledger["summary"]["mapping_count"] == 1
         mapping = ledger["mappings"][0]
+        with pytest.raises(
+            EvidenceClaimTileReviewPacketNotFoundError,
+            match="registered review packet",
+        ):
+            repository.append_evidence_claim_tile_review(
+                "memory.example",
+                _claim_tile_review_command(
+                    mapping["mapping_id"],
+                    decision="accepted",
+                    expected_current_event_id=None,
+                    key_hash="7" * 64,
+                    fingerprint="6" * 64,
+                    review_packet_fingerprint="f" * 64,
+                ),
+            )
+        packet, replayed = (
+            repository.register_evidence_claim_tile_review_packet(
+                "memory.example"
+            )
+        )
+        assert replayed is False
+        assert packet["manifest"]["candidate_count"] == 1
+        assert packet["candidates"][0]["subject_id"] == (
+            mapping["mapping_id"]
+        )
+        packet_fingerprint = packet["packet_fingerprint"]
+        replayed_packet, replayed = (
+            repository.register_evidence_claim_tile_review_packet(
+                "memory.example"
+            )
+        )
+        assert replayed is True
+        assert replayed_packet == packet
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            with pytest.raises(
+                psycopg.errors.RaiseException,
+                match="append-only",
+            ):
+                conn.execute(
+                    """
+                    UPDATE b3s_history.evidence_claim_tile_review_packets
+                    SET candidate_count = candidate_count
+                    WHERE packet_fingerprint = %s
+                    """,
+                    (packet_fingerprint,),
+                )
 
         accepted, replayed = (
             repository.append_evidence_claim_tile_review(
@@ -1167,6 +1239,7 @@ def test_postgres_claim_tile_review_survives_restart_and_revocation(
                     expected_current_event_id=None,
                     key_hash="8" * 64,
                     fingerprint="9" * 64,
+                    review_packet_fingerprint=packet_fingerprint,
                 ),
             )
         )
@@ -1183,6 +1256,13 @@ def test_postgres_claim_tile_review_survives_restart_and_revocation(
         assert accepted["automatic_scoring_effect"] is False
 
         restarted = PostgresHistoryRepository(dsn)
+        assert (
+            restarted.get_evidence_claim_tile_review_packet(
+                "memory.example",
+                packet_fingerprint,
+            )
+            == packet
+        )
         journal = restarted.list_evidence_claim_tile_reviews(
             "memory.example"
         )
@@ -1219,6 +1299,7 @@ def test_postgres_claim_tile_review_survives_restart_and_revocation(
                     expected_current_event_id=accepted["id"],
                     key_hash="a" * 64,
                     fingerprint="b" * 64,
+                    review_packet_fingerprint=packet_fingerprint,
                 ),
             )
         )
@@ -1295,6 +1376,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "007_evidence_scoring_recovery_reviews.sql",
             "008_evidence_claim_tile_reviews.sql",
             "009_evidence_claim_tile_review_packet_fingerprint.sql",
+            "010_evidence_claim_tile_review_packets.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0
@@ -1311,6 +1393,9 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
                 to_regclass(
                     'b3s_history.evidence_claim_tile_review_events'
                 )::text AS claim_tile_review_table,
+                to_regclass(
+                    'b3s_history.evidence_claim_tile_review_packets'
+                )::text AS claim_tile_review_packet_table,
                 (
                     SELECT count(*)
                     FROM b3s_history.schema_migrations
@@ -1323,7 +1408,10 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
         assert stored[1] == (
             "b3s_history.evidence_claim_tile_review_events"
         )
-        assert stored[2] == 9
+        assert stored[2] == (
+            "b3s_history.evidence_claim_tile_review_packets"
+        )
+        assert stored[3] == 10
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
@@ -1411,6 +1499,7 @@ def _claim_tile_review_command(
     expected_current_event_id: str | None,
     key_hash: str,
     fingerprint: str,
+    review_packet_fingerprint: str = "e" * 64,
 ) -> EvidenceClaimTileReviewCommand:
     return EvidenceClaimTileReviewCommand(
         subject_id=subject_id,
@@ -1420,7 +1509,7 @@ def _claim_tile_review_command(
         reason_code="tile_contract_reviewed",
         rationale="The reviewer checked the claim-to-tile contract.",
         evaluator_version="manual-review-v1",
-        review_packet_fingerprint="e" * 64,
+        review_packet_fingerprint=review_packet_fingerprint,
         actor_id="gsus",
         idempotency_key_hash=key_hash,
         request_fingerprint=fingerprint,

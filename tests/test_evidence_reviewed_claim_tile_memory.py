@@ -146,6 +146,9 @@ def test_journal_rebuild_derives_packet_and_rubric_fail_closed() -> None:
     )
 
     assert result["review_packet_fingerprint"] == PACKET_FINGERPRINT
+    assert result["review_packet_fingerprints"] == [
+        PACKET_FINGERPRINT
+    ]
     assert result["rubric_version"] == "baldosas-v3-1"
     assert result["summary"]["accepted_mapping_count"] == 1
 
@@ -163,14 +166,47 @@ def test_journal_rebuild_derives_packet_and_rubric_fail_closed() -> None:
     second = _mapping("2", "mission.M2")
     mixed_packet = _review(second, "accepted")
     mixed_packet["review_packet_fingerprint"] = "b" * 64
-    with pytest.raises(
-        EvidenceReviewedClaimTileMemoryError,
-        match="mixed packets",
-    ):
+    mixed_result = (
         build_reviewed_claim_tile_memory_from_journal_shadow(
             _ledger([mapping, second]),
             [review, mixed_packet],
         )
+    )
+    assert mixed_result["selection_ready"] is True
+    assert mixed_result["review_packet_fingerprint"] is None
+    assert mixed_result["review_packet_fingerprints"] == [
+        PACKET_FINGERPRINT,
+        "b" * 64,
+    ]
+    assert len(mixed_result["review_packet_set_fingerprint"]) == 64
+    assert {
+        row["review_packet_fingerprint"]
+        for row in mixed_result["reviewed_mappings"]
+    } == {PACKET_FINGERPRINT, "b" * 64}
+
+
+def test_journal_rebuild_scopes_memory_to_latest_mapping_series() -> None:
+    old = _mapping("1", "mission.M1")
+    current = _mapping("2", "mission.M2")
+    ledger = _ledger([old, current])
+    ledger["latest_mapping_series_id"] = current[
+        "mapping_series_id"
+    ]
+    old_review = _review(old, "accepted")
+    current_review = _review(current, "accepted")
+    current_review["review_packet_fingerprint"] = "b" * 64
+
+    result = build_reviewed_claim_tile_memory_from_journal_shadow(
+        ledger,
+        [old_review, current_review],
+    )
+
+    assert result["selection_ready"] is True
+    assert result["summary"]["candidate_mapping_count"] == 1
+    assert result["review_packet_fingerprints"] == ["b" * 64]
+    assert [
+        row["mapping_id"] for row in result["accepted_mappings"]
+    ] == [current["mapping_id"]]
 
 
 def test_unknown_authoritative_or_wrong_packet_review_fails_closed() -> None:

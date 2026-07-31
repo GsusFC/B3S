@@ -42,6 +42,12 @@ class EvidenceClaimTileReviewNotFoundError(
     """The brand or immutable claim-to-tile mapping does not exist."""
 
 
+class EvidenceClaimTileReviewPacketNotFoundError(
+    EvidenceClaimTileReviewNotFoundError
+):
+    """The exact immutable packet named by a review does not exist."""
+
+
 class EvidenceClaimTileReviewInvalidTransitionError(
     EvidenceClaimTileReviewJournalError
 ):

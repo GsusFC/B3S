@@ -36,6 +36,7 @@ from .models import (
     EvidenceClaimTileReviewCreateRequest,
     EvidenceClaimTileReviewCreateResponse,
     EvidenceClaimTileReviewJournalResponse,
+    EvidenceClaimTileReviewPacketResponse,
     EvidenceLedgerShadowResponse,
     EvidenceMemoryAdjudicationCreateRequest,
     EvidenceMemoryAdjudicationCreateResponse,
@@ -58,11 +59,13 @@ from .service import (
     create_evidence_scoring_recovery_review,
     create_scan_job,
     get_completed_report,
+    get_evidence_claim_tile_review_packet,
     get_evidence_claim_reconciliations,
     get_evidence_claim_tile_reviews,
     get_evidence_memory_adjudications,
     get_evidence_scoring_recovery_reviews,
     get_scan,
+    register_evidence_claim_tile_review_packet,
 )
 
 
@@ -411,6 +414,81 @@ def brand_evidence_claim_tile_ledger_shadow(
         "api_version": "v1",
         "domain": normalized,
         **evidence_claim_tile_ledger_for_domain(normalized),
+    }
+
+
+@router.post(
+    "/brands/{domain}/evidence-claim-tile-review-packets",
+    response_model=EvidenceClaimTileReviewPacketResponse,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="registerBrandEvidenceClaimTileReviewPacket",
+    responses=_ERRORS,
+)
+def register_brand_evidence_claim_tile_review_packet(
+    domain: str,
+    response: Response,
+    _principal: AdjudicationPrincipal,
+) -> dict[str, Any]:
+    normalized = domain_key(domain)
+    if not normalized:
+        raise ApiError(
+            400,
+            "invalid_domain",
+            "A valid brand domain is required.",
+        )
+    packet, replayed = register_evidence_claim_tile_review_packet(
+        normalized
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Location"] = (
+        f"/api/v1/brands/{normalized}/"
+        "evidence-claim-tile-review-packets/"
+        f"{packet['packet_fingerprint']}"
+    )
+    if replayed:
+        response.headers["Idempotent-Replayed"] = "true"
+    return {
+        "object": "evidence_claim_tile_review_packet",
+        "api_version": "v1",
+        "domain": normalized,
+        "replayed": replayed,
+        **packet,
+    }
+
+
+@router.get(
+    (
+        "/brands/{domain}/evidence-claim-tile-review-packets/"
+        "{packet_fingerprint}"
+    ),
+    response_model=EvidenceClaimTileReviewPacketResponse,
+    operation_id="getBrandEvidenceClaimTileReviewPacket",
+    responses=_ERRORS,
+)
+def read_brand_evidence_claim_tile_review_packet(
+    domain: str,
+    packet_fingerprint: str,
+    response: Response,
+    _principal: AdjudicationPrincipal,
+) -> dict[str, Any]:
+    normalized = domain_key(domain)
+    if not normalized:
+        raise ApiError(
+            400,
+            "invalid_domain",
+            "A valid brand domain is required.",
+        )
+    packet = get_evidence_claim_tile_review_packet(
+        normalized,
+        packet_fingerprint,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "object": "evidence_claim_tile_review_packet",
+        "api_version": "v1",
+        "domain": normalized,
+        "replayed": False,
+        **packet,
     }
 
 
