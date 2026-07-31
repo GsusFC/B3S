@@ -1346,6 +1346,61 @@ def test_reviewer_can_register_and_read_exact_claim_tile_packet(
     )
 
 
+def test_reviewer_can_read_derived_claim_tile_review_queue(
+    monkeypatch,
+):
+    _configure_evidence_reviewer(monkeypatch)
+    queue = _claim_tile_review_queue()
+    captured = {}
+
+    def fake_get(domain, packet_fingerprint):
+        captured["read"] = (domain, packet_fingerprint)
+        return queue
+
+    monkeypatch.setattr(
+        "web.api_v1.router.get_evidence_claim_tile_review_queue",
+        fake_get,
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/"
+        "evidence-claim-tile-review-packets/"
+        f"{REVIEW_PACKET_FINGERPRINT}/queue",
+        headers=REVIEW_AUTH,
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    payload = response.json()
+    assert payload["object"] == "evidence_claim_tile_review_queue"
+    assert payload["review_complete"] is False
+    assert payload["summary"]["pending_review_count"] == 1
+    assert payload["runtime_effect"] is False
+    assert payload["automatic_scoring_effect"] is False
+    assert captured["read"] == (
+        "example.com",
+        REVIEW_PACKET_FINGERPRINT,
+    )
+
+
+def test_scanner_token_cannot_read_claim_tile_review_queue(
+    monkeypatch,
+):
+    _configure_evidence_reviewer(monkeypatch)
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/"
+        "evidence-claim-tile-review-packets/"
+        f"{REVIEW_PACKET_FINGERPRINT}/queue",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["details"]["required_scope"] == (
+        "evidence:adjudicate"
+    )
+
+
 def test_scanner_token_cannot_read_private_claim_tile_packet(
     monkeypatch,
 ):
@@ -2078,6 +2133,38 @@ def _claim_tile_review_packet() -> dict:
         "automatic_tile_effect": False,
         "automatic_scoring_effect": False,
         "created_at": "2026-07-31T10:00:00+00:00",
+    }
+
+
+def _claim_tile_review_queue() -> dict:
+    return {
+        "schema_version": "evidence-claim-tile-review-queue-v1",
+        "policy_version": "evidence-claim-tile-review-queue-policy-v1",
+        "queue_kind": "claim_tile_human_review",
+        "packet_fingerprint": REVIEW_PACKET_FINGERPRINT,
+        "candidate_fingerprint": "8" * 64,
+        "mapping_series_id": "d" * 64,
+        "queue_fingerprint": "9" * 64,
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_tile_effect": False,
+        "automatic_scoring_effect": False,
+        "review_complete": False,
+        "summary": {
+            "candidate_count": 1,
+            "reviewed_count": 0,
+            "pending_review_count": 1,
+        },
+        "pending_subject_ids": ["c" * 64],
+        "reviewed_subject_ids": [],
+        "items": [
+            {
+                "subject_id": "c" * 64,
+                "review_status": "pending_review",
+                "review_reason": "unreviewed_mapping",
+            }
+        ],
+        "warnings": ["no_runtime_tile_or_scoring_effect"],
     }
 
 

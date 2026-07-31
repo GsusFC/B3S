@@ -50,6 +50,9 @@ from src.services.evidence_claim_tile_review_packet import (
     packet_candidate_for_subject,
     validate_evidence_claim_tile_review_packet,
 )
+from src.services.evidence_claim_tile_review_queue import (
+    build_evidence_claim_tile_review_queue,
+)
 from src.services.evidence_memory_adjudication import (
     ADJUDICATION_DECISIONS,
     ADJUDICATION_SUBJECT_TYPE,
@@ -719,6 +722,123 @@ class PostgresHistoryRepository:
                 "The registered claim-to-tile review packet does not exist."
             )
         return _claim_tile_review_packet_record(row)
+
+    def get_evidence_claim_tile_review_queue(
+        self,
+        domain_or_url: str,
+        packet_fingerprint: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any]:
+        """Derive review readiness from exact packets and current events."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        normalized_fingerprint = str(
+            packet_fingerprint or ""
+        ).strip().lower()
+        if not domain or not _is_sha256(normalized_fingerprint):
+            raise EvidenceClaimTileReviewPacketNotFoundError(
+                "The registered claim-to-tile review packet does not exist."
+            )
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceClaimTileReviewPacketNotFoundError(
+                    "The brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            packet_row = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_claim_tile_review_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                """,
+                (brand_id, normalized_fingerprint),
+            ).fetchone()
+            if packet_row is None:
+                raise EvidenceClaimTileReviewPacketNotFoundError(
+                    "The registered claim-to-tile review packet does not "
+                    "exist."
+                )
+            current_packet = _claim_tile_review_packet_record(packet_row)
+            subject_ids = [
+                str(candidate["subject_id"])
+                for candidate in current_packet["candidates"]
+            ]
+            review_rows = (
+                conn.execute(
+                    f"""
+                    SELECT DISTINCT ON (
+                               events.subject_type,
+                               events.subject_id
+                           )
+                           events.*
+                    FROM {_SCHEMA}.evidence_claim_tile_review_events
+                         AS events
+                    JOIN {_SCHEMA}.evidence_claim_tile_review_packets
+                         AS packets
+                      ON packets.brand_id = events.brand_id
+                     AND packets.packet_fingerprint =
+                         events.review_packet_fingerprint
+                    WHERE events.brand_id = %s
+                      AND events.subject_type = %s
+                      AND events.subject_id = ANY(%s::text[])
+                    ORDER BY events.subject_type,
+                             events.subject_id,
+                             events.sequence DESC
+                    """,
+                    (
+                        brand_id,
+                        CLAIM_TILE_REVIEW_SUBJECT_TYPE,
+                        subject_ids,
+                    ),
+                ).fetchall()
+                if subject_ids
+                else []
+            )
+            reviews = [
+                _claim_tile_review_event(row) for row in review_rows
+            ]
+            source_fingerprints = sorted(
+                {
+                    normalized_fingerprint,
+                    *(
+                        str(review["review_packet_fingerprint"])
+                        for review in reviews
+                    ),
+                }
+            )
+            source_packet_rows = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_claim_tile_review_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = ANY(%s::text[])
+                ORDER BY packet_fingerprint
+                """,
+                (brand_id, source_fingerprints),
+            ).fetchall()
+            registered_packets = [
+                _claim_tile_review_packet_record(row)
+                for row in source_packet_rows
+            ]
+        return build_evidence_claim_tile_review_queue(
+            current_packet,
+            reviews,
+            registered_packets=registered_packets,
+        )
 
     def append_evidence_claim_tile_review(
         self,

@@ -41,6 +41,7 @@ claim or quote text.
 ```text
 POST /api/v1/brands/{domain}/evidence-claim-tile-review-packets
 GET  /api/v1/brands/{domain}/evidence-claim-tile-review-packets/{fingerprint}
+GET  /api/v1/brands/{domain}/evidence-claim-tile-review-packets/{fingerprint}/queue
 GET  /api/v1/brands/{domain}/evidence-claim-tile-reviews
 POST /api/v1/brands/{domain}/evidence-claim-tile-reviews
 ```
@@ -52,6 +53,24 @@ contract. The public ledger remains hash-only. Registering the same canonical
 packet is idempotent; a changed snapshot, mapping series, rubric, manifest, or
 candidate set produces a different fingerprint. Only the evidence-reviewer
 credential can create or read these private packets.
+
+The packet-specific `queue` is a read-time projection, not a new persistence
+layer. It compares each current candidate with the exact registered packet
+that its current review event references. Its semantic target fingerprint
+includes the source passage and identity classification, claim, tile contract,
+evidence quote, polarity, and matching method, while excluding volatile report
+timestamps and observation counters. Therefore:
+
+- an exact reacquisition remains reviewed;
+- a mapping without a current decision enters `pending_review`;
+- a changed semantic target re-enters `pending_review`;
+- a revoked decision re-enters `pending_review`;
+- `not_reacquired` remains visible but does not erase or silently reinterpret
+  the human decision.
+
+The queue returns the exact candidate context, current event id, and
+`expected_current_event_id` needed for the next optimistic write. It remains
+private and always reports all four effect and authority flags as `false`.
 
 Writes require the dedicated evidence-reviewer credential and an
 `Idempotency-Key`. Example:

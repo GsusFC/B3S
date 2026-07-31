@@ -1209,6 +1209,17 @@ def test_postgres_claim_tile_review_survives_restart_and_revocation(
             mapping["mapping_id"]
         )
         packet_fingerprint = packet["packet_fingerprint"]
+        pending_queue = (
+            repository.get_evidence_claim_tile_review_queue(
+                "memory.example",
+                packet_fingerprint,
+            )
+        )
+        assert pending_queue["review_complete"] is False
+        assert pending_queue["summary"]["unreviewed_mapping_count"] == 1
+        assert pending_queue["items"][0]["review_reason"] == (
+            "unreviewed_mapping"
+        )
         replayed_packet, replayed = (
             repository.register_evidence_claim_tile_review_packet(
                 "memory.example"
@@ -1254,6 +1265,14 @@ def test_postgres_claim_tile_review_survives_restart_and_revocation(
         assert accepted["tile_key"] == "mission.M1"
         assert accepted["automatic_tile_effect"] is False
         assert accepted["automatic_scoring_effect"] is False
+        reviewed_queue = (
+            repository.get_evidence_claim_tile_review_queue(
+                "memory.example",
+                packet_fingerprint,
+            )
+        )
+        assert reviewed_queue["review_complete"] is True
+        assert reviewed_queue["summary"]["accepted_count"] == 1
 
         restarted = PostgresHistoryRepository(dsn)
         assert (
@@ -1290,6 +1309,39 @@ def test_postgres_claim_tile_review_survives_restart_and_revocation(
         assert reviewed_memory["runtime_effect"] is False
         assert reviewed_memory["automatic_scoring_effect"] is False
 
+        restarted.import_report(
+            _claim_tile_report(
+                "claim-tile-review-repeated",
+                "2026-07-07T08:00:00Z",
+            )
+        )
+        repeated_packet, replayed = (
+            restarted.register_evidence_claim_tile_review_packet(
+                "memory.example"
+            )
+        )
+        assert replayed is False
+        assert repeated_packet["packet_fingerprint"] != packet_fingerprint
+        repeated_queue = (
+            restarted.get_evidence_claim_tile_review_queue(
+                "memory.example",
+                repeated_packet["packet_fingerprint"],
+            )
+        )
+        assert repeated_queue["review_complete"] is True
+        assert repeated_queue["summary"][
+            "unreviewed_mapping_count"
+        ] == 0
+        assert repeated_queue["summary"][
+            "changed_review_target_count"
+        ] == 0
+        assert repeated_queue["summary"]["observation_state_counts"] == {
+            "repeated": 1
+        }
+        assert repeated_queue["items"][0]["review_reason"] == (
+            "review_target_unchanged"
+        )
+
         revoked, replayed = (
             restarted.append_evidence_claim_tile_review(
                 "memory.example",
@@ -1299,7 +1351,9 @@ def test_postgres_claim_tile_review_survives_restart_and_revocation(
                     expected_current_event_id=accepted["id"],
                     key_hash="a" * 64,
                     fingerprint="b" * 64,
-                    review_packet_fingerprint=packet_fingerprint,
+                    review_packet_fingerprint=repeated_packet[
+                        "packet_fingerprint"
+                    ],
                 ),
             )
         )
@@ -1331,6 +1385,17 @@ def test_postgres_claim_tile_review_survives_restart_and_revocation(
         ] == 0
         assert revoked_memory["summary"]["pending_mapping_count"] == 1
         assert revoked_memory["accepted_mappings"] == []
+        revoked_queue = (
+            restarted_again.get_evidence_claim_tile_review_queue(
+                "memory.example",
+                repeated_packet["packet_fingerprint"],
+            )
+        )
+        assert revoked_queue["review_complete"] is False
+        assert revoked_queue["summary"]["revoked_review_count"] == 1
+        assert revoked_queue["items"][0]["review_reason"] == (
+            "review_revoked"
+        )
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
