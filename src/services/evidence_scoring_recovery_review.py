@@ -109,11 +109,22 @@ def build_reviewed_scoring_memory_shadow(
     lane: str = "history",
     evidence_adjudications: Iterable[dict[str, Any]] = (),
     recovery_review_events: Iterable[dict[str, Any]] = (),
+    reviewed_claim_tile_memory: dict[str, Any] | None = None,
     ignore_stale_review_events: bool = False,
     review_events_are_current: bool = False,
 ) -> dict[str, Any]:
     """Build candidate and fail-closed reviewed scores from one report history."""
 
+    if reviewed_claim_tile_memory is not None:
+        if not isinstance(reviewed_claim_tile_memory, dict) or (
+            reviewed_claim_tile_memory.get("runtime_effect") is not False
+            or reviewed_claim_tile_memory.get("authority") is not False
+            or reviewed_claim_tile_memory.get("automatic_scoring_effect")
+            is not False
+        ):
+            raise EvidenceScoringRecoveryReviewError(
+                "reviewed claim-to-tile memory must remain non-authoritative"
+            )
     rows = [
         dict(report)
         for report in reports
@@ -193,6 +204,11 @@ def build_reviewed_scoring_memory_shadow(
             accepted_tile_evidence_ids=review[
                 "accepted_tile_evidence_ids"
             ],
+            reviewed_claim_tile_mappings=(
+                reviewed_claim_tile_memory.get("reviewed_mappings") or []
+                if reviewed_claim_tile_memory is not None
+                else []
+            ),
         )
         if isinstance(latest_report, dict)
         else dict(preview)

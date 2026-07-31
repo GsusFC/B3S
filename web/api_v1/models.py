@@ -324,6 +324,7 @@ class EvidenceScoringMemoryPreviewResponse(StrictModel):
     recoveries: list[dict[str, Any]] = Field(default_factory=list)
     conflicts: list[dict[str, Any]] = Field(default_factory=list)
     scoring: dict[str, Any] = Field(default_factory=dict)
+    tile_evolution: dict[str, Any] = Field(default_factory=dict)
     reviewed_shadow: dict[str, Any] = Field(default_factory=dict)
     recovery_review_candidates: list[dict[str, Any]] = Field(
         default_factory=list
