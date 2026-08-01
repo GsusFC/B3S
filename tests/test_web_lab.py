@@ -991,6 +991,8 @@ def test_brand_view_exposes_persistent_tile_memory_only_in_vault(monkeypatch):
     assert "runtime_effect=false" in response.text
     assert "authority=false" in response.text
     assert "memoria vault" in response.text
+    assert "cola_de_revision_scoring" in response.text
+    assert "bloqueada" in response.text
 
 
 def test_brand_view_hides_vault_memory_outside_vault(monkeypatch):
@@ -1071,6 +1073,71 @@ def test_brand_view_counts_unreviewed_vault_mappings_as_pending(monkeypatch):
     assert "<dt>mappings</dt><dd>3</dd>" in response.text
     assert "<dt>aceptados</dt><dd>0</dd>" in response.text
     assert "<dt>pendientes</dt><dd>3</dd>" in response.text
+
+
+def test_vault_score_review_queue_uses_existing_validation_channels():
+    from web.app import _vault_score_review_item
+
+    base = {
+        "tile_key": "mission.M1",
+        "previous_state": "sin_evidencia",
+        "current_state": "ok",
+        "review_priority": "score_affecting",
+        "validation_state": "pending_review",
+        "current_source_evidence_ids": ["evidence-1"],
+        "added_source_evidence_ids": ["evidence-1"],
+    }
+
+    recovery = _vault_score_review_item(
+        {
+            **base,
+            "previous_state": "ok",
+            "current_state": "sin_evidencia",
+            "validation_channel": "scoring_recovery_review",
+        },
+        impact_label="hueco de adquisición",
+        impact_tone="warn",
+        recovery_candidates=[{"case_id": "recovery-1"}],
+        current_mappings=[],
+    )
+    mapped = _vault_score_review_item(
+        {**base, "validation_channel": "claim_tile_review"},
+        impact_label="baldosa mejorada",
+        impact_tone="ok",
+        recovery_candidates=[],
+        current_mappings=[
+            {
+                "tile_key": "mission.M1",
+                "polarity": "supports",
+                "source_evidence_id": "evidence-1",
+            }
+        ],
+    )
+    missing_mapping = _vault_score_review_item(
+        {**base, "validation_channel": "claim_tile_review"},
+        impact_label="baldosa mejorada",
+        impact_tone="ok",
+        recovery_candidates=[],
+        current_mappings=[],
+    )
+    evidence_gap = _vault_score_review_item(
+        {
+            **base,
+            "previous_state": "ok",
+            "current_state": "no",
+            "validation_channel": "evidence_gap_review",
+        },
+        impact_label="negativo sin validar",
+        impact_tone="bad",
+        recovery_candidates=[],
+        current_mappings=[],
+    )
+
+    assert recovery["queue_state"] == "ready"
+    assert mapped["queue_state"] == "preparation_required"
+    assert missing_mapping["queue_state"] == "blocked"
+    assert evidence_gap["queue_state"] == "blocked"
+    assert "Recapturar evidencia" in evidence_gap["next_action"]
 
 
 def test_brand_view_repeated_mode_keeps_selected_baseline_visible(monkeypatch):
