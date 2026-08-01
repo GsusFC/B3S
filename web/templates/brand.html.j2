@@ -33,6 +33,9 @@
     {% if brand.visual_module.available %}
     <a class="source-link" href="#modulo-visual">ver visual</a>
     {% endif %}
+    {% if brand.vault_memory.enabled %}
+    <a class="source-link" href="#memoria-vault">memoria vault</a>
+    {% endif %}
     {% else %}
     <strong class="brand-profile-score">—</strong>
     <span class="brand-profile-terminal-value is-empty">sin scan local</span>
@@ -46,6 +49,115 @@
 </section>
 
 <section class="brand-profile-summary">
+  {% if brand.vault_memory.enabled %}
+  <section class="brand-profile-block vault-memory" id="memoria-vault">
+    <div class="section-head">
+      <span class="label">memoria_de_baldosas</span>
+      <span class="tag">// vault aislado · solo sombra · sin efecto operativo</span>
+    </div>
+    {% if brand.vault_memory.available %}
+    <p class="prose text-pretty">
+      Compara únicamente scans con el mismo contrato de evaluación. Las versiones se conservan en PostgreSQL;
+      ningún cambio modifica el informe ni el score vigente sin una decisión revisada.
+    </p>
+
+    <div class="vault-memory-metrics" aria-label="Resumen de memoria de baldosas">
+      <article class="vault-memory-metric">
+        <span>scans en memoria</span>
+        <strong>{{ brand.vault_memory.report_count }}</strong>
+      </article>
+      <article class="vault-memory-metric">
+        <span>baldosas actuales</span>
+        <strong>{{ brand.vault_memory.summary.tile_count }}</strong>
+      </article>
+      <article class="vault-memory-metric">
+        <span>cambios materiales</span>
+        <strong>{{ brand.vault_memory.summary.changed_tile_count }}</strong>
+      </article>
+      <article class="vault-memory-metric">
+        <span>pueden mover puntos</span>
+        <strong>{{ brand.vault_memory.summary.score_affecting_change_count }}</strong>
+      </article>
+      <article class="vault-memory-metric">
+        <span>calidad de evidencia</span>
+        <strong>{{ brand.vault_memory.summary.evidence_quality_change_count }}</strong>
+      </article>
+      <article class="vault-memory-metric">
+        <span>pendientes de revisión</span>
+        <strong>{{ brand.vault_memory.summary.pending_review_count }}</strong>
+      </article>
+    </div>
+
+    <div class="brand-profile-grid vault-memory-details">
+      <section class="panel">
+        <div class="section-head">
+          <span class="label">trayectoria</span>
+          <span class="tag">// scanner observado</span>
+        </div>
+        <dl class="brand-profile-kv">
+          <dt>score anterior</dt><dd>{{ brand.vault_memory.trajectory.previous_score if brand.vault_memory.trajectory.previous_score is not none else "—" }}</dd>
+          <dt>score último</dt><dd>{{ brand.vault_memory.trajectory.latest_score if brand.vault_memory.trajectory.latest_score is not none else "—" }}</dd>
+          <dt>delta observado</dt><dd>{{ brand.vault_memory.trajectory.score_delta_latest_minus_previous if brand.vault_memory.trajectory.score_delta_latest_minus_previous is not none else "—" }}</dd>
+          <dt>delta candidato</dt><dd>{{ brand.vault_memory.candidate_scoring.score_delta if brand.vault_memory.candidate_scoring.score_delta is not none else "—" }}</dd>
+          <dt>delta revisado</dt><dd>{{ brand.vault_memory.reviewed_scoring.score_delta if brand.vault_memory.reviewed_scoring.score_delta is not none else "—" }}</dd>
+        </dl>
+      </section>
+      <section class="panel">
+        <div class="section-head">
+          <span class="label">claim_a_baldosa</span>
+          <span class="tag">// ledger persistente</span>
+        </div>
+        <dl class="brand-profile-kv">
+          <dt>persistido</dt><dd>{{ "sí" if brand.vault_memory.ledger.stored else "no" }}</dd>
+          <dt>mappings</dt><dd>{{ brand.vault_memory.ledger.mapping_count }}</dd>
+          <dt>mappings actuales</dt><dd>{{ brand.vault_memory.ledger.current_mapping_count }}</dd>
+          <dt>claims</dt><dd>{{ brand.vault_memory.ledger.claim_variant_count }}</dd>
+          <dt>aceptados</dt><dd>{{ brand.vault_memory.ledger.accepted_mapping_count }}</dd>
+          <dt>pendientes</dt><dd>{{ brand.vault_memory.ledger.pending_mapping_count }}</dd>
+        </dl>
+      </section>
+    </div>
+
+    {% if brand.vault_memory.changes %}
+    <div class="section-head vault-memory-change-head">
+      <span class="label">cambios_observados</span>
+      <span class="tag">// primero los que pueden mover puntos</span>
+    </div>
+    <div class="overflow panel vault-memory-table-wrap">
+      <table class="vault-memory-table">
+        <thead><tr><th>baldosa</th><th>impacto</th><th>estado</th><th>prioridad</th><th>validación</th></tr></thead>
+        <tbody>
+        {% for change in brand.vault_memory.changes %}
+        <tr>
+          <td class="mono"><strong>{{ change.tile_key }}</strong></td>
+          <td><span class="chip {{ change.tone }}">{{ change.impact_label }}</span></td>
+          <td class="mono muted">{{ change.previous_state }} → {{ change.current_state }}</td>
+          <td class="mono">{{ "puntos" if change.review_priority == "score_affecting" else "evidencia" }}</td>
+          <td class="mono muted">{{ change.validation_state }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="panel vault-memory-empty">
+      <p class="text-pretty">Todavía no hay dos scans compatibles con un cambio material de baldosa.</p>
+      <a href="/">Ejecutar otro scan comparable</a>
+    </div>
+    {% endif %}
+
+    <p class="vault-memory-contract mono muted">
+      runtime_effect=false · authority=false · versión {{ brand.vault_memory.tile_memory_version[:12] or "sin-versión" }}
+    </p>
+    {% else %}
+    <div class="panel vault-memory-empty">
+      <p class="text-pretty">{{ brand.vault_memory.message or "No hay informes persistidos para construir esta memoria." }}</p>
+      <a href="/">Ejecutar el primer scan</a>
+    </div>
+    {% endif %}
+  </section>
+  {% endif %}
+
   {% if brand.visual_module.available %}
   <section class="brand-profile-block brand-profile-visual" id="modulo-visual">
     <div class="section-head">

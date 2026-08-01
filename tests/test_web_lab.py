@@ -884,6 +884,195 @@ def test_brand_view_renders_profile_from_matching_reports(monkeypatch):
     assert "79" in response.text
 
 
+def test_brand_view_exposes_persistent_tile_memory_only_in_vault(monkeypatch):
+    from web.app import app
+
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setattr(
+        "web.app.list_reports_for_domain",
+        lambda _domain: [
+            {
+                "id": "latest",
+                "brand_name": "Example",
+                "url": "https://example.com",
+                "created_at": "2026-07-31T12:00:00+00:00",
+                "score": 64,
+                "components": [],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "web.app.evidence_scoring_memory_preview_for_domain",
+        lambda _domain: {
+            "report_count": 2,
+            "memory_version": "a" * 64,
+            "persistence": {"stored": True, "backend": "postgres_history_derived"},
+            "summary": {
+                "accepted_evidence_count": 4,
+            },
+            "recoveries": [{"tile_key": "mission.M1"}],
+            "conflicts": [],
+            "scoring": {
+                "current_score": 64,
+                "preview_score": 66,
+                "score_delta": 2,
+            },
+            "reviewed_shadow": {
+                "scoring": {
+                    "current_score": 64,
+                    "preview_score": 64,
+                    "score_delta": 0,
+                }
+            },
+            "tile_evolution": {
+                "tile_memory_version": "b" * 64,
+                "summary": {
+                    "tile_count": 70,
+                    "stable_tile_count": 68,
+                    "changed_tile_count": 2,
+                    "score_affecting_change_count": 1,
+                    "evidence_quality_change_count": 1,
+                    "pending_review_count": 2,
+                    "incompatible_report_count": 0,
+                },
+                "score_trajectory": {
+                    "previous_score": 62,
+                    "latest_score": 64,
+                    "score_delta_latest_minus_previous": 2,
+                },
+                "changes": [
+                    {
+                        "tile_key": "mission.M1",
+                        "impact_kind": "tile_improved",
+                        "previous_state": "sin_evidencia",
+                        "current_state": "ok",
+                        "review_priority": "score_affecting",
+                        "validation_state": "pending_review",
+                    },
+                    {
+                        "tile_key": "value_proposition.P3",
+                        "impact_kind": "evidence_weakened",
+                        "previous_state": "ok",
+                        "current_state": "ok",
+                        "review_priority": "evidence_quality",
+                        "validation_state": "pending_review",
+                    },
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "web.app.evidence_claim_tile_ledger_for_domain",
+        lambda _domain: {
+            "persistence": {"stored": True, "backend": "postgres"},
+            "summary": {
+                "mapping_count": 3,
+                "current_series_mapping_count": 2,
+                "claim_variant_count": 2,
+                "tile_count": 3,
+            },
+            "reviewed_memory": {
+                "available": True,
+                "summary": {
+                    "accepted_mapping_count": 1,
+                    "pending_mapping_count": 1,
+                },
+            },
+        },
+    )
+
+    response = TestClient(app).get("/brand/example.com?lang=es")
+
+    assert response.status_code == 200
+    assert "memoria_de_baldosas" in response.text
+    assert "baldosa mejorada" in response.text
+    assert "evidencia debilitada" in response.text
+    assert "mission.M1" in response.text
+    assert "runtime_effect=false" in response.text
+    assert "authority=false" in response.text
+    assert "memoria vault" in response.text
+
+
+def test_brand_view_hides_vault_memory_outside_vault(monkeypatch):
+    from web.app import app
+
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "production")
+    monkeypatch.setattr(
+        "web.app.list_reports_for_domain",
+        lambda _domain: [
+            {
+                "id": "latest",
+                "brand_name": "Example",
+                "url": "https://example.com",
+                "created_at": "2026-07-31T12:00:00+00:00",
+                "score": 64,
+                "components": [],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "web.app.evidence_scoring_memory_preview_for_domain",
+        lambda _domain: pytest.fail("production must not build the Vault preview"),
+    )
+    monkeypatch.setattr(
+        "web.app.evidence_claim_tile_ledger_for_domain",
+        lambda _domain: pytest.fail("production must not read the Vault ledger"),
+    )
+
+    response = TestClient(app).get("/brand/example.com?lang=es")
+
+    assert response.status_code == 200
+    assert "memoria_de_baldosas" not in response.text
+    assert "memoria vault" not in response.text
+
+
+def test_brand_view_counts_unreviewed_vault_mappings_as_pending(monkeypatch):
+    from web.app import app
+
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setattr(
+        "web.app.list_reports_for_domain",
+        lambda _domain: [
+            {
+                "id": "latest",
+                "brand_name": "Example",
+                "url": "https://example.com",
+                "created_at": "2026-07-31T12:00:00+00:00",
+                "score": 64,
+                "components": [],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "web.app.evidence_scoring_memory_preview_for_domain",
+        lambda _domain: {
+            "report_count": 1,
+            "summary": {},
+            "tile_evolution": {"summary": {}, "changes": []},
+        },
+    )
+    monkeypatch.setattr(
+        "web.app.evidence_claim_tile_ledger_for_domain",
+        lambda _domain: {
+            "persistence": {"stored": True, "backend": "postgres"},
+            "summary": {
+                "mapping_count": 3,
+                "current_series_mapping_count": 1,
+                "claim_variant_count": 2,
+                "tile_count": 3,
+            },
+            "reviewed_memory": {"available": False},
+        },
+    )
+
+    response = TestClient(app).get("/brand/example.com?lang=es")
+
+    assert response.status_code == 200
+    assert "<dt>mappings</dt><dd>3</dd>" in response.text
+    assert "<dt>aceptados</dt><dd>0</dd>" in response.text
+    assert "<dt>pendientes</dt><dd>3</dd>" in response.text
+
+
 def test_brand_view_repeated_mode_keeps_selected_baseline_visible(monkeypatch):
     from web.app import _brand_profile
 

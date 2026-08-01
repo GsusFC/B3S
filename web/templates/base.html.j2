@@ -149,6 +149,8 @@
     font-size: var(--type-readable);
     line-height: 1.62;
   }
+  .text-balance { text-wrap: balance; }
+  .text-pretty { text-wrap: pretty; }
   .type-caption { font-size: var(--type-caption); }
   .type-label { font-size: var(--type-label); }
   .type-body { font-size: var(--type-body); }
@@ -757,6 +759,41 @@
     padding-left: 18px;
   }
   .brand-profile-evidence-list li { overflow-wrap: anywhere; }
+  .vault-memory { display: grid; gap: 16px; }
+  .vault-memory > .section-head { margin-bottom: 0; }
+  .vault-memory-metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 8px;
+  }
+  .vault-memory-metric {
+    min-width: 0;
+    border: 1px solid var(--line);
+    background: var(--panel-soft);
+    padding: 12px;
+  }
+  .vault-memory-metric span {
+    display: block;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: var(--type-caption);
+  }
+  .vault-memory-metric strong {
+    display: block;
+    margin-top: 6px;
+    font-family: var(--mono);
+    font-size: var(--type-page-title);
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  .vault-memory-details { margin-top: 0; }
+  .vault-memory-details .panel { padding: 14px; }
+  .vault-memory-change-head { margin: 8px 0 0; }
+  .vault-memory-table-wrap { padding: 0; }
+  .vault-memory-table td:first-child { white-space: nowrap; }
+  .vault-memory-empty { display: grid; gap: 8px; justify-items: start; }
+  .vault-memory-empty p { margin: 0; }
+  .vault-memory-contract { margin: 0; font-size: var(--type-caption); overflow-wrap: anywhere; }
   .health-toolbar {
     display: flex;
     align-items: center;

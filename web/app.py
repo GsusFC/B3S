@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import json
+import logging
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 from time import perf_counter
@@ -20,7 +22,14 @@ from src.services.scanner_evidence_comparison import (
     selected_report_for_display,
 )
 from web.api_v1 import install_scanner_api
-from web.report_store import domain_key, list_reports, list_reports_for_domain, load_report
+from web.report_store import (
+    domain_key,
+    evidence_claim_tile_ledger_for_domain,
+    evidence_scoring_memory_preview_for_domain,
+    list_reports,
+    list_reports_for_domain,
+    load_report,
+)
 from web.report_view_model import build_report_view_model
 from web.scan_runner import approve_degraded_scan, cancel_scan, recover_interrupted_scans, scan_status, start_scan
 from web.scoring_store import backfill_reports, dashboard as scoring_dashboard
@@ -32,6 +41,21 @@ from src.sv9.language_guard import (
     spanish_tile_motivo,
 )
 from src.sv9.rubric import COMPONENTS as SV9_COMPONENTS
+
+
+_LOG = logging.getLogger(__name__)
+
+
+_VAULT_IMPACT_PRESENTATION = {
+    "tile_improved": ("baldosa mejorada", "ok"),
+    "tile_worsened": ("baldosa empeorada", "bad"),
+    "evidence_reinforced": ("evidencia reforzada", "ok"),
+    "evidence_weakened": ("evidencia debilitada", "bad"),
+    "evidence_changed": ("evidencia cambiada", "warn"),
+    "evidence_sources_changed": ("fuentes cambiadas", "warn"),
+    "acquisition_gap": ("hueco de adquisición", "warn"),
+    "unvalidated_negative": ("negativo sin validar", "bad"),
+}
 
 
 def _initialize_runtime() -> None:
@@ -109,6 +133,117 @@ def _brand_profile(domain: str) -> dict:
         "component_count": len(components),
         "not_detected": (current or {}).get("not_detected") or [],
         "visual_module": _moodboard_from_report(current) if current else {"available": False, "images": []},
+        "vault_memory": _vault_tile_memory_profile(normalized_domain),
+    }
+
+
+def _vault_tile_memory_profile(domain: str) -> dict[str, Any]:
+    """Build the read-only Vault view from existing durable projections."""
+
+    if os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() != "vault":
+        return {"enabled": False}
+    try:
+        preview = evidence_scoring_memory_preview_for_domain(domain)
+        ledger = evidence_claim_tile_ledger_for_domain(domain)
+    except Exception:
+        _LOG.exception(
+            "failed to build vault tile memory view",
+            extra={"domain": domain_key(domain)},
+        )
+        return {
+            "enabled": True,
+            "available": False,
+            "status": "unavailable",
+            "message": "La memoria persistente no está disponible temporalmente.",
+        }
+
+    evolution = preview.get("tile_evolution") if isinstance(preview.get("tile_evolution"), dict) else {}
+    evolution_summary = evolution.get("summary") if isinstance(evolution.get("summary"), dict) else {}
+    scoring = preview.get("scoring") if isinstance(preview.get("scoring"), dict) else {}
+    reviewed_shadow = preview.get("reviewed_shadow") if isinstance(preview.get("reviewed_shadow"), dict) else {}
+    reviewed_scoring = reviewed_shadow.get("scoring") if isinstance(reviewed_shadow.get("scoring"), dict) else {}
+    trajectory = evolution.get("score_trajectory") if isinstance(evolution.get("score_trajectory"), dict) else {}
+    ledger_summary = ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {}
+    reviewed_memory = ledger.get("reviewed_memory") if isinstance(ledger.get("reviewed_memory"), dict) else {}
+    reviewed_mapping_summary = (
+        reviewed_memory.get("summary") if isinstance(reviewed_memory.get("summary"), dict) else {}
+    )
+    mapping_count = int(ledger_summary.get("mapping_count") or 0)
+    reviewed_memory_available = reviewed_memory.get("available") is True
+    accepted_mapping_count = int(reviewed_mapping_summary.get("accepted_mapping_count") or 0)
+    pending_mapping_count = (
+        int(reviewed_mapping_summary.get("pending_mapping_count") or 0)
+        if reviewed_memory_available
+        else mapping_count
+    )
+
+    changes = []
+    for row in evolution.get("changes") or []:
+        if not isinstance(row, dict):
+            continue
+        impact_kind = str(row.get("impact_kind") or "unknown")
+        impact_label, tone = _VAULT_IMPACT_PRESENTATION.get(
+            impact_kind,
+            (impact_kind.replace("_", " "), "warn"),
+        )
+        changes.append(
+            {
+                "tile_key": str(row.get("tile_key") or ""),
+                "impact_kind": impact_kind,
+                "impact_label": impact_label,
+                "tone": tone,
+                "previous_state": str(row.get("previous_state") or "—"),
+                "current_state": str(row.get("current_state") or "—"),
+                "review_priority": str(row.get("review_priority") or "evidence_quality"),
+                "validation_state": str(row.get("validation_state") or "pending_review"),
+            }
+        )
+
+    preview_summary = preview.get("summary") if isinstance(preview.get("summary"), dict) else {}
+    return {
+        "enabled": True,
+        "available": bool(preview.get("report_count")),
+        "status": "shadow",
+        "runtime_effect": False,
+        "authority": False,
+        "report_count": int(preview.get("report_count") or 0),
+        "memory_version": str(preview.get("memory_version") or ""),
+        "tile_memory_version": str(evolution.get("tile_memory_version") or ""),
+        "persistence": preview.get("persistence") or {},
+        "summary": {
+            "tile_count": int(evolution_summary.get("tile_count") or 0),
+            "stable_tile_count": int(evolution_summary.get("stable_tile_count") or 0),
+            "changed_tile_count": int(evolution_summary.get("changed_tile_count") or 0),
+            "score_affecting_change_count": int(evolution_summary.get("score_affecting_change_count") or 0),
+            "evidence_quality_change_count": int(evolution_summary.get("evidence_quality_change_count") or 0),
+            "pending_review_count": int(evolution_summary.get("pending_review_count") or 0),
+            "incompatible_report_count": int(evolution_summary.get("incompatible_report_count") or 0),
+            "accepted_evidence_count": int(preview_summary.get("accepted_evidence_count") or 0),
+            "candidate_recovery_count": len(preview.get("recoveries") or []),
+            "explicit_negative_conflict_count": len(preview.get("conflicts") or []),
+        },
+        "trajectory": trajectory,
+        "candidate_scoring": {
+            "current_score": scoring.get("current_score"),
+            "preview_score": scoring.get("preview_score"),
+            "score_delta": scoring.get("score_delta"),
+        },
+        "reviewed_scoring": {
+            "current_score": reviewed_scoring.get("current_score"),
+            "preview_score": reviewed_scoring.get("preview_score"),
+            "score_delta": reviewed_scoring.get("score_delta"),
+        },
+        "ledger": {
+            "stored": bool((ledger.get("persistence") or {}).get("stored")),
+            "mapping_count": mapping_count,
+            "current_mapping_count": int(ledger_summary.get("current_series_mapping_count") or 0),
+            "claim_variant_count": int(ledger_summary.get("claim_variant_count") or 0),
+            "tile_count": int(ledger_summary.get("tile_count") or 0),
+            "reviewed_memory_available": reviewed_memory_available,
+            "accepted_mapping_count": accepted_mapping_count,
+            "pending_mapping_count": pending_mapping_count,
+        },
+        "changes": changes,
     }
 
 
