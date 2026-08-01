@@ -57,6 +57,12 @@ _VAULT_IMPACT_PRESENTATION = {
     "unvalidated_negative": ("negativo sin validar", "bad"),
 }
 
+_VAULT_REVIEW_CHANNEL_PRESENTATION = {
+    "scoring_recovery_review": "recuperación semántica",
+    "claim_tile_review": "claim → baldosa",
+    "evidence_gap_review": "hueco de evidencia",
+}
+
 
 def _initialize_runtime() -> None:
     env_file = Path(".env")
@@ -157,11 +163,25 @@ def _vault_tile_memory_profile(domain: str) -> dict[str, Any]:
             "message": "La memoria persistente no está disponible temporalmente.",
         }
 
-    evolution = preview.get("tile_evolution") if isinstance(preview.get("tile_evolution"), dict) else {}
-    evolution_summary = evolution.get("summary") if isinstance(evolution.get("summary"), dict) else {}
     scoring = preview.get("scoring") if isinstance(preview.get("scoring"), dict) else {}
     reviewed_shadow = preview.get("reviewed_shadow") if isinstance(preview.get("reviewed_shadow"), dict) else {}
     reviewed_scoring = reviewed_shadow.get("scoring") if isinstance(reviewed_shadow.get("scoring"), dict) else {}
+    candidate_evolution = (
+        preview.get("tile_evolution")
+        if isinstance(preview.get("tile_evolution"), dict)
+        else {}
+    )
+    reviewed_evolution = (
+        reviewed_shadow.get("tile_evolution")
+        if isinstance(reviewed_shadow.get("tile_evolution"), dict)
+        else {}
+    )
+    evolution = (
+        reviewed_evolution
+        if isinstance(reviewed_evolution.get("changes"), list)
+        else candidate_evolution
+    )
+    evolution_summary = evolution.get("summary") if isinstance(evolution.get("summary"), dict) else {}
     trajectory = evolution.get("score_trajectory") if isinstance(evolution.get("score_trajectory"), dict) else {}
     ledger_summary = ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {}
     reviewed_memory = ledger.get("reviewed_memory") if isinstance(ledger.get("reviewed_memory"), dict) else {}
@@ -177,7 +197,29 @@ def _vault_tile_memory_profile(domain: str) -> dict[str, Any]:
         else mapping_count
     )
 
+    recovery_candidates_by_tile: dict[str, list[dict[str, Any]]] = {}
+    for candidate in preview.get("recovery_review_candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        tile = candidate.get("tile") if isinstance(candidate.get("tile"), dict) else {}
+        tile_key = str(tile.get("tile_key") or "")
+        if tile_key:
+            recovery_candidates_by_tile.setdefault(tile_key, []).append(candidate)
+
+    latest_mapping_series_id = str(ledger.get("latest_mapping_series_id") or "")
+    current_mappings = [
+        row
+        for row in ledger.get("mappings") or []
+        if isinstance(row, dict)
+        and (
+            not latest_mapping_series_id
+            or str(row.get("mapping_series_id") or "")
+            == latest_mapping_series_id
+        )
+    ]
+
     changes = []
+    review_items = []
     for row in evolution.get("changes") or []:
         if not isinstance(row, dict):
             continue
@@ -198,6 +240,30 @@ def _vault_tile_memory_profile(domain: str) -> dict[str, Any]:
                 "validation_state": str(row.get("validation_state") or "pending_review"),
             }
         )
+        if str(row.get("review_priority") or "") != "score_affecting":
+            continue
+        review_items.append(
+            _vault_score_review_item(
+                row,
+                impact_label=impact_label,
+                impact_tone=tone,
+                recovery_candidates=recovery_candidates_by_tile.get(
+                    str(row.get("tile_key") or ""),
+                    [],
+                ),
+                current_mappings=current_mappings,
+            )
+        )
+
+    review_summary = {
+        "total_count": len(review_items),
+        "ready_count": sum(item["queue_state"] == "ready" for item in review_items),
+        "preparation_count": sum(
+            item["queue_state"] == "preparation_required" for item in review_items
+        ),
+        "blocked_count": sum(item["queue_state"] == "blocked" for item in review_items),
+        "resolved_count": sum(item["queue_state"] == "resolved" for item in review_items),
+    }
 
     preview_summary = preview.get("summary") if isinstance(preview.get("summary"), dict) else {}
     return {
@@ -208,7 +274,7 @@ def _vault_tile_memory_profile(domain: str) -> dict[str, Any]:
         "authority": False,
         "report_count": int(preview.get("report_count") or 0),
         "memory_version": str(preview.get("memory_version") or ""),
-        "tile_memory_version": str(evolution.get("tile_memory_version") or ""),
+        "tile_memory_version": str(candidate_evolution.get("tile_memory_version") or ""),
         "persistence": preview.get("persistence") or {},
         "summary": {
             "tile_count": int(evolution_summary.get("tile_count") or 0),
@@ -243,8 +309,136 @@ def _vault_tile_memory_profile(domain: str) -> dict[str, Any]:
             "accepted_mapping_count": accepted_mapping_count,
             "pending_mapping_count": pending_mapping_count,
         },
+        "review_queue": {
+            "read_only": True,
+            "summary": review_summary,
+            "items": review_items,
+        },
         "changes": changes,
     }
+
+
+def _vault_score_review_item(
+    change: dict[str, Any],
+    *,
+    impact_label: str,
+    impact_tone: str,
+    recovery_candidates: list[dict[str, Any]],
+    current_mappings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Classify one score-affecting change without inventing a review path."""
+
+    tile_key = str(change.get("tile_key") or "")
+    validation_channel = str(change.get("validation_channel") or "unknown")
+    validation_state = str(change.get("validation_state") or "pending_review")
+    if validation_state != "pending_review":
+        return {
+            "tile_key": tile_key,
+            "impact_label": impact_label,
+            "impact_tone": impact_tone,
+            "state_change": (
+                f"{change.get('previous_state') or '—'} → "
+                f"{change.get('current_state') or '—'}"
+            ),
+            "channel_label": _VAULT_REVIEW_CHANNEL_PRESENTATION.get(
+                validation_channel,
+                validation_channel.replace("_", " "),
+            ),
+            "queue_state": "resolved",
+            "queue_label": "decisión registrada",
+            "queue_tone": "ok",
+            "next_action": "La decisión semántica ya está reflejada en la sombra revisada.",
+            "validation_state": validation_state,
+        }
+
+    queue_state = "blocked"
+    queue_label = "bloqueada"
+    queue_tone = "bad"
+    next_action = "No existe un canal de revisión seguro para este cambio."
+    if validation_channel == "scoring_recovery_review":
+        if recovery_candidates:
+            queue_state = "ready"
+            queue_label = "lista para revisar"
+            queue_tone = "ok"
+            next_action = (
+                "Revisar el candidato protegido y persistir una decisión "
+                "en el journal de recuperación."
+            )
+        else:
+            next_action = "Falta el candidato de recuperación vinculado a esta baldosa."
+    elif validation_channel == "claim_tile_review":
+        relevant_mappings = _vault_relevant_claim_tile_mappings(
+            change,
+            current_mappings=current_mappings,
+        )
+        if relevant_mappings:
+            queue_state = "preparation_required"
+            queue_label = "preparar paquete"
+            queue_tone = "warn"
+            next_action = (
+                "Registrar el paquete atómico actual y revisar el mapping "
+                "claim → baldosa."
+            )
+        else:
+            next_action = (
+                "Falta un mapping claim → baldosa reproducible; no se puede "
+                "validar el cambio todavía."
+            )
+    elif validation_channel == "evidence_gap_review":
+        next_action = (
+            "Recapturar evidencia reproducible antes de aceptar el empeoramiento."
+        )
+
+    return {
+        "tile_key": tile_key,
+        "impact_label": impact_label,
+        "impact_tone": impact_tone,
+        "state_change": (
+            f"{change.get('previous_state') or '—'} → "
+            f"{change.get('current_state') or '—'}"
+        ),
+        "channel_label": _VAULT_REVIEW_CHANNEL_PRESENTATION.get(
+            validation_channel,
+            validation_channel.replace("_", " "),
+        ),
+        "queue_state": queue_state,
+        "queue_label": queue_label,
+        "queue_tone": queue_tone,
+        "next_action": next_action,
+        "validation_state": validation_state,
+    }
+
+
+def _vault_relevant_claim_tile_mappings(
+    change: dict[str, Any],
+    *,
+    current_mappings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    expected_polarity = {
+        "ok": "supports",
+        "no": "weakens",
+        "sin_evidencia": "insufficient_evidence",
+    }.get(str(change.get("current_state") or ""))
+    relevant_sources = {
+        str(source_id)
+        for source_id in (
+            change.get("added_source_evidence_ids")
+            or change.get("current_source_evidence_ids")
+            or []
+        )
+        if str(source_id)
+    }
+    if not expected_polarity or not relevant_sources:
+        return []
+    return [
+        mapping
+        for mapping in current_mappings
+        if str(mapping.get("tile_key") or "")
+        == str(change.get("tile_key") or "")
+        and str(mapping.get("polarity") or "") == expected_polarity
+        and str(mapping.get("source_evidence_id") or "")
+        in relevant_sources
+    ]
 
 
 def _report_rows_for_index() -> list[dict[str, Any]]:
