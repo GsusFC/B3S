@@ -10,11 +10,15 @@ from pathlib import Path
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
+from urllib.parse import quote
+import uuid
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from jinja2 import select_autoescape
+from pydantic import ValidationError
 
 from src.build_info import current_build_sha
 from src.services.scanner_evidence_comparison import (
@@ -22,6 +26,9 @@ from src.services.scanner_evidence_comparison import (
     selected_report_for_display,
 )
 from web.api_v1 import install_scanner_api
+from web.api_v1.errors import ApiError
+from web.api_v1.models import EvidenceScoringRecoveryReviewCreateRequest
+from web.api_v1.service import create_evidence_scoring_recovery_review
 from web.report_store import (
     domain_key,
     evidence_claim_tile_ledger_for_domain,
@@ -33,6 +40,17 @@ from web.report_store import (
 from web.report_view_model import build_report_view_model
 from web.scan_runner import approve_degraded_scan, cancel_scan, recover_interrupted_scans, scan_status, start_scan
 from web.scoring_store import backfill_reports, dashboard as scoring_dashboard
+from web.vault_reviewer_session import (
+    VAULT_REVIEWER_COOKIE,
+    VAULT_REVIEWER_SESSION_MAX_AGE,
+    VaultReviewerSession,
+    authenticate_vault_reviewer,
+    csrf_matches,
+    issue_vault_reviewer_session,
+    read_vault_reviewer_session,
+    safe_vault_review_path,
+    vault_reviewer_enabled,
+)
 from src.sv9.language_guard import (
     spanish_component_summary,
     spanish_component_verdict,
@@ -63,6 +81,12 @@ _VAULT_REVIEW_CHANNEL_PRESENTATION = {
     "evidence_gap_review": "hueco de evidencia",
 }
 
+_VAULT_REVIEW_DECISION_REASON_CODES = {
+    "accepted": "tile_contract_satisfied",
+    "disputed": "tile_contract_uncertain",
+    "rejected": "tile_contract_not_satisfied",
+}
+
 
 def _initialize_runtime() -> None:
     env_file = Path(".env")
@@ -82,6 +106,7 @@ async def _lifespan(_app: FastAPI):
 app = FastAPI(title="B3S — Brand Evidence Lab", lifespan=_lifespan)
 install_scanner_api(app)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+templates.env.autoescape = select_autoescape(("html", "j2"))
 _STATIC_DIR = Path(__file__).parent / "static"
 if _STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -439,6 +464,172 @@ def _vault_relevant_claim_tile_mappings(
         and str(mapping.get("source_evidence_id") or "")
         in relevant_sources
     ]
+
+
+def _vault_reviewer_session(
+    request: Request,
+) -> VaultReviewerSession | None:
+    return read_vault_reviewer_session(request.cookies.get(VAULT_REVIEWER_COOKIE))
+
+
+def _vault_reviewer_profile(domain: str) -> dict[str, Any]:
+    """Expose exact recovery candidates only inside an authenticated view."""
+
+    normalized = domain_key(domain)
+    if not normalized:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    try:
+        preview = evidence_scoring_memory_preview_for_domain(normalized)
+    except Exception:
+        _LOG.exception(
+            "failed to build protected vault reviewer view",
+            extra={"domain": normalized},
+        )
+        return {
+            "domain": normalized,
+            "available": False,
+            "message": "El journal protegido no está disponible temporalmente.",
+            "items": [],
+            "summary": {"candidate_count": 0, "pending_count": 0, "reviewed_count": 0},
+        }
+
+    persistence = preview.get("persistence") if isinstance(preview.get("persistence"), dict) else {}
+    journal_ready = persistence.get("stored") is True and persistence.get("review_journal") == "postgres"
+    review = preview.get("recovery_review") if isinstance(preview.get("recovery_review"), dict) else {}
+    brand = preview.get("brand") if isinstance(preview.get("brand"), dict) else {}
+    evaluated_by_case = {
+        str(row.get("case_id") or ""): row
+        for row in review.get("evaluated") or []
+        if isinstance(row, dict) and str(row.get("case_id") or "")
+    }
+    items = []
+    for candidate in preview.get("recovery_review_candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        case_id = str(candidate.get("case_id") or "")
+        subject_id = str(candidate.get("candidate_fingerprint") or "")
+        tile = candidate.get("tile") if isinstance(candidate.get("tile"), dict) else {}
+        evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
+        evaluated = evaluated_by_case.get(case_id) or {}
+        decision = str(evaluated.get("decision") or "pending")
+        items.append(
+            {
+                "case_id": case_id,
+                "subject_id": subject_id,
+                "fingerprint_short": subject_id[:16],
+                "tile_key": str(tile.get("tile_key") or ""),
+                "tile_name": str(tile.get("name") or ""),
+                "tile_condition": str(tile.get("condition") or ""),
+                "tile_contract": (
+                    tile.get("evidence_contract") if isinstance(tile.get("evidence_contract"), dict) else {}
+                ),
+                "latest_state": str(tile.get("latest_state") or "—"),
+                "proposed_state": str(tile.get("proposed_state") or "—"),
+                "quote": str(evidence.get("quote") or ""),
+                "source_urls": [
+                    str(url)
+                    for url in evidence.get("source_urls") or []
+                    if str(url).startswith(("https://", "http://"))
+                ],
+                "source_classes": [str(value) for value in evidence.get("source_classes") or [] if str(value)],
+                "acceptance_basis": [str(value) for value in evidence.get("acceptance_basis") or [] if str(value)],
+                "first_seen_at": str(evidence.get("first_seen_at") or ""),
+                "last_seen_at": str(evidence.get("last_seen_at") or ""),
+                "observation_count": int(evidence.get("observation_count") or 0),
+                "review_prompt": str(candidate.get("review_prompt") or ""),
+                "decision": decision,
+                "reviewer_id": str(evaluated.get("reviewer_id") or ""),
+                "current_event_id": str(evaluated.get("event_id") or ""),
+                "can_review": journal_ready and decision == "pending",
+                "idempotency_key": f"vault-review-{uuid.uuid4()}",
+            }
+        )
+    pending_count = sum(item["decision"] == "pending" for item in items)
+    return {
+        "domain": normalized,
+        "brand_name": str(brand.get("name") or normalized),
+        "available": bool(preview.get("report_count")),
+        "journal_ready": journal_ready,
+        "runtime_effect": False,
+        "authority": False,
+        "automatic_scoring_effect": False,
+        "items": items,
+        "summary": {
+            "candidate_count": len(items),
+            "pending_count": pending_count,
+            "reviewed_count": len(items) - pending_count,
+        },
+    }
+
+
+def _vault_response_headers(response):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Frame-Options"] = "DENY"
+    return response
+
+
+def _vault_review_login_response(
+    request: Request,
+    *,
+    next_path: str,
+    error: str = "",
+    status_code: int = 200,
+):
+    response = templates.TemplateResponse(
+        request,
+        "vault_review_login.html.j2",
+        {
+            "next_path": safe_vault_review_path(next_path),
+            "error": error,
+        },
+        status_code=status_code,
+    )
+    return _vault_response_headers(response)
+
+
+def _vault_review_page_response(
+    request: Request,
+    domain: str,
+    session: VaultReviewerSession,
+    *,
+    error: str = "",
+    saved: bool = False,
+    status_code: int = 200,
+):
+    response = templates.TemplateResponse(
+        request,
+        "vault_review.html.j2",
+        {
+            "review": _vault_reviewer_profile(domain),
+            "reviewer": session.reviewer_id,
+            "csrf_token": session.csrf_token,
+            "error": error,
+            "saved": saved,
+        },
+        status_code=status_code,
+    )
+    return _vault_response_headers(response)
+
+
+def _vault_review_error(error: ApiError) -> tuple[str, int]:
+    if error.status_code == 409:
+        return (
+            "La decisión no se registró porque el candidato cambió desde que abriste la página. Recarga y revisa el estado actual.",
+            409,
+        )
+    if error.status_code == 404:
+        return (
+            "El candidato ya no pertenece a la proyección inmutable actual.",
+            404,
+        )
+    if error.status_code == 503:
+        return (
+            "El journal protegido no está disponible; no se ha persistido ninguna decisión.",
+            503,
+        )
+    return ("La decisión no cumple el contrato de persistencia.", 400)
 
 
 def _report_rows_for_index() -> list[dict[str, Any]]:
@@ -1084,6 +1275,201 @@ def brand_view(request: Request, domain: str, lang: str = "es"):
         "brand.html.j2",
         {"brand": _brand_profile(domain), "lang": lang},
     )
+
+
+@app.get("/vault/review/login")
+def vault_review_login(
+    request: Request,
+    next_path: str = "/",
+):
+    if not vault_reviewer_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    destination = safe_vault_review_path(next_path)
+    if _vault_reviewer_session(request) is not None:
+        return _vault_response_headers(RedirectResponse(destination, status_code=303))
+    return _vault_review_login_response(
+        request,
+        next_path=destination,
+    )
+
+
+@app.post("/vault/review/login")
+def create_vault_review_session(
+    request: Request,
+    token: str = Form(""),
+    next_path: str = Form("/"),
+):
+    if not vault_reviewer_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    destination = safe_vault_review_path(next_path)
+    try:
+        principal = authenticate_vault_reviewer(token)
+        cookie_value = issue_vault_reviewer_session(principal)
+    except ApiError as exc:
+        if exc.status_code == 503:
+            return _vault_review_login_response(
+                request,
+                next_path=destination,
+                error="La credencial de revisión no está configurada correctamente en Vault.",
+                status_code=503,
+            )
+        return _vault_review_login_response(
+            request,
+            next_path=destination,
+            error="Credencial de revisión no válida.",
+            status_code=401,
+        )
+    response = RedirectResponse(destination, status_code=303)
+    response.set_cookie(
+        key=VAULT_REVIEWER_COOKIE,
+        value=cookie_value,
+        max_age=VAULT_REVIEWER_SESSION_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/vault/review",
+    )
+    return _vault_response_headers(response)
+
+
+@app.post("/vault/review/logout")
+def delete_vault_review_session(
+    request: Request,
+    csrf_token: str = Form(""),
+):
+    if not vault_reviewer_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    session = _vault_reviewer_session(request)
+    if session is not None and not csrf_matches(session, csrf_token):
+        raise HTTPException(status_code=403, detail="Invalid CSRF token")
+    response = RedirectResponse("/", status_code=303)
+    response.delete_cookie(
+        VAULT_REVIEWER_COOKIE,
+        path="/vault/review",
+        secure=True,
+        httponly=True,
+        samesite="strict",
+    )
+    return _vault_response_headers(response)
+
+
+@app.get("/vault/review/{domain}")
+def vault_review_view(
+    request: Request,
+    domain: str,
+    saved: str = "",
+):
+    if not vault_reviewer_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    normalized = domain_key(domain)
+    if not normalized:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    session = _vault_reviewer_session(request)
+    if session is None:
+        destination = quote(
+            f"/vault/review/{normalized}",
+            safe="",
+        )
+        return _vault_response_headers(
+            RedirectResponse(
+                f"/vault/review/login?next_path={destination}",
+                status_code=303,
+            )
+        )
+    return _vault_review_page_response(
+        request,
+        normalized,
+        session,
+        saved=saved == "1",
+    )
+
+
+@app.post("/vault/review/{domain}/decisions")
+def create_vault_review_decision(
+    request: Request,
+    domain: str,
+    csrf_token: str = Form(""),
+    subject_id: str = Form(""),
+    case_id: str = Form(""),
+    decision: str = Form(""),
+    expected_current_event_id: str = Form(""),
+    rationale: str = Form(""),
+    idempotency_key: str = Form(""),
+):
+    if not vault_reviewer_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    normalized = domain_key(domain)
+    if not normalized:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    session = _vault_reviewer_session(request)
+    if session is None:
+        destination = quote(
+            f"/vault/review/{normalized}",
+            safe="",
+        )
+        return _vault_response_headers(
+            RedirectResponse(
+                f"/vault/review/login?next_path={destination}",
+                status_code=303,
+            )
+        )
+    if not csrf_matches(session, csrf_token):
+        return _vault_review_page_response(
+            request,
+            normalized,
+            session,
+            error="La sesión cambió o el formulario caducó. Recarga antes de firmar.",
+            status_code=403,
+        )
+    if decision not in _VAULT_REVIEW_DECISION_REASON_CODES:
+        return _vault_review_page_response(
+            request,
+            normalized,
+            session,
+            error="Selecciona una decisión válida.",
+            status_code=422,
+        )
+    try:
+        payload = EvidenceScoringRecoveryReviewCreateRequest.model_validate(
+            {
+                "subject_id": subject_id,
+                "case_id": case_id,
+                "decision": decision,
+                "expected_current_event_id": (expected_current_event_id or None),
+                "reason_code": _VAULT_REVIEW_DECISION_REASON_CODES[decision],
+                "rationale": rationale,
+                "evaluator_version": "vault-manual-review-v1",
+            }
+        )
+        create_evidence_scoring_recovery_review(
+            normalized,
+            payload.model_dump(),
+            client_id=session.reviewer_id,
+            reviewer_id=session.reviewer_id,
+            idempotency_key=idempotency_key,
+        )
+    except ValidationError:
+        return _vault_review_page_response(
+            request,
+            normalized,
+            session,
+            error="Completa una justificación válida antes de registrar la decisión.",
+            status_code=422,
+        )
+    except ApiError as exc:
+        message, status_code = _vault_review_error(exc)
+        return _vault_review_page_response(
+            request,
+            normalized,
+            session,
+            error=message,
+            status_code=status_code,
+        )
+    response = RedirectResponse(
+        f"/vault/review/{normalized}?saved=1",
+        status_code=303,
+    )
+    return _vault_response_headers(response)
 
 
 @app.post("/scan")

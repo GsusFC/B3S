@@ -1,0 +1,28 @@
+{% extends "base.html.j2" %}
+{% block title %}Acceso de revisión — B3S Vault{% endblock %}
+{% block content %}
+<p><a href="/">← Volver al Vault</a></p>
+
+<section class="panel vault-review-login">
+  <div class="section-head">
+    <span class="label">sesion_de_revisor</span>
+    <span class="tag">// acceso protegido · 8 horas</span>
+  </div>
+  <h1 class="text-balance">Revisión humana de evidencia</h1>
+  <p class="prose text-pretty">
+    Esta sesión permite leer los pasajes protegidos y registrar decisiones en el journal de recuperación.
+    La identidad se vincula en el servidor; la credencial no se guarda en la cookie.
+  </p>
+  {% if error %}
+  <p class="error" role="alert">{{ error }}</p>
+  {% endif %}
+  <form method="post" action="/vault/review/login" class="vault-review-form">
+    <input type="hidden" name="next_path" value="{{ next_path }}">
+    <label>
+      Credencial de revisión
+      <input type="password" name="token" required autocomplete="current-password" autofocus>
+    </label>
+    <button type="submit">Abrir sesión protegida</button>
+  </form>
+</section>
+{% endblock %}

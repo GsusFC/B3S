@@ -191,11 +191,12 @@
     background: var(--line-strong);
     border-color: var(--line-strong);
   }
-  input[type="url"], input[type="text"] {
+  input[type="url"], input[type="text"], input[type="password"], textarea {
     width: 100%; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 0;
     background: var(--panel); color: var(--ink); font: var(--type-body)/1.5 var(--mono);
   }
-  input:focus { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 0; }
+  textarea { resize: vertical; }
+  input:focus, textarea:focus { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 0; }
   button {
     padding: 10px 18px; border-radius: 0; border: 1px solid var(--accent);
     background: var(--accent); color: var(--bg); font: 700 var(--type-body)/1.3 var(--mono); cursor: pointer;
@@ -794,6 +795,86 @@
   .vault-memory-empty { display: grid; gap: 8px; justify-items: start; }
   .vault-memory-empty p { margin: 0; }
   .vault-memory-contract { margin: 0; font-size: var(--type-caption); overflow-wrap: anywhere; }
+  .vault-review-login {
+    display: grid;
+    gap: var(--space-md);
+    max-width: 620px;
+    margin: 48px auto 0;
+  }
+  .vault-review-login h1,
+  .vault-review-login p { margin: 0; }
+  .vault-review-form {
+    display: grid;
+    gap: var(--space-md);
+    align-items: start;
+  }
+  .vault-review-form label {
+    display: grid;
+    gap: var(--space-xs);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: var(--type-label);
+  }
+  .vault-review-form button { justify-self: start; }
+  .vault-review-summary { display: grid; gap: var(--space-md); }
+  .vault-review-summary p { margin: 0; }
+  .vault-review-notice {
+    border: 1px solid var(--ok);
+    color: var(--ok);
+    padding: 10px 12px;
+    margin: var(--space-lg) 0;
+  }
+  .vault-review-list {
+    display: grid;
+    gap: var(--space-lg);
+    margin-top: var(--space-lg);
+  }
+  .vault-review-card { display: grid; gap: var(--space-lg); }
+  .vault-review-card h2 { margin-top: 0; }
+  .vault-review-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-lg);
+  }
+  .vault-review-contract,
+  .vault-review-evidence-meta { margin-top: var(--space-md); }
+  .vault-review-quote {
+    margin: 0;
+    border-left: 3px solid var(--accent);
+    padding: var(--space-md) var(--space-lg);
+    background: var(--panel);
+    font-size: var(--type-readable);
+  }
+  .vault-review-decision-form {
+    border-top: 1px solid var(--line);
+    padding-top: var(--space-lg);
+  }
+  .vault-review-options {
+    display: flex;
+    gap: var(--space-lg);
+    flex-wrap: wrap;
+    margin: 0;
+    padding: var(--space-md);
+    border: 1px solid var(--line);
+  }
+  .vault-review-options legend {
+    color: var(--muted);
+    font-size: var(--type-label);
+  }
+  .vault-review-options label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-sm);
+    color: var(--ink);
+  }
+  .vault-review-registered {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-md);
+    flex-wrap: wrap;
+    border-top: 1px solid var(--line);
+    padding-top: var(--space-md);
+  }
   .health-toolbar {
     display: flex;
     align-items: center;
@@ -1267,6 +1348,7 @@
   @media (max-width: 680px) {
     .form-row { grid-template-columns: 1fr; }
     .form-action button { width: 100%; }
+    .vault-review-grid { grid-template-columns: 1fr; }
     .page-head { align-items: start; flex-direction: column; }
     .page-tools { justify-content: flex-start; }
     .report-hero { grid-template-columns: 1fr; }

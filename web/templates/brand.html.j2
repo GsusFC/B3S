@@ -100,6 +100,9 @@
         Clasifica los cambios capaces de mover puntos por su canal seguro. Esta vista no muestra los pasajes
         privados ni permite escribir decisiones; la firma sigue requiriendo la credencial de revisor y el journal protegido.
       </p>
+      {% if brand.vault_memory.review_queue.summary.ready_count %}
+      <p><a class="source-link" href="/vault/review/{{ brand.domain }}">abrir revisión protegida</a></p>
+      {% endif %}
       <div class="vault-memory-metrics" aria-label="Estado de la cola de revisión de scoring">
         <article class="vault-memory-metric">
           <span>cambios con impacto</span>
