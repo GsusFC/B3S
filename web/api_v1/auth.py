@@ -47,6 +47,51 @@ def _configured_evidence_reviewer() -> tuple[str, str]:
     )
 
 
+def authenticate_evidence_reviewer_token(
+    supplied_token: str,
+) -> ApiPrincipal:
+    """Authenticate the dedicated evidence reviewer outside HTTP Bearer flows."""
+
+    scanner_token = _configured_scanner_token()
+    reviewer_token, reviewer_id = _configured_evidence_reviewer()
+    if not reviewer_token:
+        raise ApiError(
+            503,
+            "evidence_reviewer_not_configured",
+            "B3S evidence reviewer authentication is not configured.",
+        )
+    if scanner_token and secrets.compare_digest(
+        scanner_token,
+        reviewer_token,
+    ):
+        raise ApiError(
+            503,
+            "api_token_configuration_conflict",
+            "Scanner and evidence adjudication credentials must be different.",
+        )
+    supplied = str(supplied_token or "").strip()
+    if not supplied or not secrets.compare_digest(
+        supplied,
+        reviewer_token,
+    ):
+        raise ApiError(
+            401,
+            "invalid_api_token",
+            "A valid evidence reviewer credential is required.",
+        )
+    if not _REVIEWER_ID_RE.fullmatch(reviewer_id):
+        raise ApiError(
+            503,
+            "evidence_reviewer_not_configured",
+            "B3S evidence reviewer identity is not configured correctly.",
+        )
+    return ApiPrincipal(
+        client_id=reviewer_id,
+        reviewer_id=reviewer_id,
+        scopes=EVIDENCE_REVIEWER_SCOPES,
+    )
+
+
 async def authenticate(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> ApiPrincipal:
@@ -85,17 +130,7 @@ async def authenticate(
         supplied,
         reviewer_token,
     ):
-        if not _REVIEWER_ID_RE.fullmatch(reviewer_id):
-            raise ApiError(
-                503,
-                "evidence_reviewer_not_configured",
-                "B3S evidence reviewer identity is not configured correctly.",
-            )
-        return ApiPrincipal(
-            client_id=reviewer_id,
-            reviewer_id=reviewer_id,
-            scopes=EVIDENCE_REVIEWER_SCOPES,
-        )
+        return authenticate_evidence_reviewer_token(supplied)
     if not supplied:
         raise ApiError(
             401,

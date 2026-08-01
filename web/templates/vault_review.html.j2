@@ -1,0 +1,136 @@
+{% extends "base.html.j2" %}
+{% block title %}Revisión {{ review.brand_name or review.domain }} — B3S Vault{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p><a href="/brand/{{ review.domain }}">← Volver a {{ review.domain }}</a></p>
+    <h1 class="text-balance">Revisión protegida de recuperación</h1>
+    <p class="muted mono">revisor: {{ reviewer }}</p>
+  </div>
+  <form method="post" action="/vault/review/logout">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="secondary">Cerrar sesión</button>
+  </form>
+</div>
+
+<section class="panel vault-review-summary">
+  <div class="section-head">
+    <span class="label">{{ review.brand_name or review.domain }}</span>
+    <span class="tag">// shadow · append-only · sin efecto operativo</span>
+  </div>
+  <p class="prose text-pretty">
+    Decide si cada cita satisface específicamente el contrato de la baldosa. Una aceptación mejora la sombra revisada,
+    pero no modifica el scan ni el scoring de producción.
+  </p>
+  <div class="vault-memory-metrics" aria-label="Resumen de revisión protegida">
+    <article class="vault-memory-metric">
+      <span>candidatos exactos</span>
+      <strong>{{ review.summary.candidate_count }}</strong>
+    </article>
+    <article class="vault-memory-metric">
+      <span>pendientes</span>
+      <strong>{{ review.summary.pending_count }}</strong>
+    </article>
+    <article class="vault-memory-metric">
+      <span>registrados</span>
+      <strong>{{ review.summary.reviewed_count }}</strong>
+    </article>
+  </div>
+</section>
+
+{% if saved %}
+<p class="vault-review-notice" role="status">Decisión registrada en el journal protegido.</p>
+{% endif %}
+{% if error %}
+<p class="error" role="alert">{{ error }}</p>
+{% endif %}
+{% if not review.available %}
+<section class="panel vault-memory-empty">
+  <p class="text-pretty">{{ review.message or "No hay memoria persistida disponible para esta marca." }}</p>
+  <a href="/brand/{{ review.domain }}">Volver a la memoria de baldosas</a>
+</section>
+{% elif not review.journal_ready %}
+<p class="error" role="alert">El journal PostgreSQL no está disponible. La revisión permanece bloqueada y no se puede firmar.</p>
+{% endif %}
+
+{% if review["items"] %}
+<div class="vault-review-list">
+  {% for item in review["items"] %}
+  <article class="panel vault-review-card" id="{{ item.case_id }}">
+    <div class="section-head">
+      <span class="label">{{ item.tile_key }} · {{ item.tile_name }}</span>
+      {% if item.decision == "pending" %}
+      <span class="chip warn">pendiente</span>
+      {% else %}
+      <span class="chip ok">{{ item.decision }}</span>
+      {% endif %}
+    </div>
+
+    <div class="vault-review-grid">
+      <section>
+        <h2 class="text-balance">Contrato de la baldosa</h2>
+        <p class="text-pretty">{{ item.tile_condition }}</p>
+        <dl class="brand-profile-kv vault-review-contract">
+          {% for key, value in item.tile_contract.items() %}
+          <dt>{{ key }}</dt><dd class="text-pretty">{{ value }}</dd>
+          {% endfor %}
+        </dl>
+      </section>
+      <section>
+        <h2 class="text-balance">Evidencia propuesta</h2>
+        <blockquote class="vault-review-quote text-pretty">{{ item.quote }}</blockquote>
+        {% if item.source_urls %}
+        <ul class="brand-profile-evidence-list">
+          {% for url in item.source_urls %}
+          <li><a href="{{ url }}" rel="nofollow noopener noreferrer" target="_blank">{{ url }}</a></li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+        <dl class="brand-profile-kv vault-review-evidence-meta">
+          <dt>estado</dt><dd class="mono">{{ item.latest_state }} → {{ item.proposed_state }}</dd>
+          <dt>clases</dt><dd class="mono">{{ item.source_classes | join(", ") or "—" }}</dd>
+          <dt>base</dt><dd class="mono">{{ item.acceptance_basis | join(", ") or "—" }}</dd>
+          <dt>observaciones</dt><dd class="mono">{{ item.observation_count }}</dd>
+          <dt>vigencia</dt><dd class="mono">{{ item.first_seen_at or "—" }} → {{ item.last_seen_at or "—" }}</dd>
+          <dt>fingerprint</dt><dd class="mono">{{ item.fingerprint_short }}…</dd>
+        </dl>
+      </section>
+    </div>
+
+    {% if item.can_review %}
+    <form method="post" action="/vault/review/{{ review.domain }}/decisions" class="vault-review-form vault-review-decision-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="subject_id" value="{{ item.subject_id }}">
+      <input type="hidden" name="case_id" value="{{ item.case_id }}">
+      <input type="hidden" name="expected_current_event_id" value="{{ item.current_event_id }}">
+      <input type="hidden" name="idempotency_key" value="{{ item.idempotency_key }}">
+      <p class="text-pretty"><strong>{{ item.review_prompt }}</strong></p>
+      <fieldset class="vault-review-options">
+        <legend>Decisión</legend>
+        <label><input type="radio" name="decision" value="accepted" required> Aceptada</label>
+        <label><input type="radio" name="decision" value="disputed" required> Disputada</label>
+        <label><input type="radio" name="decision" value="rejected" required> Rechazada</label>
+      </fieldset>
+      <label>
+        Justificación
+        <textarea name="rationale" required minlength="12" maxlength="2000" rows="5" placeholder="Explica por qué la cita satisface o no el contrato concreto de esta baldosa."></textarea>
+      </label>
+      <button type="submit">Registrar decisión firmada</button>
+      <p class="vault-memory-contract mono muted">runtime_effect=false · authority=false · automatic_scoring_effect=false</p>
+    </form>
+    {% else %}
+    <div class="vault-review-registered">
+      <strong>Decisión registrada: {{ item.decision }}</strong>
+      <span class="mono muted">{{ item.reviewer_id }} · {{ item.current_event_id }}</span>
+    </div>
+    {% endif %}
+  </article>
+  {% endfor %}
+</div>
+{% else %}
+<section class="panel vault-memory-empty">
+  <p class="text-pretty">No hay candidatos de recuperación preparados para esta marca.</p>
+  <a href="/brand/{{ review.domain }}">Volver a la memoria de baldosas</a>
+</section>
+{% endif %}
+{% endblock %}
