@@ -907,18 +907,33 @@ def _evidence_from_visual_signature(evidence: dict[str, Any] | None) -> list[Evi
         return []
     records: list[EvidenceRecord] = []
     capture = evidence.get("capture") if isinstance(evidence.get("capture"), dict) else {}
-    if capture.get("status") != "usable":
-        return []
+    capture_status = str(capture.get("status") or "unknown")
     records.append(
         EvidenceRecord(
             ref="visual_signature.capture",
             source="visual_signature",
-            evidence_type="visual_capture",
-            content=f"capture_status={capture.get('status')}; first_fold_evaluable={capture.get('first_fold_evaluable')}",
-            confidence="medium",
-            metadata={"capture": capture, "source_class": "visual_signal"},
+            evidence_type=(
+                "visual_capture"
+                if capture_status == "usable"
+                else "visual_capture_limitation"
+            ),
+            content=(
+                f"capture_status={capture_status}; "
+                f"first_fold_evaluable={capture.get('first_fold_evaluable')}"
+            ),
+            confidence="medium" if capture_status == "usable" else "high",
+            metadata={
+                "capture": capture,
+                "source_class": (
+                    "visual_signal"
+                    if capture_status == "usable"
+                    else "acquisition_metadata"
+                ),
+            },
         )
     )
+    if capture_status != "usable":
+        return records
     for index, tile_signal in enumerate(evidence.get("tile_signals") or []):
         if not isinstance(tile_signal, dict):
             continue
