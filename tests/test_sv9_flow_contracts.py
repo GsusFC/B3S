@@ -320,12 +320,53 @@ def test_flow_candidate_blocks_positive_visual_signal_when_capture_is_unusable()
     )
     signals = candidate.to_dict()["tile_signals"]
 
-    assert signals == []
-    assert not [
-        record
-        for record in candidate.evidence_pack.evidence
-        if record.ref.startswith("visual_signature.")
+    assert [
+        (
+            signal["tile"],
+            signal["effect"],
+            signal["confidence"],
+            signal["evidence_refs"],
+        )
+        for signal in signals
+    ] == [
+        (
+            "coherencia.C6",
+            "insufficient_evidence",
+            "high",
+            ["visual_signature.capture"],
+        )
     ]
+    assert [record.ref for record in candidate.evidence_pack.evidence] == [
+        "visual_signature.capture"
+    ]
+    assert candidate.evidence_pack.evidence[0].evidence_type == (
+        "visual_capture_limitation"
+    )
+    assert candidate.evidence_pack.evidence[0].metadata["source_class"] == (
+        "acquisition_metadata"
+    )
+
+
+def test_flow_candidate_marks_c6_blind_when_visual_capture_is_missing() -> None:
+    visual_signature = {
+        "schema_version": "visual-signature-evidence-v1",
+        "capture": {"status": "missing", "first_fold_evaluable": False},
+        "tile_signals": [],
+    }
+
+    candidate = build_flow_candidate_from_current_outputs(
+        snapshot={"run": {"brand_name": "Acme", "url": "https://acme.example"}},
+        tldr_payload={"tldr_brand3": {}},
+        visual_signature_evidence=visual_signature,
+    )
+
+    assert [
+        (signal.tile, signal.effect, signal.confidence)
+        for signal in candidate.tile_signals
+    ] == [("coherencia.C6", "insufficient_evidence", "high")]
+    assert candidate.evidence_pack.evidence[0].content == (
+        "capture_status=missing; first_fold_evaluable=False"
+    )
 
 
 def test_magnetism_tile_signals_mark_pull_tiles_insufficient_when_direct_evidence_is_missing() -> None:

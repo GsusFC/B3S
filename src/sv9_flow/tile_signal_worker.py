@@ -330,7 +330,22 @@ def _tile_signals_from_visual_signature(evidence: dict[str, Any] | None) -> list
         return []
     capture = evidence.get("capture") if isinstance(evidence.get("capture"), dict) else {}
     if capture.get("status") != "usable":
-        return []
+        return [
+            TileSignal(
+                component="coherencia",
+                tile="coherencia.C6",
+                effect="insufficient_evidence",
+                confidence="high",
+                source="visual_signature",
+                evidence_refs=["visual_signature.capture"],
+                rationale=(
+                    "copy_visual_alignment_unjudgeable:"
+                    f"capture_status={capture.get('status') or 'unknown'};"
+                    "first_fold_evaluable="
+                    f"{capture.get('first_fold_evaluable')}"
+                ),
+            )
+        ]
     out: list[TileSignal] = []
     for index, item in enumerate(evidence.get("tile_signals") or []):
         if not isinstance(item, dict):
