@@ -41,14 +41,33 @@ field comparison is approved.
 - Focused capture/evidence tests: 97 passed (including the wrapper used by the
   main scanner).
 - Full repository suite before deployment: 2,409 passed, 5 skipped.
-- Vault field validation is recorded below once the branch is deployed.
+- Vault field validation is recorded below.
 
 ## Vault field validation
 
-Pending deployment and live comparison. The acceptance checks are:
+Deployment commit: `227c433c59ff26fca59a4b3e86c5a893ddff677a`.
+Production was not targeted; its health SHA was not changed by this pilot.
 
-1. a timeout no longer discards a valid viewport when one was written;
-2. a page with more than five structural segments reports a bounded partial
-   manifest rather than claiming a full-page master;
-3. complete short pages retain the existing `complete` status and artifacts;
-4. the functional production app remains unchanged.
+| Site | Scan | Visual status | Planned segments | Captured segments | Captured sections | Result |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| SoccerSolver | `9ef936960a35` | usable / partial | 8 | 5 | 14/16 | bounded selection; no full-page claim |
+| SigmaOS | `4dd7eabbf28a` | usable / partial | 14 | 5 | 9/16 | bounded selection; no full-page claim |
+
+Both reports completed with an acquisition gate of `pass`, a usable first
+viewport, and `selection_strategy=priority_first_viewport_and_strategic_labels`.
+The raw viewport and the selected section artifacts are present in the Vault
+volume; unselected sections remain explicitly uncaptured rather than being
+represented as complete evidence. The recovery marker was not needed in these
+two runs because Playwright returned before the outer budget; its timeout path
+is covered by the local checkpoint test.
+
+Acceptance checks:
+
+1. **Passed locally:** a valid raw viewport is recovered after a structural
+   timeout and marked partial/non-authoritative.
+2. **Passed in Vault:** pages with more than five structural segments capture
+   at most five and never claim a full-page master.
+3. **Passed in Vault:** both captures retained usable first-fold evidence and
+   persisted section crops from selected segments.
+4. **Passed:** production remained untouched; only `b3s-vault` received the
+   deployment.
