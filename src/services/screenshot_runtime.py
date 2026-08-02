@@ -131,6 +131,62 @@ def _screenshot_has_capture(data: dict[str, object] | None) -> bool:
     return bool(isinstance(data, dict) and str(data.get("screenshot_url") or "").strip())
 
 
+def _allocate_playwright_screenshot_path() -> Path:
+    screenshot_dir = Path(BRAND3_SCREENSHOT_DIR).resolve()
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    fd, screenshot_path = tempfile.mkstemp(
+        prefix="brand3-screenshot-",
+        suffix=".png",
+        dir=str(screenshot_dir),
+    )
+    os.close(fd)
+    path = Path(screenshot_path)
+    path.unlink(missing_ok=True)
+    return path
+
+
+def _is_valid_screenshot_path(path: Path | None) -> bool:
+    if path is None or not path.is_file() or path.stat().st_size <= 0:
+        return False
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            image.verify()
+        return True
+    except Exception:
+        return False
+
+
+def _recover_viewport_checkpoint(
+    path: Path | None,
+    *,
+    reason: str,
+) -> dict[str, object] | None:
+    if not _is_valid_screenshot_path(path):
+        return None
+    assert path is not None
+    bounded_reason = str(reason)[:300]
+    return {
+        "screenshot_url": path.as_uri(),
+        "screenshot_path": str(path),
+        "screenshot_provider": "playwright",
+        "capture_recovery": "raw_viewport_checkpoint",
+        "metadata": {
+            "capture_type": "viewport",
+            "capture_variant": "raw_viewport",
+            "selected_capture_variant": "raw_viewport",
+            "raw_screenshot_path": str(path),
+            "section_capture_status": "timeout",
+            "structured_capture_errors": [bounded_reason],
+            "evidence_integrity_notes": [
+                "raw_viewport_recovered_after_structural_capture_timeout",
+                "structured_capture_is_incomplete_and_non_authoritative",
+            ],
+        },
+    }
+
+
 def _dismiss_cookie_banner_once(page) -> dict[str, object]:
     """Reuse the text-capture cookie dismissal affordances before visual capture."""
     try:
@@ -144,7 +200,12 @@ def _dismiss_cookie_banner_once(page) -> dict[str, object]:
         return {"attempted": True, "success": False, "error": str(exc)[:160], "selector": _COOKIE_BANNER_DISMISS_SELECTOR}
 
 
-def _take_playwright_screenshot(url: str, *, timeout_ms: int = 30000) -> dict[str, object]:
+def _take_playwright_screenshot(
+    url: str,
+    *,
+    timeout_ms: int = 30000,
+    screenshot_path: str | Path | None = None,
+) -> dict[str, object]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from src.visual_signature.capture.playwright_capture_runtime import capture_with_playwright
@@ -155,16 +216,14 @@ def _take_playwright_screenshot(url: str, *, timeout_ms: int = 30000) -> dict[st
             "screenshot_provider": "playwright",
         }
 
-    screenshot_dir = Path(BRAND3_SCREENSHOT_DIR).resolve()
-    screenshot_dir.mkdir(parents=True, exist_ok=True)
-    fd, screenshot_path = tempfile.mkstemp(prefix="brand3-screenshot-", suffix=".png", dir=str(screenshot_dir))
-    os.close(fd)
+    raw_path = Path(screenshot_path) if screenshot_path else _allocate_playwright_screenshot_path()
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
     capture_succeeded = False
     try:
         capture = capture_with_playwright(
             (urlparse(url).hostname or "brand").removeprefix("www."),
             url,
-            screenshot_path,
+            str(raw_path),
             "viewport",
             attempt_dismiss_obstructions=True,
             navigation_timeout_ms=timeout_ms,
@@ -174,7 +233,7 @@ def _take_playwright_screenshot(url: str, *, timeout_ms: int = 30000) -> dict[st
         selected_path = str(
             capture.get("clean_attempt_screenshot_path")
             if dismissal_successful
-            else capture.get("raw_screenshot_path") or screenshot_path
+            else capture.get("raw_screenshot_path") or str(raw_path)
         )
         selected_obstruction = (
             capture.get("after_obstruction")
@@ -197,7 +256,7 @@ def _take_playwright_screenshot(url: str, *, timeout_ms: int = 30000) -> dict[st
             "dismissal_eligibility": capture.get("dismissal_eligibility"),
             "dismissal_block_reason": capture.get("dismissal_block_reason"),
             "evidence_integrity_notes": list(capture.get("evidence_integrity_notes") or []),
-            "raw_screenshot_path": str(capture.get("raw_screenshot_path") or screenshot_path),
+            "raw_screenshot_path": str(capture.get("raw_screenshot_path") or raw_path),
             "full_page_screenshot_path": capture.get("full_page_screenshot_path"),
             "section_capture_status": capture.get("section_capture_status"),
             "section_manifest": capture.get("section_manifest")
@@ -236,9 +295,9 @@ def _take_playwright_screenshot(url: str, *, timeout_ms: int = 30000) -> dict[st
     except Exception as exc:
         return {"error": str(exc), "error_type": "browser_error", "screenshot_provider": "playwright"}
     finally:
-        leftovers = [Path(screenshot_path)]
+        leftovers = [raw_path]
         if not capture_succeeded:
-            leftovers.append(Path(screenshot_path).with_name(f"{Path(screenshot_path).stem}.clean-attempt.png"))
+            leftovers.append(raw_path.with_name(f"{raw_path.stem}.clean-attempt.png"))
         for leftover in leftovers:
             try:
                 if leftover.exists() and (not capture_succeeded or leftover.stat().st_size == 0):
@@ -253,8 +312,13 @@ def _take_playwright_screenshot_with_firecrawl_fallback(
     take_playwright_screenshot=_take_playwright_screenshot,
     take_firecrawl_screenshot=_take_firecrawl_screenshot,
     screenshot_has_capture=_screenshot_has_capture,
+    screenshot_path: str | Path | None = None,
 ) -> dict[str, object]:
-    primary = take_playwright_screenshot(url)
+    primary = (
+        take_playwright_screenshot(url, screenshot_path=screenshot_path)
+        if screenshot_path is not None
+        else take_playwright_screenshot(url)
+    )
     if screenshot_has_capture(primary):
         return primary
 
@@ -284,6 +348,7 @@ def _screenshot_capture_worker(
     take_playwright_screenshot=_take_playwright_screenshot,
     take_firecrawl_screenshot=_take_firecrawl_screenshot,
     screenshot_has_capture=_screenshot_has_capture,
+    screenshot_path: str | Path | None = None,
 ) -> None:
     try:
         if provider == "playwright":
@@ -295,6 +360,7 @@ def _screenshot_capture_worker(
                         take_playwright_screenshot=take_playwright_screenshot,
                         take_firecrawl_screenshot=take_firecrawl_screenshot,
                         screenshot_has_capture=screenshot_has_capture,
+                        screenshot_path=screenshot_path,
                     ),
                 )
             )
@@ -337,6 +403,11 @@ def _take_screenshot_with_budget(
     method = "spawn" if sys.platform == "darwin" else ("fork" if "fork" in mp.get_all_start_methods() else "spawn")
     ctx = mp.get_context(method)
     output_queue = ctx.Queue(maxsize=1)
+    checkpoint_path = (
+        _allocate_playwright_screenshot_path()
+        if provider_name == "playwright"
+        else None
+    )
     process = ctx.Process(
         target=screenshot_capture_worker,
         args=(output_queue, url, provider_name),
@@ -345,9 +416,15 @@ def _take_screenshot_with_budget(
             "take_playwright_screenshot": take_playwright_screenshot,
             "take_firecrawl_screenshot": take_firecrawl_screenshot,
             "screenshot_has_capture": _screenshot_has_capture,
+            "screenshot_path": checkpoint_path,
         },
     )
-    process.start()
+    try:
+        process.start()
+    except Exception:
+        if checkpoint_path is not None:
+            checkpoint_path.unlink(missing_ok=True)
+        raise
     process.join(timeout_seconds)
     if process.is_alive():
         process.terminate()
@@ -355,6 +432,14 @@ def _take_screenshot_with_budget(
         if process.is_alive():
             process.kill()
             process.join(2)
+        recovered = _recover_viewport_checkpoint(
+            checkpoint_path,
+            reason=f"visual_screenshot_timeout_after_{timeout_seconds}s",
+        )
+        if recovered is not None:
+            return recovered, "partial"
+        if checkpoint_path is not None:
+            checkpoint_path.unlink(missing_ok=True)
         return {
             "error": f"visual_screenshot_timeout_after_{timeout_seconds}s",
             "error_type": "timeout",
@@ -364,6 +449,14 @@ def _take_screenshot_with_budget(
     try:
         status, payload = output_queue.get_nowait()
     except queue.Empty:
+        recovered = _recover_viewport_checkpoint(
+            checkpoint_path,
+            reason="visual_screenshot_no_result",
+        )
+        if recovered is not None:
+            return recovered, "partial"
+        if checkpoint_path is not None:
+            checkpoint_path.unlink(missing_ok=True)
         return {
             "error": "visual_screenshot_no_result",
             "error_type": "unknown",
@@ -371,7 +464,17 @@ def _take_screenshot_with_budget(
         }, "error"
 
     if status == "ok" and isinstance(payload, dict):
+        if checkpoint_path is not None and str(payload.get("screenshot_path") or "") != str(checkpoint_path):
+            checkpoint_path.unlink(missing_ok=True)
         return payload, None
+    recovered = _recover_viewport_checkpoint(
+        checkpoint_path,
+        reason=str(payload or "visual_screenshot_error"),
+    )
+    if recovered is not None:
+        return recovered, "partial"
+    if checkpoint_path is not None:
+        checkpoint_path.unlink(missing_ok=True)
     return {
         "error": str(payload or "visual_screenshot_error"),
         "error_type": "browser_error" if provider_name == "playwright" else "capture_error",

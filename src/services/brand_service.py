@@ -201,6 +201,7 @@ def _take_playwright_screenshot_with_firecrawl_fallback(
     take_playwright_screenshot=None,
     take_firecrawl_screenshot=None,
     screenshot_has_capture=None,
+    screenshot_path=None,
 ) -> dict[str, object]:
     if take_playwright_screenshot is None:
         take_playwright_screenshot = _take_playwright_screenshot
@@ -213,6 +214,7 @@ def _take_playwright_screenshot_with_firecrawl_fallback(
         take_playwright_screenshot=take_playwright_screenshot,
         take_firecrawl_screenshot=take_firecrawl_screenshot,
         screenshot_has_capture=screenshot_has_capture,
+        screenshot_path=screenshot_path,
     )
 
 
@@ -272,6 +274,7 @@ def _screenshot_capture_worker(
     take_playwright_screenshot=None,
     take_firecrawl_screenshot=None,
     screenshot_has_capture=None,
+    screenshot_path=None,
 ) -> None:
     if take_playwright_screenshot_with_firecrawl_fallback is None:
         take_playwright_screenshot_with_firecrawl_fallback = _take_playwright_screenshot_with_firecrawl_fallback
@@ -289,6 +292,7 @@ def _screenshot_capture_worker(
         take_playwright_screenshot=take_playwright_screenshot,
         take_firecrawl_screenshot=take_firecrawl_screenshot,
         screenshot_has_capture=screenshot_has_capture,
+        screenshot_path=screenshot_path,
     )
 
 
