@@ -7,6 +7,7 @@ from pathlib import Path
 
 from src.services import screenshot_runtime
 from src.services.visual_signature_snapshot import _visual_signature_shadow_screenshot_payload
+from src.visual_signature.evidence import build_visual_signature_evidence_v1
 
 
 class _FakeLocator:
@@ -45,7 +46,26 @@ def _slow_screenshot_worker(_output_queue, _url, _provider, **_kwargs):
 def _checkpoint_then_slow_worker(_output_queue, _url, _provider, **kwargs):
     checkpoint_path = Path(str(kwargs["screenshot_path"]))
     checkpoint_path.write_bytes(_png_bytes())
+    checkpoint_path.with_name(f"{checkpoint_path.stem}.page-segment-01.png").write_bytes(_png_bytes())
     time.sleep(3)
+
+
+def _checkpoint_with_clean_result_worker(output_queue, _url, _provider, **kwargs):
+    checkpoint_path = Path(str(kwargs["screenshot_path"]))
+    clean_path = checkpoint_path.with_name(f"{checkpoint_path.stem}.clean-attempt.png")
+    checkpoint_path.write_bytes(_png_bytes(width=4, height=3))
+    clean_path.write_bytes(_png_bytes(width=4, height=3))
+    output_queue.put(
+        (
+            "ok",
+            {
+                "screenshot_url": clean_path.as_uri(),
+                "screenshot_path": str(clean_path),
+                "screenshot_provider": "playwright",
+                "metadata": {"raw_screenshot_path": str(checkpoint_path)},
+            },
+        )
+    )
 
 
 def _png_bytes(width: int = 2, height: int = 2) -> bytes:
@@ -204,7 +224,9 @@ def test_playwright_capture_budget_is_enforced_by_worker_process():
     assert data["screenshot_provider"] == "playwright"
 
 
-def test_playwright_timeout_recovers_valid_viewport_checkpoint():
+def test_playwright_timeout_recovers_valid_viewport_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setattr(screenshot_runtime, "BRAND3_SCREENSHOT_DIR", str(tmp_path))
+
     data, limitation = screenshot_runtime._take_screenshot_with_budget(
         "https://example.test",
         provider="playwright",
@@ -215,6 +237,42 @@ def test_playwright_timeout_recovers_valid_viewport_checkpoint():
     assert limitation == "partial"
     assert data["capture_recovery"] == "raw_viewport_checkpoint"
     assert data["metadata"]["section_capture_status"] == "timeout"
+    assert data["metadata"]["width"] == 2
+    assert data["metadata"]["height"] == 2
+    assert data["metadata"]["viewport_width"] == 2
+    assert data["metadata"]["viewport_height"] == 2
     recovered_path = Path(str(data["screenshot_path"]))
     assert recovered_path.is_file()
+    assert not recovered_path.with_name(f"{recovered_path.stem}.page-segment-01.png").exists()
+    shadow_payload = _visual_signature_shadow_screenshot_payload(
+        data,
+        page_url="https://example.test",
+    )
+    assert shadow_payload is not None
+    evidence = build_visual_signature_evidence_v1(
+        {"website_url": "https://example.test"},
+        screenshot_payload=shadow_payload,
+    )
+    assert shadow_payload["viewport_width"] == 2
+    assert shadow_payload["viewport_height"] == 2
+    assert evidence["capture"]["viewport"] == {"width": 2, "height": 2}
     recovered_path.unlink()
+
+
+def test_playwright_success_preserves_raw_checkpoint_when_clean_attempt_is_selected(tmp_path, monkeypatch):
+    monkeypatch.setattr(screenshot_runtime, "BRAND3_SCREENSHOT_DIR", str(tmp_path))
+
+    data, limitation = screenshot_runtime._take_screenshot_with_budget(
+        "https://example.test",
+        provider="playwright",
+        timeout_seconds=2,
+        screenshot_capture_worker=_checkpoint_with_clean_result_worker,
+    )
+
+    raw_path = Path(str(data["metadata"]["raw_screenshot_path"]))
+    clean_path = Path(str(data["screenshot_path"]))
+    assert limitation is None
+    assert raw_path.is_file()
+    assert clean_path.is_file()
+    raw_path.unlink()
+    clean_path.unlink()

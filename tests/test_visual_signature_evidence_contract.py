@@ -237,6 +237,7 @@ def test_visual_signature_evidence_hashes_screenshot_file_when_available(tmp_pat
 
 def test_visual_signature_evidence_persists_partial_capture_contract():
     payload = _payload()
+    complete = build_visual_signature_evidence_v1(payload)
     payload["vision"]["screenshot"].update(
         {
             "capture_recovery": "raw_viewport_checkpoint",
@@ -250,7 +251,10 @@ def test_visual_signature_evidence_persists_partial_capture_contract():
     assert evidence["capture"]["capture_recovery"] == "raw_viewport_checkpoint"
     assert evidence["capture"]["section_capture_status"] == "timeout"
     assert evidence["capture"]["structured_capture_errors"] == ["section_analysis_timeout"]
-    assert evidence["fingerprint"]["normalized_payload_sha256"]
+    assert (
+        evidence["fingerprint"]["normalized_payload_sha256"]
+        != complete["fingerprint"]["normalized_payload_sha256"]
+    )
 
 
 def test_visual_signature_evidence_normalized_payload_hash_ignores_capture_timestamp_and_path(tmp_path: Path):

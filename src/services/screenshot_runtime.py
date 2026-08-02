@@ -158,6 +158,33 @@ def _is_valid_screenshot_path(path: Path | None) -> bool:
         return False
 
 
+def _cleanup_playwright_checkpoint_derivatives(path: Path | None) -> None:
+    """Remove unreferenced artifacts derived from a terminated checkpoint."""
+
+    if path is None or not path.parent.is_dir():
+        return
+    for candidate in path.parent.glob(f"{path.stem}.*"):
+        if candidate == path or not candidate.is_file():
+            continue
+        if candidate.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+            continue
+        try:
+            candidate.unlink()
+        except OSError:
+            pass
+
+
+def _payload_references_checkpoint(payload: dict[str, object], path: Path) -> bool:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    return any(
+        str(candidate or "") == str(path)
+        for candidate in (
+            payload.get("screenshot_path"),
+            metadata.get("raw_screenshot_path"),
+        )
+    )
+
+
 def _recover_viewport_checkpoint(
     path: Path | None,
     *,
@@ -166,6 +193,13 @@ def _recover_viewport_checkpoint(
     if not _is_valid_screenshot_path(path):
         return None
     assert path is not None
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            width, height = image.size
+    except Exception:
+        return None
     bounded_reason = str(reason)[:300]
     return {
         "screenshot_url": path.as_uri(),
@@ -177,6 +211,11 @@ def _recover_viewport_checkpoint(
             "capture_variant": "raw_viewport",
             "selected_capture_variant": "raw_viewport",
             "raw_screenshot_path": str(path),
+            "width": width,
+            "height": height,
+            "viewport_width": width,
+            "viewport_height": height,
+            "file_size_bytes": path.stat().st_size,
             "section_capture_status": "timeout",
             "structured_capture_errors": [bounded_reason],
             "evidence_integrity_notes": [
@@ -432,6 +471,7 @@ def _take_screenshot_with_budget(
         if process.is_alive():
             process.kill()
             process.join(2)
+        _cleanup_playwright_checkpoint_derivatives(checkpoint_path)
         recovered = _recover_viewport_checkpoint(
             checkpoint_path,
             reason=f"visual_screenshot_timeout_after_{timeout_seconds}s",
@@ -449,6 +489,7 @@ def _take_screenshot_with_budget(
     try:
         status, payload = output_queue.get_nowait()
     except queue.Empty:
+        _cleanup_playwright_checkpoint_derivatives(checkpoint_path)
         recovered = _recover_viewport_checkpoint(
             checkpoint_path,
             reason="visual_screenshot_no_result",
@@ -464,9 +505,11 @@ def _take_screenshot_with_budget(
         }, "error"
 
     if status == "ok" and isinstance(payload, dict):
-        if checkpoint_path is not None and str(payload.get("screenshot_path") or "") != str(checkpoint_path):
+        if checkpoint_path is not None and not _payload_references_checkpoint(payload, checkpoint_path):
+            _cleanup_playwright_checkpoint_derivatives(checkpoint_path)
             checkpoint_path.unlink(missing_ok=True)
         return payload, None
+    _cleanup_playwright_checkpoint_derivatives(checkpoint_path)
     recovered = _recover_viewport_checkpoint(
         checkpoint_path,
         reason=str(payload or "visual_screenshot_error"),
