@@ -20,6 +20,8 @@ def fingerprint_contract(
         "capture": {
             "status": capture.get("status"),
             "capture_variant": capture.get("capture_variant"),
+            "capture_recovery": capture.get("capture_recovery"),
+            "section_capture_status": capture.get("section_capture_status"),
             "viewport": capture.get("viewport"),
             "url_final": capture.get("url_final"),
         },

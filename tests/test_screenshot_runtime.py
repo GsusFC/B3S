@@ -42,6 +42,12 @@ def _slow_screenshot_worker(_output_queue, _url, _provider, **_kwargs):
     time.sleep(3)
 
 
+def _checkpoint_then_slow_worker(_output_queue, _url, _provider, **kwargs):
+    checkpoint_path = Path(str(kwargs["screenshot_path"]))
+    checkpoint_path.write_bytes(_png_bytes())
+    time.sleep(3)
+
+
 def _png_bytes(width: int = 2, height: int = 2) -> bytes:
     def chunk(kind: bytes, data: bytes) -> bytes:
         payload = kind + data
@@ -141,6 +147,7 @@ def test_visual_snapshot_propagates_same_capture_obstruction_metadata(tmp_path):
             "screenshot_url": screenshot.as_uri(),
             "screenshot_path": str(screenshot),
             "source": "playwright",
+            "capture_recovery": "raw_viewport_checkpoint",
             "metadata": {
                 "capture_type": "viewport",
                 "viewport_width": 1440,
@@ -174,6 +181,7 @@ def test_visual_snapshot_propagates_same_capture_obstruction_metadata(tmp_path):
     assert payload is not None
     assert payload["path"] == str(screenshot)
     assert payload["selected_capture_variant"] == "raw_viewport"
+    assert payload["capture_recovery"] == "raw_viewport_checkpoint"
     assert payload["viewport_obstruction"] == obstruction
     assert payload["obstruction_observed_same_capture"] is True
     assert payload["full_page_screenshot_path"] == str(full_page)
@@ -194,3 +202,19 @@ def test_playwright_capture_budget_is_enforced_by_worker_process():
     assert limitation == "timeout"
     assert data["error_type"] == "timeout"
     assert data["screenshot_provider"] == "playwright"
+
+
+def test_playwright_timeout_recovers_valid_viewport_checkpoint():
+    data, limitation = screenshot_runtime._take_screenshot_with_budget(
+        "https://example.test",
+        provider="playwright",
+        timeout_seconds=1,
+        screenshot_capture_worker=_checkpoint_then_slow_worker,
+    )
+
+    assert limitation == "partial"
+    assert data["capture_recovery"] == "raw_viewport_checkpoint"
+    assert data["metadata"]["section_capture_status"] == "timeout"
+    recovered_path = Path(str(data["screenshot_path"]))
+    assert recovered_path.is_file()
+    recovered_path.unlink()

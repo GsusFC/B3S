@@ -36,6 +36,9 @@ def capture_contract(
     )
     quality = str(screenshot.get("quality") or ("usable" if available else "missing"))
     variant = capture_variant(screenshot)
+    structured_errors = screenshot.get("structured_capture_errors")
+    if not isinstance(structured_errors, list):
+        structured_errors = []
     first_fold_evaluable = first_fold_evaluable_for_capture(obstruction, available=available, quality=quality)
     status = capture_status(
         available=available,
@@ -48,6 +51,9 @@ def capture_contract(
         "available": available,
         "quality": quality,
         "capture_variant": variant,
+        "capture_recovery": str(screenshot.get("capture_recovery") or "") or None,
+        "section_capture_status": str(screenshot.get("section_capture_status") or "") or None,
+        "structured_capture_errors": [str(item) for item in structured_errors[:8]],
         "first_fold_evaluable": first_fold_evaluable,
         "viewport": viewport(screenshot),
         "url_requested": str(payload.get("website_url") or ""),

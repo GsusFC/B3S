@@ -53,6 +53,7 @@ def _screenshot_capture_diagnostic(
         "fallback_error",
         "primary_error",
         "primary_error_type",
+        "capture_recovery",
     )
     if screenshot_url:
         payload: dict[str, object] = {

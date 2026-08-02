@@ -9,7 +9,10 @@ from src.visual_signature._internal.utils import float_or_none as _float_or_none
 from src.visual_signature._internal.utils import normalize_capture_type as _normalize_capture_type
 from src.visual_signature._internal.playwright_capture_dismissal_rules import dismissal_skip_note as _dismissal_skip_note
 from src.visual_signature.capture.screenshot_capture_models import CaptureResult
-from src.visual_signature.capture.page_sections import capture_structured_page_evidence
+from src.visual_signature.capture.page_sections import (
+    RUNTIME_MAX_PAGE_SEGMENTS,
+    capture_structured_page_evidence,
+)
 from src.visual_signature._internal.playwright_capture_helpers import DISMISSAL_TARGET_SELECTOR
 from src.visual_signature._internal.playwright_capture_helpers import _attempt_obstruction_dismissal
 from src.visual_signature._internal.playwright_capture_helpers import _attempt_obstruction_dismissal_with_discovery
@@ -275,6 +278,7 @@ def capture_with_playwright(
                     screenshot_path=raw_path,
                     page_url=website_url,
                     capture_variant=selected_variant,
+                    max_page_segments=RUNTIME_MAX_PAGE_SEGMENTS,
                     viewport_screenshot_path=str(selected_viewport_path or raw_path),
                     post_hydration_hook=_dismiss_post_hydration_obstruction
                     if attempt_dismiss_obstructions

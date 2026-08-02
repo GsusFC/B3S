@@ -23,6 +23,30 @@ SECTION_ANALYSIS_MAX_CAPTURES = 16
 SECTION_MAX_HEIGHT = 1800
 SECTION_MIN_HEIGHT = 120
 PAGE_SEGMENT_MAX_HEIGHT = 1800
+RUNTIME_MAX_PAGE_SEGMENTS = 5
+
+_SEGMENT_PRIORITY_TERMS = (
+    "product",
+    "how it works",
+    "how it work",
+    "proof",
+    "customer",
+    "case",
+    "result",
+    "testimonial",
+    "pricing",
+    "cta",
+    "contact",
+    "producto",
+    "cómo funciona",
+    "como funciona",
+    "prueba",
+    "cliente",
+    "caso",
+    "resultado",
+    "precio",
+    "contacto",
+)
 
 
 _RENDERED_SECTION_SNAPSHOT_JS = r"""
@@ -437,13 +461,61 @@ def build_page_segment_plan(
     return segments
 
 
+def select_page_segments_for_capture(
+    section_manifest: dict[str, Any],
+    segments: list[dict[str, Any]],
+    *,
+    max_segments: int | None = None,
+) -> list[dict[str, Any]]:
+    """Select bounded, high-value segments while preserving the full plan."""
+
+    if max_segments is None or len(segments) <= max_segments:
+        return list(segments)
+    limit = max(1, int(max_segments))
+    viewport = section_manifest.get("viewport") if isinstance(section_manifest.get("viewport"), dict) else {}
+    viewport_height = max(1, _int(viewport.get("height"), 900))
+    sections_by_id = {
+        str(row.get("id") or ""): row
+        for row in section_manifest.get("sections") or []
+        if isinstance(row, dict) and str(row.get("id") or "")
+    }
+
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+    for index, segment in enumerate(segments):
+        bbox = segment.get("bbox") if isinstance(segment.get("bbox"), dict) else {}
+        top = _int(bbox.get("top"), 0)
+        score = 1000 if top == 0 else 800 if top < viewport_height else 0
+        for section_id in segment.get("semantic_section_ids") or []:
+            section = sections_by_id.get(str(section_id))
+            if not section:
+                continue
+            kind = str(section.get("kind") or "").lower()
+            label = " ".join(
+                str(section.get(key) or "")
+                for key in ("label", "heading", "aria_label")
+            ).lower()
+            if kind == "hero":
+                score += 500
+            elif kind in {"header", "navigation"}:
+                score += 100
+            elif kind == "footer":
+                score += 250
+            score += sum(40 for term in _SEGMENT_PRIORITY_TERMS if term in label)
+        scored.append((-score, index, segment))
+
+    scored.sort(key=lambda item: (item[0], item[1]))
+    selected_indexes = {index for _, index, _ in scored[:limit]}
+    return [segment for index, segment in enumerate(segments) if index in selected_indexes]
+
+
 def _capture_page_segments(
     page: Any,
     *,
     base_path: Path,
     section_manifest: dict[str, Any],
+    max_segments: int | None = None,
 ) -> dict[str, Any]:
-    """Capture bounded Chromium slices and reconstruct one deterministic master."""
+    """Capture bounded Chromium slices and reconstruct a master when complete."""
 
     context = getattr(page, "context", None)
     new_cdp_session = getattr(context, "new_cdp_session", None)
@@ -457,12 +529,25 @@ def _capture_page_segments(
     document_height = max(1, _int(document.get("height"), 1))
     viewport_width = max(1, _int(viewport.get("width"), 1440))
     segments = build_page_segment_plan(section_manifest)
+    selected_segments = select_page_segments_for_capture(
+        section_manifest,
+        segments,
+        max_segments=max_segments,
+    )
+    selected_segment_ids = {str(segment.get("id") or "") for segment in selected_segments}
+    for segment in segments:
+        segment["selected_for_capture"] = str(segment.get("id") or "") in selected_segment_ids
     session = new_cdp_session(page)
-    master = Image.new("RGB", (viewport_width, document_height), color=(255, 255, 255))
+    reconstruct_master = len(selected_segments) == len(segments)
+    master = (
+        Image.new("RGB", (viewport_width, document_height), color=(255, 255, 255))
+        if reconstruct_master
+        else None
+    )
     captured_height = 0
     errors: list[str] = []
     try:
-        for segment in segments:
+        for segment in selected_segments:
             bbox = segment["bbox"]
             segment_path = _derived_path(base_path, str(segment["id"]))
             try:
@@ -495,7 +580,8 @@ def _capture_page_segments(
                                 f"actual={rendered.width}x{rendered.height}"
                             )
                         segment_path.write_bytes(raw)
-                        master.paste(rendered, (int(bbox["left"]), int(bbox["top"])))
+                        if master is not None:
+                            master.paste(rendered, (int(bbox["left"]), int(bbox["top"])))
                     finally:
                         rendered.close()
                 segment["capture_path"] = str(segment_path)
@@ -514,17 +600,25 @@ def _capture_page_segments(
             except Exception:
                 pass
 
-    complete = captured_height == document_height and not errors
+    complete = reconstruct_master and captured_height == document_height and not errors
     full_page_path = _derived_path(base_path, "full-page")
-    if complete:
+    if complete and master is not None:
         master.save(full_page_path, format="PNG", compress_level=1)
-    master.close()
+    if master is not None:
+        master.close()
     return {
         "schema_version": PAGE_SEGMENT_CAPTURE_VERSION,
         "strategy": "html_boundaries_grouped_into_bounded_chromium_segments",
         "status": "complete" if complete else "partial" if captured_height else "failed",
         "max_segment_height": PAGE_SEGMENT_MAX_HEIGHT,
         "segment_count": len(segments),
+        "selected_segment_count": len(selected_segments),
+        "max_segment_captures": max_segments,
+        "selection_strategy": (
+            "priority_first_viewport_and_strategic_labels"
+            if max_segments is not None and len(selected_segments) < len(segments)
+            else "all_planned_segments"
+        ),
         "captured_segment_count": sum(1 for segment in segments if str(segment.get("capture_path") or "").strip()),
         "coverage_ratio": round(min(1.0, captured_height / document_height), 4),
         "full_page_screenshot_path": str(full_page_path) if complete else None,
@@ -542,8 +636,9 @@ def capture_structured_page_evidence(
     viewport_screenshot_path: str | Path | None = None,
     post_hydration_hook: Callable[[Any], dict[str, Any]] | None = None,
     max_captures: int = SECTION_ANALYSIS_MAX_CAPTURES,
+    max_page_segments: int | None = None,
 ) -> dict[str, Any]:
-    """Capture one master full-page image and the normalized section bands."""
+    """Capture bounded page segments and normalized section bands."""
 
     base_path = Path(screenshot_path)
     hydration = hydrate_lazy_content(page)
@@ -575,6 +670,7 @@ def capture_structured_page_evidence(
             page,
             base_path=base_path,
             section_manifest=manifest,
+            max_segments=max_page_segments,
         )
         manifest["page_segment_capture"] = {key: value for key, value in segment_capture.items() if key != "segments"}
         manifest["page_segments"] = list(segment_capture.get("segments") or [])
@@ -635,8 +731,18 @@ def capture_structured_page_evidence(
                 str(section.get("id") or f"section-{captured + 1:02d}"),
             )
             if not full_page_available or master_image is None:
-                section["capture_path"] = None
-                section["capture_error"] = "full_page_master_unavailable"
+                if _crop_section_from_captured_segment(
+                    section=section,
+                    section_manifest=manifest,
+                    section_path=section_path,
+                ):
+                    section["capture_path"] = str(section_path)
+                    section["file_size_bytes"] = section_path.stat().st_size
+                    section["capture_source"] = "page_segment"
+                    captured += 1
+                else:
+                    section["capture_path"] = None
+                    section["capture_error"] = "full_page_master_unavailable"
                 continue
             try:
                 _crop_section_from_master_image(
@@ -724,6 +830,57 @@ def _crop_section_from_master_image(
     )
     with master.crop((left, top, right, bottom)) as crop:
         crop.save(section_path, format="PNG")
+
+
+def _crop_section_from_captured_segment(
+    *,
+    section: dict[str, Any],
+    section_manifest: dict[str, Any],
+    section_path: Path,
+) -> bool:
+    """Persist a section crop when only a bounded segment was captured."""
+
+    section_bbox = section.get("bbox") if isinstance(section.get("bbox"), dict) else {}
+    section_top = _int(section_bbox.get("top"), 0)
+    section_left = _int(section_bbox.get("left"), 0)
+    section_width = max(1, _int(section_bbox.get("width"), 1))
+    section_height = max(1, _int(section_bbox.get("height"), 1))
+    section_bottom = section_top + section_height
+    for segment in section_manifest.get("page_segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        capture_path = str(segment.get("capture_path") or "").strip()
+        if not capture_path:
+            continue
+        segment_bbox = segment.get("bbox") if isinstance(segment.get("bbox"), dict) else {}
+        segment_top = _int(segment_bbox.get("top"), 0)
+        segment_left = _int(segment_bbox.get("left"), 0)
+        segment_width = max(1, _int(segment_bbox.get("width"), 1))
+        segment_height = max(1, _int(segment_bbox.get("height"), 1))
+        segment_bottom = segment_top + segment_height
+        if not (
+            section_left >= segment_left
+            and section_top >= segment_top
+            and section_left + section_width <= segment_left + segment_width
+            and section_bottom <= segment_bottom
+        ):
+            continue
+        try:
+            from PIL import Image
+
+            with Image.open(capture_path) as image:
+                left = section_left - segment_left
+                top = section_top - segment_top
+                right = min(image.width, left + section_width)
+                bottom = min(image.height, top + section_height)
+                if right <= left or bottom <= top:
+                    return False
+                with image.crop((left, top, right, bottom)) as crop:
+                    crop.save(section_path, format="PNG")
+            return True
+        except Exception:
+            return False
+    return False
 
 
 def _document_metrics(page: Any) -> dict[str, int]:

@@ -10,6 +10,7 @@ from src.visual_signature.capture.page_sections import (
     build_section_manifest,
     capture_structured_page_evidence,
     hydrate_lazy_content,
+    select_page_segments_for_capture,
 )
 from src.visual_signature.vision import enrich_visual_signature_with_vision
 
@@ -200,6 +201,32 @@ def test_page_without_reliable_structure_falls_back_to_viewport_bands():
     segments = build_page_segment_plan(manifest)
     assert sum(row["bbox"]["height"] for row in segments) == 2500
     assert all(row["source"] == "geometric_height_fallback" for row in segments)
+
+
+def test_segment_selector_keeps_first_viewport_and_strategic_sections():
+    manifest = {
+        "viewport": {"height": 900},
+        "sections": [
+            {"id": "hero", "kind": "hero", "label": "Promise"},
+            {"id": "product", "kind": "section", "label": "Product"},
+            {"id": "proof", "kind": "section", "label": "Customer proof"},
+            {"id": "other", "kind": "section", "label": "Company history"},
+            {"id": "footer", "kind": "footer", "label": "Contact"},
+        ],
+    }
+    segments = [
+        {
+            "id": f"segment-{index}",
+            "index": index,
+            "bbox": {"top": index * 1800, "height": 1800},
+            "semantic_section_ids": [section_id],
+        }
+        for index, section_id in enumerate(("hero", "product", "proof", "other", "footer"))
+    ]
+
+    selected = select_page_segments_for_capture(manifest, segments, max_segments=3)
+
+    assert [segment["index"] for segment in selected] == [0, 2, 4]
 
 
 class _LazyPage:
@@ -408,6 +435,11 @@ def test_segment_failure_preserves_partial_atlas_without_claiming_full_page(tmp_
     assert 0 < segment_capture["coverage_ratio"] < 1
     assert Path(manifest["page_segments"][0]["capture_path"]).is_file()
     assert manifest["page_segments"][1]["capture_path"] is None
+    assert manifest["captured_section_count"] == 2
+    assert all(
+        Path(row["capture_path"]).is_file()
+        for row in manifest["sections"][:2]
+    )
     assert "synthetic_segment_failure" in " ".join(result["structured_capture_errors"])
 
 

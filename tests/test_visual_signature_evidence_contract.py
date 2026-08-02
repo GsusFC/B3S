@@ -235,6 +235,24 @@ def test_visual_signature_evidence_hashes_screenshot_file_when_available(tmp_pat
     assert first["fingerprint"]["normalized_payload_sha256"] == second["fingerprint"]["normalized_payload_sha256"]
 
 
+def test_visual_signature_evidence_persists_partial_capture_contract():
+    payload = _payload()
+    payload["vision"]["screenshot"].update(
+        {
+            "capture_recovery": "raw_viewport_checkpoint",
+            "section_capture_status": "timeout",
+            "structured_capture_errors": ["section_analysis_timeout"],
+        }
+    )
+
+    evidence = build_visual_signature_evidence_v1(payload)
+
+    assert evidence["capture"]["capture_recovery"] == "raw_viewport_checkpoint"
+    assert evidence["capture"]["section_capture_status"] == "timeout"
+    assert evidence["capture"]["structured_capture_errors"] == ["section_analysis_timeout"]
+    assert evidence["fingerprint"]["normalized_payload_sha256"]
+
+
 def test_visual_signature_evidence_normalized_payload_hash_ignores_capture_timestamp_and_path(tmp_path: Path):
     first_path = tmp_path / "first.png"
     second_path = tmp_path / "second.png"

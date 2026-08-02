@@ -29,6 +29,8 @@ def _visual_signature_shadow_screenshot_payload(
         "page_url": page_url,
         "source": screenshot_capture.get("source") or "existing_brand3_screenshot",
     }
+    if screenshot_capture.get("capture_recovery") not in (None, ""):
+        payload["capture_recovery"] = screenshot_capture.get("capture_recovery")
     screenshot_path = str(screenshot_capture.get("screenshot_path") or "").strip()
     if screenshot_path:
         payload["path"] = screenshot_path
