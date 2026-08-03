@@ -432,6 +432,14 @@ def test_evidence_claim_memory_endpoint_is_non_authoritative(monkeypatch):
             "brand": {"name": "Example", "domain": "example.com"},
             "report_count": 2,
             "latest_report_id": "two",
+            "claim_slot_producer": {
+                "historical_backfill_version": (
+                    "evidence-claim-historical-backfill-v1"
+                ),
+                "resolution_mode_counts": {"persisted_shadow_lane": 2},
+                "runtime_effect": False,
+                "authority": False,
+            },
             "summary": {
                 "claim_slot_count": 1,
                 "claim_variant_count": 2,
@@ -495,6 +503,9 @@ def test_evidence_claim_memory_endpoint_is_non_authoritative(monkeypatch):
     assert payload["domain"] == "example.com"
     assert payload["runtime_effect"] is False
     assert payload["authority"] is False
+    assert payload["claim_slot_producer"]["resolution_mode_counts"] == {
+        "persisted_shadow_lane": 2
+    }
     assert payload["policy"]["automatic_claim_replacement"] is False
     assert payload["summary"]["claim_slot_count"] == 1
     assert payload["slots"][0]["relation_candidates"][0]["authority"] is False
