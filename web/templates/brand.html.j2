@@ -93,24 +93,37 @@
 
     <section id="cola-revision-vault">
       <div class="section-head vault-memory-change-head">
-        <span class="label">cola_de_revision_scoring</span>
-        <span class="tag">// priorización de solo lectura</span>
+        <span class="label">cola_de_revision_vault</span>
+        <span class="tag">// score y calidad de evidencia · solo lectura</span>
       </div>
       <p class="prose text-pretty">
-        Clasifica los cambios capaces de mover puntos por su canal seguro. Esta vista no muestra los pasajes
-        privados ni permite escribir decisiones; la firma sigue requiriendo la credencial de revisor y el journal protegido.
+        Clasifica todos los cambios materiales por su canal seguro y distingue cuáles pueden mover puntos.
+        Esta vista no muestra pasajes privados ni permite escribir decisiones; la firma sigue requiriendo
+        la credencial de revisor y el journal protegido.
       </p>
-      {% if brand.vault_memory.review_queue.summary.ready_count %}
-      <p><a class="source-link" href="/vault/review/{{ brand.domain }}">abrir revisión protegida</a></p>
+      {% if brand.vault_memory.review_queue.summary.protected_candidate_count %}
+      <p>
+        <a class="source-link" href="/vault/review/{{ brand.domain }}">
+          abrir revisión protegida · {{ brand.vault_memory.review_queue.summary.pending_protected_candidate_count }} pendientes
+        </a>
+      </p>
       {% endif %}
-      <div class="vault-memory-metrics" aria-label="Estado de la cola de revisión de scoring">
+      <div class="vault-memory-metrics" aria-label="Estado de la cola de revisión del Vault">
         <article class="vault-memory-metric">
-          <span>cambios con impacto</span>
+          <span>cambios materiales</span>
           <strong>{{ brand.vault_memory.review_queue.summary.total_count }}</strong>
         </article>
         <article class="vault-memory-metric">
-          <span>listos para revisar</span>
-          <strong>{{ brand.vault_memory.review_queue.summary.ready_count }}</strong>
+          <span>pueden mover puntos</span>
+          <strong>{{ brand.vault_memory.review_queue.summary.score_affecting_count }}</strong>
+        </article>
+        <article class="vault-memory-metric">
+          <span>calidad de evidencia</span>
+          <strong>{{ brand.vault_memory.review_queue.summary.evidence_quality_count }}</strong>
+        </article>
+        <article class="vault-memory-metric">
+          <span>candidatos protegidos pendientes</span>
+          <strong>{{ brand.vault_memory.review_queue.summary.pending_protected_candidate_count }}</strong>
         </article>
         <article class="vault-memory-metric">
           <span>requieren preparación</span>
@@ -128,7 +141,7 @@
       {% if brand.vault_memory.review_queue["items"] %}
       <div class="overflow panel vault-memory-table-wrap">
         <table class="vault-memory-table">
-          <thead><tr><th>baldosa</th><th>cambio</th><th>canal</th><th>estado</th><th>siguiente acción</th></tr></thead>
+          <thead><tr><th>baldosa</th><th>cambio</th><th>prioridad</th><th>canal</th><th>estado</th><th>siguiente acción</th></tr></thead>
           <tbody>
           {% for item in brand.vault_memory.review_queue["items"] %}
           <tr>
@@ -137,6 +150,7 @@
               <span class="chip {{ item.impact_tone }}">{{ item.impact_label }}</span>
               <span class="mono muted">{{ item.state_change }}</span>
             </td>
+            <td class="mono">{{ "puntos" if item.review_priority == "score_affecting" else "evidencia" }}</td>
             <td class="mono muted">{{ item.channel_label }}</td>
             <td><span class="chip {{ item.queue_tone }}">{{ item.queue_label }}</span></td>
             <td class="text-pretty">{{ item.next_action }}</td>
@@ -147,8 +161,13 @@
       </div>
       {% else %}
       <div class="panel vault-memory-empty">
-        <p class="text-pretty">No hay cambios comparables que puedan mover puntos.</p>
+        {% if brand.vault_memory.review_queue.summary.pending_protected_candidate_count %}
+        <p class="text-pretty">No hay cambios materiales nuevos, pero quedan candidatos históricos pendientes.</p>
+        <a href="/vault/review/{{ brand.domain }}">Abrir revisión protegida</a>
+        {% else %}
+        <p class="text-pretty">No hay cambios materiales comparables pendientes.</p>
         <a href="/">Ejecutar otro scan comparable</a>
+        {% endif %}
       </div>
       {% endif %}
     </section>
@@ -182,34 +201,6 @@
         </dl>
       </section>
     </div>
-
-    {% if brand.vault_memory.changes %}
-    <div class="section-head vault-memory-change-head" id="cambios-observados">
-      <span class="label">cambios_observados</span>
-      <span class="tag">// primero los que pueden mover puntos</span>
-    </div>
-    <div class="overflow panel vault-memory-table-wrap">
-      <table class="vault-memory-table">
-        <thead><tr><th>baldosa</th><th>impacto</th><th>estado</th><th>prioridad</th><th>validación</th></tr></thead>
-        <tbody>
-        {% for change in brand.vault_memory.changes %}
-        <tr>
-          <td class="mono"><strong>{{ change.tile_key }}</strong></td>
-          <td><span class="chip {{ change.tone }}">{{ change.impact_label }}</span></td>
-          <td class="mono muted">{{ change.previous_state }} → {{ change.current_state }}</td>
-          <td class="mono">{{ "puntos" if change.review_priority == "score_affecting" else "evidencia" }}</td>
-          <td class="mono muted">{{ change.validation_state }}</td>
-        </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% else %}
-    <div class="panel vault-memory-empty">
-      <p class="text-pretty">Todavía no hay dos scans compatibles con un cambio material de baldosa.</p>
-      <a href="/">Ejecutar otro scan comparable</a>
-    </div>
-    {% endif %}
 
     <p class="vault-memory-contract mono muted">
       runtime_effect=false · authority=false · versión {{ brand.vault_memory.tile_memory_version[:12] or "sin-versión" }}

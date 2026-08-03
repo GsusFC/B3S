@@ -924,6 +924,18 @@ def test_brand_view_exposes_persistent_tile_memory_only_in_vault(monkeypatch):
                     "score_delta": 0,
                 }
             },
+            "recovery_review_candidates": [
+                {
+                    "case_id": "historical-recovery",
+                    "tile": {"tile_key": "coherencia.C8"},
+                }
+            ],
+            "recovery_review": {
+                "summary": {
+                    "candidate_count": 1,
+                    "pending_count": 1,
+                }
+            },
             "tile_evolution": {
                 "tile_memory_version": "b" * 64,
                 "summary": {
@@ -991,7 +1003,11 @@ def test_brand_view_exposes_persistent_tile_memory_only_in_vault(monkeypatch):
     assert "runtime_effect=false" in response.text
     assert "authority=false" in response.text
     assert "memoria vault" in response.text
-    assert "cola_de_revision_scoring" in response.text
+    assert "cola_de_revision_vault" in response.text
+    assert "score y calidad de evidencia" in response.text
+    assert "candidatos protegidos pendientes" in response.text
+    assert 'href="/vault/review/example.com"' in response.text
+    assert response.text.count("value_proposition.P3") == 1
     assert "bloqueada" in response.text
 
 
@@ -1132,12 +1148,26 @@ def test_vault_score_review_queue_uses_existing_validation_channels():
         recovery_candidates=[],
         current_mappings=[],
     )
+    corroboration = _vault_score_review_item(
+        {
+            **base,
+            "review_priority": "evidence_quality",
+            "validation_channel": "claim_corroboration_review",
+        },
+        impact_label="evidencia reforzada",
+        impact_tone="ok",
+        recovery_candidates=[],
+        current_mappings=[],
+    )
 
     assert recovery["queue_state"] == "ready"
     assert mapped["queue_state"] == "preparation_required"
     assert missing_mapping["queue_state"] == "blocked"
     assert evidence_gap["queue_state"] == "blocked"
     assert "Recapturar evidencia" in evidence_gap["next_action"]
+    assert corroboration["queue_state"] == "preparation_required"
+    assert corroboration["review_priority"] == "evidence_quality"
+    assert "claim-scoped" in corroboration["next_action"]
 
 
 def test_brand_view_repeated_mode_keeps_selected_baseline_visible(monkeypatch):
