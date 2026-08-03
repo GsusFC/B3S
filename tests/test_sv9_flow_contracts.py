@@ -1283,7 +1283,7 @@ def test_shadow_eval_model_tiers_read_env_overrides(monkeypatch) -> None:
     assert shadow_eval._default_evaluator_llm().model != "tier-lite"
 
 
-def test_flow_sv9_shadow_eval_runs_current_sv9_from_flow_interpretation() -> None:
+def test_flow_sv9_shadow_eval_runs_current_sv9_from_flow_interpretation(monkeypatch) -> None:
     class FlowLLM:
         api_key = "test-key"
         model = "flow-fake"
@@ -1323,6 +1323,18 @@ def test_flow_sv9_shadow_eval_runs_current_sv9_from_flow_interpretation() -> Non
         api_key = None
         model = "labeling-disabled"
 
+    reasoning_llm = TileLLM()
+    reasoning_llm.call_failures = [
+        {
+            "reason": "schema_validation_error",
+            "error": "$.baldosas[0].estado: expected string",
+        }
+    ]
+    monkeypatch.setattr(
+        "scripts.sv9_flow_sv9_shadow_eval._default_reasoning_llm",
+        lambda: reasoning_llm,
+    )
+
     report = build_flow_sv9_shadow_eval(
         {
             "source_run_id": 44,
@@ -1342,7 +1354,6 @@ def test_flow_sv9_shadow_eval_runs_current_sv9_from_flow_interpretation() -> Non
         include_full=True,
         interpretation_llm=FlowLLM(),
         evaluator_llm=TileLLM(),
-        reasoning_llm=TileLLM(),
         labeling_llm=NoKeyLabelingLLM(),
         visual_evidence_fn=lambda _snapshot: {
             "schema_version": "visual-signature-evidence-v1",
@@ -1371,6 +1382,13 @@ def test_flow_sv9_shadow_eval_runs_current_sv9_from_flow_interpretation() -> Non
     assert report["flow"]["detected_blocks"]
     assert report["llm_usage"]["roles"]["flow_interpretation"]["model"] == "flow-fake"
     assert report["llm_usage"]["roles"]["sv9_evaluator"]["model"] == "tile-fake"
+    assert report["llm_usage"]["roles"]["sv9_reasoning"]["model"] == "tile-fake"
+    assert report["llm_usage"]["roles"]["sv9_reasoning"]["call_failures"] == [
+        {
+            "reason": "schema_validation_error",
+            "error": "$.baldosas[0].estado: expected string",
+        }
+    ]
     assert report["llm_usage"]["totals"]["provider_calls"] == 0
     assert report["flow"]["extra_signals"]["mission"][0]["feature"] == "sv9_flow_tile_signal"
     assert report["flow"]["extra_signals"]["mission"][0]["tile"] == "mission.M1"

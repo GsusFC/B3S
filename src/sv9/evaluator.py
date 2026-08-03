@@ -372,8 +372,9 @@ def _run_tile_call(
         if verdicts is not None and not veredicto and requires_veredicto:
             error = "falta 'veredicto': frase de síntesis obligatoria en Coherencia"
         last_error = str(getattr(llm, "last_failure_reason", None) or error or "llm_error")
+        feedback_error = _latest_schema_validation_detail(llm) or error
         user_with_feedback = (
-            f"{user}\n\nTu respuesta anterior fue inválida: {error}. "
+            f"{user}\n\nTu respuesta anterior fue inválida: {feedback_error}. "
             "Corrige y devuelve JSON estricto con una baldosa por cada id, "
             "evidencia literal en cada 'ok' y motivo en cada 'no' y 'sin_evidencia'. "
             "En cada 'ok', `evidencia` debe ser SOLO el substring exacto copiado "
@@ -416,6 +417,20 @@ def _run_tile_call(
         evidence=evidence or [],
         error=last_error,
     )
+
+
+def _latest_schema_validation_detail(llm: Any) -> str:
+    """Return the provider payload's safe schema error for corrective retries."""
+
+    if getattr(llm, "last_failure_reason", None) != "schema_validation_error":
+        return ""
+    failures = getattr(llm, "call_failures", None)
+    if not isinstance(failures, list) or not failures:
+        return ""
+    latest = failures[-1]
+    if not isinstance(latest, dict) or latest.get("reason") != "schema_validation_error":
+        return ""
+    return str(latest.get("error") or "").strip()
 
 
 def _int_dict(value: Any) -> dict[str, int]:
