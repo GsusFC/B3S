@@ -138,10 +138,37 @@ def test_identity_match_matrix() -> None:
     )
     assert (
         _identity_match(
+            brand_name="Soccer Solver",
+            scan_url="https://soccersolver.com",
+            record_url="https://news.example/story",
+            content="SoccerSolver secures new funding.",
+        )
+        == "brand_name"
+    )
+    assert (
+        _identity_match(
+            brand_name="Soccer Solver",
+            scan_url="https://soccersolver.com",
+            record_url="https://news.example/soccersolver-raises-funding",
+            content="A sports technology startup secures new funding.",
+        )
+        == "brand_name"
+    )
+    assert (
+        _identity_match(
             brand_name="Acme",
             scan_url="https://acme.com",
             record_url="https://foreign.example/story",
             content="A different company is discussed.",
+        )
+        == "none"
+    )
+    assert (
+        _identity_match(
+            brand_name="Soccer Solver",
+            scan_url="https://soccersolver.com",
+            record_url="https://news.example/soccer-solutions",
+            content="A soccer-solving platform launches.",
         )
         == "none"
     )

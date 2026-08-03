@@ -541,13 +541,29 @@ def _identity_match(*, brand_name: str, scan_url: str, record_url: str, content:
     normalized_content = _fold_text(content)
     if re.search(rf"(?<!\w){re.escape(normalized_brand)}(?!\w)", normalized_content):
         return "brand_name"
-    brand_tokens = normalized_brand.split()
-    if len(brand_tokens) == 1:
-        token = re.escape(brand_tokens[0])
-        normalized_url = _fold_text(record_url)
-        if re.search(rf"(^|[-/._]){token}($|[-/._])", normalized_url):
-            return "brand_name"
+    compact_brand = "".join(normalized_brand.split())
+    if _contains_compact_alias(normalized_content, compact_brand):
+        return "brand_name"
+    if _contains_compact_alias(_fold_text(record_url), compact_brand):
+        return "brand_name"
     return "none"
+
+
+def _contains_compact_alias(value: str, compact_alias: str) -> bool:
+    """Match one brand alias as complete adjacent tokens, never a substring."""
+
+    if not compact_alias:
+        return False
+    tokens = re.findall(r"[a-z0-9]+", value)
+    for start in range(len(tokens)):
+        candidate = ""
+        for token in tokens[start:]:
+            candidate += token
+            if candidate == compact_alias:
+                return True
+            if len(candidate) >= len(compact_alias):
+                break
+    return False
 
 
 def _normalized_host(value: str) -> str:
