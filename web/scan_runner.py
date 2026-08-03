@@ -446,6 +446,32 @@ def _build_acquisition_gate(
             )
         )
 
+    diversity = _vault_external_diversity_status(normalized)
+    if diversity and diversity["observed"] < diversity["minimum"]:
+        diversity_step = searchapi_step or exa_step
+        warning = _issue(
+            source="external_sources",
+            code="external_domain_diversity_low",
+            severity="warning",
+            message=(
+                "External acquisition found too few distinct candidate domains; "
+                "corroboration coverage may be incomplete."
+            ),
+            step=diversity_step,
+        )
+        warning.update(
+            {
+                "detail": (
+                    f"distinct_candidate_domains: {diversity['observed']}; "
+                    f"minimum: {diversity['minimum']}"
+                ),
+                "observed_external_domain_count": diversity["observed"],
+                "minimum_external_domain_count": diversity["minimum"],
+                "metric": "distinct_candidate_domains",
+            }
+        )
+        warnings.append(warning)
+
     if _is_failure_status(searchapi_status):
         target = issues if exa_failed else warnings
         target.append(
@@ -495,7 +521,7 @@ def _build_acquisition_gate(
     can_continue = bool(blocking) and all(bool(item.get("can_fallback")) for item in blocking)
     state = "blocked" if blocking else ("warning" if warnings else "pass")
     return {
-        "version": "b3s-acquisition-gate-v1",
+        "version": "b3s-acquisition-gate-v2",
         "state": state,
         "can_continue": can_continue,
         "allow_degraded_fallback": bool(allow_degraded_fallback),
@@ -619,6 +645,36 @@ def _searchapi_available_for_fallback(step: Any) -> bool:
     if not status:
         return True
     return status not in {"disabled", "missing_key", "error", "failed", "failure", "blocked", "timeout"}
+
+
+def _vault_external_diversity_status(steps: dict[str, dict[str, Any]]) -> dict[str, int] | None:
+    if os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() != "vault":
+        return None
+    exa_details = _step_details(steps.get("exa"))
+    searchapi_details = _step_details(steps.get("searchapi"))
+    observed = searchapi_details.get("combined_external_domain_count")
+    if not _is_plain_int(observed):
+        observed = exa_details.get("external_domain_count")
+    if not _is_plain_int(observed):
+        return None
+    minimum = searchapi_details.get("minimum_external_domain_count")
+    if not _is_plain_int(minimum):
+        minimum = exa_details.get("minimum_external_domain_count")
+    if not _is_plain_int(minimum):
+        from src.config import BRAND3_VAULT_MIN_EXTERNAL_SOURCE_DOMAINS
+
+        minimum = BRAND3_VAULT_MIN_EXTERNAL_SOURCE_DOMAINS
+    return {"observed": observed, "minimum": minimum}
+
+
+def _step_details(step: Any) -> dict[str, Any]:
+    if not isinstance(step, dict) or not isinstance(step.get("details"), dict):
+        return {}
+    return step["details"]
+
+
+def _is_plain_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _issue(
