@@ -262,6 +262,7 @@ class EvidenceClaimMemoryShadowResponse(StrictModel):
     brand: dict[str, Any] = Field(default_factory=dict)
     report_count: int = 0
     latest_report_id: str | None = None
+    claim_slot_producer: dict[str, Any] = Field(default_factory=dict)
     summary: dict[str, Any] = Field(default_factory=dict)
     policy: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
