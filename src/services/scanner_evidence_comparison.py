@@ -18,7 +18,7 @@ from typing import Any, Iterable
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 
-EVIDENCE_COMPARISON_VERSION = "evidence-comparison-v2"
+EVIDENCE_COMPARISON_VERSION = "evidence-comparison-v3"
 CANONICAL_POLICY_VERSION = "brand-canonical-policy-v1"
 ENFORCEMENT_ENV = "B3S_CANONICAL_ENFORCEMENT_MODE"
 ENFORCEMENT_MODES = {"observe", "repeated", "all"}
@@ -76,7 +76,7 @@ class EvidenceSnapshot:
     material_url_count: int
     owned_count: int
     external_count: int
-    independent_external_cluster_count: int
+    external_content_cluster_count: int
     visual_evidence_count: int
     acquisition_state: str
     acquisition_warning_codes: tuple[str, ...]
@@ -97,7 +97,7 @@ class EvidenceSnapshot:
                 "material_urls": self.material_url_count,
                 "owned": self.owned_count,
                 "external": self.external_count,
-                "independent_external_clusters": self.independent_external_cluster_count,
+                "external_content_clusters": self.external_content_cluster_count,
                 "visual": self.visual_evidence_count,
             },
             "acquisition": {
@@ -160,7 +160,7 @@ def build_evidence_snapshot(report: dict[str, Any]) -> EvidenceSnapshot:
     semantic_payload = {
         "urls": urls,
         "owned_content": sorted(record.content_hash for record in owned),
-        "external_clusters": _external_cluster_fingerprints(external),
+        "external_content_clusters": _external_content_cluster_fingerprints(external),
         "visual_content": sorted(record.content_hash for record in visual),
     }
     return EvidenceSnapshot(
@@ -172,7 +172,7 @@ def build_evidence_snapshot(report: dict[str, Any]) -> EvidenceSnapshot:
         material_url_count=len(urls),
         owned_count=len(owned),
         external_count=len(external),
-        independent_external_cluster_count=len(_external_clusters(external)),
+        external_content_cluster_count=len(_external_content_clusters(external)),
         visual_evidence_count=len(visual),
         acquisition_state=str(acquisition_gate.get("state") or "unknown").strip().lower(),
         acquisition_warning_codes=tuple(sorted(set(warnings))),
@@ -823,8 +823,8 @@ def _acquisition_regression_reasons(
         reasons.append("owned_evidence_lost")
     if baseline_external_urls - candidate_external_urls:
         reasons.append("external_evidence_lost")
-    if candidate.independent_external_cluster_count < baseline.independent_external_cluster_count:
-        reasons.append("independent_external_coverage_lost")
+    if candidate.external_content_cluster_count < baseline.external_content_cluster_count:
+        reasons.append("external_content_coverage_lost")
     if candidate.visual_evidence_count < baseline.visual_evidence_count:
         reasons.append("visual_evidence_lost")
     if lost_urls and candidate.acquisition_state in {"warning", "blocked", "unknown", ""}:
@@ -840,7 +840,9 @@ def _source_class_urls(snapshot: EvidenceSnapshot, source_class: str) -> set[str
     }
 
 
-def _external_clusters(records: list[CanonicalEvidenceRecord]) -> list[list[CanonicalEvidenceRecord]]:
+def _external_content_clusters(
+    records: list[CanonicalEvidenceRecord],
+) -> list[list[CanonicalEvidenceRecord]]:
     clusters: list[list[CanonicalEvidenceRecord]] = []
     for record in records:
         tokens = _content_tokens(record.normalized_content)
@@ -864,9 +866,11 @@ def _external_clusters(records: list[CanonicalEvidenceRecord]) -> list[list[Cano
     return clusters
 
 
-def _external_cluster_fingerprints(records: list[CanonicalEvidenceRecord]) -> list[str]:
+def _external_content_cluster_fingerprints(
+    records: list[CanonicalEvidenceRecord],
+) -> list[str]:
     fingerprints = []
-    for cluster in _external_clusters(records):
+    for cluster in _external_content_clusters(records):
         fingerprints.append(
             _stable_hash(
                 {

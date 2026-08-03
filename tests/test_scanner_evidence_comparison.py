@@ -193,7 +193,7 @@ def test_snapshot_excludes_identity_quarantine_from_material_comparison() -> Non
     assert comparison.acquisition_comparable is True
 
 
-def test_same_domain_exa_result_is_owned_not_independent_external() -> None:
+def test_same_domain_exa_result_is_owned_not_external_content() -> None:
     report = _report(
         "candidate",
         "2026-07-27T00:00:00Z",
@@ -223,10 +223,14 @@ def test_same_domain_exa_result_is_owned_not_independent_external() -> None:
     )
 
     snapshot = build_evidence_snapshot(report)
+    public_snapshot = snapshot.to_dict()
 
     assert snapshot.owned_count == 2
     assert snapshot.external_count == 1
-    assert snapshot.independent_external_cluster_count == 1
+    assert snapshot.external_content_cluster_count == 1
+    assert public_snapshot["schema_version"] == "evidence-comparison-v3"
+    assert public_snapshot["counts"]["external_content_clusters"] == 1
+    assert "independent_external_clusters" not in public_snapshot["counts"]
 
 
 def test_lost_same_domain_exa_result_is_owned_evidence_loss() -> None:
@@ -262,7 +266,7 @@ def test_lost_same_domain_exa_result_is_owned_evidence_loss() -> None:
     assert comparison.classification == "acquisition_regression"
     assert "owned_evidence_lost" in comparison.reason_codes
     assert "external_evidence_lost" not in comparison.reason_codes
-    assert "independent_external_coverage_lost" not in comparison.reason_codes
+    assert "external_content_coverage_lost" not in comparison.reason_codes
 
 
 def test_history_keeps_first_shadow_scan_provisional_and_quarantines_drift() -> None:
