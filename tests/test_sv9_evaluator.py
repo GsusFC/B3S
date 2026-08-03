@@ -493,6 +493,51 @@ class EvaluateComponentTests(unittest.TestCase):
         self.assertEqual(result.status, STATUS_SCORED)
         self.assertEqual(result.score, 0)
 
+    def test_schema_retry_receives_precise_validation_detail(self):
+        class SchemaFailureLLM(FakeLLM):
+            def __init__(self):
+                super().__init__()
+                self.attempt = 0
+                self.call_failures = []
+
+            def _call_json(self, system, user, max_tokens=8000, **kwargs):
+                self.calls.append({"user": user})
+                self.attempt += 1
+                if self.attempt == 1:
+                    self.last_failure_reason = "schema_validation_error"
+                    self.call_failures.append(
+                        {
+                            "reason": "schema_validation_error",
+                            "error": "$.baldosas[0].estado: expected string",
+                        }
+                    )
+                    return {}
+                self.assert_precise_feedback(user)
+                ids = self._tiles_for(kwargs.get("schema_name"))
+                return {
+                    "baldosas": [
+                        {"id": tile_id, "estado": "no", "motivo": "falta"}
+                        for tile_id in ids
+                    ]
+                }
+
+            @staticmethod
+            def assert_precise_feedback(user):
+                if "$.baldosas[0].estado: expected string" not in user:
+                    raise AssertionError("corrective retry omitted the schema validation detail")
+
+        result = evaluate_component(
+            "mission",
+            tldr=full_tldr(),
+            signals=[],
+            brand_name="Acme",
+            url="u",
+            llm=SchemaFailureLLM(),
+        )
+
+        self.assertEqual(result.status, STATUS_SCORED)
+        self.assertEqual(result.score, 0)
+
     def test_relational_context_carries_facts_not_judgments(self):
         llm = FakeLLM()
         tldr = full_tldr()

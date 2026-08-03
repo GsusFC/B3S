@@ -16,7 +16,13 @@ if str(ROOT) not in sys.path:
 
 from scripts.sv9_flow_shadow_run import _load_env_file
 from scripts.sv9_flow_snapshot_eval import snapshot_and_run_id_from_envelope
-from src.config import SV9_ADJUDICATOR_MODEL, SV9_FLOW_GATE_AUTHORITY, SV9_FLOW_LABELING_MODEL, SV9_FLOW_MODEL
+from src.config import (
+    SV9_ADJUDICATOR_MODEL,
+    SV9_FLOW_GATE_AUTHORITY,
+    SV9_FLOW_LABELING_MODEL,
+    SV9_FLOW_MODEL,
+    SV9_REASONING_MODEL,
+)
 from src.features.llm_analyzer import LLMAnalyzer
 from src.sv9.flow_ingress import (
     detection_blocks_from_flow_candidate,
@@ -95,6 +101,7 @@ def build_flow_sv9_shadow_eval(
         gate_authority=gate_authority or SV9_FLOW_GATE_AUTHORITY,
     )
     evaluator_llm = evaluator_llm or _default_evaluator_llm()
+    reasoning_llm = reasoning_llm or _default_reasoning_llm()
     result = sv9_runner(
         snapshot,
         llm=evaluator_llm,
@@ -161,6 +168,12 @@ def _default_evaluator_llm() -> LLMAnalyzer:
     """Tile evaluator tier; the score-sensitive role."""
 
     return LLMAnalyzer(model=os.environ.get("BRAND3_FLOW_EVALUATOR_MODEL") or SV9_FLOW_MODEL)
+
+
+def _default_reasoning_llm() -> LLMAnalyzer:
+    """Reasoning tier; instantiate here so failures survive in scan telemetry."""
+
+    return LLMAnalyzer(model=SV9_REASONING_MODEL)
 
 
 def _default_adjudicator_llm() -> LLMAnalyzer:
@@ -271,7 +284,9 @@ def _llm_usage_payload(
 def _llm_usage_summary(llm: Any) -> dict[str, Any]:
     summary_fn = getattr(llm, "usage_observation_summary", None)
     if callable(summary_fn):
-        return summary_fn()
+        summary = summary_fn()
+        summary["call_failures"] = list(getattr(llm, "call_failures", []) or [])
+        return summary
     observations = getattr(llm, "usage_observations", [])
     if not isinstance(observations, list):
         observations = []
@@ -286,6 +301,7 @@ def _llm_usage_summary(llm: Any) -> dict[str, Any]:
             bool(item.get("usage_metadata_available")) for item in observations
         ),
         "observations": observations,
+        "call_failures": list(getattr(llm, "call_failures", []) or []),
     }
 
 
