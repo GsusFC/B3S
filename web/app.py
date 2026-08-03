@@ -78,6 +78,7 @@ _VAULT_IMPACT_PRESENTATION = {
 _VAULT_REVIEW_CHANNEL_PRESENTATION = {
     "scoring_recovery_review": "recuperación semántica",
     "claim_tile_review": "claim → baldosa",
+    "claim_corroboration_review": "corroboración del claim",
     "evidence_gap_review": "hueco de evidencia",
 }
 
@@ -243,7 +244,26 @@ def _vault_tile_memory_profile(domain: str) -> dict[str, Any]:
         )
     ]
 
-    changes = []
+    recovery_review = (
+        preview.get("recovery_review")
+        if isinstance(preview.get("recovery_review"), dict)
+        else {}
+    )
+    recovery_review_summary = (
+        recovery_review.get("summary")
+        if isinstance(recovery_review.get("summary"), dict)
+        else {}
+    )
+    protected_candidate_count = sum(
+        isinstance(candidate, dict)
+        for candidate in preview.get("recovery_review_candidates") or []
+    )
+    pending_protected_candidate_count = int(
+        recovery_review_summary.get("pending_count")
+        if recovery_review_summary.get("pending_count") is not None
+        else protected_candidate_count
+    )
+
     review_items = []
     for row in evolution.get("changes") or []:
         if not isinstance(row, dict):
@@ -253,20 +273,6 @@ def _vault_tile_memory_profile(domain: str) -> dict[str, Any]:
             impact_kind,
             (impact_kind.replace("_", " "), "warn"),
         )
-        changes.append(
-            {
-                "tile_key": str(row.get("tile_key") or ""),
-                "impact_kind": impact_kind,
-                "impact_label": impact_label,
-                "tone": tone,
-                "previous_state": str(row.get("previous_state") or "—"),
-                "current_state": str(row.get("current_state") or "—"),
-                "review_priority": str(row.get("review_priority") or "evidence_quality"),
-                "validation_state": str(row.get("validation_state") or "pending_review"),
-            }
-        )
-        if str(row.get("review_priority") or "") != "score_affecting":
-            continue
         review_items.append(
             _vault_score_review_item(
                 row,
@@ -282,12 +288,24 @@ def _vault_tile_memory_profile(domain: str) -> dict[str, Any]:
 
     review_summary = {
         "total_count": len(review_items),
+        "score_affecting_count": sum(
+            item["review_priority"] == "score_affecting"
+            for item in review_items
+        ),
+        "evidence_quality_count": sum(
+            item["review_priority"] == "evidence_quality"
+            for item in review_items
+        ),
         "ready_count": sum(item["queue_state"] == "ready" for item in review_items),
         "preparation_count": sum(
             item["queue_state"] == "preparation_required" for item in review_items
         ),
         "blocked_count": sum(item["queue_state"] == "blocked" for item in review_items),
         "resolved_count": sum(item["queue_state"] == "resolved" for item in review_items),
+        "protected_candidate_count": protected_candidate_count,
+        "pending_protected_candidate_count": (
+            pending_protected_candidate_count
+        ),
     }
 
     preview_summary = preview.get("summary") if isinstance(preview.get("summary"), dict) else {}
@@ -339,7 +357,6 @@ def _vault_tile_memory_profile(domain: str) -> dict[str, Any]:
             "summary": review_summary,
             "items": review_items,
         },
-        "changes": changes,
     }
 
 
@@ -351,7 +368,7 @@ def _vault_score_review_item(
     recovery_candidates: list[dict[str, Any]],
     current_mappings: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Classify one score-affecting change without inventing a review path."""
+    """Classify one material change without inventing a review path."""
 
     tile_key = str(change.get("tile_key") or "")
     validation_channel = str(change.get("validation_channel") or "unknown")
@@ -374,6 +391,9 @@ def _vault_score_review_item(
             "queue_tone": "ok",
             "next_action": "La decisión semántica ya está reflejada en la sombra revisada.",
             "validation_state": validation_state,
+            "review_priority": str(
+                change.get("review_priority") or "evidence_quality"
+            ),
         }
 
     queue_state = "blocked"
@@ -409,6 +429,14 @@ def _vault_score_review_item(
                 "Falta un mapping claim → baldosa reproducible; no se puede "
                 "validar el cambio todavía."
             )
+    elif validation_channel == "claim_corroboration_review":
+        queue_state = "preparation_required"
+        queue_label = "preparar paquete"
+        queue_tone = "warn"
+        next_action = (
+            "Preparar un paquete claim-scoped para decidir si la fuente "
+            "refuerza, sustituye o debilita la evidencia existente."
+        )
     elif validation_channel == "evidence_gap_review":
         next_action = (
             "Recapturar evidencia reproducible antes de aceptar el empeoramiento."
@@ -431,6 +459,9 @@ def _vault_score_review_item(
         "queue_tone": queue_tone,
         "next_action": next_action,
         "validation_state": validation_state,
+        "review_priority": str(
+            change.get("review_priority") or "evidence_quality"
+        ),
     }
 
 
