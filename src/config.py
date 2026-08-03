@@ -99,6 +99,10 @@ BRAND3_SEARCHAPI_FALLBACK_INTENTS = tuple(
     for item in os.environ.get("BRAND3_SEARCHAPI_FALLBACK_INTENTS", "news").split(",")
     if item.strip()
 )
+BRAND3_VAULT_MIN_EXTERNAL_SOURCE_DOMAINS = max(
+    1,
+    int(os.environ.get("BRAND3_VAULT_MIN_EXTERNAL_SOURCE_DOMAINS", "3")),
+)
 BRAND3_NICHE_AUTO_APPLY_MIN_CONFIDENCE = float(
     os.environ.get("BRAND3_NICHE_AUTO_APPLY_MIN_CONFIDENCE", "0.65")
 )

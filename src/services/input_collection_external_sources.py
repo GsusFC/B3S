@@ -19,8 +19,10 @@ from src.config import (
     BRAND3_HYPERBROWSER_ENABLED,
     BRAND3_SEARCHAPI_FALLBACK_INTENTS,
     BRAND3_SEARCHAPI_VERTICAL_FALLBACK_ENABLED,
+    BRAND3_VAULT_MIN_EXTERNAL_SOURCE_DOMAINS,
     SEARCHAPI_API_KEY,
 )
+from src.external_identity_provenance import normalized_domain
 from src.services.input_collection_payloads import (
     from_github_payload,
     from_hyperbrowser_payload,
@@ -32,6 +34,7 @@ from src.services.input_collection_state import (
     AcquisitionResult,
     _save_raw_input_safely,
     _set_acquisition_state,
+    _merge_acquisition_details,
     _use_cached_input,
 )
 from src.storage.sqlite_store import SQLiteStore
@@ -160,6 +163,30 @@ def _collect_searchapi_fallback_input(
     run_input_sources: set[str] | None = None,
     searchapi_collector_cls=SearchApiCollector,
 ) -> SearchApiData | None:
+    trigger_reason = _searchapi_trigger_reason(
+        exa_data,
+        effective_brand_url=effective_brand_url,
+    )
+    exa_details = _external_domain_details(
+        exa_data=exa_data,
+        searchapi_data=None,
+        effective_brand_url=effective_brand_url,
+        trigger_reason=trigger_reason,
+    )
+    _merge_acquisition_details(
+        acquisition_steps,
+        source="exa",
+        details={
+            "external_domain_count": exa_details["exa_external_domain_count"],
+            "external_domains": exa_details["exa_external_domains"],
+            "external_domain_metric": "distinct_candidate_domains",
+            **(
+                {"minimum_external_domain_count": BRAND3_VAULT_MIN_EXTERNAL_SOURCE_DOMAINS}
+                if _vault_external_diversity_enabled()
+                else {}
+            ),
+        },
+    )
     if not _searchapi_fallback_enabled(run_input_sources):
         _set_acquisition_state(
             raw_input_cache,
@@ -169,11 +196,14 @@ def _collect_searchapi_fallback_input(
             status="disabled",
             cache_status="disabled",
             eligible=False,
-            details={"reason": "vertical fallback disabled"},
+            details={"reason": "vertical fallback disabled", **exa_details},
         )
         return None
 
-    intents = _searchapi_candidate_intents(exa_data)
+    intents = _searchapi_candidate_intents(
+        exa_data,
+        effective_brand_url=effective_brand_url,
+    )
     if not intents:
         _set_acquisition_state(
             raw_input_cache,
@@ -183,12 +213,21 @@ def _collect_searchapi_fallback_input(
             status="skipped",
             cache_status="skipped",
             eligible=False,
-            details={"reason": "no failed or empty Exa intents eligible for SearchAPI fallback"},
+            details={
+                "reason": "no Exa acquisition condition eligible for SearchAPI fallback",
+                **exa_details,
+            },
         )
         return None
 
     cached = cache_read("searchapi", BRAND3_CACHE_TTL_HOURS, from_searchapi_payload)
     if cached:
+        details = _external_domain_details(
+            exa_data=exa_data,
+            searchapi_data=cached,
+            effective_brand_url=effective_brand_url,
+            trigger_reason=trigger_reason,
+        )
         _use_cached_input(
             store=store,
             run_id=run_id,
@@ -196,7 +235,7 @@ def _collect_searchapi_fallback_input(
             payload=cached,
             raw_input_cache=raw_input_cache,
             acquisition_steps=acquisition_steps,
-            details={"intents": list(cached.intents), "status": cached.status},
+            details={"intents": list(cached.intents), "status": cached.status, **details},
             action="searchapi cache save",
         )
         return cached
@@ -208,6 +247,12 @@ def _collect_searchapi_fallback_input(
         effective_brand_url,
         intents=intents,
         queries_by_intent=queries_by_intent,
+    )
+    diversity_details = _external_domain_details(
+        exa_data=exa_data,
+        searchapi_data=data,
+        effective_brand_url=effective_brand_url,
+        trigger_reason=trigger_reason,
     )
     raw_status = "miss" if data.status in {"ok", "partial"} else data.status
     _set_acquisition_state(
@@ -223,6 +268,7 @@ def _collect_searchapi_fallback_input(
             "result_total": data.diagnostics.get("result_total", 0),
             "failed_intents": data.diagnostics.get("failed_intents", []),
             "no_result_intents": data.diagnostics.get("no_result_intents", []),
+            **diversity_details,
         },
     )
     logger.info(
@@ -241,10 +287,13 @@ def _collect_searchapi_fallback_input(
     return data
 
 
-def _searchapi_candidate_intents(exa_data) -> tuple[str, ...]:
+def _searchapi_candidate_intents(
+    exa_data,
+    *,
+    effective_brand_url: str = "",
+) -> tuple[str, ...]:
     diagnostics = getattr(exa_data, "diagnostics", None)
-    if not isinstance(diagnostics, dict):
-        return ()
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
     failed_or_empty = set(diagnostics.get("failed_intents") or []) | set(diagnostics.get("no_result_intents") or [])
     allowed = set(BRAND3_SEARCHAPI_FALLBACK_INTENTS)
     fallback_intents = ("news", "external_mentions", "ai_visibility")
@@ -253,7 +302,118 @@ def _searchapi_candidate_intents(exa_data) -> tuple[str, ...]:
         return explicit
     if exa_external_proof_empty(diagnostics):
         return tuple(intent for intent in fallback_intents if intent in allowed)
+    if _vault_external_diversity_is_low(
+        exa_data,
+        effective_brand_url=effective_brand_url,
+    ):
+        return tuple(intent for intent in fallback_intents if intent in allowed)
     return ()
+
+
+def _searchapi_trigger_reason(exa_data, *, effective_brand_url: str) -> str:
+    diagnostics = getattr(exa_data, "diagnostics", None)
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    failed_or_empty = set(diagnostics.get("failed_intents") or []) | set(
+        diagnostics.get("no_result_intents") or []
+    )
+    allowed = set(BRAND3_SEARCHAPI_FALLBACK_INTENTS)
+    if failed_or_empty & allowed:
+        return "exa_intent_failed_or_empty"
+    if exa_external_proof_empty(diagnostics):
+        return "exa_external_proof_empty"
+    if _vault_external_diversity_is_low(
+        exa_data,
+        effective_brand_url=effective_brand_url,
+    ):
+        return "low_external_domain_diversity"
+    return ""
+
+
+def _vault_external_diversity_enabled() -> bool:
+    return os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault"
+
+
+def _vault_external_diversity_is_low(exa_data, *, effective_brand_url: str) -> bool:
+    return (
+        _vault_external_diversity_enabled()
+        and len(_exa_external_domains(exa_data, effective_brand_url=effective_brand_url))
+        < BRAND3_VAULT_MIN_EXTERNAL_SOURCE_DOMAINS
+    )
+
+
+def _external_domain_details(
+    *,
+    exa_data,
+    searchapi_data,
+    effective_brand_url: str,
+    trigger_reason: str,
+) -> dict[str, object]:
+    exa_domains = _exa_external_domains(
+        exa_data,
+        effective_brand_url=effective_brand_url,
+    )
+    searchapi_domains = _searchapi_external_domains(
+        searchapi_data,
+        effective_brand_url=effective_brand_url,
+    )
+    combined = exa_domains | searchapi_domains
+    details: dict[str, object] = {
+        "trigger_reason": trigger_reason,
+        "external_domain_metric": "distinct_candidate_domains",
+        "exa_external_domain_count": len(exa_domains),
+        "exa_external_domains": sorted(exa_domains),
+        "searchapi_external_domain_count": len(searchapi_domains),
+        "searchapi_external_domains": sorted(searchapi_domains),
+        "combined_external_domain_count": len(combined),
+        "combined_external_domains": sorted(combined),
+    }
+    if _vault_external_diversity_enabled():
+        details["minimum_external_domain_count"] = BRAND3_VAULT_MIN_EXTERNAL_SOURCE_DOMAINS
+        details["external_domain_coverage"] = (
+            "sufficient"
+            if len(combined) >= BRAND3_VAULT_MIN_EXTERNAL_SOURCE_DOMAINS
+            else "low"
+        )
+    return details
+
+
+def _exa_external_domains(exa_data, *, effective_brand_url: str) -> set[str]:
+    domains: set[str] = set()
+    for collection_name in ("mentions", "profiles", "news", "ai_visibility_results"):
+        for result in getattr(exa_data, collection_name, None) or []:
+            source_class = str(getattr(result, "source_class", "") or "").strip().lower()
+            if source_class != "external" or bool(getattr(result, "requires_human_review", False)):
+                continue
+            domain = normalized_domain(getattr(result, "url", ""))
+            if domain and not _is_owned_domain(domain, effective_brand_url):
+                domains.add(domain)
+    return domains
+
+
+def _searchapi_external_domains(searchapi_data, *, effective_brand_url: str) -> set[str]:
+    domains: set[str] = set()
+    intents = getattr(searchapi_data, "intents", None)
+    if not isinstance(intents, dict):
+        return domains
+    for intent in intents.values():
+        for result in getattr(intent, "results", None) or []:
+            domain = normalized_domain(
+                getattr(result, "domain", "") or getattr(result, "url", "")
+            )
+            if domain and not _is_owned_domain(domain, effective_brand_url):
+                domains.add(domain)
+    return domains
+
+
+def _is_owned_domain(candidate_domain: str, effective_brand_url: str) -> bool:
+    brand_domain = normalized_domain(effective_brand_url)
+    if not brand_domain:
+        return False
+    return (
+        candidate_domain == brand_domain
+        or candidate_domain.endswith(f".{brand_domain}")
+        or brand_domain.endswith(f".{candidate_domain}")
+    )
 
 
 def _searchapi_queries_from_exa_diagnostics(exa_data) -> dict[str, str]:
