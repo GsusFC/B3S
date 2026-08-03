@@ -9,6 +9,7 @@ Scrapes the brand's website and extracts:
 """
 
 import hashlib
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -24,6 +25,10 @@ from src.collectors.web_collector_content_runtime import WebCollectorContentSupp
 from src.collectors.web_collector_support_linking_runtime import (
     MAX_OWNED_SUBPAGES,
     OWNED_PAGE_SELECTION_VERSION,
+    VAULT_MAX_OWNED_SUBPAGES,
+    VAULT_MAX_SITEMAP_EXPLORATION_PAGES,
+    VAULT_MAX_STRATEGIC_ROLE_PAGES,
+    VAULT_OWNED_PAGE_SELECTION_VERSION,
     WebCollectorLinkingSupport,
 )
 from src.config import FIRECRAWL_API_KEYS
@@ -304,20 +309,45 @@ class WebCollector(
             )
             observed_set = set(observed_links)
             sitemap_set = set(sitemap_links)
+            sitemap_only_links = [
+                candidate
+                for candidate in sitemap_links
+                if candidate not in observed_set
+            ]
+            vault_evidence_expansion = (
+                os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower()
+                == "vault"
+            )
+            maximum_page_budget = (
+                VAULT_MAX_OWNED_SUBPAGES
+                if vault_evidence_expansion
+                else MAX_OWNED_SUBPAGES
+            )
             subpages_to_crawl = self._select_internal_links_to_crawl(
                 all_candidates,
                 url,
-                sitemap_only_links=[
-                    candidate
-                    for candidate in sitemap_links
-                    if candidate not in observed_set
-                ],
+                sitemap_only_links=sitemap_only_links,
                 sitemap_lastmod=sitemap_lastmod,
-            )[:MAX_OWNED_SUBPAGES]
+                maximum_budget=maximum_page_budget,
+                strategic_role_page_limit=(
+                    VAULT_MAX_STRATEGIC_ROLE_PAGES
+                    if vault_evidence_expansion
+                    else 6
+                ),
+                sitemap_exploration_limit=(
+                    VAULT_MAX_SITEMAP_EXPLORATION_PAGES
+                    if vault_evidence_expansion
+                    else 2
+                ),
+                evidence_expansion=vault_evidence_expansion,
+            )[:maximum_page_budget]
             selected_rows = [
                 {
                     "url": selected_url,
-                    "role": self._link_role(selected_url),
+                    "role": self._selection_link_role(
+                        selected_url,
+                        evidence_expansion=vault_evidence_expansion,
+                    ),
                     "source": (
                         "observed+sitemap"
                         if selected_url in observed_set
@@ -331,15 +361,21 @@ class WebCollector(
                 for selected_url in subpages_to_crawl
             ]
             data.page_selection = {
-                "version": OWNED_PAGE_SELECTION_VERSION,
+                "version": (
+                    VAULT_OWNED_PAGE_SELECTION_VERSION
+                    if vault_evidence_expansion
+                    else OWNED_PAGE_SELECTION_VERSION
+                ),
                 "budget": len(subpages_to_crawl),
-                "maximum_budget": MAX_OWNED_SUBPAGES,
+                "maximum_budget": maximum_page_budget,
                 "observed_candidate_count": len(observed_links),
                 "sitemap_candidate_count": len(sitemap_links),
                 "unique_candidate_count": len(all_candidates),
                 "discovery": discovery,
                 "selected": selected_rows,
             }
+            if vault_evidence_expansion:
+                data.page_selection["profile"] = "vault_evidence_expansion"
 
             subpage_contents = []
             owned_fallback_urls = []
@@ -457,12 +493,30 @@ class WebCollector(
                     or known_url in selected_set
                 ):
                     continue
-                eligible = bool(
-                    self._score_internal_links([known_url], url)
-                ) or (
-                    known_url in sitemap_set
-                    and self._is_sitemap_exploration_candidate(known_url)
+                scored_eligible = bool(
+                    self._score_internal_links(
+                        [known_url],
+                        url,
+                        evidence_expansion=vault_evidence_expansion,
+                    )
                 )
+                if vault_evidence_expansion:
+                    sitemap_exploration_eligible = (
+                        known_url in sitemap_only_links
+                        and self._selection_link_role(
+                            known_url,
+                            evidence_expansion=True,
+                        )
+                        == "other"
+                        and self._is_sitemap_exploration_candidate(known_url)
+                    )
+                else:
+                    # Preserve the production v3 reason contract exactly.
+                    sitemap_exploration_eligible = (
+                        known_url in sitemap_set
+                        and self._is_sitemap_exploration_candidate(known_url)
+                    )
+                eligible = scored_eligible or sitemap_exploration_eligible
                 not_visited_pages.append(
                     {
                         **row,
@@ -504,6 +558,21 @@ class WebCollector(
                     "captured_count": len(owned_fallback_urls),
                 }
             )
+            if vault_evidence_expansion:
+                eligible_not_visited_count = sum(
+                    1
+                    for row in not_visited_pages
+                    if row.get("reason") == "page_budget"
+                )
+                data.page_selection.update(
+                    {
+                        "eligible_not_visited_count": eligible_not_visited_count,
+                        "budget_exhausted": (
+                            len(selected_rows) >= maximum_page_budget
+                            and eligible_not_visited_count > 0
+                        ),
+                    }
+                )
 
         data.capture_provenance = self._capture_provenance(
             requested_url=url,

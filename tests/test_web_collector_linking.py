@@ -243,6 +243,7 @@ def test_owned_page_selection_backfills_unused_budget_with_recent_sitemap_pages(
 def test_scrape_persists_page_selection_sources_and_capture_status(
     monkeypatch,
 ) -> None:
+    monkeypatch.delenv("BRAND3_ENVIRONMENT", raising=False)
     collector = WebCollector(api_key=())
     root = "https://example.com"
     sitemap_links = [
@@ -303,6 +304,8 @@ def test_scrape_persists_page_selection_sources_and_capture_status(
 
     assert data.owned_fallback_urls == sitemap_links
     assert data.page_selection["version"] == "owned-page-selection-v3"
+    assert "profile" not in data.page_selection
+    assert "budget_exhausted" not in data.page_selection
     assert data.page_selection["maximum_budget"] == 8
     assert data.page_selection["observed_candidate_count"] == 1
     assert data.page_selection["sitemap_candidate_count"] == 6
@@ -327,3 +330,135 @@ def test_scrape_persists_page_selection_sources_and_capture_status(
     restored = from_web_payload(asdict(data))
     assert restored is not None
     assert restored.page_selection == data.page_selection
+
+
+def test_vault_profile_expands_soccersolver_editorial_evidence_without_changing_standard(
+    monkeypatch,
+) -> None:
+    root = "https://soccersolver.com"
+    sitemap_links = [
+        f"{root}/about-us",
+        f"{root}/validation-meetings",
+        f"{root}/research",
+        f"{root}/detected-players",
+        f"{root}/club-simulations",
+        f"{root}/media-and-press",
+        f"{root}/breakout-worldcup",
+        f"{root}/austria-assets",
+        f"{root}/strikers-worldcup",
+        f"{root}/mateus-fernandes",
+        f"{root}/luka-vuskovic",
+        f"{root}/spain-u19",
+        f"{root}/investment-round",
+        f"{root}/new-way-of-signings",
+        f"{root}/laprovincia",
+        f"{root}/contact-us",
+    ]
+    observed_links = [
+        f"{root}/about-us",
+        f"{root}/validation-meetings",
+        f"{root}/research",
+        f"{root}/detected-players",
+        f"{root}/club-simulations",
+        f"{root}/media-and-press",
+        f"{root}/new-way-of-signings",
+        f"{root}/contact-us",
+    ]
+
+    def scrape_for_environment(environment: str):
+        monkeypatch.setenv("BRAND3_ENVIRONMENT", environment)
+        collector = WebCollector(api_key=())
+
+        def fake_firecrawl(url: str) -> dict:
+            links = "".join(
+                f'<a href="{page_url}">Page</a>' for page_url in observed_links
+            )
+            return {
+                "content": f"# Soccer Solver\n\nEvidence from {url}. " * 8,
+                "html": links if url == root else "",
+                "final_url": url,
+            }
+
+        monkeypatch.setattr(collector, "_run_firecrawl", fake_firecrawl)
+        monkeypatch.setattr(
+            collector,
+            "_discover_sitemap_links",
+            lambda _url: (
+                sitemap_links,
+                {
+                    "status": "discovered",
+                    "robots_status": "read",
+                    "robots_url": f"{root}/robots.txt",
+                    "sitemaps_read": [f"{root}/sitemap.xml"],
+                    "candidate_count": len(sitemap_links),
+                    "known_page_count": len(sitemap_links) + 1,
+                    "known_pages": [
+                        {"url": root, "lastmod": ""},
+                        *[
+                            {"url": page_url, "lastmod": ""}
+                            for page_url in sitemap_links
+                        ],
+                    ],
+                    "excluded_pages": [],
+                    "latest_lastmod": "",
+                    "disallowed_count": 0,
+                    "errors": [],
+                },
+            ),
+        )
+        return collector.scrape(root, crawl_subpages=True)
+
+    standard = scrape_for_environment("production")
+    vault = scrape_for_environment("vault")
+
+    assert "profile" not in standard.page_selection
+    assert "budget_exhausted" not in standard.page_selection
+    assert standard.page_selection["maximum_budget"] == 8
+    assert len(standard.owned_fallback_urls) == 8
+    assert f"{root}/media-and-press" not in standard.owned_fallback_urls
+
+    assert vault.page_selection["profile"] == "vault_evidence_expansion"
+    assert vault.page_selection["version"] == (
+        "owned-page-selection-v4-vault-adaptive"
+    )
+    assert vault.page_selection["maximum_budget"] == 24
+    assert vault.page_selection["budget"] == len(sitemap_links) - 1
+    assert vault.page_selection["budget_exhausted"] is False
+    assert vault.page_selection["eligible_not_visited_count"] == 0
+    assert set(vault.owned_fallback_urls) == (
+        set(sitemap_links) - {f"{root}/contact-us"}
+    )
+    not_visited_by_url = {
+        row["url"]: row for row in vault.page_selection["not_visited_pages"]
+    }
+    assert not_visited_by_url[f"{root}/contact-us"]["reason"] == "low_priority"
+    selected_by_url = {
+        row["url"]: row for row in vault.page_selection["selected"]
+    }
+    assert selected_by_url[f"{root}/media-and-press"]["role"] == (
+        "editorial_hub"
+    )
+    assert selected_by_url[f"{root}/investment-round"]["role"] == "proof"
+    assert WebCollector._selection_link_role(
+        f"{root}/background",
+        evidence_expansion=True,
+    ) == "other"
+
+
+def test_vault_evidence_expansion_keeps_a_hard_page_ceiling() -> None:
+    collector = WebCollector(api_key=())
+    root = "https://large.example"
+    sitemap_links = [f"{root}/article-{index}" for index in range(40)]
+
+    selected = collector._select_internal_links_to_crawl(
+        sitemap_links,
+        root,
+        sitemap_only_links=sitemap_links,
+        maximum_budget=24,
+        strategic_role_page_limit=14,
+        sitemap_exploration_limit=12,
+        evidence_expansion=True,
+    )
+
+    assert len(selected) == 24
+    assert len(set(selected)) == 24

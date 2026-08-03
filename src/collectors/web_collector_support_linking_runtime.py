@@ -9,11 +9,15 @@ from xml.etree import ElementTree
 
 
 MAX_OWNED_SUBPAGES = 8
+VAULT_MAX_OWNED_SUBPAGES = 24
 _MAX_STRATEGIC_ROLE_PAGES = 6
 _MAX_SITEMAP_EXPLORATION_PAGES = 2
+VAULT_MAX_STRATEGIC_ROLE_PAGES = 14
+VAULT_MAX_SITEMAP_EXPLORATION_PAGES = 12
 _MAX_SITEMAP_FILES = 4
 _MAX_SITEMAP_CANDIDATES = 200
 OWNED_PAGE_SELECTION_VERSION = "owned-page-selection-v3"
+VAULT_OWNED_PAGE_SELECTION_VERSION = "owned-page-selection-v4-vault-adaptive"
 _OWNED_PAGE_ROLE_PRIORITY = (
     "product",
     "solutions",
@@ -346,7 +350,13 @@ class WebCollectorLinkingSupport:
                 return False
         return True
 
-    def _score_internal_links(self, links: list[str], base_url: str) -> list[str]:
+    def _score_internal_links(
+        self,
+        links: list[str],
+        base_url: str,
+        *,
+        evidence_expansion: bool = False,
+    ) -> list[str]:
         """Score and sort internal links based on relevance keywords."""
         del base_url
         high_value = {
@@ -432,6 +442,35 @@ class WebCollectorLinkingSupport:
             "/404": -20,
             "/qr": -5,
         }
+        if evidence_expansion:
+            # Vault needs editorial and announcement surfaces as discovery
+            # paths. They are candidates for evidence extraction, not proof by
+            # themselves; provenance validation remains downstream.
+            low_value.pop("blog", None)
+            low_value.pop("news", None)
+            low_value.pop("press", None)
+            evidence_route_weights = {
+                "media": 7,
+                "press": 6,
+                "news": 5,
+                "newsroom": 6,
+                "insight": 5,
+                "insights": 5,
+                "investment": 6,
+                "funding": 6,
+                "round": 5,
+                "partnership": 6,
+                "partnerships": 6,
+                "agreement": 6,
+                "agreements": 6,
+                "agree": 6,
+                "acuerdo": 6,
+                "acuerdos": 6,
+                "alianza": 6,
+                "alianzas": 6,
+            }
+        else:
+            evidence_route_weights = {}
 
         scored_links = []
         for link in links:
@@ -446,6 +485,12 @@ class WebCollectorLinkingSupport:
             for kw, penalty in low_value.items():
                 if kw in path or kw in query:
                     score += penalty
+            route_tokens = self._route_tokens(link)
+            score += sum(
+                weight
+                for marker, weight in evidence_route_weights.items()
+                if marker in route_tokens
+            )
             if score >= -2:
                 scored_links.append((score, link))
 
@@ -459,18 +504,39 @@ class WebCollectorLinkingSupport:
         *,
         sitemap_only_links: list[str] | None = None,
         sitemap_lastmod: dict[str, str] | None = None,
+        maximum_budget: int = MAX_OWNED_SUBPAGES,
+        strategic_role_page_limit: int = _MAX_STRATEGIC_ROLE_PAGES,
+        sitemap_exploration_limit: int = _MAX_SITEMAP_EXPLORATION_PAGES,
+        evidence_expansion: bool = False,
     ) -> list[str]:
-        scored_links = self._score_internal_links(links, base_url)
+        if maximum_budget <= 0:
+            return []
+        scored_links = self._score_internal_links(
+            links,
+            base_url,
+            evidence_expansion=evidence_expansion,
+        )
         selected: list[str] = []
 
-        for role in _OWNED_PAGE_ROLE_PRIORITY:
+        role_priority = list(_OWNED_PAGE_ROLE_PRIORITY)
+        if evidence_expansion:
+            proof_index = role_priority.index("proof") + 1
+            role_priority.insert(proof_index, "editorial_hub")
+
+        for role in role_priority:
             for link in scored_links:
                 if link in selected:
                     continue
-                if self._link_role(link) == role:
+                if (
+                    self._selection_link_role(
+                        link,
+                        evidence_expansion=evidence_expansion,
+                    )
+                    == role
+                ):
                     selected.append(link)
                     break
-            if len(selected) >= _MAX_STRATEGIC_ROLE_PAGES:
+            if len(selected) >= strategic_role_page_limit:
                 break
 
         # A recognized strategic page is stronger evidence than an untyped
@@ -478,10 +544,17 @@ class WebCollectorLinkingSupport:
         # remaining budget for additional strategic candidates before
         # exploring pages whose role is still unknown.
         for link in scored_links:
-            if link in selected or self._link_role(link) == "other":
+            if (
+                link in selected
+                or self._selection_link_role(
+                    link,
+                    evidence_expansion=evidence_expansion,
+                )
+                == "other"
+            ):
                 continue
             selected.append(link)
-            if len(selected) >= MAX_OWNED_SUBPAGES:
+            if len(selected) >= maximum_budget:
                 return selected
 
         exploration_added = 0
@@ -492,7 +565,11 @@ class WebCollectorLinkingSupport:
         sitemap_exploration = [
             link
             for link in sitemap_only_links or []
-            if self._link_role(link) == "other"
+            if self._selection_link_role(
+                link,
+                evidence_expansion=evidence_expansion,
+            )
+            == "other"
             and self._is_sitemap_exploration_candidate(link)
         ]
         sitemap_exploration.sort(
@@ -505,20 +582,23 @@ class WebCollectorLinkingSupport:
             selected.append(link)
             exploration_added += 1
             if (
-                len(selected) >= MAX_OWNED_SUBPAGES
-                or exploration_added >= _MAX_SITEMAP_EXPLORATION_PAGES
+                len(selected) >= maximum_budget
+                or exploration_added >= sitemap_exploration_limit
             ):
                 break
 
-        if len(selected) >= MAX_OWNED_SUBPAGES:
+        if len(selected) >= maximum_budget:
             return selected
 
         for link in scored_links:
             if link in selected:
                 continue
             selected.append(link)
-            if len(selected) >= MAX_OWNED_SUBPAGES:
+            if len(selected) >= maximum_budget:
                 break
+
+        if len(selected) >= maximum_budget:
+            return selected
 
         # A site with few recognized strategic routes should not leave the
         # capture budget unused while recent, public sitemap pages remain.
@@ -526,10 +606,66 @@ class WebCollectorLinkingSupport:
             if link in selected:
                 continue
             selected.append(link)
-            if len(selected) >= MAX_OWNED_SUBPAGES:
+            if len(selected) >= maximum_budget:
                 break
 
         return selected
+
+    @classmethod
+    def _selection_link_role(
+        cls,
+        link: str,
+        *,
+        evidence_expansion: bool = False,
+    ) -> str:
+        role = cls._link_role(link)
+        if role != "other" or not evidence_expansion:
+            return role
+
+        path = urlparse(link).path.casefold().rstrip("/")
+        last_segment = path.rsplit("/", 1)[-1]
+        if last_segment in {
+            "blog",
+            "news",
+            "newsroom",
+            "press",
+            "press-room",
+            "media",
+            "media-and-press",
+            "insight",
+            "insights",
+        }:
+            return "editorial_hub"
+        route_tokens = cls._route_tokens(link)
+        if any(
+            marker in route_tokens
+            for marker in (
+                "investment",
+                "funding",
+                "round",
+                "partnership",
+                "partnerships",
+                "agreement",
+                "agreements",
+                "agree",
+                "acuerdo",
+                "acuerdos",
+                "alianza",
+                "alianzas",
+            )
+        ):
+            return "proof"
+        return role
+
+    @staticmethod
+    def _route_tokens(link: str) -> set[str]:
+        parsed = urlparse(link)
+        route = f"{parsed.path} {parsed.query}".casefold()
+        return {
+            token
+            for token in re.split(r"[^a-z0-9áéíóúüñ]+", route)
+            if token
+        }
 
     @staticmethod
     def _is_sitemap_exploration_candidate(link: str) -> bool:
