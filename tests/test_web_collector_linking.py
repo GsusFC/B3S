@@ -18,10 +18,14 @@ def test_internal_link_extraction_ignores_framework_assets_and_keeps_navigation(
     """
 
     links = collector._extract_internal_links(
-        "[Valores](/values)",
+        "[Valores](/values)\n![Removed](<Base64-Image-Removed>)",
         "https://movyn.ai",
         html=html,
-        links=["https://movyn.ai/_next/image?url=%2Fassets%2Fillo-values.png", "/culture"],
+        links=[
+            "https://movyn.ai/_next/image?url=%2Fassets%2Fillo-values.png",
+            "/%3CBase64-Image-Removed%3E",
+            "/culture",
+        ],
     )
 
     assert links == ["https://movyn.ai/values", "https://movyn.ai/about", "https://movyn.ai/culture"]

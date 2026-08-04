@@ -316,6 +316,11 @@ class WebCollectorLinkingSupport:
         path = str(getattr(parsed_link, "path", "") or "")
         query = str(getattr(parsed_link, "query", "") or "")
         lowered = path.lower()
+        decoded_path = unquote(path).lower()
+        # Firecrawl emits this sentinel when removeBase64Images is enabled.
+        # It is a payload placeholder, not an owned page to crawl.
+        if "base64-image-removed" in decoded_path:
+            return False
         if lowered.startswith(("/_next/", "/static/", "/assets/", "/images/", "/img/")):
             return False
         blocked_extensions = (
