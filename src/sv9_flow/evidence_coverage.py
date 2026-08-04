@@ -10,6 +10,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from src.evidence_identity import normalize_evidence_url
+from src.services.scanner_content_sampling import content_sampling_from_evidence
 from src.sv9_flow.contracts import BrandEvidencePack, BrandInterpretation, EvidenceRecord
 from src.sv9_flow.evidence_source import (
     SOURCE_CLASS_ACQUISITION_METADATA,
@@ -83,6 +84,7 @@ def acquisition_coverage(pack: BrandEvidencePack) -> dict[str, Any]:
         "absence_ref_count": len(absence_refs),
         "evidence_record_count": len(by_ref),
         "owned_page_coverage": owned_page_coverage,
+        "content_sampling": content_sampling_from_evidence(pack.evidence),
     }
 
 
@@ -449,14 +451,29 @@ def _owned_page_coverage(selection: dict[str, Any]) -> dict[str, Any]:
             if str(row.get("status") or "") == "captured"
         )
     )
-    attempted_count = int(
-        selection.get("attempted_page_count")
-        or len(visited_pages)
+    attempted_count = max(
+        captured_count,
+        int(selection.get("attempted_page_count") or len(visited_pages)),
     )
     ratio = (
         round(captured_count / known_count, 4)
         if known_count
         else 0.0
+    )
+    eligible_not_visited_count = int(
+        selection.get("eligible_not_visited_count")
+        or sum(
+            1
+            for row in not_visited_pages
+            if str(row.get("reason") or "") == "page_budget"
+        )
+    )
+    eligible_captured_count = int(
+        selection.get("eligible_captured_page_count") or captured_count
+    )
+    eligible_count = int(
+        selection.get("eligible_page_count")
+        or attempted_count + eligible_not_visited_count
     )
     return {
         "selection_version": str(selection.get("version") or ""),
@@ -464,6 +481,14 @@ def _owned_page_coverage(selection: dict[str, Any]) -> dict[str, Any]:
         "attempted_page_count": attempted_count,
         "captured_page_count": captured_count,
         "coverage_ratio": ratio,
+        "eligible_page_count": eligible_count,
+        "eligible_captured_page_count": eligible_captured_count,
+        "eligible_not_visited_count": eligible_not_visited_count,
+        "eligible_coverage_ratio": (
+            round(eligible_captured_count / eligible_count, 4)
+            if eligible_count
+            else 0.0
+        ),
         "known_pages": known_pages,
         "visited_pages": visited_pages,
         "not_visited_pages": not_visited_pages,

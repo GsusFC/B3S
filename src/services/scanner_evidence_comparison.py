@@ -17,8 +17,13 @@ import unicodedata
 from typing import Any, Iterable
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from src.services.scanner_analysis_contract import (
+    analysis_contract_from_report,
+    analysis_contracts_match,
+)
 
-EVIDENCE_COMPARISON_VERSION = "evidence-comparison-v3"
+
+EVIDENCE_COMPARISON_VERSION = "evidence-comparison-v4"
 CANONICAL_POLICY_VERSION = "brand-canonical-policy-v1"
 ENFORCEMENT_ENV = "B3S_CANONICAL_ENFORCEMENT_MODE"
 ENFORCEMENT_MODES = {"observe", "repeated", "all"}
@@ -83,6 +88,7 @@ class EvidenceSnapshot:
     reliability_status: str
     evaluation_fingerprint: str
     interpretation_fingerprint: str
+    analysis_contract: dict[str, Any]
     invalid: bool
 
     def to_dict(self) -> dict[str, Any]:
@@ -107,6 +113,7 @@ class EvidenceSnapshot:
             "reliability_status": self.reliability_status,
             "evaluation_fingerprint": self.evaluation_fingerprint,
             "interpretation_fingerprint": self.interpretation_fingerprint,
+            "analysis_contract": dict(self.analysis_contract),
             "invalid": self.invalid,
         }
 
@@ -120,6 +127,7 @@ class EvidenceComparison:
     acquisition_comparable: bool
     evaluation_changed: bool
     interpretation_changed: bool
+    contract_comparable: bool
     reason_codes: tuple[str, ...]
     delta: dict[str, Any]
 
@@ -133,6 +141,7 @@ class EvidenceComparison:
             "acquisition_comparable": self.acquisition_comparable,
             "evaluation_changed": self.evaluation_changed,
             "interpretation_changed": self.interpretation_changed,
+            "contract_comparable": self.contract_comparable,
             "reason_codes": list(self.reason_codes),
             "delta": dict(self.delta),
         }
@@ -179,6 +188,7 @@ def build_evidence_snapshot(report: dict[str, Any]) -> EvidenceSnapshot:
         reliability_status=reliability,
         evaluation_fingerprint=_evaluation_fingerprint(report),
         interpretation_fingerprint=_interpretation_fingerprint(report),
+        analysis_contract=analysis_contract_from_report(report),
         invalid=invalid,
     )
 
@@ -229,6 +239,10 @@ def compare_reports(
     acquisition_comparable = not acquisition_regression_reasons
     evaluation_changed = baseline.evaluation_fingerprint != candidate.evaluation_fingerprint
     interpretation_changed = baseline.interpretation_fingerprint != candidate.interpretation_fingerprint
+    contract_comparable = analysis_contracts_match(
+        baseline.analysis_contract,
+        candidate.analysis_contract,
+    )
 
     reasons: list[str] = []
     if candidate.invalid:
@@ -238,6 +252,9 @@ def compare_reports(
     elif acquisition_regression_reasons:
         classification = "acquisition_regression"
         reasons.extend(acquisition_regression_reasons)
+    elif not contract_comparable:
+        classification = "contract_mismatch"
+        reasons.append("analysis_contract_changed")
     elif equivalent and (evaluation_changed or interpretation_changed):
         classification = "evaluation_drift"
         if interpretation_changed:
@@ -259,6 +276,7 @@ def compare_reports(
         acquisition_comparable=acquisition_comparable,
         evaluation_changed=evaluation_changed,
         interpretation_changed=interpretation_changed,
+        contract_comparable=contract_comparable,
         reason_codes=tuple(dict.fromkeys(reasons)),
         delta={
             "unchanged_record_count": len(unchanged),
@@ -273,6 +291,8 @@ def compare_reports(
             "exact_record_ratio": round(exact_record_ratio, 4),
             "baseline_counts": baseline.to_dict()["counts"],
             "candidate_counts": candidate.to_dict()["counts"],
+            "baseline_analysis_contract": dict(baseline.analysis_contract),
+            "candidate_analysis_contract": dict(candidate.analysis_contract),
             "changed_components": _changed_components(baseline_report, candidate_report),
         },
     )
@@ -335,14 +355,33 @@ def classify_report_history(reports: Iterable[dict[str, Any]]) -> dict[str, Any]
         effective = previous_comparison if previous_comparison and previous_comparison.classification in {
             "invalid",
             "acquisition_regression",
+            "contract_mismatch",
             "evaluation_drift",
         } else baseline_comparison
 
         classification = effective.classification
         reasons = list(effective.reason_codes)
         canonical_status = "non_canonical"
+        repeated_new_contract = bool(
+            eligible
+            and baseline_comparison.classification == "contract_mismatch"
+            and previous_comparison is not None
+            and previous_comparison.classification == "stable"
+        )
 
-        if (
+        if repeated_new_contract:
+            selected_report = report
+            selected_kind = "canonical"
+            classification = "canonical"
+            canonical_status = "canonical"
+            reasons = ["new_contract_reliable_repeat_promoted"]
+            for prior_entry in entries:
+                if prior_entry["canonical_status"] in {
+                    "canonical",
+                    "provisional",
+                }:
+                    prior_entry["canonical_status"] = "non_canonical"
+        elif (
             selected_kind == "provisional"
             and eligible
             and classification == "stable"

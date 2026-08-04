@@ -266,6 +266,47 @@ def test_completed_result_exposes_scan_time_stability_assessment():
     payload = result_payload(report)
 
     assert payload["stability"] == report["stability"]
+    assert payload["score"] == {
+        "value": None,
+        "raw_value": 72,
+        "publishable": False,
+        "retention_reason": "evaluation_drift",
+        "scale": 100,
+        "base_average": 7.2,
+        "reliability_status": "reviewable",
+    }
+    assert payload["components"][0]["score"] is None
+    assert payload["components"][0]["raw_score"] == 8
+    assert payload["components"][0]["score_publishable"] is False
+
+
+def test_completed_result_retains_score_after_acquisition_regression():
+    report = _report("scan-regression")
+    report["stability"] = {
+        "classification": "acquisition_regression",
+        "canonical_status": "non_canonical",
+        "reason_codes": ["owned_evidence_lost"],
+    }
+
+    payload = result_payload(report)
+
+    assert payload["score"]["value"] is None
+    assert payload["score"]["raw_value"] == 72
+    assert payload["score"]["retention_reason"] == "acquisition_regression"
+
+
+def test_completed_result_fails_closed_when_stability_comparison_errors():
+    report = _report("scan-comparison-error")
+    report["stability"] = {
+        "classification": "comparison_error",
+        "canonical_status": "non_canonical",
+        "reason_codes": ["evidence_comparison_failed"],
+    }
+
+    payload = result_payload(report)
+
+    assert payload["score"]["value"] is None
+    assert payload["score"]["retention_reason"] == "comparison_error"
 
 
 def test_evidence_endpoint_separates_evidence_from_result(monkeypatch):
@@ -305,6 +346,69 @@ def test_brand_history_is_paginated(monkeypatch):
     assert response.json()["canonical_report_id"] is None
     assert response.json()["items"][0]["canonical_status"] == "non_canonical"
     assert response.json()["items"][0]["stability_classification"] == "stable"
+
+
+def test_brand_history_retains_drifted_score_but_preserves_raw_audit_value(
+    monkeypatch,
+):
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    shared = {
+        "brand_name": "SoccerSolver",
+        "url": "https://soccersolver.com",
+        "reliability_status": "shadow",
+        "raw": {
+            "flow": {
+                "candidate": {
+                    "evidence_pack": {
+                        "evidence": [
+                            {
+                                "ref": "web",
+                                "source": "web",
+                                "evidence_type": "raw_input",
+                                "content": "Stable owned evidence.",
+                                "url": "https://soccersolver.com",
+                                "metadata": {"source_class": "owned_copy"},
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    }
+    monkeypatch.setattr(
+        "web.api_v1.router.list_reports_for_domain",
+        lambda _domain: [
+            {
+                **shared,
+                "id": "new",
+                "created_at": "2026-08-03T12:00:00Z",
+                "score": 64,
+                "components": [
+                    {"key": "core_purpose", "status": "scored", "score": 4}
+                ],
+            },
+            {
+                **shared,
+                "id": "old",
+                "created_at": "2026-08-03T08:00:00Z",
+                "score": 62,
+                "components": [
+                    {"key": "core_purpose", "status": "scored", "score": 9}
+                ],
+            },
+        ],
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/soccersolver.com/scans",
+        headers=AUTH,
+    )
+
+    newest = response.json()["items"][0]
+    assert newest["stability_classification"] == "evaluation_drift"
+    assert newest["score"] is None
+    assert newest["raw_score"] == 64
+    assert newest["score_publishable"] is False
 
 
 def test_evidence_ledger_shadow_endpoint_is_explicitly_non_authoritative(monkeypatch):

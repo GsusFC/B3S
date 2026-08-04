@@ -404,6 +404,74 @@ def test_evidence_worker_prioritizes_late_strategy_on_long_owned_subpage() -> No
     assert sampling.metadata["strategic_prioritization"] is True
 
 
+def test_vault_preserves_late_distinctive_copy_beyond_standard_scoring_sample(
+    monkeypatch,
+) -> None:
+    sections = [
+        f"## Match analysis {index}\n" + ("Technical supporting detail. " * 20)
+        for index in range(1, 10)
+    ]
+    distinctive_copy = (
+        "The definition of a low-risk, high-convexity buy, supported by "
+        "Sharpe Ratio, volatility and maximum drawdown."
+    )
+    sections.append(f"## Investment reading\n{distinctive_copy}")
+    markdown = (
+        "Homepage copy.\n"
+        "\n---\n## Subpage: https://soccersolver.com/luka-vuskovic\n"
+        + "\n\n".join(sections)
+    )
+
+    monkeypatch.delenv("BRAND3_ENVIRONMENT", raising=False)
+    standard = build_evidence_pack_from_snapshot(
+        {
+            "run": {
+                "brand_name": "SoccerSolver",
+                "url": "https://soccersolver.com",
+            },
+            "raw_inputs": [
+                {
+                    "source": "web",
+                    "payload": {
+                        "url": "https://soccersolver.com",
+                        "markdown_content": markdown,
+                    },
+                }
+            ],
+        }
+    )
+    assert not any(
+        distinctive_copy in record.content for record in standard.evidence
+    )
+
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    vault = build_evidence_pack_from_snapshot(
+        {
+            "run": {
+                "brand_name": "SoccerSolver",
+                "url": "https://soccersolver.com",
+            },
+            "raw_inputs": [
+                {
+                    "source": "web",
+                    "payload": {
+                        "url": "https://soccersolver.com",
+                        "markdown_content": markdown,
+                    },
+                }
+            ],
+        }
+    )
+
+    assert any(
+        distinctive_copy in record.content for record in vault.evidence
+    )
+    assert not any(
+        record.evidence_type == "acquisition.evidence_sampling"
+        for record in vault.evidence
+    )
+
+
 def test_evidence_worker_persists_owned_page_selection_as_acquisition_metadata() -> None:
     selection = {
         "version": "owned-page-selection-v2",

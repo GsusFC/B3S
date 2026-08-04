@@ -802,6 +802,33 @@ def test_home_renders_report_list(monkeypatch):
     assert "status-tag status-tag--ok status-tag--filled" in response.text
 
 
+def test_home_does_not_publish_a_drifted_score(monkeypatch):
+    from web.app import app
+
+    monkeypatch.setattr(
+        "web.app.list_reports",
+        lambda: [
+            {
+                "id": "drifted",
+                "brand_name": "SoccerSolver",
+                "url": "https://soccersolver.com",
+                "score": 64,
+                "detected_count": 8,
+                "block_count": 9,
+                "not_detected": [],
+                "created_at": "2026-08-03T12:00:00+00:00",
+                "stability": {"classification": "evaluation_drift"},
+            }
+        ],
+    )
+
+    response = TestClient(app).get("/")
+
+    assert response.status_code == 200
+    assert "retenido" in response.text
+    assert "<strong>64</strong>" not in response.text
+
+
 def test_visual_signature_logo_url_falls_back_to_real_logo_candidate():
     from web.app import _visual_signature_logo_url
 
@@ -1197,7 +1224,9 @@ def test_brand_view_repeated_mode_keeps_selected_baseline_visible(monkeypatch):
 
     assert profile["current"]["id"] == "baseline"
     assert profile["current"]["score"] == 56
+    assert profile["current"]["score_publication"]["publishable"] is True
     assert profile["latest_attempt"]["id"] == "drifted"
+    assert profile["latest_attempt"]["score_publication"]["publishable"] is False
     assert profile["enforcement_mode"] == "repeated"
 
 
@@ -2218,6 +2247,22 @@ def test_report_view_renders_report(monkeypatch):
                 "external_source_count": 0,
                 "absence_record_count": 0,
                 "attempt_record_count": 0,
+                "content_sampling": {
+                    "sampling_record_count": 1,
+                    "affected_url_count": 1,
+                    "available_chunk_count": 10,
+                    "retained_chunk_count": 6,
+                    "omitted_chunk_count": 4,
+                    "surfaces": [
+                        {
+                            "ref": "raw_inputs.0.diagnostics.sampling.subpage.1",
+                            "url": "https://mercury.com/orphan",
+                            "available_chunk_count": 10,
+                            "retained_chunk_count": 6,
+                            "omitted_chunk_count": 4,
+                        }
+                    ],
+                },
             },
             "components": [
                 {
@@ -2303,9 +2348,15 @@ def test_report_view_renders_report(monkeypatch):
     assert "1 de 2" in response.text
     assert "https://mercury.com/orphan" in response.text
     assert "page_budget" in response.text
+    assert "contenido muestreado" in response.text
+    assert "se omitieron 4 fragmentos" in response.text
+    assert "6/10 fragmentos" in response.text
     assert "report-hero" in response.text
-    assert "Brand3 Score" in response.text
-    assert "--score-width: 81%;" in response.text
+    assert "Score retenido" in response.text
+    assert "--score-width: 0%;" in response.text
+    assert ">81<span>/100</span>" not in response.text
+    assert 'method="post" action="/scan"' in response.text
+    assert 'value="https://mercury.com"' in response.text
     assert "shadow run" not in response.text
     assert 'id="core_purpose"' in response.text
     assert "component-card--half" in response.text
@@ -2948,6 +2999,6 @@ def test_report_view_does_not_instantiate_llm_analyzer(monkeypatch):
 
     assert response.status_code == 200
     assert "Lectura persistida." in response.text
-    assert "Base detectada" in response.text
+    assert "Interpretación de la evidencia" in response.text
     assert "Misión detectada." in response.text
     assert '<p class="card-verdict">Misión detectada.</p>' in response.text

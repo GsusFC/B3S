@@ -425,6 +425,12 @@ def test_vault_profile_expands_soccersolver_editorial_evidence_without_changing_
     assert vault.page_selection["budget"] == len(sitemap_links) - 1
     assert vault.page_selection["budget_exhausted"] is False
     assert vault.page_selection["eligible_not_visited_count"] == 0
+    assert vault.page_selection["eligible_page_count"] == len(
+        vault.page_selection["visited_pages"]
+    )
+    assert vault.page_selection["eligible_captured_page_count"] == len(
+        vault.page_selection["visited_pages"]
+    )
     assert set(vault.owned_fallback_urls) == (
         set(sitemap_links) - {f"{root}/contact-us"}
     )

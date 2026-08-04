@@ -52,7 +52,7 @@
           <span class="brand-cell-url">{{ row.url }}</span>
         </div>
       </td>
-      <td class="mono"><strong>{{ row.score if row.score is not none else "—" }}</strong></td>
+      <td class="mono"><strong>{% if row.score_publication.publishable %}{{ row.score if row.score is not none else "—" }}{% else %}retenido{% endif %}</strong></td>
       <td class="mono">{{ row.detected_count }}/{{ row.block_count }}</td>
       <td>
         {% for name in row.not_detected %}{{ ui.tag(name, "warn") }} {% else %}{{ ui.tag("none", "ok") }}{% endfor %}

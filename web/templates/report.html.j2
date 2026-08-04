@@ -1,5 +1,5 @@
 {% extends "base.html.j2" %}
-{% block title %}{{ report.brand_name }} · {{ report.score }} — B3S{% endblock %}
+{% block title %}{{ report.brand_name }}{% if report.score_publication.publishable %} · {{ report.score }}{% else %} · score retenido{% endif %} — B3S{% endblock %}
 {% set coverage_chip = {
   "positive_evidence": ("ok", "con evidencia"),
   "implied_not_explicit": ("info", "implícito, no explícito"),
@@ -8,7 +8,7 @@
   "insufficient_acquisition": ("bad", "adquisición insuficiente"),
 } %}
 
-{% macro component_card(component) %}
+{% macro component_card(component, score_publication) %}
 {% set primary = component.card.primary %}
 {% set support = component.card.support %}
 {% set drawer = component.drawer %}
@@ -17,7 +17,7 @@
   <div class="card-head">
     <h2 class="card-title">{{ component.label }}</h2>
     <div class="card-actions">
-      <span class="badge">{{ component.score }}/{{ component.scale or 10 }}</span>
+      <span class="badge">{% if score_publication.publishable %}{{ component.score }}{% else %}—{% endif %}/{{ component.scale or 10 }}</span>
       {% if meta.has_drawer %}
       <button type="button" class="icon-button" data-dialog-target="drawer-{{ component.key }}" aria-label="Abrir lectura de {{ component.label }}" title="Abrir lectura de {{ component.label }}">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -30,9 +30,9 @@
   </div>
 
   {% if primary["items"] %}
-  <p class="card-result card-result--terms">{{ primary["items"] | join(" · ") }}</p>
+  <p class="card-result card-result--terms"><span class="chip info">interpretación</span> {{ primary["items"] | join(" · ") }}</p>
   {% elif primary.text %}
-  <p class="card-result{% if primary.is_fallback %} muted{% endif %}">{{ primary.text }}</p>
+  <p class="card-result{% if primary.is_fallback %} muted{% endif %}"><span class="chip info">interpretación</span> {{ primary.text }}</p>
   {% endif %}
 
   {% if support.show_on_card and (support.text or support["items"]) %}
@@ -46,7 +46,12 @@
 
   {% set bq = component.card.brand_quote %}
   {% if bq and bq.snippet %}
-  <p class="card-evidence"><em>“{{ bq.snippet | truncate(180) }}”</em>{% if bq.url %} · <a class="source-link" href="{{ bq.url }}" target="_blank" rel="noopener noreferrer">fuente</a>{% endif %}</p>
+  <p class="card-evidence"><span class="chip ok">cita literal</span> <em>“{{ bq.snippet | truncate(180) }}”</em>{% if bq.url %} · <a class="source-link" href="{{ bq.url }}" target="_blank" rel="noopener noreferrer">fuente</a>{% endif %}</p>
+  {% endif %}
+
+  {% if drawer.summary.coverage_status and drawer.summary.coverage_status in coverage_chip %}
+  {% set component_coverage_chip = coverage_chip.get(drawer.summary.coverage_status) %}
+  <p class="card-evidence"><span class="chip {{ component_coverage_chip[0] }}">{{ component_coverage_chip[1] }}</span></p>
   {% endif %}
 
   {% set hierarchy = component.card.surface_hierarchy %}
@@ -58,7 +63,7 @@
   <dialog class="report-drawer" id="drawer-{{ component.key }}" aria-labelledby="drawer-title-{{ component.key }}">
     <div class="report-drawer-head">
       <div>
-        <div class="report-drawer-kicker">{{ component.score }}/{{ component.scale or 10 }}</div>
+        <div class="report-drawer-kicker">{% if score_publication.publishable %}{{ component.score }}{% else %}—{% endif %}/{{ component.scale or 10 }}</div>
         <h3 id="drawer-title-{{ component.key }}">{{ component.label }}</h3>
       </div>
       <form method="dialog">
@@ -74,11 +79,11 @@
       <section class="drawer-section">
         <h4>Resumen</h4>
         <div class="drawer-summary-line">
-          <span class="badge">{{ component.score }}/{{ component.scale or 10 }}</span>
-          <span class="muted">evaluado</span>
+          <span class="badge">{% if score_publication.publishable %}{{ component.score }}{% else %}—{% endif %}/{{ component.scale or 10 }}</span>
+          <span class="muted">{% if score_publication.publishable %}evaluado{% else %}score retenido{% endif %}</span>
         </div>
         {% if drawer.summary.primary_text %}
-        <p class="drawer-lead"><em>{{ drawer.summary.primary_text }}</em></p>
+        <p class="drawer-lead"><span class="chip info">interpretación</span> <em>{{ drawer.summary.primary_text }}</em></p>
         {% else %}
         <p class="muted">(no detectado)</p>
         {% endif %}
@@ -86,7 +91,7 @@
 
       {% if drawer.evidence %}
       <section class="drawer-section">
-        <h4>Evidencia</h4>
+        <h4>Evidencia literal del snapshot</h4>
         {% for item in drawer.evidence %}
         <div class="evidence">
           <div class="ref">{% if item.ref %}{{ item.ref }}{% else %}evidencia{% endif %}{% if item.url %} · <a class="source-link" href="{{ item.url }}" rel="noopener noreferrer" target="_blank">abrir fuente</a>{% endif %}</div>
@@ -119,7 +124,7 @@
 
       {% if drawer.detected_basis and (drawer.detected_basis.text or drawer.detected_basis["items"]) %}
       <section class="drawer-section">
-        <h4>Base detectada</h4>
+        <h4>Interpretación de la evidencia</h4>
         {% if drawer.detected_basis["items"] %}
         <p class="card-verdict card-verdict--terms">{{ drawer.detected_basis["items"] | join(" · ") }}</p>
         {% endif %}
@@ -194,7 +199,14 @@
 {% endmacro %}
 {% block main_class %}wide{% endblock %}
 {% block content %}
-<p><a href="/">← Todos los informes</a> · <a href="{{ report.export.brand_visual_url }}">Módulo visual</a> · <a href="{{ report.export.markdown_url }}">Markdown</a></p>
+<div class="report-actions">
+  <p><a href="/">← Todos los informes</a> · <a href="{{ report.export.brand_visual_url }}">Módulo visual</a> · <a href="{{ report.export.markdown_url }}">Markdown</a></p>
+  <form method="post" action="/scan">
+    <input type="hidden" name="url" value="{{ report.url }}">
+    <input type="hidden" name="brand_name" value="{{ report.brand_name }}">
+    <button type="submit">Reescanear</button>
+  </form>
+</div>
 
 {% set score_width = report.score_width if report.score_width is not none else 0 %}
 <div class="report-hero">
@@ -206,25 +218,29 @@
     {% endif %}
   </div>
   <div class="report-hero-metric">
-    <div class="report-hero-label">{{ report.hero.score_label }}</div>
+    <div class="report-hero-label">{{ report.score_publication.label }}</div>
     <div class="report-hero-score">
-      {{ report.score if report.score is not none else "—" }}<span>/100</span>
+      {% if report.score_publication.publishable %}{{ report.score if report.score is not none else "—" }}{% else %}—{% endif %}<span>/100</span>
     </div>
     <div class="report-score-bar" aria-hidden="true">
       <span style="--score-width: {{ score_width }}%;"></span>
     </div>
-    {% if report.hero.most_painful_gap.label %}
+    {% if not report.score_publication.publishable %}
+    <div class="report-hero-note">{{ report.score_publication.reason }}</div>
+    {% elif report.hero.most_painful_gap.label %}
     <div class="report-hero-note">hueco: {{ report.hero.most_painful_gap.label }}</div>
     {% elif report.base_average is not none %}
     <div class="report-hero-note">media base {{ report.base_average }}</div>
     {% endif %}
   </div>
   <div class="report-hero-metric">
-    <div class="report-hero-label">Margen inmediato</div>
+    <div class="report-hero-label">{% if report.score_publication.publishable %}Margen inmediato{% else %}Comparativa{% endif %}</div>
     <div class="report-hero-score report-hero-score--gain">
-      {% if report.hero.immediate_margin %}+{{ report.hero.immediate_margin }}{% else %}0{% endif %}<span> pts</span>
+      {% if report.score_publication.publishable %}{% if report.hero.immediate_margin %}+{{ report.hero.immediate_margin }}{% else %}0{% endif %}<span> pts</span>{% else %}—{% endif %}
     </div>
-    {% if report.hero.insufficient_evidence %}
+    {% if not report.score_publication.publishable %}
+    <div class="report-hero-note">consulta abajo el diagnóstico de estabilidad</div>
+    {% elif report.hero.insufficient_evidence %}
     <div class="report-hero-note">sin evidencia suficiente: {{ report.hero.insufficient_evidence | join(", ") }}</div>
     {% elif report.hero.not_detected %}
     <div class="report-hero-note">faltan: {{ report.hero.not_detected | join(", ") }}</div>
@@ -261,7 +277,7 @@
 
 <div class="canvas">
 {% for component in report.components %}
-  {{ component_card(component) }}
+  {{ component_card(component, report.score_publication) }}
 {% endfor %}
 </div>
 
@@ -299,6 +315,12 @@
 {% endif %}
 <div class="acquisition-metrics">
   <div class="cell acquisition-metric"><div class="k">páginas propias capturadas</div><div class="v">{{ report.acquisition.owned_pages.coverage_label }}</div>{% if report.acquisition.owned_pages.known_page_count %}<div class="muted">{{ report.acquisition.owned_pages.coverage_percent }}% de las conocidas</div>{% endif %}</div>
+  {% if report.acquisition.owned_pages.eligible_page_count %}
+  <div class="cell acquisition-metric"><div class="k">páginas elegibles capturadas</div><div class="v">{{ report.acquisition.owned_pages.eligible_coverage_label }}</div><div class="muted">{{ report.acquisition.owned_pages.eligible_coverage_percent }}% del alcance estratégico</div></div>
+  {% endif %}
+  {% if report.acquisition.owned_pages.content_sampling.sampling_record_count %}
+  <div class="cell acquisition-metric"><div class="k">contenido conservado</div><div class="v">{{ report.acquisition.owned_pages.content_sampling.retained_chunk_count }} de {{ report.acquisition.owned_pages.content_sampling.available_chunk_count }}</div><div class="muted">en {{ report.acquisition.owned_pages.content_sampling.affected_url_count }} páginas con muestreo parcial</div></div>
+  {% endif %}
   <div class="cell acquisition-metric"><div class="k">pruebas externas</div><div class="v">{{ report.acquisition.metrics.external_proof_count }}</div></div>
   <div class="cell acquisition-metric"><div class="k">intentos externos</div><div class="v">{{ report.acquisition.metrics.external_attempt_count }}</div></div>
   <div class="cell acquisition-metric"><div class="k">registros de ausencia</div><div class="v">{{ report.acquisition.metrics.absence_ref_count }}</div></div>
@@ -314,8 +336,22 @@
   {% if report.acquisition.owned_pages.selection_version %}
   <p class="muted">Política: <span class="mono">{{ report.acquisition.owned_pages.selection_version }}</span>{% if report.acquisition.owned_pages.latest_lastmod %} · último <span class="mono">lastmod</span> observado: {{ report.acquisition.owned_pages.latest_lastmod }}{% endif %}</p>
   {% endif %}
+  {% if report.acquisition.owned_pages.latest_lastmod_newer_than_scan %}
+  <p><span class="chip warn">contenido posterior al scan</span> El sitemap declara contenido modificado después de este análisis. Conviene reescanear.</p>
+  {% endif %}
   {% if report.acquisition.owned_pages.language_detection.mixed_language_site %}
   <p><span class="chip warn">mezcla de idiomas</span> Las páginas capturadas cambian de idioma dentro del mismo dominio{% if report.acquisition.owned_pages.language_detection.declared_mismatch_count %}; {{ report.acquisition.owned_pages.language_detection.declared_mismatch_count }} no coincide{% if report.acquisition.owned_pages.language_detection.declared_mismatch_count != 1 %}n{% endif %} con el idioma declarado en HTML{% endif %}.</p>
+  {% endif %}
+  {% if report.acquisition.owned_pages.content_sampling.sampling_record_count %}
+  <p><span class="chip warn">contenido muestreado</span> Capturar una URL no implica conservar todo su texto: se omitieron {{ report.acquisition.owned_pages.content_sampling.omitted_chunk_count }} fragmentos después de priorizar las secciones estratégicas.</p>
+  <details>
+    <summary>Superficies con contenido parcial</summary>
+    <ul class="plain">
+      {% for surface in report.acquisition.owned_pages.content_sampling.surfaces %}
+      <li><span class="chip warn">{{ surface.retained_chunk_count }}/{{ surface.available_chunk_count }} fragmentos</span> {% if surface.url %}<a href="{{ surface.url }}" target="_blank" rel="noopener noreferrer">{{ surface.url }}</a>{% else %}<span class="mono">{{ surface.ref }}</span>{% endif %}</li>
+      {% endfor %}
+    </ul>
+  </details>
   {% endif %}
   {% if report.acquisition.owned_pages.visited_pages %}
   <h3 class="acquisition-subhead">Visitadas</h3>
@@ -357,6 +393,9 @@
 </section>
 <p class="muted mono type-caption">
   report {{ report.id }} ·
-  <span title="{{ report.build.commit_sha }}">build {{ report.build.commit_short }}</span>
+  <span title="{{ report.build.commit_sha }}">build {{ report.build.commit_short }}</span> ·
+  rúbrica {{ report.analysis_contract.rubric_version or "unknown" }} ·
+  prompt {{ report.analysis_contract.interpretation_prompt_version or "unknown" }} ·
+  evaluador {{ report.analysis_contract.evaluator_model or "unknown" }}
 </p>
 {% endblock %}

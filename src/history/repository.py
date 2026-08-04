@@ -349,7 +349,9 @@ class PostgresHistoryRepository:
                     report_snapshots.payload -> 'score' AS score,
                     report_snapshots.payload -> 'detected_count' AS detected_count,
                     report_snapshots.payload -> 'block_count' AS block_count,
-                    COALESCE(report_snapshots.payload -> 'not_detected', '[]'::jsonb) AS not_detected
+                    COALESCE(report_snapshots.payload -> 'not_detected', '[]'::jsonb) AS not_detected,
+                    COALESCE(report_snapshots.payload ->> 'canonical_status', '') AS canonical_status,
+                    COALESCE(report_snapshots.payload -> 'stability', '{{}}'::jsonb) AS stability
                 FROM {_SCHEMA}.report_snapshots
                 JOIN {_SCHEMA}.workspaces
                   ON workspaces.id = report_snapshots.workspace_id

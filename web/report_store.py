@@ -874,6 +874,12 @@ def _summary_row(report: dict[str, Any], *, fallback_id: str = "") -> dict[str, 
         "detected_count": report.get("detected_count"),
         "block_count": report.get("block_count"),
         "not_detected": report.get("not_detected") or [],
+        "canonical_status": report.get("canonical_status") or "",
+        "stability": (
+            dict(report.get("stability"))
+            if isinstance(report.get("stability"), dict)
+            else {}
+        ),
     }
 
 

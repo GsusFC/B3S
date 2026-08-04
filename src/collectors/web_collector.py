@@ -567,6 +567,10 @@ class WebCollector(
                 data.page_selection.update(
                     {
                         "eligible_not_visited_count": eligible_not_visited_count,
+                        "eligible_page_count": (
+                            len(visited_pages) + eligible_not_visited_count
+                        ),
+                        "eligible_captured_page_count": captured_page_count,
                         "budget_exhausted": (
                             len(selected_rows) >= maximum_page_budget
                             and eligible_not_visited_count > 0
