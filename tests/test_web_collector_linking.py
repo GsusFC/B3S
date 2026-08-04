@@ -27,132 +27,136 @@ def test_internal_link_extraction_ignores_framework_assets_and_keeps_navigation(
     assert links == ["https://movyn.ai/values", "https://movyn.ai/about", "https://movyn.ai/culture"]
 
 
-def test_firecrawl_map_discovery_is_bounded_and_filters_non_owned_links(
+def test_vault_firecrawl_requests_live_links_without_retaining_html(
     monkeypatch,
 ) -> None:
-    collector = WebCollector(api_key="firecrawl-map-test-key")
-    observed_options: dict[str, object] = {}
+    calls: list[dict[str, object]] = []
 
     class FakeFirecrawl:
         def __init__(self, *, api_key: str):
-            assert api_key == "firecrawl-map-test-key"
+            assert api_key == "firecrawl-test-key"
 
-        def map(self, url: str, **options):
-            assert url == "https://example.com"
-            observed_options.update(options)
+        def scrape(self, url: str, **options):
+            calls.append({"url": url, **options})
             return SimpleNamespace(
-                links=[
-                    SimpleNamespace(url="https://example.com"),
-                    SimpleNamespace(url="https://example.com/research?utm_source=map"),
-                    SimpleNamespace(url="/news/story#section"),
-                    SimpleNamespace(url="https://external.example/about"),
-                    SimpleNamespace(url="https://example.com/report.pdf"),
-                ]
+                markdown="# Example\n\nUseful current evidence. " * 8,
+                html="<html>large payload</html>",
+                links=["https://example.com/current-proof"],
+                metadata={"statusCode": 200, "sourceURL": url},
             )
 
     monkeypatch.setattr("firecrawl.Firecrawl", FakeFirecrawl)
-
-    links, diagnostics = collector._discover_firecrawl_map_links(
-        "https://example.com",
-        limit=40,
-        timeout_ms=12_000,
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    vault = WebCollector(api_key="firecrawl-test-key")._run_firecrawl(
+        "https://example.com"
     )
 
-    assert links == [
-        "https://example.com/research",
-        "https://example.com/news/story",
-    ]
-    assert diagnostics["status"] == "discovered"
-    assert diagnostics["candidate_count"] == 2
-    assert observed_options == {
-        "include_subdomains": False,
-        "ignore_query_parameters": True,
-        "limit": 40,
-        "sitemap": "include",
-        "timeout": 12_000,
-    }
+    assert calls[0]["formats"] == ["markdown", "links"]
+    assert calls[0]["only_main_content"] is False
+    assert calls[0]["remove_base64_images"] is True
+    assert vault["html"] == ""
+    assert vault["links"] == ["https://example.com/current-proof"]
+    assert vault["status_code"] == 200
+
+    calls.clear()
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "production")
+    production = WebCollector(api_key="firecrawl-test-key")._run_firecrawl(
+        "https://example.com"
+    )
+
+    assert calls[0]["formats"] == ["markdown", "html"]
+    assert calls[0]["only_main_content"] is True
+    assert "remove_base64_images" not in calls[0]
+    assert production["html"] == "<html>large payload</html>"
 
 
-def test_vault_provider_map_augments_sparse_homepage_without_touching_production(
+def test_vault_live_links_expand_sparse_homepage_without_stale_map(
     monkeypatch,
 ) -> None:
     root = "https://example.com"
-    map_links = [
-        f"{root}/media-and-press",
-        f"{root}/luka-vuskovic",
-        f"{root}/investment-round",
-        f"{root}/new-way-of-signings",
-    ]
-    map_calls: list[str] = []
-
-    def scrape_for_environment(environment: str):
-        monkeypatch.setenv("BRAND3_ENVIRONMENT", environment)
-        collector = WebCollector(api_key=())
-
-        def fake_firecrawl(url: str) -> dict:
-            return {
-                "content": f"# Example\n\nEvidence from {url}. " * 8,
-                "html": '<a href="/aboutus">About</a>' if url == root else "",
-                "final_url": url,
-            }
-
-        monkeypatch.setattr(collector, "_run_firecrawl", fake_firecrawl)
-        monkeypatch.setattr(
-            collector,
-            "_discover_sitemap_links",
-            lambda _url: (
-                [],
-                {
-                    "status": "unavailable",
-                    "known_pages": [],
-                    "excluded_pages": [],
-                    "latest_lastmod": "",
-                    "errors": ["sitemap:not found"],
-                },
-            ),
-        )
-
-        def fake_provider_map(url: str):
-            map_calls.append(f"{environment}:{url}")
-            return map_links, {
-                "status": "discovered",
-                "reason": "",
-                "candidate_count": len(map_links),
-                "errors": [],
-            }
-
-        monkeypatch.setattr(
-            collector,
-            "_discover_firecrawl_map_links",
-            fake_provider_map,
-        )
-        return collector.scrape(root, crawl_subpages=True)
-
-    production = scrape_for_environment("production")
-    vault = scrape_for_environment("vault")
-
-    assert map_calls == [f"vault:{root}"]
-    assert production.page_selection["known_page_count"] == 2
-    assert vault.page_selection["provider_map_candidate_count"] == 4
-    assert vault.page_selection["provider_map_discovery"]["status"] == (
-        "discovered"
-    )
-    assert vault.page_selection["discovery_status"] == "verified"
-    assert vault.page_selection["discovery_sources"] == [
-        "homepage_links",
-        "firecrawl_map",
-    ]
-    assert set(vault.owned_fallback_urls) == {
+    live_links = [
         f"{root}/aboutus",
-        *map_links,
-    }
-    known_by_url = {
-        row["url"]: row for row in vault.page_selection["known_pages"]
-    }
-    assert known_by_url[f"{root}/luka-vuskovic"]["source"] == "provider_map"
-    assert known_by_url[f"{root}/luka-vuskovic"]["navigation_status"] == (
-        "provider_map_only"
+        f"{root}/round",
+        f"{root}/mateus",
+        f"{root}/vuskovic",
+        f"{root}/spainsub",
+        f"{root}/strikerswc",
+        f"{root}/austriawc",
+    ]
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    collector = WebCollector(api_key=())
+
+    def fake_firecrawl(url: str) -> dict:
+        return {
+            "content": f"# Example\n\nEvidence from {url}. " * 8,
+            "html": "",
+            "links": live_links if url == root else [],
+            "final_url": url,
+            "status_code": 200,
+        }
+
+    monkeypatch.setattr(collector, "_run_firecrawl", fake_firecrawl)
+    monkeypatch.setattr(
+        collector,
+        "_discover_sitemap_links",
+        lambda _url: (
+            [],
+            {
+                "status": "unavailable",
+                "known_pages": [],
+                "excluded_pages": [],
+                "latest_lastmod": "",
+                "sitemaps_read": [],
+                "errors": ["sitemap:not found"],
+            },
+        ),
     )
+
+    data = collector.scrape(root, crawl_subpages=True)
+
+    assert data.page_selection["version"] == (
+        "owned-page-selection-v6-vault-live-links"
+    )
+    assert data.page_selection["discovery_status"] == "observed_only"
+    assert data.page_selection["discovery_sources"] == ["firecrawl_live_links"]
+    assert data.page_selection["discovery_limitations"] == [
+        "owned_page_enumeration_unverified"
+    ]
+    assert set(data.owned_fallback_urls) == set(live_links)
+    assert data.page_selection["known_page_count"] == 1 + len(live_links)
+
+
+def test_http_error_page_is_not_accepted_as_evidence_or_retried(
+    monkeypatch,
+) -> None:
+    collector = WebCollector(api_key=())
+    monkeypatch.setattr(
+        collector,
+        "_run_firecrawl",
+        lambda _url: {
+            "content": "# Page not found\n\nThis route no longer exists. " * 8,
+            "html": "<h1>Page not found</h1>",
+            "status_code": 404,
+        },
+    )
+    monkeypatch.setattr(
+        collector,
+        "_fetch_html_fallback",
+        lambda _url: (_ for _ in ()).throw(AssertionError("unexpected fallback")),
+    )
+    monkeypatch.setattr(
+        collector,
+        "_fetch_browser_fallback",
+        lambda _url: (_ for _ in ()).throw(AssertionError("unexpected fallback")),
+    )
+
+    data = collector.scrape("https://example.com/old-route", crawl_subpages=False)
+
+    assert data.markdown_content == ""
+    assert data.html == ""
+    assert data.error == "HTTP 404"
+    assert data.browser_status == 404
+    assert data.capture_provenance["provider"] == "none"
 
 
 def test_sitemap_discovery_reads_robots_index_and_filters_disallowed_urls(
@@ -548,7 +552,7 @@ def test_vault_profile_expands_soccersolver_editorial_evidence_without_changing_
 
     assert vault.page_selection["profile"] == "vault_evidence_expansion"
     assert vault.page_selection["version"] == (
-        "owned-page-selection-v5-vault-map-adaptive"
+        "owned-page-selection-v6-vault-live-links"
     )
     assert vault.page_selection["maximum_budget"] == 24
     assert vault.page_selection["budget"] == len(sitemap_links) - 1

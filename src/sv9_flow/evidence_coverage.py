@@ -514,9 +514,6 @@ def _owned_page_coverage(selection: dict[str, Any]) -> dict[str, Any]:
                     for limitation in selection.get("discovery_limitations") or []
                     if str(limitation).strip()
                 ],
-                "provider_map_candidate_count": int(
-                    selection.get("provider_map_candidate_count") or 0
-                ),
             }
         )
     return coverage

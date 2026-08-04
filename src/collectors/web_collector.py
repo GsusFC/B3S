@@ -13,7 +13,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from src.api_key_pool import ApiKeySource, shared_api_key_pool
 from src.collectors.page_language import (
@@ -148,6 +148,26 @@ class WebCollector(
         """Scrape URL via Firecrawl Python SDK. Returns legacy {content, raw, error} shape."""
         if not self._api_keys:
             return {"error": "FIRECRAWL_API_KEY not set"}
+        vault_evidence_expansion = (
+            os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower()
+            == "vault"
+        )
+        scrape_options: dict[str, object] = {
+            "formats": (
+                ["markdown", "links"]
+                if vault_evidence_expansion
+                else ["markdown", "html"]
+            ),
+            "max_age": _FIRECRAWL_MAX_AGE_MS,
+            "timeout": 60000,
+            "wait_for": 2000,
+            "only_main_content": not vault_evidence_expansion,
+        }
+        if vault_evidence_expansion:
+            # Firecrawl only removes inline base64 payloads from markdown.
+            # Omitting HTML entirely prevents image-heavy sites from keeping
+            # tens of megabytes resident while the visual pass starts.
+            scrape_options["remove_base64_images"] = True
         last_error = ""
         attempts = max(_TRANSIENT_FETCH_ATTEMPTS, self._api_keys.size)
         for attempt in range(attempts):
@@ -156,11 +176,7 @@ class WebCollector(
 
                 doc = Firecrawl(api_key=self._api_keys.next_key()).scrape(
                     url,
-                    formats=["markdown", "html"],
-                    max_age=_FIRECRAWL_MAX_AGE_MS,
-                    timeout=60000,
-                    wait_for=2000,
-                    only_main_content=True,
+                    **scrape_options,
                 )
                 break
             except Exception as exc:
@@ -173,8 +189,20 @@ class WebCollector(
         else:
             return {"error": last_error}
         content = (doc.markdown or "").strip()
-        html = (getattr(doc, "html", None) or "").strip()
+        html = (
+            ""
+            if vault_evidence_expansion
+            else (getattr(doc, "html", None) or "").strip()
+        )
+        links = [
+            str(link).strip()
+            for link in (getattr(doc, "links", None) or [])
+            if str(link).strip()
+        ]
         metadata = self._firecrawl_metadata(getattr(doc, "metadata", None))
+        status_code = self._coerce_http_status(
+            metadata.get("statusCode") or metadata.get("status_code")
+        )
         final_url = str(
             metadata.get("sourceURL")
             or metadata.get("source_url")
@@ -185,79 +213,9 @@ class WebCollector(
             "content": content,
             "raw": content,
             "html": html,
+            "links": links,
             "final_url": final_url,
-        }
-
-    def _discover_firecrawl_map_links(
-        self,
-        url: str,
-        *,
-        limit: int = 80,
-        timeout_ms: int = 30_000,
-    ) -> tuple[list[str], dict[str, object]]:
-        """Return bounded same-domain page candidates from Firecrawl Map."""
-
-        diagnostics: dict[str, object] = {
-            "status": "skipped",
-            "reason": "firecrawl_api_key_unavailable",
-            "candidate_count": 0,
-            "limit": limit,
-            "timeout_ms": timeout_ms,
-            "errors": [],
-        }
-        if not self._api_keys:
-            return [], diagnostics
-
-        last_error = ""
-        attempts = max(_TRANSIENT_FETCH_ATTEMPTS, self._api_keys.size)
-        for attempt in range(attempts):
-            try:
-                from firecrawl import Firecrawl
-
-                result = Firecrawl(api_key=self._api_keys.next_key()).map(
-                    url,
-                    include_subdomains=False,
-                    ignore_query_parameters=True,
-                    limit=limit,
-                    sitemap="include",
-                    timeout=timeout_ms,
-                )
-                break
-            except Exception as exc:
-                last_error = str(exc)
-                if attempt + 1 < attempts:
-                    time.sleep(_TRANSIENT_FETCH_DELAY_S)
-        else:
-            return [], {
-                **diagnostics,
-                "status": "unavailable",
-                "reason": "firecrawl_map_failed",
-                "errors": [last_error[:160]] if last_error else [],
-            }
-
-        candidates: list[str] = []
-        seen: set[str] = set()
-        for row in getattr(result, "links", []) or []:
-            candidate = str(getattr(row, "url", "") or "").strip()
-            if not candidate:
-                continue
-            absolute = self._normalize_request_url(urljoin(url, candidate))
-            parsed = urlparse(absolute)
-            if not self._same_owned_domain(absolute, url):
-                continue
-            if not self._looks_like_page_link(parsed):
-                continue
-            normalized = parsed._replace(fragment="", query="").geturl().rstrip("/")
-            if normalized.rstrip("/") == url.rstrip("/") or normalized in seen:
-                continue
-            seen.add(normalized)
-            candidates.append(normalized)
-
-        return candidates, {
-            **diagnostics,
-            "status": "discovered" if candidates else "empty",
-            "reason": "",
-            "candidate_count": len(candidates),
+            "status_code": status_code,
         }
 
     def scrape(self, url: str, crawl_subpages: bool = True) -> WebData:
@@ -269,9 +227,16 @@ class WebCollector(
 
         # Basic scrape
         result = self._run_firecrawl(url)
-        if "error" not in result:
+        status_code = self._coerce_http_status(result.get("status_code"))
+        terminal_http_error = bool(status_code and status_code >= 400)
+        if terminal_http_error:
+            data.browser_status = status_code
+            data.error = f"HTTP {status_code}"
+        elif "error" not in result:
             data.markdown_content = self._clean_markdown_content(result.get("content", ""))
             data.html = result.get("html", "") or data.html
+            data.links = result.get("links") or data.links
+            data.browser_status = status_code
             data.title = self._extract_title(data.markdown_content)
             data.markdown_content = self._trim_to_title(data.markdown_content, data.title)
             if self._looks_like_cookie_banner(data.title, data.markdown_content):
@@ -285,10 +250,13 @@ class WebCollector(
             if self._has_usable_markdown_content(data.markdown_content):
                 capture_provider = "firecrawl"
                 final_url = str(result.get("final_url") or url)
-        else:
+        elif not terminal_http_error:
             data.error = result["error"]
 
-        if not self._has_usable_markdown_content(data.markdown_content):
+        if (
+            not terminal_http_error
+            and not self._has_usable_markdown_content(data.markdown_content)
+        ):
             html, html_error = self._fetch_html_fallback(url)
             if html:
                 data.html = html
@@ -304,7 +272,10 @@ class WebCollector(
             elif html_error and not data.error:
                 data.error = html_error
 
-        if not self._has_usable_markdown_content(data.markdown_content):
+        if (
+            not terminal_http_error
+            and not self._has_usable_markdown_content(data.markdown_content)
+        ):
             payload, browser_error = self._fetch_browser_fallback(url)
             if payload:
                 data.html = payload.get("html") or data.html
@@ -371,31 +342,6 @@ class WebCollector(
                 os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower()
                 == "vault"
             )
-            provider_map_links: list[str] = []
-            provider_map_discovery: dict[str, object] = {
-                "status": "disabled",
-                "reason": "vault_evidence_expansion_disabled",
-                "candidate_count": 0,
-                "errors": [],
-            }
-            discovered_before_map = list(
-                dict.fromkeys([*observed_links, *sitemap_links])
-            )
-            if (
-                vault_evidence_expansion
-                and len(discovered_before_map) < VAULT_MAX_OWNED_SUBPAGES
-            ):
-                try:
-                    provider_map_links, provider_map_discovery = (
-                        self._discover_firecrawl_map_links(url)
-                    )
-                except Exception as exc:
-                    provider_map_discovery = {
-                        **provider_map_discovery,
-                        "status": "unavailable",
-                        "reason": "firecrawl_map_exception",
-                        "errors": [str(exc)[:160]],
-                    }
             sitemap_page_metadata = {
                 str(row.get("url") or "").rstrip("/"): row
                 for row in discovery.get("known_pages") or []
@@ -406,13 +352,10 @@ class WebCollector(
                 for page_url, row in sitemap_page_metadata.items()
             }
             all_candidates = list(
-                dict.fromkeys(
-                    [*observed_links, *sitemap_links, *provider_map_links]
-                )
+                dict.fromkeys([*observed_links, *sitemap_links])
             )
             observed_set = set(observed_links)
             sitemap_set = set(sitemap_links)
-            provider_map_set = set(provider_map_links)
             sitemap_only_links = [
                 candidate
                 for candidate in sitemap_links
@@ -452,16 +395,8 @@ class WebCollector(
                         "observed+sitemap"
                         if selected_url in observed_set
                         and selected_url in sitemap_set
-                        else "observed+provider_map"
-                        if selected_url in observed_set
-                        and selected_url in provider_map_set
-                        else "sitemap+provider_map"
-                        if selected_url in sitemap_set
-                        and selected_url in provider_map_set
                         else "sitemap"
                         if selected_url in sitemap_set
-                        else "provider_map"
-                        if selected_url in provider_map_set
                         else "observed"
                     ),
                     "status": "selected",
@@ -478,16 +413,11 @@ class WebCollector(
                 "maximum_budget": maximum_page_budget,
                 "observed_candidate_count": len(observed_links),
                 "sitemap_candidate_count": len(sitemap_links),
-                "provider_map_candidate_count": len(provider_map_links),
                 "unique_candidate_count": len(all_candidates),
                 "discovery": discovery,
-                "provider_map_discovery": provider_map_discovery,
                 "selected": selected_rows,
             }
             if vault_evidence_expansion:
-                provider_map_status = str(
-                    provider_map_discovery.get("status") or ""
-                ).strip().lower()
                 sitemap_status = str(
                     discovery.get("status") or ""
                 ).strip().lower()
@@ -495,27 +425,21 @@ class WebCollector(
                     sitemap_status in {"discovered", "empty"}
                     and bool(discovery.get("sitemaps_read"))
                 )
-                provider_map_verified = provider_map_status in {
-                    "discovered",
-                    "empty",
-                }
-                discovery_sources = ["homepage_links"]
+                discovery_sources = [
+                    "firecrawl_live_links" if data.links else "homepage_links"
+                ]
                 if sitemap_verified:
                     discovery_sources.append("sitemap")
-                if provider_map_verified:
-                    discovery_sources.append("firecrawl_map")
                 data.page_selection.update(
                     {
                         "profile": "vault_evidence_expansion",
                         "discovery_status": (
-                            "verified"
-                            if sitemap_verified or provider_map_verified
-                            else "observed_only"
+                            "verified" if sitemap_verified else "observed_only"
                         ),
                         "discovery_sources": discovery_sources,
                         "discovery_limitations": (
                             []
-                            if sitemap_verified or provider_map_verified
+                            if sitemap_verified
                             else ["owned_page_enumeration_unverified"]
                         ),
                     }
@@ -567,16 +491,8 @@ class WebCollector(
                         if known_url.rstrip("/") == url.rstrip("/")
                         else "observed+sitemap"
                         if known_url in observed_set and known_url in sitemap_set
-                        else "observed+provider_map"
-                        if known_url in observed_set
-                        and known_url in provider_map_set
-                        else "sitemap+provider_map"
-                        if known_url in sitemap_set
-                        and known_url in provider_map_set
                         else "sitemap"
                         if known_url in sitemap_set
-                        else "provider_map"
-                        if known_url in provider_map_set
                         else "observed"
                     ),
                     "navigation_status": (
@@ -585,8 +501,6 @@ class WebCollector(
                         else "linked_from_home"
                         if known_url in observed_set
                         else "sitemap_only"
-                        if known_url in sitemap_set
-                        else "provider_map_only"
                     ),
                     "lastmod": str(
                         (
@@ -622,8 +536,6 @@ class WebCollector(
                             "linked_from_home"
                             if row["url"] in observed_set
                             else "sitemap_only"
-                            if row["url"] in sitemap_set
-                            else "provider_map_only"
                         ),
                         "lastmod": str(
                             sitemap_page_metadata.get(
@@ -773,6 +685,14 @@ class WebCollector(
             dumped = value.dict()
             return dumped if isinstance(dumped, dict) else {}
         return {}
+
+    @staticmethod
+    def _coerce_http_status(value) -> int | None:
+        try:
+            status = int(value)
+        except (TypeError, ValueError):
+            return None
+        return status if 100 <= status <= 599 else None
 
     @staticmethod
     def _capture_provenance(
