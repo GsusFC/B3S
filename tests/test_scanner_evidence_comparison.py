@@ -302,9 +302,63 @@ def test_same_domain_exa_result_is_owned_not_external_content() -> None:
     assert snapshot.owned_count == 2
     assert snapshot.external_count == 1
     assert snapshot.external_content_cluster_count == 1
-    assert public_snapshot["schema_version"] == "evidence-comparison-v4"
+    assert public_snapshot["schema_version"] == "evidence-comparison-v5"
     assert public_snapshot["counts"]["external_content_clusters"] == 1
     assert "independent_external_clusters" not in public_snapshot["counts"]
+
+
+def test_comparator_treats_chunk_boundary_drift_as_equivalent_evidence() -> None:
+    baseline = _report(
+        "baseline",
+        "2026-07-26T00:00:00Z",
+        evidence=[
+            _evidence(
+                "web.1",
+                "web",
+                "owned_copy",
+                "https://example.com/research",
+                "Alpha evidence explains the durable strategic direction.",
+            ),
+            _evidence(
+                "web.2",
+                "web",
+                "owned_copy",
+                "https://example.com/research",
+                "Strategic direction connects product proof with market impact.",
+            ),
+        ],
+        component_score=3,
+    )
+    candidate = _report(
+        "candidate",
+        "2026-07-27T00:00:00Z",
+        evidence=[
+            _evidence(
+                "web.9",
+                "web",
+                "owned_copy",
+                "https://example.com/research",
+                "Alpha evidence explains the durable strategic direction and connects product proof.",
+            ),
+            _evidence(
+                "web.10",
+                "web",
+                "owned_copy",
+                "https://example.com/research",
+                "Product proof connects the strategic direction with market impact.",
+            ),
+        ],
+        component_score=0,
+    )
+
+    comparison = compare_reports(baseline, candidate)
+
+    assert comparison.classification == "evaluation_drift"
+    assert comparison.equivalent_evidence is True
+    assert comparison.delta["unchanged_record_count"] == 0
+    assert comparison.delta["modified_record_count"] == 1
+    assert comparison.delta["semantic_locator_ratio"] == 1.0
+    assert comparison.delta["semantic_token_jaccard"] >= 0.9
 
 
 def test_lost_same_domain_exa_result_is_owned_evidence_loss() -> None:
