@@ -7,6 +7,9 @@ import json
 from typing import Any
 from urllib.parse import urlparse
 
+from src.services.scanner_analysis_contract import analysis_contract_from_report
+from src.services.scanner_score_publication import score_publication_from_report
+
 
 _STATE_MAP = {
     "accepted": "running",
@@ -92,14 +95,21 @@ def completed_status_from_report(report: dict[str, Any]) -> dict[str, Any]:
 
 def result_payload(report: dict[str, Any]) -> dict[str, Any]:
     scan_id = str(report.get("id") or "")
-    components = [_component_payload(item) for item in report.get("components") or [] if isinstance(item, dict)]
+    score_publication = score_publication_from_report(report)
+    score_publishable = bool(score_publication["publishable"])
+    components = [
+        _component_payload(item, score_publishable=score_publishable)
+        for item in report.get("components") or []
+        if isinstance(item, dict)
+    ]
     raw = report.get("raw") if isinstance(report.get("raw"), dict) else {}
     flow = raw.get("flow") if isinstance(raw.get("flow"), dict) else {}
     debug = flow.get("interpretation_debug") if isinstance(flow.get("interpretation_debug"), dict) else {}
     sv9 = raw.get("sv9") if isinstance(raw.get("sv9"), dict) else {}
     sv9_result = sv9.get("result") if isinstance(sv9.get("result"), dict) else {}
     evaluator_model = str(
-        sv9_result.get("evaluation_model")
+        sv9_result.get("evaluator_model")
+        or sv9_result.get("evaluation_model")
         or next((item.get("evaluation_model") for item in report.get("components") or [] if isinstance(item, dict) and item.get("evaluation_model")), "")
         or ""
     )
@@ -120,6 +130,8 @@ def result_payload(report: dict[str, Any]) -> dict[str, Any]:
         key = str(component.get("key") or component.get("component") or "").strip()
         if key and key not in insufficient_evidence:
             insufficient_evidence.append(key)
+    analysis_contract = analysis_contract_from_report(report)
+    raw_score = _number(score_publication.get("raw_value"))
     return {
         "object": "scan_result",
         "api_version": "v1",
@@ -127,7 +139,12 @@ def result_payload(report: dict[str, Any]) -> dict[str, Any]:
         "status": "completed",
         "brand": _brand_payload(report),
         "score": {
-            "value": _number(report.get("score")),
+            "value": raw_score if score_publishable else None,
+            "raw_value": raw_score,
+            "publishable": score_publishable,
+            "retention_reason": str(
+                score_publication.get("retention_reason") or ""
+            ),
             "scale": 100,
             "base_average": _number(report.get("base_average")),
             "reliability_status": str(report.get("reliability_status") or "unknown"),
@@ -158,6 +175,9 @@ def result_payload(report: dict[str, Any]) -> dict[str, Any]:
             "rubric_version": str(sv9_result.get("rubric_version") or "unknown"),
             "prompt_version": str(debug.get("prompt_version") or "unknown"),
             "evaluator_model": evaluator_model or "unknown",
+            "analysis_contract_fingerprint": str(
+                analysis_contract.get("fingerprint") or ""
+            ),
             "generated_at": report.get("created_at"),
         },
         "links": scan_links(scan_id),
@@ -198,7 +218,11 @@ def report_etag(report: dict[str, Any]) -> str:
     return f'"{digest}"'
 
 
-def _component_payload(component: dict[str, Any]) -> dict[str, Any]:
+def _component_payload(
+    component: dict[str, Any],
+    *,
+    score_publishable: bool = True,
+) -> dict[str, Any]:
     block = component.get("block") if isinstance(component.get("block"), dict) else {}
     tile_profile = [dict(item) for item in component.get("tile_profile") or [] if isinstance(item, dict)]
     if not tile_profile:
@@ -227,7 +251,11 @@ def _component_payload(component: dict[str, Any]) -> dict[str, Any]:
         "key": key,
         "label": str(component.get("label") or key.replace("_", " ").title()),
         "status": str(component.get("status") or "unknown"),
-        "score": _number(component.get("score")),
+        "score": (
+            _number(component.get("score")) if score_publishable else None
+        ),
+        "raw_score": _number(component.get("score")),
+        "score_publishable": score_publishable,
         "max_score": _number(component.get("scale")),
         "confidence": str(component.get("confidence") or block.get("confidence") or "unknown"),
         "summary": str(component.get("resumen") or ""),

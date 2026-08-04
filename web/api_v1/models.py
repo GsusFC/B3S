@@ -100,6 +100,8 @@ class ScanComponent(StrictModel):
     label: str
     status: str
     score: float | int | None = None
+    raw_score: float | int | None = None
+    score_publishable: bool = True
     max_score: float | int | None = None
     confidence: str
     summary: str
@@ -120,6 +122,9 @@ class ScanBrand(StrictModel):
 
 class ScanScore(StrictModel):
     value: float | int | None = None
+    raw_value: float | int | None = None
+    publishable: bool = True
+    retention_reason: str = ""
     scale: int = 100
     base_average: float | int | None = None
     reliability_status: str
@@ -132,6 +137,7 @@ class ResultMetadata(StrictModel):
     rubric_version: str
     prompt_version: str
     evaluator_model: str
+    analysis_contract_fingerprint: str = ""
     generated_at: str | None = None
 
 
@@ -184,6 +190,8 @@ class ScanHistoryItem(StrictModel):
     brand_name: str
     url: str
     score: float | int | None = None
+    raw_score: float | int | None = None
+    score_publishable: bool = True
     created_at: str | None = None
     reliability_status: str = "unknown"
     canonical_status: str = "unknown"

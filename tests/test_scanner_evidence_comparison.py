@@ -73,6 +73,80 @@ def test_comparator_flags_evaluation_drift_for_equivalent_evidence() -> None:
     assert comparison.delta["changed_components"][0]["component"] == "value_proposition"
 
 
+def test_comparator_does_not_call_different_rubrics_evaluation_drift() -> None:
+    baseline = _report(
+        "baseline",
+        "2026-07-25T00:00:00Z",
+        component_score=3,
+    )
+    candidate = _report(
+        "candidate",
+        "2026-07-26T00:00:00Z",
+        component_score=0,
+    )
+    baseline["raw"]["sv9"] = {
+        "result": {"rubric_version": "baldosas-v3-1"}
+    }
+    candidate["raw"]["sv9"] = {
+        "result": {"rubric_version": "baldosas-v3-2"}
+    }
+
+    comparison = compare_reports(baseline, candidate)
+
+    assert comparison.classification == "contract_mismatch"
+    assert comparison.contract_comparable is False
+    assert comparison.reason_codes == ("analysis_contract_changed",)
+    assert (
+        comparison.delta["baseline_analysis_contract"]["rubric_version"]
+        == "baldosas-v3-1"
+    )
+
+
+def test_comparator_detects_legacy_evaluator_model_change_as_contract_mismatch() -> None:
+    baseline = _report("baseline", "2026-07-25T00:00:00Z")
+    candidate = _report("candidate", "2026-07-26T00:00:00Z")
+    baseline["raw"]["sv9"] = {
+        "result": {"evaluation_model": "gemini-2.5-flash"}
+    }
+    candidate["raw"]["sv9"] = {
+        "result": {"evaluation_model": "gemini-3-flash"}
+    }
+
+    comparison = compare_reports(baseline, candidate)
+
+    assert comparison.classification == "contract_mismatch"
+    assert (
+        comparison.delta["baseline_analysis_contract"]["evaluator_model"]
+        == "gemini-2.5-flash"
+    )
+
+
+def test_history_promotes_repeated_reliable_new_contract_without_locking_old_baseline() -> None:
+    old = _report("old", "2026-07-25T00:00:00Z")
+    first_new = _report("first-new", "2026-07-26T00:00:00Z")
+    repeated_new = _report("repeated-new", "2026-07-27T00:00:00Z")
+    for report, rubric in (
+        (old, "baldosas-v3-1"),
+        (first_new, "baldosas-v3-2"),
+        (repeated_new, "baldosas-v3-2"),
+    ):
+        report["reliability_status"] = "reliable"
+        report["acquisition_gate"] = {"state": "pass", "warnings": []}
+        report["raw"]["sv9"] = {"result": {"rubric_version": rubric}}
+
+    state = classify_report_history([old, first_new, repeated_new])
+    entries = {entry["report_id"]: entry for entry in state["entries"]}
+
+    assert entries["first-new"]["classification"] == "contract_mismatch"
+    assert entries["first-new"]["canonical_status"] == "non_canonical"
+    assert entries["repeated-new"]["classification"] == "canonical"
+    assert entries["repeated-new"]["reason_codes"] == [
+        "new_contract_reliable_repeat_promoted"
+    ]
+    assert entries["old"]["canonical_status"] == "non_canonical"
+    assert state["canonical_report_id"] == "repeated-new"
+
+
 def test_comparator_tolerates_one_minor_content_change_in_same_source_set() -> None:
     baseline_rows = [
         _evidence("web", "web", "owned_copy", "https://example.com", "Owned copy."),
@@ -228,9 +302,63 @@ def test_same_domain_exa_result_is_owned_not_external_content() -> None:
     assert snapshot.owned_count == 2
     assert snapshot.external_count == 1
     assert snapshot.external_content_cluster_count == 1
-    assert public_snapshot["schema_version"] == "evidence-comparison-v3"
+    assert public_snapshot["schema_version"] == "evidence-comparison-v5"
     assert public_snapshot["counts"]["external_content_clusters"] == 1
     assert "independent_external_clusters" not in public_snapshot["counts"]
+
+
+def test_comparator_treats_chunk_boundary_drift_as_equivalent_evidence() -> None:
+    baseline = _report(
+        "baseline",
+        "2026-07-26T00:00:00Z",
+        evidence=[
+            _evidence(
+                "web.1",
+                "web",
+                "owned_copy",
+                "https://example.com/research",
+                "Alpha evidence explains the durable strategic direction.",
+            ),
+            _evidence(
+                "web.2",
+                "web",
+                "owned_copy",
+                "https://example.com/research",
+                "Strategic direction connects product proof with market impact.",
+            ),
+        ],
+        component_score=3,
+    )
+    candidate = _report(
+        "candidate",
+        "2026-07-27T00:00:00Z",
+        evidence=[
+            _evidence(
+                "web.9",
+                "web",
+                "owned_copy",
+                "https://example.com/research",
+                "Alpha evidence explains the durable strategic direction and connects product proof.",
+            ),
+            _evidence(
+                "web.10",
+                "web",
+                "owned_copy",
+                "https://example.com/research",
+                "Product proof connects the strategic direction with market impact.",
+            ),
+        ],
+        component_score=0,
+    )
+
+    comparison = compare_reports(baseline, candidate)
+
+    assert comparison.classification == "evaluation_drift"
+    assert comparison.equivalent_evidence is True
+    assert comparison.delta["unchanged_record_count"] == 0
+    assert comparison.delta["modified_record_count"] == 1
+    assert comparison.delta["semantic_locator_ratio"] == 1.0
+    assert comparison.delta["semantic_token_jaccard"] >= 0.9
 
 
 def test_lost_same_domain_exa_result_is_owned_evidence_loss() -> None:

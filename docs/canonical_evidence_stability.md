@@ -23,7 +23,13 @@ LLM interpretations and tile results have separate fingerprints. Temperature `0`
 - `evaluation_drift`: materially equivalent evidence produced different interpretation or tile results.
 - `acquisition_regression`: previously observed owned, external, independent, or visual evidence was not reacquired, or the acquisition gate worsened.
 - `candidate`: material evidence changed and needs confirmation rather than silently replacing the baseline.
+- `contract_mismatch`: rubric, prompt, evaluator, or another scoring-contract
+  input differs from the selected baseline; its score is not comparable.
 - `invalid`: broken run or a component that could not be evaluated.
+
+A reliable new contract must produce a stable repeat before it can replace the
+previous contract's baseline. This prevents both cross-rubric score comparison
+and permanent lock-in to an obsolete rubric.
 
 All scans remain accessible in the history. Canonical status is a derived projection and never rewrites a stored report.
 

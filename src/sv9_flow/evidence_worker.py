@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import unicodedata
 from typing import Any
@@ -20,6 +21,8 @@ _WEB_CHUNK_CHARS = _RAW_INPUT_CONTENT_CHARS
 _WEB_CHUNK_OVERLAP = 100
 _MAX_WEB_HOMEPAGE_CHUNKS = 12
 _MAX_WEB_SUBPAGE_CHUNKS = 6
+_MAX_VAULT_WEB_HOMEPAGE_CHUNKS = 18
+_MAX_VAULT_WEB_SUBPAGE_CHUNKS = 12
 _BOILERPLATE_MIN_PAGES = 3
 _STRATEGIC_CHUNK_TERMS: tuple[tuple[str, int], ...] = (
     ("our mission", 12),
@@ -1084,7 +1087,7 @@ def _chunk_text_by_section(text: str, *, homepage: bool = False) -> tuple[list[s
     flush_pending()
 
     total_chunks = len(chunks)
-    limit = _MAX_WEB_HOMEPAGE_CHUNKS if homepage else _MAX_WEB_SUBPAGE_CHUNKS
+    limit = _web_chunk_limit(homepage=homepage)
     if total_chunks <= limit:
         return chunks, total_chunks
 
@@ -1108,6 +1111,25 @@ def _chunk_text_by_section(text: str, *, homepage: bool = False) -> tuple[list[s
             break
     selected_indexes.sort()
     return [chunks[index] for index in selected_indexes[:limit]], total_chunks
+
+
+def _web_chunk_limit(*, homepage: bool) -> int:
+    """Keep more acquired copy in the evidence vault without changing prod.
+
+    Page discovery and evidence preservation are separate budgets. The vault
+    may capture a page successfully and still lose its late, distinctive copy
+    if it applies the standard six-chunk scoring budget while building the
+    persisted EvidencePack. The wider bound remains finite and only applies to
+    the isolated vault deployment.
+    """
+
+    if os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault":
+        return (
+            _MAX_VAULT_WEB_HOMEPAGE_CHUNKS
+            if homepage
+            else _MAX_VAULT_WEB_SUBPAGE_CHUNKS
+        )
+    return _MAX_WEB_HOMEPAGE_CHUNKS if homepage else _MAX_WEB_SUBPAGE_CHUNKS
 
 
 def _strategic_chunk_score(text: str) -> int:

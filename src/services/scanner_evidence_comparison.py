@@ -17,8 +17,13 @@ import unicodedata
 from typing import Any, Iterable
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from src.services.scanner_analysis_contract import (
+    analysis_contract_from_report,
+    analysis_contracts_match,
+)
 
-EVIDENCE_COMPARISON_VERSION = "evidence-comparison-v3"
+
+EVIDENCE_COMPARISON_VERSION = "evidence-comparison-v5"
 CANONICAL_POLICY_VERSION = "brand-canonical-policy-v1"
 ENFORCEMENT_ENV = "B3S_CANONICAL_ENFORCEMENT_MODE"
 ENFORCEMENT_MODES = {"observe", "repeated", "all"}
@@ -83,6 +88,7 @@ class EvidenceSnapshot:
     reliability_status: str
     evaluation_fingerprint: str
     interpretation_fingerprint: str
+    analysis_contract: dict[str, Any]
     invalid: bool
 
     def to_dict(self) -> dict[str, Any]:
@@ -107,6 +113,7 @@ class EvidenceSnapshot:
             "reliability_status": self.reliability_status,
             "evaluation_fingerprint": self.evaluation_fingerprint,
             "interpretation_fingerprint": self.interpretation_fingerprint,
+            "analysis_contract": dict(self.analysis_contract),
             "invalid": self.invalid,
         }
 
@@ -120,6 +127,7 @@ class EvidenceComparison:
     acquisition_comparable: bool
     evaluation_changed: bool
     interpretation_changed: bool
+    contract_comparable: bool
     reason_codes: tuple[str, ...]
     delta: dict[str, Any]
 
@@ -133,6 +141,7 @@ class EvidenceComparison:
             "acquisition_comparable": self.acquisition_comparable,
             "evaluation_changed": self.evaluation_changed,
             "interpretation_changed": self.interpretation_changed,
+            "contract_comparable": self.contract_comparable,
             "reason_codes": list(self.reason_codes),
             "delta": dict(self.delta),
         }
@@ -157,12 +166,13 @@ def build_evidence_snapshot(report: dict[str, Any]) -> EvidenceSnapshot:
     ]
     reliability = str(report.get("reliability_status") or "unknown").strip().lower()
     invalid = reliability in _INVALID_RELIABILITY or _has_not_evaluated_component(report)
-    semantic_payload = {
-        "urls": urls,
-        "owned_content": sorted(record.content_hash for record in owned),
-        "external_content_clusters": _external_content_cluster_fingerprints(external),
-        "visual_content": sorted(record.content_hash for record in visual),
-    }
+    semantic_payload = [
+        {
+            "locator": locator,
+            "tokens": sorted(_records_content_tokens(group)),
+        }
+        for locator, group in _records_by_locator(material).items()
+    ]
     return EvidenceSnapshot(
         report_id=str(report.get("id") or ""),
         fingerprint=_stable_hash(material_payload),
@@ -179,6 +189,7 @@ def build_evidence_snapshot(report: dict[str, Any]) -> EvidenceSnapshot:
         reliability_status=reliability,
         evaluation_fingerprint=_evaluation_fingerprint(report),
         interpretation_fingerprint=_interpretation_fingerprint(report),
+        analysis_contract=analysis_contract_from_report(report),
         invalid=invalid,
     )
 
@@ -191,34 +202,69 @@ def compare_reports(
 
     baseline = build_evidence_snapshot(baseline_report)
     candidate = build_evidence_snapshot(candidate_report)
-    baseline_by_locator = {record.locator: record for record in baseline.material_records}
-    candidate_by_locator = {record.locator: record for record in candidate.material_records}
+    baseline_by_locator = _records_by_locator(baseline.material_records)
+    candidate_by_locator = _records_by_locator(candidate.material_records)
+    baseline_by_fingerprint = {
+        record.fingerprint: record for record in baseline.material_records
+    }
+    candidate_by_fingerprint = {
+        record.fingerprint: record for record in candidate.material_records
+    }
     baseline_urls = {record.url for record in baseline.material_records if record.url}
     candidate_urls = {record.url for record in candidate.material_records if record.url}
 
     unchanged = sorted(
+        baseline_by_fingerprint.keys() & candidate_by_fingerprint.keys()
+    )
+    modified_locators = sorted(
         locator
         for locator in baseline_by_locator.keys() & candidate_by_locator.keys()
-        if baseline_by_locator[locator].content_hash == candidate_by_locator[locator].content_hash
+        if {
+            record.fingerprint for record in baseline_by_locator[locator]
+        }
+        != {
+            record.fingerprint for record in candidate_by_locator[locator]
+        }
     )
-    modified = sorted(
-        locator
-        for locator in baseline_by_locator.keys() & candidate_by_locator.keys()
-        if baseline_by_locator[locator].content_hash != candidate_by_locator[locator].content_hash
-    )
-    lost = sorted(baseline_by_locator.keys() - candidate_by_locator.keys())
-    added = sorted(candidate_by_locator.keys() - baseline_by_locator.keys())
+    lost = sorted(baseline_by_fingerprint.keys() - candidate_by_fingerprint.keys())
+    added = sorted(candidate_by_fingerprint.keys() - baseline_by_fingerprint.keys())
+    lost_locators = sorted(baseline_by_locator.keys() - candidate_by_locator.keys())
+    added_locators = sorted(candidate_by_locator.keys() - baseline_by_locator.keys())
     lost_urls = sorted(baseline_urls - candidate_urls)
     added_urls = sorted(candidate_urls - baseline_urls)
     url_similarity = _jaccard(baseline_urls, candidate_urls)
-    exact_record_ratio = len(unchanged) / max(1, len(baseline_by_locator))
+    exact_record_ratio = len(unchanged) / max(1, len(baseline_by_fingerprint))
+    locator_similarities = {
+        locator: _jaccard(
+            _records_content_tokens(baseline_by_locator[locator]),
+            _records_content_tokens(candidate_by_locator[locator]),
+        )
+        for locator in baseline_by_locator.keys() & candidate_by_locator.keys()
+    }
+    semantically_equivalent_locators = sorted(
+        locator
+        for locator, similarity in locator_similarities.items()
+        if similarity >= 0.82
+    )
+    semantic_locator_ratio = len(semantically_equivalent_locators) / max(
+        1, len(baseline_by_locator)
+    )
+    semantic_token_jaccard = _jaccard(
+        _records_content_tokens(baseline.material_records),
+        _records_content_tokens(candidate.material_records),
+    )
     equivalent = (
         baseline.fingerprint == candidate.fingerprint
         or baseline.semantic_fingerprint == candidate.semantic_fingerprint
         or (
             url_similarity >= 0.9
-            and exact_record_ratio >= 0.8
-            and candidate.owned_count >= baseline.owned_count
+            and (
+                exact_record_ratio >= 0.8
+                or (
+                    semantic_locator_ratio >= 0.9
+                    and semantic_token_jaccard >= 0.9
+                )
+            )
         )
     )
     acquisition_regression_reasons = _acquisition_regression_reasons(
@@ -229,6 +275,10 @@ def compare_reports(
     acquisition_comparable = not acquisition_regression_reasons
     evaluation_changed = baseline.evaluation_fingerprint != candidate.evaluation_fingerprint
     interpretation_changed = baseline.interpretation_fingerprint != candidate.interpretation_fingerprint
+    contract_comparable = analysis_contracts_match(
+        baseline.analysis_contract,
+        candidate.analysis_contract,
+    )
 
     reasons: list[str] = []
     if candidate.invalid:
@@ -238,6 +288,9 @@ def compare_reports(
     elif acquisition_regression_reasons:
         classification = "acquisition_regression"
         reasons.extend(acquisition_regression_reasons)
+    elif not contract_comparable:
+        classification = "contract_mismatch"
+        reasons.append("analysis_contract_changed")
     elif equivalent and (evaluation_changed or interpretation_changed):
         classification = "evaluation_drift"
         if interpretation_changed:
@@ -259,20 +312,27 @@ def compare_reports(
         acquisition_comparable=acquisition_comparable,
         evaluation_changed=evaluation_changed,
         interpretation_changed=interpretation_changed,
+        contract_comparable=contract_comparable,
         reason_codes=tuple(dict.fromkeys(reasons)),
         delta={
             "unchanged_record_count": len(unchanged),
-            "modified_record_count": len(modified),
+            "modified_record_count": len(modified_locators),
             "added_record_count": len(added),
             "lost_record_count": len(lost),
+            "added_locator_count": len(added_locators),
+            "lost_locator_count": len(lost_locators),
             "added_urls": added_urls,
             "lost_urls": lost_urls,
             "acquisition_unknown_urls": lost_urls,
             "verified_removed_urls": [],
             "url_jaccard": round(url_similarity, 4),
             "exact_record_ratio": round(exact_record_ratio, 4),
+            "semantic_locator_ratio": round(semantic_locator_ratio, 4),
+            "semantic_token_jaccard": round(semantic_token_jaccard, 4),
             "baseline_counts": baseline.to_dict()["counts"],
             "candidate_counts": candidate.to_dict()["counts"],
+            "baseline_analysis_contract": dict(baseline.analysis_contract),
+            "candidate_analysis_contract": dict(candidate.analysis_contract),
             "changed_components": _changed_components(baseline_report, candidate_report),
         },
     )
@@ -335,14 +395,33 @@ def classify_report_history(reports: Iterable[dict[str, Any]]) -> dict[str, Any]
         effective = previous_comparison if previous_comparison and previous_comparison.classification in {
             "invalid",
             "acquisition_regression",
+            "contract_mismatch",
             "evaluation_drift",
         } else baseline_comparison
 
         classification = effective.classification
         reasons = list(effective.reason_codes)
         canonical_status = "non_canonical"
+        repeated_new_contract = bool(
+            eligible
+            and baseline_comparison.classification == "contract_mismatch"
+            and previous_comparison is not None
+            and previous_comparison.classification == "stable"
+        )
 
-        if (
+        if repeated_new_contract:
+            selected_report = report
+            selected_kind = "canonical"
+            classification = "canonical"
+            canonical_status = "canonical"
+            reasons = ["new_contract_reliable_repeat_promoted"]
+            for prior_entry in entries:
+                if prior_entry["canonical_status"] in {
+                    "canonical",
+                    "provisional",
+                }:
+                    prior_entry["canonical_status"] = "non_canonical"
+        elif (
             selected_kind == "provisional"
             and eligible
             and classification == "stable"
@@ -577,6 +656,27 @@ def canonical_evidence_records(
         )
         records[fingerprint] = record
     return tuple(sorted(records.values(), key=lambda item: (item.locator, item.fingerprint)))
+
+
+def _records_by_locator(
+    records: Iterable[CanonicalEvidenceRecord],
+) -> dict[str, tuple[CanonicalEvidenceRecord, ...]]:
+    grouped: dict[str, list[CanonicalEvidenceRecord]] = {}
+    for record in records:
+        grouped.setdefault(record.locator, []).append(record)
+    return {
+        locator: tuple(sorted(group, key=lambda item: item.fingerprint))
+        for locator, group in sorted(grouped.items())
+    }
+
+
+def _records_content_tokens(
+    records: Iterable[CanonicalEvidenceRecord],
+) -> set[str]:
+    tokens: set[str] = set()
+    for record in records:
+        tokens.update(_content_tokens(record.normalized_content))
+    return tokens
 
 
 def _identity_quarantined_refs(flow: dict[str, Any]) -> set[str]:

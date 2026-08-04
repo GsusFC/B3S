@@ -20,10 +20,11 @@
   <div class="brand-profile-terminal">
     <span class="brand-profile-terminal-key">sv9</span>
     {% if brand.current %}
-    <strong class="brand-profile-score">{{ brand.current.score if brand.current.score is not none else "—" }}</strong>
+    <strong class="brand-profile-score">{{ brand.current.score_publication.raw_value if brand.current.score_publication.raw_value is not none else "—" }}</strong>
     <span class="brand-profile-terminal-value">
       {{ brand.current.canonical_status or "sin_clasificar" }}
       · {{ brand.current.reliability_status or "unknown" }}
+      {% if not brand.current.score_publication.publishable %} · diagnóstico{% endif %}
       / {{ (brand.current.created_at or "")[:10] }}
     </span>
     <a class="source-link" href="/report/{{ brand.current.id }}">ver SV9</a>
@@ -337,7 +338,10 @@
         {% for row in brand.reports %}
         <tr>
           <td class="muted mono">{{ (row.created_at or "")[:10] }}</td>
-          <td class="mono">{{ row.score if row.score is not none else "—" }}</td>
+          <td class="mono">
+            {{ row.score_publication.raw_value if row.score_publication.raw_value is not none else "—" }}
+            {% if not row.score_publication.publishable %}<span class="muted"> diagnóstico</span>{% endif %}
+          </td>
           <td class="muted mono">{{ row.canonical_status or "sin_clasificar" }}</td>
           <td class="muted mono">{{ (row.stability or {}).classification or "sin_datos" }}</td>
           <td class="muted mono">{{ row.id }}</td>

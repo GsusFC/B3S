@@ -148,6 +148,26 @@ class WebCollector(
         """Scrape URL via Firecrawl Python SDK. Returns legacy {content, raw, error} shape."""
         if not self._api_keys:
             return {"error": "FIRECRAWL_API_KEY not set"}
+        vault_evidence_expansion = (
+            os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower()
+            == "vault"
+        )
+        scrape_options: dict[str, object] = {
+            "formats": (
+                ["markdown", "links"]
+                if vault_evidence_expansion
+                else ["markdown", "html"]
+            ),
+            "max_age": _FIRECRAWL_MAX_AGE_MS,
+            "timeout": 60000,
+            "wait_for": 2000,
+            "only_main_content": not vault_evidence_expansion,
+        }
+        if vault_evidence_expansion:
+            # Firecrawl only removes inline base64 payloads from markdown.
+            # Omitting HTML entirely prevents image-heavy sites from keeping
+            # tens of megabytes resident while the visual pass starts.
+            scrape_options["remove_base64_images"] = True
         last_error = ""
         attempts = max(_TRANSIENT_FETCH_ATTEMPTS, self._api_keys.size)
         for attempt in range(attempts):
@@ -156,11 +176,7 @@ class WebCollector(
 
                 doc = Firecrawl(api_key=self._api_keys.next_key()).scrape(
                     url,
-                    formats=["markdown", "html"],
-                    max_age=_FIRECRAWL_MAX_AGE_MS,
-                    timeout=60000,
-                    wait_for=2000,
-                    only_main_content=True,
+                    **scrape_options,
                 )
                 break
             except Exception as exc:
@@ -173,8 +189,20 @@ class WebCollector(
         else:
             return {"error": last_error}
         content = (doc.markdown or "").strip()
-        html = (getattr(doc, "html", None) or "").strip()
+        html = (
+            ""
+            if vault_evidence_expansion
+            else (getattr(doc, "html", None) or "").strip()
+        )
+        links = [
+            str(link).strip()
+            for link in (getattr(doc, "links", None) or [])
+            if str(link).strip()
+        ]
         metadata = self._firecrawl_metadata(getattr(doc, "metadata", None))
+        status_code = self._coerce_http_status(
+            metadata.get("statusCode") or metadata.get("status_code")
+        )
         final_url = str(
             metadata.get("sourceURL")
             or metadata.get("source_url")
@@ -185,7 +213,9 @@ class WebCollector(
             "content": content,
             "raw": content,
             "html": html,
+            "links": links,
             "final_url": final_url,
+            "status_code": status_code,
         }
 
     def scrape(self, url: str, crawl_subpages: bool = True) -> WebData:
@@ -197,9 +227,16 @@ class WebCollector(
 
         # Basic scrape
         result = self._run_firecrawl(url)
-        if "error" not in result:
+        status_code = self._coerce_http_status(result.get("status_code"))
+        terminal_http_error = bool(status_code and status_code >= 400)
+        if terminal_http_error:
+            data.browser_status = status_code
+            data.error = f"HTTP {status_code}"
+        elif "error" not in result:
             data.markdown_content = self._clean_markdown_content(result.get("content", ""))
             data.html = result.get("html", "") or data.html
+            data.links = result.get("links") or data.links
+            data.browser_status = status_code
             data.title = self._extract_title(data.markdown_content)
             data.markdown_content = self._trim_to_title(data.markdown_content, data.title)
             if self._looks_like_cookie_banner(data.title, data.markdown_content):
@@ -213,10 +250,13 @@ class WebCollector(
             if self._has_usable_markdown_content(data.markdown_content):
                 capture_provider = "firecrawl"
                 final_url = str(result.get("final_url") or url)
-        else:
+        elif not terminal_http_error:
             data.error = result["error"]
 
-        if not self._has_usable_markdown_content(data.markdown_content):
+        if (
+            not terminal_http_error
+            and not self._has_usable_markdown_content(data.markdown_content)
+        ):
             html, html_error = self._fetch_html_fallback(url)
             if html:
                 data.html = html
@@ -232,7 +272,10 @@ class WebCollector(
             elif html_error and not data.error:
                 data.error = html_error
 
-        if not self._has_usable_markdown_content(data.markdown_content):
+        if (
+            not terminal_http_error
+            and not self._has_usable_markdown_content(data.markdown_content)
+        ):
             payload, browser_error = self._fetch_browser_fallback(url)
             if payload:
                 data.html = payload.get("html") or data.html
@@ -295,6 +338,10 @@ class WebCollector(
                         "reason": "discovery_exception",
                         "errors": [str(exc)[:160]],
                     }
+            vault_evidence_expansion = (
+                os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower()
+                == "vault"
+            )
             sitemap_page_metadata = {
                 str(row.get("url") or "").rstrip("/"): row
                 for row in discovery.get("known_pages") or []
@@ -314,10 +361,6 @@ class WebCollector(
                 for candidate in sitemap_links
                 if candidate not in observed_set
             ]
-            vault_evidence_expansion = (
-                os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower()
-                == "vault"
-            )
             maximum_page_budget = (
                 VAULT_MAX_OWNED_SUBPAGES
                 if vault_evidence_expansion
@@ -375,7 +418,32 @@ class WebCollector(
                 "selected": selected_rows,
             }
             if vault_evidence_expansion:
-                data.page_selection["profile"] = "vault_evidence_expansion"
+                sitemap_status = str(
+                    discovery.get("status") or ""
+                ).strip().lower()
+                sitemap_verified = (
+                    sitemap_status in {"discovered", "empty"}
+                    and bool(discovery.get("sitemaps_read"))
+                )
+                discovery_sources = [
+                    "firecrawl_live_links" if data.links else "homepage_links"
+                ]
+                if sitemap_verified:
+                    discovery_sources.append("sitemap")
+                data.page_selection.update(
+                    {
+                        "profile": "vault_evidence_expansion",
+                        "discovery_status": (
+                            "verified" if sitemap_verified else "observed_only"
+                        ),
+                        "discovery_sources": discovery_sources,
+                        "discovery_limitations": (
+                            []
+                            if sitemap_verified
+                            else ["owned_page_enumeration_unverified"]
+                        ),
+                    }
+                )
 
             subpage_contents = []
             owned_fallback_urls = []
@@ -567,6 +635,10 @@ class WebCollector(
                 data.page_selection.update(
                     {
                         "eligible_not_visited_count": eligible_not_visited_count,
+                        "eligible_page_count": (
+                            len(visited_pages) + eligible_not_visited_count
+                        ),
+                        "eligible_captured_page_count": captured_page_count,
                         "budget_exhausted": (
                             len(selected_rows) >= maximum_page_budget
                             and eligible_not_visited_count > 0
@@ -613,6 +685,14 @@ class WebCollector(
             dumped = value.dict()
             return dumped if isinstance(dumped, dict) else {}
         return {}
+
+    @staticmethod
+    def _coerce_http_status(value) -> int | None:
+        try:
+            status = int(value)
+        except (TypeError, ValueError):
+            return None
+        return status if 100 <= status <= 599 else None
 
     @staticmethod
     def _capture_provenance(

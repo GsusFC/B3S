@@ -25,6 +25,8 @@ from src.services.scanner_evidence_comparison import (
     canonical_enforcement_mode,
     selected_report_for_display,
 )
+from src.services.scanner_content_sampling import content_sampling_from_report
+from src.services.scanner_score_publication import score_publication_from_report
 from web.api_v1 import install_scanner_api
 from web.api_v1.errors import ApiError
 from web.api_v1.models import EvidenceScoringRecoveryReviewCreateRequest
@@ -131,7 +133,11 @@ def _component_display_text(component: dict[str, Any], *, prefer_summary: bool =
 def _brand_profile(domain: str) -> dict:
     raw_reports = list_reports_for_domain(domain)
     selected, classified_reports, history_state = selected_report_for_display(raw_reports)
-    reports = [_sanitize_report_language(report) for report in classified_reports]
+    reports = []
+    for source_report in classified_reports:
+        report = _sanitize_report_language(source_report)
+        report["score_publication"] = score_publication_from_report(report)
+        reports.append(report)
     selected_id = str((selected or {}).get("id") or "")
     current = next((report for report in reports if str(report.get("id") or "") == selected_id), None)
     latest_attempt = reports[0] if reports else None
@@ -668,6 +674,7 @@ def _report_rows_for_index() -> list[dict[str, Any]]:
     for row in list_reports():
         enriched = dict(row)
         enriched["brand_domain"] = domain_key(str(row.get("url") or ""))
+        enriched["score_publication"] = score_publication_from_report(enriched)
         rows.append(enriched)
     return rows
 
@@ -852,6 +859,10 @@ def _sanitize_report_language(report: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _scan_payload_for_markdown(report: dict[str, Any]) -> dict[str, Any]:
+    from src.services.scanner_analysis_contract import (
+        analysis_contract_from_report,
+    )
+
     result = dict(_raw_sv9_result(report))
     projected_components = {
         str(component.get("key") or component.get("component") or ""): component
@@ -903,9 +914,23 @@ def _scan_payload_for_markdown(report: dict[str, Any]) -> dict[str, Any]:
         "stability",
         report.get("stability") or {},
     )
+    result_coverage = (
+        result.get("coverage_acquisition")
+        if isinstance(result.get("coverage_acquisition"), dict)
+        else {}
+    )
+    coverage_acquisition = {
+        **result_coverage,
+        **dict(report.get("coverage_acquisition") or {}),
+    }
+    coverage_acquisition.setdefault(
+        "content_sampling",
+        content_sampling_from_report(report),
+    )
+    result["coverage_acquisition"] = coverage_acquisition
     result.setdefault(
-        "coverage_acquisition",
-        report.get("coverage_acquisition") or {},
+        "analysis_contract",
+        analysis_contract_from_report(report),
     )
     return result
 

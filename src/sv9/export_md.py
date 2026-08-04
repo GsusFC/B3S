@@ -10,8 +10,10 @@ shape, components as a list). It never recomputes scores.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
+from src.services.scanner_score_publication import score_publication_from_report
 from src.sv9.language_guard import (
     spanish_component_verdict,
     spanish_generated_text,
@@ -57,8 +59,32 @@ def build_scan_markdown(scan: dict[str, Any], *, lang: str = "es") -> str:
     lines.append("")
     if url:
         lines.append(f"- URL: {url}")
-    lines.append(f"- Brand3 Score: **{scan.get('brand3_score', 0)}/100**")
+    score_publishable = bool(
+        score_publication_from_report(scan)["publishable"]
+    )
+    if score_publishable:
+        lines.append(f"- Brand3 Score: **{scan.get('brand3_score', 0)}/100**")
+    else:
+        lines.append("- Brand3 Score: **retenido (evaluación no canónica)**")
     lines.append(f"- Modelo: {model}")
+    analysis_contract = (
+        scan.get("analysis_contract")
+        if isinstance(scan.get("analysis_contract"), dict)
+        else {}
+    )
+    if analysis_contract.get("rubric_version"):
+        lines.append(
+            f"- Rúbrica: `{analysis_contract.get('rubric_version')}`"
+        )
+    if analysis_contract.get("interpretation_prompt_version"):
+        lines.append(
+            "- Prompt de interpretación: "
+            f"`{analysis_contract.get('interpretation_prompt_version')}`"
+        )
+    if analysis_contract.get("evaluator_model"):
+        lines.append(
+            f"- Evaluador: `{analysis_contract.get('evaluator_model')}`"
+        )
     lines.append(f"- Build: `{scan.get('pipeline_commit_sha') or 'unknown'}`")
     if scan.get("created_at"):
         lines.append(f"- Escaneado: {scan.get('created_at')}")
@@ -85,13 +111,47 @@ def build_scan_markdown(scan: dict[str, Any], *, lang: str = "es") -> str:
         if isinstance(scan.get("stability"), dict)
         else {}
     )
-    if str(stability.get("classification") or "") == "evaluation_drift":
+    stability_classification = str(stability.get("classification") or "")
+    if stability_classification in {
+        "acquisition_regression",
+        "candidate",
+        "comparison_error",
+        "evaluation_drift",
+        "contract_mismatch",
+        "invalid",
+    }:
         lines.append("## Estabilidad de la evaluación")
         lines.append("")
-        lines.append(
-            "**Resultado no canónico:** la evidencia material es equivalente "
-            "al baseline, pero la interpretación o las baldosas cambiaron."
-        )
+        if stability_classification == "evaluation_drift":
+            lines.append(
+                "**Resultado no canónico:** la evidencia material es equivalente "
+                "al baseline, pero la interpretación o las baldosas cambiaron."
+            )
+        elif stability_classification == "contract_mismatch":
+            lines.append(
+                "**Resultado no comparable:** el contrato de evaluación no "
+                "coincide con el baseline."
+            )
+        elif stability_classification == "acquisition_regression":
+            lines.append(
+                "**Regresión de adquisición:** este run no recuperó toda la "
+                "evidencia observada anteriormente; su score queda retenido."
+            )
+        elif stability_classification == "candidate":
+            lines.append(
+                "**Evidencia candidata:** el corpus material cambió y necesita "
+                "confirmación antes de sustituir el baseline."
+            )
+        elif stability_classification == "comparison_error":
+            lines.append(
+                "**Comparación fallida:** no se pudo validar este run contra "
+                "el baseline; su score queda retenido."
+            )
+        else:
+            lines.append(
+                "**Resultado inválido:** el run no cumple el contrato mínimo "
+                "de evaluación; su score queda retenido."
+            )
         comparison = (
             stability.get("baseline_comparison")
             if isinstance(stability.get("baseline_comparison"), dict)
@@ -138,7 +198,7 @@ def build_scan_markdown(scan: dict[str, Any], *, lang: str = "es") -> str:
         veredicto = spanish_component_verdict(key, component.get("veredicto"), component.get("tile_profile") or [])
         if veredicto:
             lines.append("")
-            lines.append(f"> {veredicto}")
+            lines.append(f"> **Interpretación:** {veredicto}")
         message = spanish_generated_text(component.get("message"))
         if message and message != veredicto:
             lines.append("")
@@ -155,10 +215,16 @@ def build_scan_markdown(scan: dict[str, Any], *, lang: str = "es") -> str:
             continue
 
         lines.append("")
-        lines.append(
-            f"- Nota: **{score}/{spec['scale']}**{multiplier} "
-            f"({component.get('points', 0)}/{component_max_points(key)} pts) · confianza {confidence}"
-        )
+        if score_publishable:
+            lines.append(
+                f"- Nota: **{score}/{spec['scale']}**{multiplier} "
+                f"({component.get('points', 0)}/{component_max_points(key)} pts) · confianza {confidence}"
+            )
+        else:
+            lines.append(
+                "- Nota: **retenida** · el valor bruto permanece en el "
+                "registro de auditoría"
+            )
         hierarchy = (
             component.get("surface_hierarchy")
             if isinstance(component.get("surface_hierarchy"), dict)
@@ -195,13 +261,18 @@ def build_scan_markdown(scan: dict[str, Any], *, lang: str = "es") -> str:
         off_tiles = []
         blind_spots = []
         missing_tiles = []
+        literal_quotes = []
         for tile_id, tile in tiles.items():
             verdict = verdicts.get(tile_id)
             if verdict is None:
                 missing_tiles.append(tile)
                 continue
             estado = str(verdict.get("estado") or "")
-            if estado == ESTADO_NO:
+            if estado == ESTADO_OK and str(verdict.get("evidencia") or "").strip():
+                literal_quotes.append(
+                    (tile, str(verdict.get("evidencia") or "").strip())
+                )
+            elif estado == ESTADO_NO:
                 off_tiles.append((tile, verdict))
             elif estado == ESTADO_SIN_EVIDENCIA:
                 blind_spots.append((tile, verdict))
@@ -219,6 +290,16 @@ def build_scan_markdown(scan: dict[str, Any], *, lang: str = "es") -> str:
             lines.append("### Baldosas sin veredicto persistido")
             for tile in missing_tiles:
                 lines.append(f"- **{tile['id']} · {tile['name']}** — {tile['condition']}")
+
+        lines.append("")
+        lines.append("### Citas literales del snapshot")
+        if literal_quotes:
+            for tile, quote in literal_quotes:
+                lines.append(
+                    f"- **{tile['id']} · {tile['name']}** — “{quote}”"
+                )
+        else:
+            lines.append("- (ninguna cita literal positiva persistida)")
 
         lines.append("")
         lines.append("### Puntos ciegos (contexto pendiente)")
@@ -269,14 +350,89 @@ def build_scan_markdown(scan: dict[str, Any], *, lang: str = "es") -> str:
             lines.append(
                 f"- Páginas propias capturadas: **{captured_count}**"
             )
+        eligible_not_visited = int(
+            owned.get("eligible_not_visited_count")
+            or sum(
+                1
+                for row in owned.get("not_visited_pages") or []
+                if isinstance(row, dict)
+                and str(row.get("reason") or "") == "page_budget"
+            )
+        )
+        eligible_captured = int(
+            owned.get("eligible_captured_page_count") or captured_count
+        )
+        eligible_attempted = max(
+            captured_count,
+            int(
+                owned.get("attempted_page_count")
+                or len(owned.get("visited_pages") or [])
+            ),
+        )
+        eligible_count = int(
+            owned.get("eligible_page_count")
+            or eligible_attempted + eligible_not_visited
+        )
+        if eligible_count:
+            eligible_percentage = int(
+                round((eligible_captured / eligible_count) * 100)
+            )
+            lines.append(
+                "- Páginas elegibles capturadas: "
+                f"**{eligible_captured} de {eligible_count} "
+                f"({eligible_percentage}%)**"
+            )
+        content_sampling = (
+            coverage.get("content_sampling")
+            if isinstance(coverage.get("content_sampling"), dict)
+            else {}
+        )
+        if int(content_sampling.get("sampling_record_count") or 0):
+            lines.append(
+                "- Contenido conservado en páginas con muestreo parcial: "
+                f"**{int(content_sampling.get('retained_chunk_count') or 0)} de "
+                f"{int(content_sampling.get('available_chunk_count') or 0)} fragmentos**"
+            )
+            lines.append(
+                "- Transparencia de contenido: **capturar una URL no implica "
+                "conservar todo su texto**; se omitieron "
+                f"{int(content_sampling.get('omitted_chunk_count') or 0)} fragmentos"
+            )
         if owned.get("selection_version"):
             lines.append(
                 f"- Política de selección: `{owned.get('selection_version')}`"
+            )
+        discovery_status = str(owned.get("discovery_status") or "")
+        discovery_sources = [
+            str(source)
+            for source in owned.get("discovery_sources") or []
+            if str(source).strip()
+        ]
+        if discovery_status:
+            source_suffix = (
+                f" ({', '.join(discovery_sources)})"
+                if discovery_sources
+                else ""
+            )
+            lines.append(
+                f"- Enumeración de páginas: **{discovery_status}**{source_suffix}"
+            )
+        if discovery_status == "observed_only":
+            lines.append(
+                "- Límite de descubrimiento: **el porcentaje cubre solo páginas "
+                "conocidas; el universo del sitio no fue verificado**"
             )
         if owned.get("latest_lastmod"):
             lines.append(
                 f"- Último `lastmod` observado: {owned.get('latest_lastmod')}"
             )
+            if _timestamp_is_newer(
+                owned.get("latest_lastmod"), scan.get("created_at")
+            ):
+                lines.append(
+                    "- Recencia: **el sitemap declara contenido posterior al "
+                    "scan; conviene reescanear**"
+                )
         language_detection = (
             owned.get("language_detection")
             if isinstance(owned.get("language_detection"), dict)
@@ -358,3 +514,25 @@ def build_scan_markdown(scan: dict[str, Any], *, lang: str = "es") -> str:
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _timestamp_is_newer(candidate: Any, baseline: Any) -> bool:
+    def parse(value: Any) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    candidate_dt = parse(candidate)
+    baseline_dt = parse(baseline)
+    return bool(
+        candidate_dt is not None
+        and baseline_dt is not None
+        and candidate_dt > baseline_dt
+    )

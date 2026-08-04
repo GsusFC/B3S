@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from web.report_store import domain_key
 
+from src.services.scanner_analysis_contract import analysis_contract_from_report
+from src.services.scanner_content_sampling import content_sampling_from_report
+from src.services.scanner_score_publication import score_publication_from_report
 from src.sv9.rubric import COMPONENTS as SV9_COMPONENTS
 
 SCHEMA_VERSION = "b3s_report_view_model_v0_2"
@@ -113,10 +116,12 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
 
     acquisition = _acquisition_view_model(report)
     stability = _stability_view_model(report)
+    score_publication = _score_publication_view_model(report)
     score = report.get("score")
     editorial = report.get("editorial") if isinstance(report.get("editorial"), dict) else {}
     insufficient_evidence = _coverage_limited_keys(report)
     pipeline_commit_sha = str(report.get("pipeline_commit_sha") or "unknown")
+    analysis_contract = analysis_contract_from_report(report)
     return {
         "schema_version": SCHEMA_VERSION,
         "id": str(report.get("id") or ""),
@@ -129,9 +134,13 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
             "commit_sha": pipeline_commit_sha,
             "commit_short": pipeline_commit_sha[:12] if pipeline_commit_sha != "unknown" else "unknown",
         },
+        "analysis_contract": analysis_contract,
         "score": score,
         "score_scale": 100,
+        # Non-canonical scores remain visible as diagnostics while authority
+        # continues to be governed by score_publication.publishable.
         "score_width": score if score is not None else 0,
+        "score_publication": score_publication,
         "base_average": report.get("base_average"),
         "reliability": {
             "status": str(report.get("reliability_status") or "unknown"),
@@ -212,6 +221,25 @@ def _stability_view_model(report: dict[str, Any]) -> dict[str, Any]:
             "interpretación o las baldosas cambiaron. Este resultado no "
             "sustituye al canónico."
         )
+    elif classification == "acquisition_regression":
+        title = "Regresión de adquisición detectada"
+        message = (
+            "Este run no recuperó evidencia observada anteriormente o "
+            "empeoró el estado de adquisición. Su score no sustituye al "
+            "baseline."
+        )
+    elif classification == "contract_mismatch":
+        title = "Contrato de evaluación distinto"
+        message = (
+            "La rúbrica, el prompt o el evaluador no coinciden con el "
+            "baseline. Los scores no forman una serie comparable."
+        )
+    elif classification == "invalid":
+        title = "Resultado inválido"
+        message = (
+            "El run no cumple el contrato mínimo de evaluación. Sus números "
+            "se conservan solo para diagnóstico."
+        )
     elif classification == "provisional":
         title = "Resultado provisional"
         message = (
@@ -242,6 +270,24 @@ def _stability_view_model(report: dict[str, Any]) -> dict[str, Any]:
             comparison.get("baseline_report_id")
         ),
         "changed_components": changed_components,
+    }
+
+
+def _score_publication_view_model(
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    policy = score_publication_from_report(report)
+    retained = not policy["publishable"]
+    return {
+        **policy,
+        "publishable": not retained,
+        "label": "Score diagnóstico" if retained else "Brand3 Score",
+        "reason": (
+            "Resultado no canónico: permanece visible para diagnóstico y no "
+            "sustituye al score autorizado."
+            if retained
+            else ""
+        ),
     }
 
 
@@ -735,6 +781,41 @@ def _acquisition_view_model(report: dict[str, Any]) -> dict[str, Any]:
     language_detection = _language_detection_view_model(
         owned_page_coverage.get("language_detection")
     )
+    eligible_not_visited_count = int(
+        owned_page_coverage.get("eligible_not_visited_count")
+        or sum(
+            1
+            for row in not_visited_pages
+            if str(row.get("reason") or "") == "page_budget"
+        )
+    )
+    eligible_captured_page_count = int(
+        owned_page_coverage.get("eligible_captured_page_count")
+        or captured_page_count
+    )
+    attempted_page_count = max(
+        captured_page_count,
+        int(
+            owned_page_coverage.get("attempted_page_count")
+            or len(visited_pages)
+        ),
+    )
+    eligible_page_count = int(
+        owned_page_coverage.get("eligible_page_count")
+        or attempted_page_count + eligible_not_visited_count
+    )
+    eligible_ratio = (
+        float(owned_page_coverage.get("eligible_coverage_ratio") or 0.0)
+        if eligible_page_count
+        else 0.0
+    )
+    if eligible_page_count and not eligible_ratio:
+        eligible_ratio = eligible_captured_page_count / eligible_page_count
+    content_sampling = (
+        coverage.get("content_sampling")
+        if isinstance(coverage.get("content_sampling"), dict)
+        else content_sampling_from_report(report)
+    )
     return {
         "state": _clean_text(gate.get("state")) or "unknown",
         "warnings": list(gate.get("warnings") or []),
@@ -747,11 +828,23 @@ def _acquisition_view_model(report: dict[str, Any]) -> dict[str, Any]:
             "selection_version": _clean_text(
                 owned_page_coverage.get("selection_version")
             ),
+            "discovery_status": _clean_text(
+                owned_page_coverage.get("discovery_status")
+            ),
+            "discovery_sources": [
+                _clean_text(source)
+                for source in owned_page_coverage.get("discovery_sources") or []
+                if _clean_text(source)
+            ],
+            "discovery_limitations": [
+                _clean_text(limitation)
+                for limitation in owned_page_coverage.get("discovery_limitations") or []
+                if _clean_text(limitation)
+            ],
             "known_page_count": known_page_count,
             "captured_page_count": captured_page_count,
             "attempted_page_count": int(
-                owned_page_coverage.get("attempted_page_count")
-                or len(visited_pages)
+                attempted_page_count
             ),
             "coverage_ratio": ratio,
             "coverage_percent": int(round(ratio * 100)),
@@ -759,6 +852,15 @@ def _acquisition_view_model(report: dict[str, Any]) -> dict[str, Any]:
                 f"{captured_page_count} de {known_page_count}"
                 if known_page_count
                 else str(captured_page_count)
+            ),
+            "eligible_page_count": eligible_page_count,
+            "eligible_captured_page_count": eligible_captured_page_count,
+            "eligible_not_visited_count": eligible_not_visited_count,
+            "eligible_coverage_percent": int(round(eligible_ratio * 100)),
+            "eligible_coverage_label": (
+                f"{eligible_captured_page_count} de {eligible_page_count}"
+                if eligible_page_count
+                else ""
             ),
             "visited_pages": visited_pages,
             "not_visited_pages": not_visited_pages,
@@ -768,7 +870,12 @@ def _acquisition_view_model(report: dict[str, Any]) -> dict[str, Any]:
             "latest_lastmod": _clean_text(
                 owned_page_coverage.get("latest_lastmod")
             ),
+            "latest_lastmod_newer_than_scan": _timestamp_is_newer(
+                owned_page_coverage.get("latest_lastmod"),
+                report.get("created_at"),
+            ),
             "language_detection": language_detection,
+            "content_sampling": content_sampling,
         },
         "metrics": {
             "owned_url_count": captured_page_count,
@@ -882,6 +989,29 @@ def _display_timestamp(value: Any) -> str:
         return raw
     suffix = " UTC" if parsed.utcoffset() is not None else ""
     return parsed.strftime("%Y-%m-%d %H:%M:%S") + suffix
+
+
+def _timestamp_is_newer(candidate: Any, baseline: Any) -> bool:
+    candidate_dt = _parse_timestamp(candidate)
+    baseline_dt = _parse_timestamp(baseline)
+    return bool(
+        candidate_dt is not None
+        and baseline_dt is not None
+        and candidate_dt > baseline_dt
+    )
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    raw = _clean_text(value)
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _tile_counts(component: dict[str, Any], tile_profile: list[Any]) -> tuple[int, int, int]:

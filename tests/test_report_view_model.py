@@ -220,6 +220,9 @@ def test_acquisition_view_model_exposes_owned_page_denominator_and_reasons():
     assert vm["acquisition"]["metrics"]["owned_url_count"] == 3
     assert vm["acquisition"]["owned_pages"]["coverage_label"] == "3 de 4"
     assert vm["acquisition"]["owned_pages"]["coverage_percent"] == 75
+    assert vm["acquisition"]["owned_pages"]["eligible_coverage_label"] == "3 de 4"
+    assert vm["acquisition"]["owned_pages"]["eligible_coverage_percent"] == 75
+    assert vm["acquisition"]["owned_pages"]["latest_lastmod_newer_than_scan"] is False
     assert vm["acquisition"]["owned_pages"]["not_visited_pages"] == [
         {
             "url": "https://optiak.com/orphan",
@@ -239,6 +242,78 @@ def test_acquisition_view_model_exposes_owned_page_denominator_and_reasons():
     language = vm["acquisition"]["owned_pages"]["language_detection"]
     assert language["summary"] == "inglés 2 · español 1"
     assert language["mixed_language_site"] is True
+
+
+def test_acquisition_view_model_distinguishes_page_capture_from_content_retention():
+    vm = build_report_view_model(
+        {
+            "id": "soccersolver",
+            "brand_name": "SoccerSolver",
+            "url": "https://soccersolver.com",
+            "score": 64,
+            "components": [],
+            "coverage_acquisition": {
+                "owned_page_coverage": {
+                    "known_page_count": 22,
+                    "captured_page_count": 18,
+                }
+            },
+            "raw": {
+                "flow": {
+                    "candidate": {
+                        "evidence_pack": {
+                            "evidence": [
+                                {
+                                    "ref": "raw_inputs.0.diagnostics.sampling.subpage.1",
+                                    "url": "https://soccersolver.com/luka-vuskovic",
+                                    "evidence_type": "acquisition.evidence_sampling",
+                                    "metadata": {
+                                        "total_chunks": 10,
+                                        "selected_chunks": 6,
+                                        "strategic_prioritization": True,
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        }
+    )
+
+    sampling = vm["acquisition"]["owned_pages"]["content_sampling"]
+    assert sampling["affected_url_count"] == 1
+    assert sampling["retained_chunk_count"] == 6
+    assert sampling["omitted_chunk_count"] == 4
+
+
+def test_eligible_coverage_counts_failed_attempts_in_denominator():
+    vm = build_report_view_model(
+        {
+            "id": "partial",
+            "brand_name": "SoccerSolver",
+            "url": "https://soccersolver.com",
+            "score": 64,
+            "components": [],
+            "coverage_acquisition": {
+                "owned_page_coverage": {
+                    "known_page_count": 4,
+                    "attempted_page_count": 3,
+                    "captured_page_count": 2,
+                    "not_visited_pages": [
+                        {
+                            "url": "https://soccersolver.com/editorial",
+                            "reason": "page_budget",
+                        }
+                    ],
+                }
+            },
+        }
+    )
+
+    owned = vm["acquisition"]["owned_pages"]
+    assert owned["eligible_coverage_label"] == "2 de 4"
+    assert owned["eligible_coverage_percent"] == 50
 
 
 def test_component_view_model_exposes_hidden_evidence_hierarchy():
@@ -345,6 +420,77 @@ def test_report_view_model_exposes_evaluation_drift_against_baseline():
             "changed_tiles": ["PR3", "PR4"],
         }
     ]
+    assert vm["score_publication"]["publishable"] is False
+    assert vm["score_publication"]["value"] is None
+    assert vm["score_publication"]["raw_value"] == 66
+    assert vm["score_publication"]["retention_reason"] == "evaluation_drift"
+    assert vm["score_publication"]["label"] == "Score diagnóstico"
+    assert vm["score_publication"]["reason"] == (
+        "Resultado no canónico: permanece visible para diagnóstico y no "
+        "sustituye al score autorizado."
+    )
+    assert vm["score_width"] == 66
+
+
+def test_report_view_model_retains_score_after_acquisition_regression():
+    vm = build_report_view_model(
+        {
+            "id": "candidate",
+            "brand_name": "SoccerSolver",
+            "url": "https://soccersolver.com",
+            "score": 64,
+            "components": [],
+            "stability": {"classification": "acquisition_regression"},
+        }
+    )
+
+    assert vm["score_publication"]["publishable"] is False
+    assert vm["score_width"] == 64
+    assert vm["stability"]["title"] == "Regresión de adquisición detectada"
+
+
+def test_report_view_model_fails_closed_when_stability_comparison_errors():
+    vm = build_report_view_model(
+        {
+            "id": "candidate",
+            "brand_name": "SoccerSolver",
+            "url": "https://soccersolver.com",
+            "score": 64,
+            "canonical_status": "non_canonical",
+            "components": [],
+            "stability": {"classification": "comparison_error"},
+        }
+    )
+
+    assert vm["score_publication"]["publishable"] is False
+    assert vm["score_width"] == 64
+
+
+def test_acquisition_flags_sitemap_content_newer_than_scan():
+    vm = build_report_view_model(
+        {
+            "id": "r-newer",
+            "brand_name": "Optiak",
+            "url": "https://optiak.com",
+            "created_at": "2026-07-30T13:48:00+00:00",
+            "score": 64,
+            "components": [],
+            "coverage_acquisition": {
+                "owned_page_coverage": {
+                    "known_page_count": 1,
+                    "captured_page_count": 1,
+                    "latest_lastmod": "2026-07-31",
+                }
+            },
+        }
+    )
+
+    assert (
+        vm["acquisition"]["owned_pages"][
+            "latest_lastmod_newer_than_scan"
+        ]
+        is True
+    )
 
 
 def test_attributes_and_values_cards_expose_compact_terms():

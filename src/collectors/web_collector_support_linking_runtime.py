@@ -17,7 +17,7 @@ VAULT_MAX_SITEMAP_EXPLORATION_PAGES = 12
 _MAX_SITEMAP_FILES = 4
 _MAX_SITEMAP_CANDIDATES = 200
 OWNED_PAGE_SELECTION_VERSION = "owned-page-selection-v3"
-VAULT_OWNED_PAGE_SELECTION_VERSION = "owned-page-selection-v4-vault-adaptive"
+VAULT_OWNED_PAGE_SELECTION_VERSION = "owned-page-selection-v6-vault-live-links"
 _OWNED_PAGE_ROLE_PRIORITY = (
     "product",
     "solutions",
@@ -316,6 +316,11 @@ class WebCollectorLinkingSupport:
         path = str(getattr(parsed_link, "path", "") or "")
         query = str(getattr(parsed_link, "query", "") or "")
         lowered = path.lower()
+        decoded_path = unquote(path).lower()
+        # Firecrawl emits this sentinel when removeBase64Images is enabled.
+        # It is a payload placeholder, not an owned page to crawl.
+        if "base64-image-removed" in decoded_path:
+            return False
         if lowered.startswith(("/_next/", "/static/", "/assets/", "/images/", "/img/")):
             return False
         blocked_extensions = (

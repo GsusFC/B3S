@@ -1035,6 +1035,15 @@ def test_acquisition_coverage_summarizes_external_attempts_and_absence_refs() ->
     coverage = acquisition_coverage(pack)
 
     assert coverage["owned_urls"] == ["https://acme.example"]
+    assert coverage["content_sampling"] == {
+        "schema_version": "content-sampling-disclosure-v1",
+        "sampling_record_count": 0,
+        "affected_url_count": 0,
+        "available_chunk_count": 0,
+        "retained_chunk_count": 0,
+        "omitted_chunk_count": 0,
+        "surfaces": [],
+    }
     assert coverage["external_attempts"] == [
         {
             "ref": "raw_inputs.1.searchapi.diagnostics.news",
@@ -1058,6 +1067,10 @@ def test_acquisition_coverage_summarizes_external_attempts_and_absence_refs() ->
         "attempted_page_count": 2,
         "captured_page_count": 2,
         "coverage_ratio": 0.6667,
+        "eligible_page_count": 3,
+        "eligible_captured_page_count": 2,
+        "eligible_not_visited_count": 1,
+        "eligible_coverage_ratio": 0.6667,
         "known_pages": [
             {"url": "https://acme.example"},
             {"url": "https://acme.example/about"},

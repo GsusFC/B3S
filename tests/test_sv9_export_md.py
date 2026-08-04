@@ -100,18 +100,32 @@ class ExportMarkdownTests(unittest.TestCase):
                         {"language": "es", "page_count": 1, "share": 0.3333},
                     ],
                 },
-            }
+            },
+            "content_sampling": {
+                "sampling_record_count": 1,
+                "affected_url_count": 1,
+                "available_chunk_count": 10,
+                "retained_chunk_count": 6,
+                "omitted_chunk_count": 4,
+                "surfaces": [],
+            },
         }
 
         md = build_scan_markdown(scan)
 
         self.assertIn("Escaneado: 2026-07-30T13:48:00+00:00", md)
         self.assertIn("Páginas propias capturadas: **3 de 4 (75%)**", md)
+        self.assertIn("Páginas elegibles capturadas: **3 de 4 (75%)**", md)
         self.assertIn("https://acme.test/orphan · sitemap_only", md)
         self.assertIn("Idiomas observados por página: **inglés 2 · español 1**", md)
         self.assertIn("mezcla de idiomas dentro del mismo dominio", md)
         self.assertIn("no coincide con el declarado en HTML: **1**", md)
         self.assertIn("https://acme.test · homepage · idioma inglés", md)
+        self.assertIn(
+            "Contenido conservado en páginas con muestreo parcial: **6 de 10 fragmentos**",
+            md,
+        )
+        self.assertIn("se omitieron 4 fragmentos", md)
 
     def test_export_exposes_component_evidence_hierarchy_without_rescoring(self):
         scan = self._scan()
@@ -162,6 +176,46 @@ class ExportMarkdownTests(unittest.TestCase):
         self.assertIn("## Estabilidad de la evaluación", md)
         self.assertIn("Baseline: `baseline`", md)
         self.assertIn("Propósito: **4 → 8** · baldosas PR3, PR4", md)
+        self.assertIn(
+            "Brand3 Score: **retenido (evaluación no canónica)**",
+            md,
+        )
+        self.assertIn("Nota: **retenida**", md)
+
+    def test_export_retains_score_after_acquisition_regression(self):
+        scan = self._scan()
+        scan["stability"] = {"classification": "acquisition_regression"}
+
+        md = build_scan_markdown(scan)
+
+        self.assertIn(
+            "Brand3 Score: **retenido (evaluación no canónica)**",
+            md,
+        )
+        self.assertIn("**Regresión de adquisición:**", md)
+
+    def test_export_declares_analysis_contract_and_newer_sitemap_content(self):
+        scan = self._scan()
+        scan["created_at"] = "2026-07-30T13:48:00+00:00"
+        scan["analysis_contract"] = {
+            "rubric_version": "baldosas-v3-1",
+            "interpretation_prompt_version": "interpretation-v1.2",
+            "evaluator_model": "gemini-test",
+        }
+        scan["coverage_acquisition"] = {
+            "owned_page_coverage": {
+                "known_page_count": 1,
+                "captured_page_count": 1,
+                "latest_lastmod": "2026-07-31",
+            }
+        }
+
+        md = build_scan_markdown(scan)
+
+        self.assertIn("Rúbrica: `baldosas-v3-1`", md)
+        self.assertIn("Prompt de interpretación: `interpretation-v1.2`", md)
+        self.assertIn("Evaluador: `gemini-test`", md)
+        self.assertIn("contenido posterior al scan", md)
 
     def test_coherencia_verdict_is_the_section_header(self):
         md = build_scan_markdown(self._scan())

@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from src.build_info import current_build_sha
 from src.services.scanner_evidence_comparison import annotate_report_history
+from src.services.scanner_score_publication import score_publication_from_report
 from web.report_store import (
     domain_key,
     evidence_claim_memory_for_domain,
@@ -293,13 +294,17 @@ def brand_scan_history(
         raise ApiError(400, "invalid_domain", "A valid brand domain is required.")
     reports, history_state = annotate_report_history(list_reports_for_domain(normalized))
     page = reports[offset : offset + limit]
-    items = [
-        {
+    items = []
+    for item in page:
+        score_publication = score_publication_from_report(item)
+        items.append({
             "id": str(item.get("id") or ""),
             "status": "completed",
             "brand_name": str(item.get("brand_name") or normalized),
             "url": str(item.get("url") or ""),
-            "score": item.get("score"),
+            "score": score_publication.get("value"),
+            "raw_score": score_publication.get("raw_value"),
+            "score_publishable": score_publication.get("publishable") is True,
             "created_at": item.get("created_at"),
             "reliability_status": str(item.get("reliability_status") or "unknown"),
             "canonical_status": str(item.get("canonical_status") or "unknown"),
@@ -311,9 +316,7 @@ def brand_scan_history(
             ],
             "result_url": f"/api/v1/scans/{item.get('id')}/result",
             "report_url": f"/report/{item.get('id')}",
-        }
-        for item in page
-    ]
+        })
     return {
         "object": "scan_list",
         "api_version": "v1",
