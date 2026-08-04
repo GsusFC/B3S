@@ -802,7 +802,7 @@ def test_home_renders_report_list(monkeypatch):
     assert "status-tag status-tag--ok status-tag--filled" in response.text
 
 
-def test_home_does_not_publish_a_drifted_score(monkeypatch):
+def test_home_shows_a_drifted_score_as_diagnostic(monkeypatch):
     from web.app import app
 
     monkeypatch.setattr(
@@ -825,8 +825,8 @@ def test_home_does_not_publish_a_drifted_score(monkeypatch):
     response = TestClient(app).get("/")
 
     assert response.status_code == 200
-    assert "retenido" in response.text
-    assert "<strong>64</strong>" not in response.text
+    assert "<strong>64</strong>" in response.text
+    assert "diagnóstico" in response.text
 
 
 def test_visual_signature_logo_url_falls_back_to_real_logo_candidate():
@@ -2352,9 +2352,9 @@ def test_report_view_renders_report(monkeypatch):
     assert "se omitieron 4 fragmentos" in response.text
     assert "6/10 fragmentos" in response.text
     assert "report-hero" in response.text
-    assert "Score retenido" in response.text
-    assert "--score-width: 0%;" in response.text
-    assert ">81<span>/100</span>" not in response.text
+    assert "Score diagnóstico" in response.text
+    assert "--score-width: 81%;" in response.text
+    assert "81<span>/100</span>" in response.text
     assert 'method="post" action="/scan"' in response.text
     assert 'value="https://mercury.com"' in response.text
     assert "shadow run" not in response.text
@@ -2379,6 +2379,68 @@ def test_report_view_renders_report(monkeypatch):
     assert 'id="coherencia"' in response.text
     assert "component-card--full" in response.text
     assert json.dumps({"ok": True}) not in response.text
+
+
+def test_report_hides_explanatory_tags_but_keeps_diagnostic_scores_and_quote(
+    monkeypatch,
+):
+    from web.app import app
+
+    monkeypatch.setattr(
+        "web.app.load_report",
+        lambda _report_id: {
+            "id": "diagnostic123",
+            "brand_name": "Mercury",
+            "url": "https://mercury.com",
+            "score": 64,
+            "stability": {
+                "classification": "evaluation_drift",
+                "canonical_status": "non_canonical",
+            },
+            "components": [
+                {
+                    "key": "core_purpose",
+                    "label": "Propósito",
+                    "score": 7,
+                    "scale": 10,
+                    "status": "scored",
+                    "resumen": "Una lectura estratégica verificable.",
+                    "veredicto": "La evidencia sostiene la lectura.",
+                    "tile_profile": [
+                        {
+                            "id": "P1",
+                            "estado": "ok",
+                            "evidencia": "La prueba literal permanece visible.",
+                        }
+                    ],
+                    "evidence": [
+                        {
+                            "ref": "raw_inputs.1",
+                            "url": "https://mercury.com/about",
+                            "snippet": "La prueba literal permanece visible.",
+                        }
+                    ],
+                    "block": {"coverage_status": "positive_evidence"},
+                }
+            ],
+            "blocks": [],
+            "absences": [],
+            "attempts": [],
+            "raw": {},
+        },
+    )
+
+    response = TestClient(app).get("/report/diagnostic123")
+
+    assert response.status_code == 200
+    assert "Score diagnóstico" in response.text
+    assert "64<span>/100</span>" in response.text
+    assert '<span class="badge">7/10</span>' in response.text
+    assert "diagnóstico no canónico" in response.text
+    assert "La prueba literal permanece visible." in response.text
+    assert '<span class="chip info">interpretación</span>' not in response.text
+    assert '<span class="chip ok">cita literal</span>' not in response.text
+    assert ">con evidencia</span>" not in response.text
 
 
 def test_report_view_hides_automatic_verdict_from_card_without_tile_profile(monkeypatch):

@@ -1,7 +1,6 @@
 {% extends "base.html.j2" %}
-{% block title %}{{ report.brand_name }}{% if report.score_publication.publishable %} · {{ report.score }}{% else %} · score retenido{% endif %} — B3S{% endblock %}
+{% block title %}{{ report.brand_name }} · {{ report.score if report.score is not none else "—" }}{% if not report.score_publication.publishable %} diagnóstico{% endif %} — B3S{% endblock %}
 {% set coverage_chip = {
-  "positive_evidence": ("ok", "con evidencia"),
   "implied_not_explicit": ("info", "implícito, no explícito"),
   "verified_absent": ("warn", "ausencia verificada"),
   "probable_absent": ("warn", "ausencia probable"),
@@ -17,7 +16,7 @@
   <div class="card-head">
     <h2 class="card-title">{{ component.label }}</h2>
     <div class="card-actions">
-      <span class="badge">{% if score_publication.publishable %}{{ component.score }}{% else %}—{% endif %}/{{ component.scale or 10 }}</span>
+      <span class="badge">{{ component.score if component.score is not none else "—" }}/{{ component.scale or 10 }}</span>
       {% if meta.has_drawer %}
       <button type="button" class="icon-button" data-dialog-target="drawer-{{ component.key }}" aria-label="Abrir lectura de {{ component.label }}" title="Abrir lectura de {{ component.label }}">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -30,9 +29,9 @@
   </div>
 
   {% if primary["items"] %}
-  <p class="card-result card-result--terms"><span class="chip info">interpretación</span> {{ primary["items"] | join(" · ") }}</p>
+  <p class="card-result card-result--terms">{{ primary["items"] | join(" · ") }}</p>
   {% elif primary.text %}
-  <p class="card-result{% if primary.is_fallback %} muted{% endif %}"><span class="chip info">interpretación</span> {{ primary.text }}</p>
+  <p class="card-result{% if primary.is_fallback %} muted{% endif %}">{{ primary.text }}</p>
   {% endif %}
 
   {% if support.show_on_card and (support.text or support["items"]) %}
@@ -46,10 +45,10 @@
 
   {% set bq = component.card.brand_quote %}
   {% if bq and bq.snippet %}
-  <p class="card-evidence"><span class="chip ok">cita literal</span> <em>“{{ bq.snippet | truncate(180) }}”</em>{% if bq.url %} · <a class="source-link" href="{{ bq.url }}" target="_blank" rel="noopener noreferrer">fuente</a>{% endif %}</p>
+  <p class="card-evidence"><em>“{{ bq.snippet | truncate(180) }}”</em>{% if bq.url %} · <a class="source-link" href="{{ bq.url }}" target="_blank" rel="noopener noreferrer">fuente</a>{% endif %}</p>
   {% endif %}
 
-  {% if drawer.summary.coverage_status and drawer.summary.coverage_status in coverage_chip %}
+  {% if drawer.summary.coverage_status and drawer.summary.coverage_status != "positive_evidence" and drawer.summary.coverage_status in coverage_chip %}
   {% set component_coverage_chip = coverage_chip.get(drawer.summary.coverage_status) %}
   <p class="card-evidence"><span class="chip {{ component_coverage_chip[0] }}">{{ component_coverage_chip[1] }}</span></p>
   {% endif %}
@@ -63,7 +62,7 @@
   <dialog class="report-drawer" id="drawer-{{ component.key }}" aria-labelledby="drawer-title-{{ component.key }}">
     <div class="report-drawer-head">
       <div>
-        <div class="report-drawer-kicker">{% if score_publication.publishable %}{{ component.score }}{% else %}—{% endif %}/{{ component.scale or 10 }}</div>
+        <div class="report-drawer-kicker">{{ component.score if component.score is not none else "—" }}/{{ component.scale or 10 }}</div>
         <h3 id="drawer-title-{{ component.key }}">{{ component.label }}</h3>
       </div>
       <form method="dialog">
@@ -79,11 +78,11 @@
       <section class="drawer-section">
         <h4>Resumen</h4>
         <div class="drawer-summary-line">
-          <span class="badge">{% if score_publication.publishable %}{{ component.score }}{% else %}—{% endif %}/{{ component.scale or 10 }}</span>
-          <span class="muted">{% if score_publication.publishable %}evaluado{% else %}score retenido{% endif %}</span>
+          <span class="badge">{{ component.score if component.score is not none else "—" }}/{{ component.scale or 10 }}</span>
+          <span class="muted">{% if score_publication.publishable %}evaluado{% else %}diagnóstico no canónico{% endif %}</span>
         </div>
         {% if drawer.summary.primary_text %}
-        <p class="drawer-lead"><span class="chip info">interpretación</span> <em>{{ drawer.summary.primary_text }}</em></p>
+        <p class="drawer-lead"><em>{{ drawer.summary.primary_text }}</em></p>
         {% else %}
         <p class="muted">(no detectado)</p>
         {% endif %}
@@ -187,7 +186,7 @@
       </section>
       {% endif %}
 
-      {% if drawer.summary.coverage_status and drawer.summary.coverage_status != "unknown" %}
+      {% if drawer.summary.coverage_status and drawer.summary.coverage_status not in ["unknown", "positive_evidence"] %}
       {% set chip = coverage_chip.get(drawer.summary.coverage_status, ("", drawer.summary.coverage_status)) %}
       <div class="drawer-meta"><span class="chip {{ chip[0] }}">{{ chip[1] }}</span></div>
       {% endif %}
@@ -220,7 +219,7 @@
   <div class="report-hero-metric">
     <div class="report-hero-label">{{ report.score_publication.label }}</div>
     <div class="report-hero-score">
-      {% if report.score_publication.publishable %}{{ report.score if report.score is not none else "—" }}{% else %}—{% endif %}<span>/100</span>
+      {{ report.score if report.score is not none else "—" }}<span>/100</span>
     </div>
     <div class="report-score-bar" aria-hidden="true">
       <span style="--score-width: {{ score_width }}%;"></span>
@@ -234,9 +233,9 @@
     {% endif %}
   </div>
   <div class="report-hero-metric">
-    <div class="report-hero-label">{% if report.score_publication.publishable %}Margen inmediato{% else %}Comparativa{% endif %}</div>
+    <div class="report-hero-label">{% if report.score_publication.publishable %}Margen inmediato{% else %}Margen diagnóstico{% endif %}</div>
     <div class="report-hero-score report-hero-score--gain">
-      {% if report.score_publication.publishable %}{% if report.hero.immediate_margin %}+{{ report.hero.immediate_margin }}{% else %}0{% endif %}<span> pts</span>{% else %}—{% endif %}
+      {% if report.hero.immediate_margin %}+{{ report.hero.immediate_margin }}{% else %}0{% endif %}<span> pts</span>
     </div>
     {% if not report.score_publication.publishable %}
     <div class="report-hero-note">consulta abajo el diagnóstico de estabilidad</div>

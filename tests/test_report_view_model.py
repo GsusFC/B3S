@@ -424,12 +424,12 @@ def test_report_view_model_exposes_evaluation_drift_against_baseline():
     assert vm["score_publication"]["value"] is None
     assert vm["score_publication"]["raw_value"] == 66
     assert vm["score_publication"]["retention_reason"] == "evaluation_drift"
-    assert vm["score_publication"]["label"] == "Score retenido"
+    assert vm["score_publication"]["label"] == "Score diagnóstico"
     assert vm["score_publication"]["reason"] == (
-        "La evaluación no es canónica; los números se conservan solo "
-        "para auditoría."
+        "Resultado no canónico: permanece visible para diagnóstico y no "
+        "sustituye al score autorizado."
     )
-    assert vm["score_width"] == 0
+    assert vm["score_width"] == 66
 
 
 def test_report_view_model_retains_score_after_acquisition_regression():
@@ -445,7 +445,7 @@ def test_report_view_model_retains_score_after_acquisition_regression():
     )
 
     assert vm["score_publication"]["publishable"] is False
-    assert vm["score_width"] == 0
+    assert vm["score_width"] == 64
     assert vm["stability"]["title"] == "Regresión de adquisición detectada"
 
 
@@ -463,7 +463,7 @@ def test_report_view_model_fails_closed_when_stability_comparison_errors():
     )
 
     assert vm["score_publication"]["publishable"] is False
-    assert vm["score_width"] == 0
+    assert vm["score_width"] == 64
 
 
 def test_acquisition_flags_sitemap_content_newer_than_scan():

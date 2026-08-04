@@ -137,11 +137,9 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
         "analysis_contract": analysis_contract,
         "score": score,
         "score_scale": 100,
-        "score_width": (
-            score
-            if score is not None and score_publication["publishable"]
-            else 0
-        ),
+        # Non-canonical scores remain visible as diagnostics while authority
+        # continues to be governed by score_publication.publishable.
+        "score_width": score if score is not None else 0,
         "score_publication": score_publication,
         "base_average": report.get("base_average"),
         "reliability": {
@@ -283,10 +281,10 @@ def _score_publication_view_model(
     return {
         **policy,
         "publishable": not retained,
-        "label": "Score retenido" if retained else "Brand3 Score",
+        "label": "Score diagnóstico" if retained else "Brand3 Score",
         "reason": (
-            "La evaluación no es canónica; los números se conservan solo "
-            "para auditoría."
+            "Resultado no canónico: permanece visible para diagnóstico y no "
+            "sustituye al score autorizado."
             if retained
             else ""
         ),
