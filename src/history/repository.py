@@ -81,6 +81,23 @@ from src.services.evidence_ledger_shadow import (
     build_evidence_ledger_shadow,
     evidence_ledger_mode,
 )
+from src.services.evidence_vault_canonical_authority import (
+    CanonicalMemoryPromotionCommand,
+    EvidenceVaultCanonicalAuthorityError,
+    EvidenceVaultCanonicalPacketNotFoundError,
+    EvidenceVaultCanonicalPromotionConflictError,
+    EvidenceVaultCanonicalUnavailableError,
+    build_promotion_event,
+    build_reference_resolution,
+    plan_canonical_memory_promotion,
+    promotion_request_fingerprint,
+    project_promoted_canonical_memory,
+    validate_promotion_event,
+)
+from src.services.evidence_vault_canonical_core import (
+    EvidenceVaultCanonicalCoreError,
+    validate_candidate_packet,
+)
 from src.services.scanner_evidence_comparison import (
     CANONICAL_POLICY_VERSION,
     annotate_report_history,
@@ -841,6 +858,413 @@ class PostgresHistoryRepository:
             reviews,
             registered_packets=registered_packets,
         )
+
+    def register_evidence_vault_canonical_memory_packet(
+        self,
+        domain_or_url: str,
+        packet: dict[str, Any],
+        *,
+        resolved_references: dict[str, str],
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Register one immutable packet after trusted reference resolution.
+
+        The caller must be the Vault candidate generator/resolver. This
+        storage boundary binds its exact resolution but does not infer
+        upstream ledger identities from caller-provided strings.
+        """
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceVaultCanonicalPacketNotFoundError(
+                "The brand domain does not exist in durable history."
+            )
+        try:
+            validate_candidate_packet(packet)
+            resolution = build_reference_resolution(packet, resolved_references)
+        except EvidenceVaultCanonicalCoreError as exc:
+            raise EvidenceVaultCanonicalPacketNotFoundError(
+                "The canonical-memory candidate packet is invalid."
+            ) from exc
+        manifest = packet["manifest"]
+        if manifest["brand_identity"] != domain:
+            raise EvidenceVaultCanonicalPromotionConflictError(
+                "The candidate packet belongs to a different brand."
+            )
+
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id,
+                       workspaces.id AS workspace_id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceVaultCanonicalPacketNotFoundError(
+                    "The brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        "evidence-vault-canonical-packet",
+                        packet["candidate_packet_fingerprint"],
+                    ),
+                ),
+            )
+            packet_id = _stable_uuid(
+                brand_id,
+                "evidence-vault-canonical-memory-packet",
+                packet["candidate_packet_fingerprint"],
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_vault_canonical_memory_packets (
+                    id, brand_id, packet_fingerprint, schema_version,
+                    brand_identity, parent_canonical_memory_version,
+                    reference_resolution_fingerprint,
+                    reference_resolution, manifest, candidate_tiles,
+                    authority_state, authority,
+                    production_runtime_effect, scanner_runtime_effect
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    'pending_review', false, false, false
+                )
+                ON CONFLICT (brand_id, packet_fingerprint) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    packet_id,
+                    brand_id,
+                    packet["candidate_packet_fingerprint"],
+                    manifest["schema_version"],
+                    manifest["brand_identity"],
+                    manifest["parent_canonical_memory_version"],
+                    resolution["reference_resolution_fingerprint"],
+                    _jsonb(resolution),
+                    _jsonb(manifest),
+                    _jsonb(packet["candidate_tiles"]),
+                ),
+            ).fetchone()
+            replayed = inserted is None
+            row = inserted
+            if row is None:
+                row = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                    WHERE brand_id = %s
+                      AND packet_fingerprint = %s
+                    """,
+                    (brand_id, packet["candidate_packet_fingerprint"]),
+                ).fetchone()
+            if row is None:
+                raise EvidenceVaultCanonicalPacketNotFoundError(
+                    "The canonical-memory candidate packet could not be registered."
+                )
+            stored = _vault_canonical_packet_record(row)
+            if (
+                stored["packet"] != packet
+                or stored["reference_resolution"] != resolution
+            ):
+                raise EvidenceVaultCanonicalPromotionConflictError(
+                    "The registered packet fingerprint resolves to different content."
+                )
+        return stored, replayed
+
+    def get_evidence_vault_canonical_memory_packet(
+        self,
+        domain_or_url: str,
+        packet_fingerprint: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any]:
+        """Read and revalidate one exact canonical-memory candidate packet."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        normalized_fingerprint = str(packet_fingerprint or "").strip().lower()
+        if not domain or not _is_sha256(normalized_fingerprint):
+            raise EvidenceVaultCanonicalPacketNotFoundError(
+                "The registered canonical-memory packet does not exist."
+            )
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT packets.*
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets AS packets
+                JOIN {_SCHEMA}.brands
+                  ON brands.id = packets.brand_id
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                  AND packets.packet_fingerprint = %s
+                """,
+                (workspace_slug, domain, normalized_fingerprint),
+            ).fetchone()
+        if row is None:
+            raise EvidenceVaultCanonicalPacketNotFoundError(
+                "The registered canonical-memory packet does not exist."
+            )
+        return _vault_canonical_packet_record(row)
+
+    def append_evidence_vault_canonical_memory_promotion(
+        self,
+        domain_or_url: str,
+        command: CanonicalMemoryPromotionCommand,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Append one human promotion with serialized parent comparison."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceVaultCanonicalPacketNotFoundError(
+                "The brand domain does not exist in durable history."
+            )
+        packet_fingerprint = str(
+            command.candidate_packet_fingerprint or ""
+        ).strip().lower()
+        idempotency_hash = str(
+            command.idempotency_key_hash or ""
+        ).strip().lower()
+        request_fingerprint = str(
+            command.request_fingerprint or ""
+        ).strip().lower()
+        if not all(
+            _is_sha256(value)
+            for value in (
+                packet_fingerprint,
+                idempotency_hash,
+                request_fingerprint,
+            )
+        ):
+            raise EvidenceVaultCanonicalPromotionConflictError(
+                "The promotion command fingerprints are invalid."
+            )
+        try:
+            expected_request_fingerprint = promotion_request_fingerprint(
+                candidate_packet_fingerprint=packet_fingerprint,
+                parent_canonical_memory_version=(
+                    command.parent_canonical_memory_version
+                ),
+                reviewer_id=command.reviewer_id,
+                reviewed_at=command.reviewed_at,
+                rationale=command.rationale,
+            )
+        except EvidenceVaultCanonicalAuthorityError as exc:
+            raise EvidenceVaultCanonicalPromotionConflictError(
+                "The promotion command is invalid."
+            ) from exc
+        if request_fingerprint != expected_request_fingerprint:
+            raise EvidenceVaultCanonicalPromotionConflictError(
+                "The promotion request fingerprint does not match the command."
+            )
+
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceVaultCanonicalPacketNotFoundError(
+                    "The brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        "evidence-vault-canonical-promotion",
+                    ),
+                ),
+            )
+
+            existing = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_promotion_events
+                WHERE brand_id = %s
+                  AND idempotency_key_hash = %s
+                """,
+                (brand_id, idempotency_hash),
+            ).fetchone()
+            if existing is not None:
+                event = _vault_canonical_promotion_event(existing)
+                if event["request_fingerprint"] != request_fingerprint:
+                    raise EvidenceVaultCanonicalPromotionConflictError(
+                        "The Idempotency-Key was used for a different promotion.",
+                        existing_event_id=event["event_id"],
+                    )
+                return event, True
+
+            existing_packet_event = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_promotion_events
+                WHERE brand_id = %s
+                  AND candidate_packet_fingerprint = %s
+                """,
+                (brand_id, packet_fingerprint),
+            ).fetchone()
+            if existing_packet_event is not None:
+                event = _vault_canonical_promotion_event(
+                    existing_packet_event
+                )
+                if event["request_fingerprint"] == request_fingerprint:
+                    return event, True
+                raise EvidenceVaultCanonicalPromotionConflictError(
+                    "The candidate packet was already promoted by a different request.",
+                    existing_event_id=event["event_id"],
+                )
+
+            packet_row = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                """,
+                (brand_id, packet_fingerprint),
+            ).fetchone()
+            if packet_row is None:
+                raise EvidenceVaultCanonicalPacketNotFoundError(
+                    "The exact registered canonical-memory packet does not exist."
+                )
+            stored_packet = _vault_canonical_packet_record(packet_row)
+            current_memory = _project_vault_canonical_memory(
+                conn,
+                brand_id,
+            )
+            current_version = (
+                current_memory["canonical_memory_version"]
+                if current_memory is not None
+                else None
+            )
+            if command.parent_canonical_memory_version != current_version:
+                raise EvidenceVaultCanonicalPromotionConflictError(
+                    "The canonical memory changed after the candidate was built.",
+                    current_canonical_memory_version=current_version,
+                )
+            plan = plan_canonical_memory_promotion(
+                stored_packet["packet"],
+                resolved_references=(
+                    stored_packet["reference_resolution"]["references"]
+                ),
+                current_memory=current_memory,
+            )
+            previous_event_id = (
+                current_memory["promotion_event_id"]
+                if current_memory is not None
+                else None
+            )
+            sequence = (
+                int(current_memory["promotion_sequence"]) + 1
+                if current_memory is not None
+                else 1
+            )
+            event_id = _stable_uuid(
+                brand_id,
+                "evidence-vault-canonical-memory-promotion",
+                idempotency_hash,
+            )
+            event = build_promotion_event(
+                plan,
+                command,
+                event_id=str(event_id),
+                sequence=sequence,
+                previous_event_id=previous_event_id,
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_vault_canonical_memory_promotion_events (
+                    id, brand_id, event_type, sequence, previous_event_id,
+                    brand_identity, candidate_packet_fingerprint,
+                    reference_resolution_fingerprint,
+                    promotion_policy_fingerprint,
+                    parent_canonical_memory_version,
+                    promoted_canonical_memory_version, decision,
+                    reviewer_id, reviewed_at, rationale, schema_version,
+                    idempotency_key_hash, request_fingerprint, authority,
+                    authority_scope, production_runtime_effect,
+                    scanner_runtime_effect
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, true, %s,
+                    false, false
+                )
+                RETURNING *
+                """,
+                (
+                    event["event_id"],
+                    brand_id,
+                    event["event_type"],
+                    event["sequence"],
+                    event["previous_event_id"],
+                    event["brand_identity"],
+                    event["candidate_packet_fingerprint"],
+                    event["reference_resolution_fingerprint"],
+                    event["promotion_policy_fingerprint"],
+                    event["parent_canonical_memory_version"],
+                    event["promoted_canonical_memory_version"],
+                    event["decision"],
+                    event["reviewer_id"],
+                    event["reviewed_at"],
+                    event["rationale"],
+                    event["schema_version"],
+                    event["idempotency_key_hash"],
+                    event["request_fingerprint"],
+                    event["authority_scope"],
+                ),
+            ).fetchone()
+        return _vault_canonical_promotion_event(inserted), False
+
+    def get_evidence_vault_canonical_memory(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        """Rebuild the current canonical memory from packets and promotions."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            return None
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                return None
+            return _project_vault_canonical_memory(conn, brand["id"])
 
     def append_evidence_claim_tile_review(
         self,
@@ -2480,6 +2904,8 @@ class PostgresHistoryRepository:
             "evidence_scoring_recovery_review_events",
             "evidence_claim_tile_review_events",
             "evidence_claim_tile_review_packets",
+            "evidence_vault_canonical_memory_packets",
+            "evidence_vault_canonical_memory_promotion_events",
             "evidence_claim_tile_ledger_states",
             "evidence_claim_tile_mapping_series",
             "evidence_claim_tile_mappings",
@@ -3562,6 +3988,165 @@ def _stable_uuid(*parts: Any) -> UUID:
 def _advisory_lock_key(*parts: Any) -> int:
     digest = hashlib.sha256(":".join(str(part) for part in parts).encode("utf-8")).digest()
     return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _vault_canonical_packet_record(row: Any) -> dict[str, Any]:
+    manifest = dict(row["manifest"])
+    candidate_tiles = list(row["candidate_tiles"])
+    packet = {
+        "manifest": manifest,
+        "candidate_tiles": candidate_tiles,
+        "candidate_packet_fingerprint": str(row["packet_fingerprint"]),
+    }
+    resolution = dict(row["reference_resolution"])
+    try:
+        validate_candidate_packet(packet)
+        expected_resolution = build_reference_resolution(
+            packet,
+            resolution.get("references") or {},
+        )
+    except Exception as exc:
+        raise EvidenceVaultCanonicalUnavailableError(
+            "The registered canonical-memory packet failed validation."
+        ) from exc
+    if resolution != expected_resolution:
+        raise EvidenceVaultCanonicalUnavailableError(
+            "The registered canonical-memory reference resolution is invalid."
+        )
+    if (
+        str(row["schema_version"]) != manifest["schema_version"]
+        or str(row["brand_identity"]) != manifest["brand_identity"]
+        or (
+            str(row["parent_canonical_memory_version"])
+            if row["parent_canonical_memory_version"] is not None
+            else None
+        )
+        != manifest["parent_canonical_memory_version"]
+        or str(row["reference_resolution_fingerprint"])
+        != resolution["reference_resolution_fingerprint"]
+        or str(row["authority_state"]) != "pending_review"
+        or bool(row["authority"])
+        or bool(row["production_runtime_effect"])
+        or bool(row["scanner_runtime_effect"])
+    ):
+        raise EvidenceVaultCanonicalUnavailableError(
+            "The registered canonical-memory packet metadata is inconsistent."
+        )
+    created_at = row["created_at"]
+    return {
+        "packet": packet,
+        "reference_resolution": resolution,
+        "authority_state": "pending_review",
+        "authority": False,
+        "production_runtime_effect": False,
+        "scanner_runtime_effect": False,
+        "created_at": (
+            created_at.isoformat()
+            if hasattr(created_at, "isoformat")
+            else str(created_at)
+        ),
+    }
+
+
+def _vault_canonical_promotion_event(row: Any) -> dict[str, Any]:
+    reviewed_at = row["reviewed_at"]
+    event = {
+        "schema_version": str(row["schema_version"]),
+        "event_type": str(row["event_type"]),
+        "event_id": str(row["id"]),
+        "sequence": int(row["sequence"]),
+        "previous_event_id": (
+            str(row["previous_event_id"])
+            if row["previous_event_id"] is not None
+            else None
+        ),
+        "brand_identity": str(row["brand_identity"]),
+        "candidate_packet_fingerprint": str(
+            row["candidate_packet_fingerprint"]
+        ),
+        "reference_resolution_fingerprint": str(
+            row["reference_resolution_fingerprint"]
+        ),
+        "promotion_policy_fingerprint": str(
+            row["promotion_policy_fingerprint"]
+        ),
+        "parent_canonical_memory_version": (
+            str(row["parent_canonical_memory_version"])
+            if row["parent_canonical_memory_version"] is not None
+            else None
+        ),
+        "promoted_canonical_memory_version": str(
+            row["promoted_canonical_memory_version"]
+        ),
+        "decision": str(row["decision"]),
+        "reviewer_id": str(row["reviewer_id"]),
+        "reviewed_at": (
+            reviewed_at.isoformat()
+            if hasattr(reviewed_at, "isoformat")
+            else str(reviewed_at)
+        ),
+        "rationale": str(row["rationale"]),
+        "idempotency_key_hash": str(row["idempotency_key_hash"]),
+        "request_fingerprint": str(row["request_fingerprint"]),
+        "authority": bool(row["authority"]),
+        "authority_scope": str(row["authority_scope"]),
+        "production_runtime_effect": bool(
+            row["production_runtime_effect"]
+        ),
+        "scanner_runtime_effect": bool(row["scanner_runtime_effect"]),
+    }
+    validate_promotion_event(event)
+    return event
+
+
+def _project_vault_canonical_memory(
+    conn: Any,
+    brand_id: Any,
+) -> dict[str, Any] | None:
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM {_SCHEMA}.evidence_vault_canonical_memory_promotion_events
+        WHERE brand_id = %s
+        ORDER BY sequence
+        """,
+        (brand_id,),
+    ).fetchall()
+    current: dict[str, Any] | None = None
+    previous_event_id: str | None = None
+    for expected_sequence, row in enumerate(rows, start=1):
+        event = _vault_canonical_promotion_event(row)
+        if (
+            event["sequence"] != expected_sequence
+            or event["previous_event_id"] != previous_event_id
+        ):
+            raise EvidenceVaultCanonicalUnavailableError(
+                "The canonical-memory promotion chain is not contiguous."
+            )
+        packet_row = conn.execute(
+            f"""
+            SELECT *
+            FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+            WHERE brand_id = %s
+              AND packet_fingerprint = %s
+            """,
+            (brand_id, event["candidate_packet_fingerprint"]),
+        ).fetchone()
+        if packet_row is None:
+            raise EvidenceVaultCanonicalUnavailableError(
+                "A promoted canonical-memory packet is unavailable."
+            )
+        stored_packet = _vault_canonical_packet_record(packet_row)
+        plan = plan_canonical_memory_promotion(
+            stored_packet["packet"],
+            resolved_references=(
+                stored_packet["reference_resolution"]["references"]
+            ),
+            current_memory=current,
+        )
+        current = project_promoted_canonical_memory(plan, event)
+        previous_event_id = event["event_id"]
+    return current
 
 
 def _validate_adjudication_command(
