@@ -475,7 +475,7 @@ def _owned_page_coverage(selection: dict[str, Any]) -> dict[str, Any]:
         selection.get("eligible_page_count")
         or attempted_count + eligible_not_visited_count
     )
-    return {
+    coverage = {
         "selection_version": str(selection.get("version") or ""),
         "known_page_count": known_count,
         "attempted_page_count": attempted_count,
@@ -500,6 +500,26 @@ def _owned_page_coverage(selection: dict[str, Any]) -> dict[str, Any]:
             else {}
         ),
     }
+    if str(selection.get("discovery_status") or "").strip():
+        coverage.update(
+            {
+                "discovery_status": str(selection.get("discovery_status") or ""),
+                "discovery_sources": [
+                    str(source)
+                    for source in selection.get("discovery_sources") or []
+                    if str(source).strip()
+                ],
+                "discovery_limitations": [
+                    str(limitation)
+                    for limitation in selection.get("discovery_limitations") or []
+                    if str(limitation).strip()
+                ],
+                "provider_map_candidate_count": int(
+                    selection.get("provider_map_candidate_count") or 0
+                ),
+            }
+        )
+    return coverage
 
 
 def _append_unique(values: list[str], value: str) -> None:

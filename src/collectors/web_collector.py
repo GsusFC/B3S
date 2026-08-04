@@ -13,7 +13,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit
 
 from src.api_key_pool import ApiKeySource, shared_api_key_pool
 from src.collectors.page_language import (
@@ -188,6 +188,78 @@ class WebCollector(
             "final_url": final_url,
         }
 
+    def _discover_firecrawl_map_links(
+        self,
+        url: str,
+        *,
+        limit: int = 80,
+        timeout_ms: int = 30_000,
+    ) -> tuple[list[str], dict[str, object]]:
+        """Return bounded same-domain page candidates from Firecrawl Map."""
+
+        diagnostics: dict[str, object] = {
+            "status": "skipped",
+            "reason": "firecrawl_api_key_unavailable",
+            "candidate_count": 0,
+            "limit": limit,
+            "timeout_ms": timeout_ms,
+            "errors": [],
+        }
+        if not self._api_keys:
+            return [], diagnostics
+
+        last_error = ""
+        attempts = max(_TRANSIENT_FETCH_ATTEMPTS, self._api_keys.size)
+        for attempt in range(attempts):
+            try:
+                from firecrawl import Firecrawl
+
+                result = Firecrawl(api_key=self._api_keys.next_key()).map(
+                    url,
+                    include_subdomains=False,
+                    ignore_query_parameters=True,
+                    limit=limit,
+                    sitemap="include",
+                    timeout=timeout_ms,
+                )
+                break
+            except Exception as exc:
+                last_error = str(exc)
+                if attempt + 1 < attempts:
+                    time.sleep(_TRANSIENT_FETCH_DELAY_S)
+        else:
+            return [], {
+                **diagnostics,
+                "status": "unavailable",
+                "reason": "firecrawl_map_failed",
+                "errors": [last_error[:160]] if last_error else [],
+            }
+
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for row in getattr(result, "links", []) or []:
+            candidate = str(getattr(row, "url", "") or "").strip()
+            if not candidate:
+                continue
+            absolute = self._normalize_request_url(urljoin(url, candidate))
+            parsed = urlparse(absolute)
+            if not self._same_owned_domain(absolute, url):
+                continue
+            if not self._looks_like_page_link(parsed):
+                continue
+            normalized = parsed._replace(fragment="", query="").geturl().rstrip("/")
+            if normalized.rstrip("/") == url.rstrip("/") or normalized in seen:
+                continue
+            seen.add(normalized)
+            candidates.append(normalized)
+
+        return candidates, {
+            **diagnostics,
+            "status": "discovered" if candidates else "empty",
+            "reason": "",
+            "candidate_count": len(candidates),
+        }
+
     def scrape(self, url: str, crawl_subpages: bool = True) -> WebData:
         """Scrape a website and return structured data."""
         url = self._normalize_request_url(url)
@@ -295,6 +367,35 @@ class WebCollector(
                         "reason": "discovery_exception",
                         "errors": [str(exc)[:160]],
                     }
+            vault_evidence_expansion = (
+                os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower()
+                == "vault"
+            )
+            provider_map_links: list[str] = []
+            provider_map_discovery: dict[str, object] = {
+                "status": "disabled",
+                "reason": "vault_evidence_expansion_disabled",
+                "candidate_count": 0,
+                "errors": [],
+            }
+            discovered_before_map = list(
+                dict.fromkeys([*observed_links, *sitemap_links])
+            )
+            if (
+                vault_evidence_expansion
+                and len(discovered_before_map) < VAULT_MAX_OWNED_SUBPAGES
+            ):
+                try:
+                    provider_map_links, provider_map_discovery = (
+                        self._discover_firecrawl_map_links(url)
+                    )
+                except Exception as exc:
+                    provider_map_discovery = {
+                        **provider_map_discovery,
+                        "status": "unavailable",
+                        "reason": "firecrawl_map_exception",
+                        "errors": [str(exc)[:160]],
+                    }
             sitemap_page_metadata = {
                 str(row.get("url") or "").rstrip("/"): row
                 for row in discovery.get("known_pages") or []
@@ -305,19 +406,18 @@ class WebCollector(
                 for page_url, row in sitemap_page_metadata.items()
             }
             all_candidates = list(
-                dict.fromkeys([*observed_links, *sitemap_links])
+                dict.fromkeys(
+                    [*observed_links, *sitemap_links, *provider_map_links]
+                )
             )
             observed_set = set(observed_links)
             sitemap_set = set(sitemap_links)
+            provider_map_set = set(provider_map_links)
             sitemap_only_links = [
                 candidate
                 for candidate in sitemap_links
                 if candidate not in observed_set
             ]
-            vault_evidence_expansion = (
-                os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower()
-                == "vault"
-            )
             maximum_page_budget = (
                 VAULT_MAX_OWNED_SUBPAGES
                 if vault_evidence_expansion
@@ -352,8 +452,16 @@ class WebCollector(
                         "observed+sitemap"
                         if selected_url in observed_set
                         and selected_url in sitemap_set
+                        else "observed+provider_map"
+                        if selected_url in observed_set
+                        and selected_url in provider_map_set
+                        else "sitemap+provider_map"
+                        if selected_url in sitemap_set
+                        and selected_url in provider_map_set
                         else "sitemap"
                         if selected_url in sitemap_set
+                        else "provider_map"
+                        if selected_url in provider_map_set
                         else "observed"
                     ),
                     "status": "selected",
@@ -370,12 +478,48 @@ class WebCollector(
                 "maximum_budget": maximum_page_budget,
                 "observed_candidate_count": len(observed_links),
                 "sitemap_candidate_count": len(sitemap_links),
+                "provider_map_candidate_count": len(provider_map_links),
                 "unique_candidate_count": len(all_candidates),
                 "discovery": discovery,
+                "provider_map_discovery": provider_map_discovery,
                 "selected": selected_rows,
             }
             if vault_evidence_expansion:
-                data.page_selection["profile"] = "vault_evidence_expansion"
+                provider_map_status = str(
+                    provider_map_discovery.get("status") or ""
+                ).strip().lower()
+                sitemap_status = str(
+                    discovery.get("status") or ""
+                ).strip().lower()
+                sitemap_verified = (
+                    sitemap_status in {"discovered", "empty"}
+                    and bool(discovery.get("sitemaps_read"))
+                )
+                provider_map_verified = provider_map_status in {
+                    "discovered",
+                    "empty",
+                }
+                discovery_sources = ["homepage_links"]
+                if sitemap_verified:
+                    discovery_sources.append("sitemap")
+                if provider_map_verified:
+                    discovery_sources.append("firecrawl_map")
+                data.page_selection.update(
+                    {
+                        "profile": "vault_evidence_expansion",
+                        "discovery_status": (
+                            "verified"
+                            if sitemap_verified or provider_map_verified
+                            else "observed_only"
+                        ),
+                        "discovery_sources": discovery_sources,
+                        "discovery_limitations": (
+                            []
+                            if sitemap_verified or provider_map_verified
+                            else ["owned_page_enumeration_unverified"]
+                        ),
+                    }
+                )
 
             subpage_contents = []
             owned_fallback_urls = []
@@ -423,8 +567,16 @@ class WebCollector(
                         if known_url.rstrip("/") == url.rstrip("/")
                         else "observed+sitemap"
                         if known_url in observed_set and known_url in sitemap_set
+                        else "observed+provider_map"
+                        if known_url in observed_set
+                        and known_url in provider_map_set
+                        else "sitemap+provider_map"
+                        if known_url in sitemap_set
+                        and known_url in provider_map_set
                         else "sitemap"
                         if known_url in sitemap_set
+                        else "provider_map"
+                        if known_url in provider_map_set
                         else "observed"
                     ),
                     "navigation_status": (
@@ -433,6 +585,8 @@ class WebCollector(
                         else "linked_from_home"
                         if known_url in observed_set
                         else "sitemap_only"
+                        if known_url in sitemap_set
+                        else "provider_map_only"
                     ),
                     "lastmod": str(
                         (
@@ -468,6 +622,8 @@ class WebCollector(
                             "linked_from_home"
                             if row["url"] in observed_set
                             else "sitemap_only"
+                            if row["url"] in sitemap_set
+                            else "provider_map_only"
                         ),
                         "lastmod": str(
                             sitemap_page_metadata.get(

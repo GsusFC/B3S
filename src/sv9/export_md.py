@@ -402,6 +402,26 @@ def build_scan_markdown(scan: dict[str, Any], *, lang: str = "es") -> str:
             lines.append(
                 f"- Política de selección: `{owned.get('selection_version')}`"
             )
+        discovery_status = str(owned.get("discovery_status") or "")
+        discovery_sources = [
+            str(source)
+            for source in owned.get("discovery_sources") or []
+            if str(source).strip()
+        ]
+        if discovery_status:
+            source_suffix = (
+                f" ({', '.join(discovery_sources)})"
+                if discovery_sources
+                else ""
+            )
+            lines.append(
+                f"- Enumeración de páginas: **{discovery_status}**{source_suffix}"
+            )
+        if discovery_status == "observed_only":
+            lines.append(
+                "- Límite de descubrimiento: **el porcentaje cubre solo páginas "
+                "conocidas; el universo del sitio no fue verificado**"
+            )
         if owned.get("latest_lastmod"):
             lines.append(
                 f"- Último `lastmod` observado: {owned.get('latest_lastmod')}"

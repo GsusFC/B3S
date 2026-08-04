@@ -334,7 +334,10 @@
 <details class="panel acquisition-panel">
   <summary>Cobertura propia · {{ report.acquisition.owned_pages.coverage_label }} páginas capturadas</summary>
   {% if report.acquisition.owned_pages.selection_version %}
-  <p class="muted">Política: <span class="mono">{{ report.acquisition.owned_pages.selection_version }}</span>{% if report.acquisition.owned_pages.latest_lastmod %} · último <span class="mono">lastmod</span> observado: {{ report.acquisition.owned_pages.latest_lastmod }}{% endif %}</p>
+  <p class="muted">Política: <span class="mono">{{ report.acquisition.owned_pages.selection_version }}</span>{% if report.acquisition.owned_pages.discovery_sources %} · descubrimiento: {{ report.acquisition.owned_pages.discovery_sources | join(", ") }}{% endif %}{% if report.acquisition.owned_pages.latest_lastmod %} · último <span class="mono">lastmod</span> observado: {{ report.acquisition.owned_pages.latest_lastmod }}{% endif %}</p>
+  {% endif %}
+  {% if report.acquisition.owned_pages.discovery_status == "observed_only" %}
+  <p><span class="chip warn">enumeración no verificada</span> El porcentaje cubre solo las páginas conocidas por enlaces observados; no se pudo confirmar el universo del sitio mediante sitemap o mapa del proveedor.</p>
   {% endif %}
   {% if report.acquisition.owned_pages.latest_lastmod_newer_than_scan %}
   <p><span class="chip warn">contenido posterior al scan</span> El sitemap declara contenido modificado después de este análisis. Conviene reescanear.</p>

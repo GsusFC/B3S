@@ -830,6 +830,22 @@ def _acquisition_view_model(report: dict[str, Any]) -> dict[str, Any]:
             "selection_version": _clean_text(
                 owned_page_coverage.get("selection_version")
             ),
+            "discovery_status": _clean_text(
+                owned_page_coverage.get("discovery_status")
+            ),
+            "discovery_sources": [
+                _clean_text(source)
+                for source in owned_page_coverage.get("discovery_sources") or []
+                if _clean_text(source)
+            ],
+            "discovery_limitations": [
+                _clean_text(limitation)
+                for limitation in owned_page_coverage.get("discovery_limitations") or []
+                if _clean_text(limitation)
+            ],
+            "provider_map_candidate_count": int(
+                owned_page_coverage.get("provider_map_candidate_count") or 0
+            ),
             "known_page_count": known_page_count,
             "captured_page_count": captured_page_count,
             "attempted_page_count": int(

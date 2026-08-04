@@ -17,7 +17,7 @@ VAULT_MAX_SITEMAP_EXPLORATION_PAGES = 12
 _MAX_SITEMAP_FILES = 4
 _MAX_SITEMAP_CANDIDATES = 200
 OWNED_PAGE_SELECTION_VERSION = "owned-page-selection-v3"
-VAULT_OWNED_PAGE_SELECTION_VERSION = "owned-page-selection-v4-vault-adaptive"
+VAULT_OWNED_PAGE_SELECTION_VERSION = "owned-page-selection-v5-vault-map-adaptive"
 _OWNED_PAGE_ROLE_PRIORITY = (
     "product",
     "solutions",
