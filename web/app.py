@@ -547,6 +547,20 @@ def _vault_reviewer_profile(domain: str) -> dict[str, Any]:
         subject_id = str(candidate.get("candidate_fingerprint") or "")
         tile = candidate.get("tile") if isinstance(candidate.get("tile"), dict) else {}
         evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
+        contexts = [
+            context
+            for context in candidate.get("contexts") or []
+            if isinstance(context, dict)
+        ]
+        review_scope = (
+            "current_direct_relation"
+            if any(
+                context.get("review_scope")
+                == "current_direct_relation"
+                for context in contexts
+            )
+            else "historical_recovery"
+        )
         evaluated = evaluated_by_case.get(case_id) or {}
         decision = str(evaluated.get("decision") or "pending")
         items.append(
@@ -562,6 +576,7 @@ def _vault_reviewer_profile(domain: str) -> dict[str, Any]:
                 ),
                 "latest_state": str(tile.get("latest_state") or "—"),
                 "proposed_state": str(tile.get("proposed_state") or "—"),
+                "review_scope": review_scope,
                 "quote": str(evidence.get("quote") or ""),
                 "source_urls": [
                     str(url)

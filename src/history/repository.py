@@ -2027,11 +2027,16 @@ class PostgresHistoryRepository:
                 workspace_slug=workspace_slug,
             )
         )
+        claim_tile_ledger = build_evidence_claim_tile_ledger(
+            reports,
+            mode="shadow",
+        )
         return build_reviewed_scoring_memory_shadow(
             reports,
             evidence_adjudications=adjudications,
             recovery_review_events=recovery_reviews,
             reviewed_claim_tile_memory=reviewed_claim_tile_memory,
+            claim_tile_ledger=claim_tile_ledger,
             ignore_stale_review_events=True,
             review_events_are_current=True,
         )

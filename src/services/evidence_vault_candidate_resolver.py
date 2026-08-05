@@ -208,6 +208,7 @@ def build_resolved_canonical_memory_candidate(
             evidence_adjudications=adjudication_rows,
             recovery_review_events=recovery_review_rows,
             reviewed_claim_tile_memory=reviewed_memory,
+            claim_tile_ledger=claim_tile_ledger,
             ignore_stale_review_events=True,
             review_events_are_current=True,
         )
@@ -606,32 +607,13 @@ def _resolve_direct_tile_relations(
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     """Resolve claim-optional direct relations without granting authority.
 
-    Current literal scanner evidence remains visibly ``unreviewed`` in the
-    atomic package.  A recovery can become accepted basis only through the
-    existing durable semantic-recovery journal.  In both cases the underlying
-    evidence identity must already be human-accepted.
+    Current scanner evidence and historical recoveries use the same durable
+    semantic-review journal.  Only an accepted exact relation can become tile
+    basis, and its underlying evidence identity must already be accepted.
     """
 
     semantic_by_relation: dict[str, dict[str, Any]] = {}
     recovery_reviews_by_relation: dict[str, dict[str, Any]] = {}
-    current_entries = [
-        dict(entry)
-        for entry in recovery_memory.get("accepted_evidence") or []
-        if isinstance(entry, dict) and entry.get("present_in_latest") is True
-    ]
-    for entry in current_entries:
-        _resolve_direct_entry(
-            entry,
-            review=None,
-            accepted_evidence=accepted_evidence,
-            snapshot_evidence_ids=snapshot_evidence_ids,
-            claim_routed_pairs=claim_routed_pairs,
-            basis_by_tile=basis_by_tile,
-            semantic_by_relation=semantic_by_relation,
-            unresolved_items=unresolved_items,
-            unresolved_by_tile=unresolved_by_tile,
-        )
-
     events_by_case = {
         str(event.get("case_id") or ""): event for event in recovery_review_rows if str(event.get("case_id") or "")
     }
@@ -653,30 +635,48 @@ def _resolve_direct_tile_relations(
         ):
             event = None
         evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
+        direct_source_evidence_ids = _direct_source_evidence_ids(
+            evidence,
+            tile_id=tile_id,
+            claim_routed_pairs=claim_routed_pairs,
+        )
+        if not direct_source_evidence_ids:
+            continue
+        review_scope = (
+            "current_direct_relation"
+            if any(
+                isinstance(context, dict)
+                and context.get("review_scope")
+                == "current_direct_relation"
+                for context in candidate.get("contexts") or []
+            )
+            else "historical_recovery"
+        )
         if event is not None:
             tile_evidence_id = _sha256(
                 evidence.get("tile_evidence_id"),
                 field="tile_evidence_id",
             )
-            for evidence_id in evidence.get("source_evidence_ids") or []:
+            for evidence_id in direct_source_evidence_ids:
                 relation_id = _direct_relation_id(
                     tile_id=tile_id,
                     tile_evidence_id=tile_evidence_id,
-                    evidence_id=_sha256(
-                        evidence_id,
-                        field="source_evidence_id",
-                    ),
+                    evidence_id=evidence_id,
                 )
                 recovery_reviews_by_relation[relation_id] = event
         decision = str(evaluated.get("decision") or "pending")
         current_event_decision = str(evaluated.get("current_event_decision") or "pending")
         if decision == "accepted":
+            if event is None:
+                raise EvidenceVaultCandidateResolverError(
+                    "accepted direct relation has no current review event"
+                )
             if str(tile.get("proposed_state") or "") != "ok":
                 _add_unresolved(
                     unresolved_items,
                     unresolved_by_tile,
                     tile_id=tile_id,
-                    kind="unsupported_direct_recovery_state",
+                    kind="unsupported_direct_relation_state",
                     blocking=True,
                     details={
                         "case_id": case_id,
@@ -701,12 +701,52 @@ def _resolve_direct_tile_relations(
                 unresolved_items,
                 unresolved_by_tile,
                 tile_id=tile_id,
-                kind="direct_recovery_review_pending",
+                kind=(
+                    "direct_tile_relation_review_pending"
+                    if review_scope == "current_direct_relation"
+                    else "direct_recovery_review_pending"
+                ),
                 blocking=True,
                 details={
                     "case_id": case_id,
                     "candidate_fingerprint": str(candidate.get("candidate_fingerprint") or ""),
                 },
+            )
+            _add_direct_relation_identity_prerequisite(
+                evidence,
+                tile_id=tile_id,
+                accepted_evidence=accepted_evidence,
+                snapshot_evidence_ids=snapshot_evidence_ids,
+                claim_routed_pairs=claim_routed_pairs,
+                unresolved_items=unresolved_items,
+                unresolved_by_tile=unresolved_by_tile,
+            )
+        elif decision == "disputed":
+            _add_unresolved(
+                unresolved_items,
+                unresolved_by_tile,
+                tile_id=tile_id,
+                kind=(
+                    "direct_tile_relation_review_disputed"
+                    if review_scope == "current_direct_relation"
+                    else "direct_recovery_review_disputed"
+                ),
+                blocking=True,
+                details={
+                    "case_id": case_id,
+                    "candidate_fingerprint": str(
+                        candidate.get("candidate_fingerprint") or ""
+                    ),
+                },
+            )
+            _add_direct_relation_identity_prerequisite(
+                evidence,
+                tile_id=tile_id,
+                accepted_evidence=accepted_evidence,
+                snapshot_evidence_ids=snapshot_evidence_ids,
+                claim_routed_pairs=claim_routed_pairs,
+                unresolved_items=unresolved_items,
+                unresolved_by_tile=unresolved_by_tile,
             )
 
     return (
@@ -718,7 +758,7 @@ def _resolve_direct_tile_relations(
 def _resolve_direct_entry(
     entry: dict[str, Any],
     *,
-    review: dict[str, Any] | None,
+    review: dict[str, Any],
     accepted_evidence: dict[str, dict[str, Any]],
     snapshot_evidence_ids: set[str],
     claim_routed_pairs: set[tuple[str, str]],
@@ -733,14 +773,11 @@ def _resolve_direct_entry(
         entry.get("tile_evidence_id"),
         field="tile_evidence_id",
     )
-    source_evidence_ids = sorted(
-        {_sha256(value, field="source_evidence_id") for value in entry.get("source_evidence_ids") or []}
+    direct_source_evidence_ids = _direct_source_evidence_ids(
+        entry,
+        tile_id=resolved_tile_id,
+        claim_routed_pairs=claim_routed_pairs,
     )
-    if not source_evidence_ids:
-        raise EvidenceVaultCandidateResolverError("direct tile evidence requires source evidence")
-    direct_source_evidence_ids = [
-        evidence_id for evidence_id in source_evidence_ids if (resolved_tile_id, evidence_id) not in claim_routed_pairs
-    ]
     if not direct_source_evidence_ids:
         return
     unresolved_source_ids = [
@@ -762,12 +799,10 @@ def _resolve_direct_entry(
         )
         return
 
-    review_status = "accepted" if review is not None else "unreviewed"
-    decision_event_id = None
-    if review is not None:
-        decision_event_id = str(review.get("event_id") or review.get("id") or "").strip()
-        if not decision_event_id:
-            raise EvidenceVaultCandidateResolverError("accepted direct relation review_event_id is required")
+    review_status = "accepted"
+    decision_event_id = str(review.get("event_id") or review.get("id") or "").strip()
+    if not decision_event_id:
+        raise EvidenceVaultCandidateResolverError("accepted direct relation review_event_id is required")
     for evidence_id in direct_source_evidence_ids:
         source_identity_id = _sha256(
             accepted_evidence[evidence_id].get("document_id"),
@@ -802,6 +837,68 @@ def _resolve_direct_entry(
             "polarity": "supports",
             "review_status": review_status,
         }
+
+
+def _direct_source_evidence_ids(
+    entry: dict[str, Any],
+    *,
+    tile_id: str,
+    claim_routed_pairs: set[tuple[str, str]],
+) -> list[str]:
+    source_evidence_ids = sorted(
+        {
+            _sha256(value, field="source_evidence_id")
+            for value in entry.get("source_evidence_ids") or []
+        }
+    )
+    if not source_evidence_ids:
+        raise EvidenceVaultCandidateResolverError(
+            "direct tile evidence requires source evidence"
+        )
+    return [
+        evidence_id
+        for evidence_id in source_evidence_ids
+        if (tile_id, evidence_id) not in claim_routed_pairs
+    ]
+
+
+def _add_direct_relation_identity_prerequisite(
+    entry: dict[str, Any],
+    *,
+    tile_id: str,
+    accepted_evidence: dict[str, dict[str, Any]],
+    snapshot_evidence_ids: set[str],
+    claim_routed_pairs: set[tuple[str, str]],
+    unresolved_items: list[dict[str, Any]],
+    unresolved_by_tile: dict[str, list[str]],
+) -> None:
+    direct_source_evidence_ids = _direct_source_evidence_ids(
+        entry,
+        tile_id=tile_id,
+        claim_routed_pairs=claim_routed_pairs,
+    )
+    unresolved_source_ids = [
+        evidence_id
+        for evidence_id in direct_source_evidence_ids
+        if evidence_id not in accepted_evidence
+        or evidence_id not in snapshot_evidence_ids
+    ]
+    if not unresolved_source_ids:
+        return
+    _add_unresolved(
+        unresolved_items,
+        unresolved_by_tile,
+        tile_id=tile_id,
+        kind="direct_tile_evidence_identity_not_accepted",
+        blocking=True,
+        details={
+            "tile_evidence_id": _sha256(
+                entry.get("tile_evidence_id"),
+                field="tile_evidence_id",
+            ),
+            "source_evidence_ids": unresolved_source_ids,
+        },
+    )
 
 
 def _direct_relation_id(

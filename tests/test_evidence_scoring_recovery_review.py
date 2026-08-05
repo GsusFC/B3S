@@ -34,6 +34,52 @@ def test_candidate_is_deduplicated_across_shadow_lanes() -> None:
     assert candidate["authority"] is False
 
 
+def test_current_direct_relation_is_a_review_candidate() -> None:
+    preview = _preview()
+    preview["accepted_evidence"][0]["present_in_latest"] = True
+    preview["accepted_evidence"][0]["component_key"] = "magnetism"
+    preview["accepted_evidence"][0]["tile_id"] = "MG1"
+    preview["recoveries"] = []
+
+    candidates = build_recovery_review_candidates(
+        [{"lane": "history", "preview": preview}]
+    )
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate["tile"]["latest_state"] == "ok"
+    assert candidate["tile"]["proposed_state"] == "ok"
+    assert candidate["contexts"] == [
+        {
+            "lane": "history",
+            "latest_report_id": "report-2",
+            "review_scope": "current_direct_relation",
+            "latest_state": "ok",
+            "proposed_state": "ok",
+        }
+    ]
+
+
+def test_claim_routed_current_relation_is_not_duplicated() -> None:
+    preview = _preview()
+    preview["accepted_evidence"][0]["present_in_latest"] = True
+    preview["accepted_evidence"][0]["component_key"] = "magnetism"
+    preview["accepted_evidence"][0]["tile_id"] = "MG1"
+    preview["recoveries"] = []
+
+    candidates = build_recovery_review_candidates(
+        [{"lane": "history", "preview": preview}],
+        claim_tile_mappings=[
+            {
+                "tile_id": "MG1",
+                "source_evidence_id": "source-1",
+            }
+        ],
+    )
+
+    assert candidates == []
+
+
 def test_unsigned_template_and_missing_reviews_fail_closed() -> None:
     candidates = build_recovery_review_candidates(
         [{"lane": "bridge", "preview": _preview()}]

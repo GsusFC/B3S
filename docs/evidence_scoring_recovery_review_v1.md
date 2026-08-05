@@ -1,5 +1,11 @@
 # Evidence scoring recovery review v1
 
+> Estado: el schema de candidato y el journal v1 siguen vigentes por
+> compatibilidad. La política v2 amplía los mismos sujetos a relaciones
+> directas observadas en el scan actual. No crea otra tabla ni otro journal.
+> Una decisión actual gobierna la entrada al paquete canónico de Vault; no
+> reescribe el scoring diagnóstico del scan.
+
 ## Veredicto
 
 La procedencia reproducible y la identidad correcta no bastan para reutilizar
@@ -8,18 +14,21 @@ satisface el contrato semántico del tile concreto.
 
 Esta capa cierra ese hueco sin activar producción:
 
-- las recuperaciones se deduplican por marca, rúbrica, tile y evidencia;
+- las relaciones actuales y las recuperaciones se deduplican por marca,
+  rúbrica, tile y evidencia;
+- las rutas ya cubiertas por claim→tile se excluyen para no duplicar revisión;
 - cada candidato incluye la condición y el contrato vigente del tile;
 - las decisiones son `accepted`, `disputed`, `rejected` o `revoked`;
 - los eventos forman una cadena append-only con secuencia y predecesor;
 - una revocación devuelve la asociación a estado pendiente;
-- solo un `accepted` vigente puede modificar el score revisado de sombra;
+- solo un `accepted` vigente puede aportar base directa al candidato canónico;
 - `runtime_effect=false`, `authority=false` y
   `automatic_scoring_effect=false`.
 
-El preview candidato sigue mostrando qué ocurriría si todas las asociaciones
-se aceptaran. El score revisado de sombra muestra únicamente las asociaciones
-humanamente aceptadas. Ninguno de los dos altera un informe o score operativo.
+El preview de scoring conserva el diagnóstico del scanner. Una recuperación
+histórica aceptada puede aparecer en `reviewed_shadow`; revisar una relación
+actual no reescribe ese diagnóstico. Ninguna decisión altera un informe, el
+scanner o el score de producción.
 
 `PostgresHistoryRepository.get_evidence_scoring_memory_preview()` reconstruye
 ambas lecturas desde los informes persistidos. Mientras no exista un evento

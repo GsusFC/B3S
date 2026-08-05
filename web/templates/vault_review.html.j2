@@ -4,7 +4,7 @@
 <div class="page-head">
   <div>
     <p><a href="/brand/{{ review.domain }}">← Volver a {{ review.domain }}</a></p>
-    <h1 class="text-balance">Revisión protegida de recuperación</h1>
+    <h1 class="text-balance">Revisión protegida evidencia → baldosa</h1>
     <p class="muted mono">revisor: {{ reviewer }}</p>
   </div>
   <form method="post" action="/vault/review/logout">
@@ -19,8 +19,8 @@
     <span class="tag">// shadow · append-only · sin efecto operativo</span>
   </div>
   <p class="prose text-pretty">
-    Decide si cada cita satisface específicamente el contrato de la baldosa. Una aceptación mejora la sombra revisada,
-    pero no modifica el scan ni el scoring de producción.
+    Decide si cada cita satisface específicamente el contrato de la baldosa. La decisión alimenta el próximo paquete
+    canónico de Vault; no reescribe el scan ni su scoring diagnóstico y no modifica producción.
   </p>
   <div class="vault-memory-metrics" aria-label="Resumen de revisión protegida">
     <article class="vault-memory-metric">
@@ -65,6 +65,13 @@
       <span class="chip ok">{{ item.decision }}</span>
       {% endif %}
     </div>
+    <p class="mono muted">
+      {% if item.review_scope == "current_direct_relation" %}
+      relación directa observada en el escaneo actual
+      {% else %}
+      recuperación desde evidencia histórica
+      {% endif %}
+    </p>
 
     <div class="vault-review-grid">
       <section>
@@ -129,7 +136,7 @@
 </div>
 {% else %}
 <section class="panel vault-memory-empty">
-  <p class="text-pretty">No hay candidatos de recuperación preparados para esta marca.</p>
+  <p class="text-pretty">No hay relaciones directas evidencia → baldosa pendientes para esta marca.</p>
   <a href="/brand/{{ review.domain }}">Volver a la memoria de baldosas</a>
 </section>
 {% endif %}
