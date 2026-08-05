@@ -374,7 +374,7 @@ Every event and overlay remains `runtime_effect=false` and `authority=false`.
 Accepting `replacement_candidate` records a review decision but does not select
 the newer variant, alter a tile, or change a score.
 
-## Evidence scoring memory and recovery review
+## Evidence scoring memory and direct relation review
 
 ```text
 GET  /api/v1/brands/{domain}/evidence-scoring-memory-preview
@@ -383,8 +383,12 @@ POST /api/v1/brands/{domain}/evidence-scoring-recovery-reviews
 ```
 
 The preview rebuilds scoring-memory candidates from immutable PostgreSQL report
-history. `scoring` shows the candidate effect; `reviewed_shadow.scoring` applies
-only current, human-accepted evidence-to-tile mappings. Both are experimental:
+history. The legacy route name is retained, but policy v2 covers both current
+direct evidence-to-tile relations and historical recoveries; claim-routed paths
+are excluded. `scoring` remains the scanner diagnostic, while
+`reviewed_shadow.scoring` can show accepted historical recoveries. Reviewing a
+current direct relation controls its eligibility for the next canonical Vault
+packet and does not rewrite the scanner result. Both projections remain experimental:
 `runtime_effect=false`, `authority=false`, and
 `automatic_scoring_effect=false`.
 

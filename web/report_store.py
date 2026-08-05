@@ -513,8 +513,13 @@ def evidence_scoring_memory_preview_for_domain(
                 "failed to load evidence scoring memory preview",
                 extra={"domain": domain_key(domain)},
             )
+    reports = list_reports_for_domain(domain)
     derived = build_reviewed_scoring_memory_shadow(
-        list_reports_for_domain(domain),
+        reports,
+        claim_tile_ledger=build_evidence_claim_tile_ledger(
+            reports,
+            mode="shadow",
+        ),
     )
     return {
         **derived,

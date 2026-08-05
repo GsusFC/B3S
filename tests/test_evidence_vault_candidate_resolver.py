@@ -17,6 +17,7 @@ from src.services.evidence_memory_identity_v2 import (
 )
 from src.services.evidence_scoring_recovery_review import (
     EVIDENCE_SCORING_RECOVERY_REVIEW_EVENT_VERSION,
+    EvidenceScoringRecoveryReviewCommand,
     build_reviewed_scoring_memory_shadow,
 )
 from src.services.evidence_vault_candidate_resolver import (
@@ -455,7 +456,7 @@ def test_aggregation_contract_is_content_addressed_and_has_no_runtime_effect() -
     assert len(policy["components"]) == 10
 
 
-def test_current_literal_evidence_can_reach_a_tile_without_a_claim() -> None:
+def test_current_direct_relation_requires_semantic_review() -> None:
     report = _direct_report(
         "one",
         "2026-08-01T00:00:00Z",
@@ -473,16 +474,118 @@ def test_current_literal_evidence_can_reach_a_tile_without_a_claim() -> None:
 
     mission = _tile(result["packet"], "M1")
     assert ledger["mappings"] == []
-    assert mission["candidate_state"] == "ok"
-    assert mission["provenance_status"] == "scanner_derived_unreviewed"
-    assert mission["basis"][0]["claim_id"] is None
-    assert mission["basis"][0]["review_status"] == "unreviewed"
-    assert result["packet"]["manifest"]["coverage_summary"]["direct_evidence_tile_relation_count"] == 1
-    plan_canonical_memory_promotion(
-        result["packet"],
-        resolved_references=result["resolved_references"],
-        current_memory=None,
+    assert mission["candidate_state"] == "sin_evidencia"
+    assert mission["basis"] == []
+    assert result["packet"]["manifest"]["unresolved_items"][0]["kind"] == (
+        "direct_tile_relation_review_pending"
     )
+
+
+def test_accepted_current_direct_relation_can_reach_a_tile_without_a_claim() -> None:
+    report = _direct_report(
+        "one",
+        "2026-08-01T00:00:00Z",
+        state="ok",
+    )
+    ledger = build_evidence_claim_tile_ledger([report], mode="shadow")
+    preview = build_reviewed_scoring_memory_shadow([report])
+    candidate = preview["recovery_review_candidates"][0]
+    source_evidence_id = candidate["evidence"]["source_evidence_ids"][0]
+
+    result = _resolve(
+        [report],
+        ledger=ledger,
+        adjudications=[_evidence_review(source_evidence_id)],
+        recovery_reviews=[_recovery_review(candidate, "accepted")],
+    )
+
+    mission = _tile(result["packet"], "M1")
+    assert mission["candidate_state"] == "ok"
+    assert mission["provenance_status"] == "accepted_basis"
+    assert mission["basis"][0]["claim_id"] is None
+    assert mission["basis"][0]["review_status"] == "accepted"
+    assert mission["basis"][0]["decision_event_id"] == "recovery-review-1"
+    assert result["packet"]["manifest"]["unresolved_items"] == []
+
+
+@pytest.mark.parametrize(
+    ("decision", "expected_blocker"),
+    [
+        ("rejected", None),
+        ("disputed", "direct_tile_relation_review_disputed"),
+    ],
+)
+def test_nonaccepted_current_direct_relation_never_lights_tile(
+    decision: str,
+    expected_blocker: str | None,
+) -> None:
+    report = _direct_report(
+        "one",
+        "2026-08-01T00:00:00Z",
+        state="ok",
+    )
+    ledger = build_evidence_claim_tile_ledger([report], mode="shadow")
+    preview = build_reviewed_scoring_memory_shadow([report])
+    candidate = preview["recovery_review_candidates"][0]
+    source_evidence_id = candidate["evidence"]["source_evidence_ids"][0]
+
+    result = _resolve(
+        [report],
+        ledger=ledger,
+        adjudications=[_evidence_review(source_evidence_id)],
+        recovery_reviews=[_recovery_review(candidate, decision)],
+    )
+
+    mission = _tile(result["packet"], "M1")
+    unresolved = result["packet"]["manifest"]["unresolved_items"]
+    assert mission["candidate_state"] == "sin_evidencia"
+    assert mission["basis"] == []
+    assert [item["kind"] for item in unresolved] == (
+        [expected_blocker] if expected_blocker else []
+    )
+
+
+def test_revoked_current_direct_relation_creates_verified_deprecation() -> None:
+    report = _direct_report(
+        "one",
+        "2026-08-01T00:00:00Z",
+        state="ok",
+    )
+    ledger = build_evidence_claim_tile_ledger([report], mode="shadow")
+    preview = build_reviewed_scoring_memory_shadow([report])
+    candidate = preview["recovery_review_candidates"][0]
+    source_evidence_id = candidate["evidence"]["source_evidence_ids"][0]
+    adjudications = [_evidence_review(source_evidence_id)]
+    accepted = _recovery_review(candidate, "accepted")
+    baseline = _resolve(
+        [report],
+        ledger=ledger,
+        adjudications=adjudications,
+        recovery_reviews=[accepted],
+    )
+    canonical = _promote(baseline)
+    revoked = _recovery_review(
+        candidate,
+        "revoked",
+        sequence=2,
+        previous_event_id=accepted["event_id"],
+    )
+
+    result = _resolve(
+        [report],
+        ledger=ledger,
+        adjudications=adjudications,
+        recovery_reviews=[revoked],
+        current=canonical,
+    )
+
+    mission = _tile(result["packet"], "M1")
+    assert mission["delta_kind"] == "verified_deprecation"
+    assert mission["candidate_state"] == "sin_evidencia"
+    assert [row["polarity"] for row in mission["basis"]] == [
+        "invalidates_candidate"
+    ]
+    assert result["packet"]["manifest"]["unresolved_items"] == []
 
 
 def test_report_order_does_not_change_direct_candidate_packet() -> None:
@@ -499,18 +602,22 @@ def test_report_order_does_not_change_direct_candidate_packet() -> None:
     reports = [first, second]
     ledger = build_evidence_claim_tile_ledger(reports, mode="shadow")
     preview = build_reviewed_scoring_memory_shadow(reports)
-    source_evidence_id = preview["accepted_evidence"][0]["source_evidence_ids"][0]
+    candidate = preview["recovery_review_candidates"][0]
+    source_evidence_id = candidate["evidence"]["source_evidence_ids"][0]
     adjudications = [_evidence_review(source_evidence_id)]
+    recovery_reviews = [_recovery_review(candidate, "accepted")]
 
     ordered = _resolve(
         reports,
         ledger=ledger,
         adjudications=adjudications,
+        recovery_reviews=recovery_reviews,
     )
     reversed_result = _resolve(
         list(reversed(reports)),
         ledger=ledger,
         adjudications=adjudications,
+        recovery_reviews=recovery_reviews,
     )
 
     assert reversed_result["packet"] == ordered["packet"]
@@ -743,6 +850,29 @@ def test_generated_packet_is_idempotent_and_survives_repository_restart(
                 actor_id="gsus",
                 idempotency_key_hash="1" * 64,
                 request_fingerprint="2" * 64,
+            ),
+        )
+        preview = repository.get_evidence_scoring_memory_preview(
+            "example.com"
+        )
+        assert preview is not None
+        candidate = preview["recovery_review_candidates"][0]
+        repository.append_evidence_scoring_recovery_review(
+            "example.com",
+            EvidenceScoringRecoveryReviewCommand(
+                subject_id=candidate["candidate_fingerprint"],
+                case_id=candidate["case_id"],
+                decision="accepted",
+                expected_current_event_id=None,
+                reviewer="gsus",
+                reason_code="tile_contract_reviewed",
+                rationale=(
+                    "The direct evidence-to-tile relation was reviewed."
+                ),
+                evaluator_version="manual-review-v1",
+                actor_id="gsus",
+                idempotency_key_hash="3" * 64,
+                request_fingerprint="4" * 64,
             ),
         )
 

@@ -65,6 +65,12 @@ def _preview(*, decision: str = "pending") -> dict:
                     "last_seen_at": "2026-07-30T08:00:00+00:00",
                     "observation_count": 2,
                 },
+                "contexts": [
+                    {
+                        "review_scope": "current_direct_relation",
+                        "lane": "history",
+                    }
+                ],
                 "review_prompt": "¿La cita satisface el contrato?",
             }
         ],
@@ -199,6 +205,8 @@ def test_authenticated_view_exposes_exact_candidate_safely(
     assert "private evidence" in response.text
     assert "<script>private evidence</script>" not in response.text
     assert "javascript:alert" not in response.text
+    assert "relación directa observada en el escaneo actual" in response.text
+    assert "no reescribe el scan ni su scoring diagnóstico" in response.text
     assert "Registrar decisión firmada" in response.text
     assert response.headers["cache-control"] == "no-store"
 

@@ -1,10 +1,11 @@
-"""Human review gate for evidence-scoring memory recoveries.
+"""Human review gate for direct evidence-to-tile semantic relations.
 
-The scoring-memory preview proves that an old quote is reproducible and still
-belongs to the scanned brand.  It does not prove that the quote satisfies the
-semantic contract of the SV9 tile it would recover.  This module freezes that
-last mapping as a reviewable subject and resolves append-only review events
-without granting runtime or scoring authority.
+The scoring-memory preview can prove that a quote is reproducible and belongs
+to the scanned brand.  It does not prove that the quote satisfies the semantic
+contract of an SV9 tile, whether the quote is present in the current scan or
+would recover a historical tile.  This module freezes that last mapping as a
+reviewable subject and resolves append-only review events without granting
+runtime or scoring authority.
 """
 
 from __future__ import annotations
@@ -32,13 +33,13 @@ EVIDENCE_SCORING_RECOVERY_REVIEW_EVENT_VERSION = (
     "evidence-scoring-recovery-review-event-v1"
 )
 EVIDENCE_SCORING_RECOVERY_REVIEW_POLICY_VERSION = (
-    "evidence-scoring-recovery-review-policy-v1"
+    "evidence-scoring-recovery-review-policy-v2"
 )
 REVIEW_DECISIONS = frozenset(
     {"accepted", "disputed", "rejected", "revoked"}
 )
 EVIDENCE_SCORING_REVIEWED_SHADOW_VERSION = (
-    "evidence-scoring-reviewed-memory-shadow-v1"
+    "evidence-scoring-reviewed-memory-shadow-v2"
 )
 SCORING_RECOVERY_REVIEW_SUBJECT_TYPE = "scoring_recovery"
 
@@ -110,6 +111,7 @@ def build_reviewed_scoring_memory_shadow(
     evidence_adjudications: Iterable[dict[str, Any]] = (),
     recovery_review_events: Iterable[dict[str, Any]] = (),
     reviewed_claim_tile_memory: dict[str, Any] | None = None,
+    claim_tile_ledger: dict[str, Any] | None = None,
     ignore_stale_review_events: bool = False,
     review_events_are_current: bool = False,
 ) -> dict[str, Any]:
@@ -136,7 +138,10 @@ def build_reviewed_scoring_memory_shadow(
         evidence_adjudications=evidence_adjudications,
     )
     candidates = build_recovery_review_candidates(
-        [{"lane": lane, "preview": preview}]
+        [{"lane": lane, "preview": preview}],
+        claim_tile_mappings=_latest_claim_tile_mappings(
+            claim_tile_ledger
+        ),
     )
     stored_events = [
         dict(event)
@@ -231,10 +236,167 @@ def build_reviewed_scoring_memory_shadow(
 
 def build_recovery_review_candidates(
     preview_lanes: Iterable[dict[str, Any]],
+    *,
+    claim_tile_mappings: Iterable[dict[str, Any]] = (),
 ) -> list[dict[str, Any]]:
-    """Freeze unique evidence-to-tile recovery mappings across preview lanes."""
+    """Freeze unique direct evidence-to-tile mappings across preview lanes.
+
+    A semantic decision is reusable while the exact evidence, tile contract,
+    rubric, and source identities remain unchanged.  Current observations and
+    historical recoveries therefore share one subject fingerprint.  Relations
+    already routed through the claim-to-tile ledger are excluded so reviewers
+    never decide the same path twice.
+    """
 
     accumulators: dict[str, dict[str, Any]] = {}
+    claim_routed_pairs = {
+        (
+            str(mapping.get("tile_id") or ""),
+            str(mapping.get("source_evidence_id") or ""),
+        )
+        for mapping in claim_tile_mappings
+        if isinstance(mapping, dict)
+        and str(mapping.get("tile_id") or "")
+        and str(mapping.get("source_evidence_id") or "")
+    }
+
+    def accumulate_candidate(
+        *,
+        lane: str,
+        preview: dict[str, Any],
+        brand: dict[str, Any],
+        domain: str,
+        evidence: dict[str, Any],
+        component_key: str,
+        tile_id: str,
+        latest_state: str,
+        proposed_state: str,
+        review_scope: str,
+    ) -> None:
+        tile_spec = _tile_spec(component_key, tile_id)
+        source_evidence_ids = sorted(
+            {
+                str(value)
+                for value in evidence.get("source_evidence_ids") or []
+                if str(value)
+                and (tile_id, str(value)) not in claim_routed_pairs
+            }
+        )
+        if not source_evidence_ids:
+            return
+        tile_evidence_id = str(
+            evidence.get("tile_evidence_id") or ""
+        )
+        if not tile_evidence_id:
+            raise EvidenceScoringRecoveryReviewError(
+                "direct tile relation is missing tile evidence identity"
+            )
+        source_urls = sorted(
+            str(value)
+            for value in evidence.get("source_urls") or []
+            if str(value)
+        )
+        subject = {
+            "brand_domain": domain,
+            "rubric_version": str(preview.get("rubric_version") or ""),
+            "component_key": component_key,
+            "tile_id": tile_id,
+            "tile_name": str(tile_spec["name"]),
+            "tile_condition": str(tile_spec["condition"]),
+            "tile_evidence_contract": dict(
+                tile_spec["evidence_contract"]
+            ),
+            "tile_evidence_id": tile_evidence_id,
+            "quote": str(evidence.get("quote") or ""),
+            "source_urls": source_urls,
+            "source_evidence_ids": source_evidence_ids,
+        }
+        candidate_fingerprint = stable_artifact_digest(
+            EVIDENCE_SCORING_RECOVERY_REVIEW_VERSION,
+            subject,
+        )
+        case_id = (
+            "scoring-recovery-"
+            f"{domain.replace('.', '-')}-"
+            f"{component_key}-{tile_id.lower()}-"
+            f"{candidate_fingerprint[:12]}"
+        )
+        accumulator = accumulators.setdefault(
+            case_id,
+            {
+                "schema_version": (
+                    EVIDENCE_SCORING_RECOVERY_REVIEW_VERSION
+                ),
+                "policy_version": (
+                    EVIDENCE_SCORING_RECOVERY_REVIEW_POLICY_VERSION
+                ),
+                "case_id": case_id,
+                "candidate_fingerprint": candidate_fingerprint,
+                "brand": {
+                    "name": str(brand.get("name") or ""),
+                    "domain": domain,
+                },
+                "rubric_version": str(
+                    preview.get("rubric_version") or ""
+                ),
+                "tile": {
+                    "component_key": component_key,
+                    "tile_id": tile_id,
+                    "tile_key": f"{component_key}.{tile_id}",
+                    "name": str(tile_spec["name"]),
+                    "condition": str(tile_spec["condition"]),
+                    "evidence_contract": dict(
+                        tile_spec["evidence_contract"]
+                    ),
+                    "latest_state": latest_state,
+                    "proposed_state": proposed_state,
+                },
+                "evidence": {
+                    "tile_evidence_id": tile_evidence_id,
+                    "quote": str(evidence.get("quote") or ""),
+                    "source_urls": source_urls,
+                    "source_classes": sorted(
+                        str(value)
+                        for value in evidence.get("source_classes") or []
+                        if str(value)
+                    ),
+                    "source_evidence_ids": source_evidence_ids,
+                    "acceptance_basis": sorted(
+                        str(value)
+                        for value in evidence.get("acceptance_basis") or []
+                        if str(value)
+                    ),
+                    "first_seen_at": str(
+                        evidence.get("first_seen_at") or ""
+                    ),
+                    "last_seen_at": str(
+                        evidence.get("last_seen_at") or ""
+                    ),
+                    "observation_count": int(
+                        evidence.get("observation_count") or 0
+                    ),
+                },
+                "contexts": [],
+                "review_prompt": (
+                    "¿La evidencia citada satisface específicamente "
+                    "el contrato semántico de esta baldosa?"
+                ),
+                "runtime_effect": False,
+                "authority": False,
+            },
+        )
+        context = {
+            "lane": lane,
+            "latest_report_id": (
+                str(preview.get("latest_report_id") or "") or None
+            ),
+            "review_scope": review_scope,
+            "latest_state": latest_state,
+            "proposed_state": proposed_state,
+        }
+        if context not in accumulator["contexts"]:
+            accumulator["contexts"].append(context)
+
     for lane_row in preview_lanes:
         if not isinstance(lane_row, dict):
             continue
@@ -263,6 +425,23 @@ def build_recovery_review_candidates(
             if isinstance(row, dict)
             and str(row.get("tile_evidence_id") or "")
         }
+        for evidence in evidence_by_id.values():
+            if evidence.get("present_in_latest") is not True:
+                continue
+            accumulate_candidate(
+                lane=lane,
+                preview=preview,
+                brand=brand,
+                domain=domain,
+                evidence=evidence,
+                component_key=str(
+                    evidence.get("component_key") or ""
+                ).strip(),
+                tile_id=str(evidence.get("tile_id") or "").strip(),
+                latest_state="ok",
+                proposed_state="ok",
+                review_scope="current_direct_relation",
+            )
         for recovery in preview.get("recoveries") or []:
             if not isinstance(recovery, dict):
                 continue
@@ -270,7 +449,6 @@ def build_recovery_review_candidates(
                 recovery.get("component_key") or ""
             ).strip()
             tile_id = str(recovery.get("tile_id") or "").strip()
-            tile_spec = _tile_spec(component_key, tile_id)
             for tile_evidence_id in sorted(
                 {
                     str(value)
@@ -283,148 +461,78 @@ def build_recovery_review_candidates(
                     raise EvidenceScoringRecoveryReviewError(
                         "recovery references evidence absent from preview"
                     )
-                subject = {
-                    "brand_domain": domain,
-                    "rubric_version": str(
-                        preview.get("rubric_version") or ""
-                    ),
-                    "component_key": component_key,
-                    "tile_id": tile_id,
-                    "tile_name": str(tile_spec["name"]),
-                    "tile_condition": str(tile_spec["condition"]),
-                    "tile_evidence_contract": dict(
-                        tile_spec["evidence_contract"]
-                    ),
-                    "tile_evidence_id": tile_evidence_id,
-                    "quote": str(evidence.get("quote") or ""),
-                    "source_urls": sorted(
-                        str(value)
-                        for value in evidence.get("source_urls") or []
-                        if str(value)
-                    ),
-                    "source_evidence_ids": sorted(
-                        str(value)
-                        for value in evidence.get(
-                            "source_evidence_ids"
-                        )
-                        or []
-                        if str(value)
-                    ),
-                }
-                candidate_fingerprint = stable_artifact_digest(
-                    EVIDENCE_SCORING_RECOVERY_REVIEW_VERSION,
-                    subject,
-                )
-                case_id = (
-                    "scoring-recovery-"
-                    f"{domain.replace('.', '-')}-"
-                    f"{component_key}-{tile_id.lower()}-"
-                    f"{candidate_fingerprint[:12]}"
-                )
-                accumulator = accumulators.setdefault(
-                    case_id,
-                    {
-                        "schema_version": (
-                            EVIDENCE_SCORING_RECOVERY_REVIEW_VERSION
-                        ),
-                        "policy_version": (
-                            EVIDENCE_SCORING_RECOVERY_REVIEW_POLICY_VERSION
-                        ),
-                        "case_id": case_id,
-                        "candidate_fingerprint": candidate_fingerprint,
-                        "brand": {
-                            "name": str(brand.get("name") or ""),
-                            "domain": domain,
-                        },
-                        "rubric_version": str(
-                            preview.get("rubric_version") or ""
-                        ),
-                        "tile": {
-                            "component_key": component_key,
-                            "tile_id": tile_id,
-                            "tile_key": f"{component_key}.{tile_id}",
-                            "name": str(tile_spec["name"]),
-                            "condition": str(tile_spec["condition"]),
-                            "evidence_contract": dict(
-                                tile_spec["evidence_contract"]
-                            ),
-                            "latest_state": str(
-                                recovery.get("latest_state") or ""
-                            ),
-                            "proposed_state": str(
-                                recovery.get("preview_state") or ""
-                            ),
-                        },
-                        "evidence": {
-                            "tile_evidence_id": tile_evidence_id,
-                            "quote": str(evidence.get("quote") or ""),
-                            "source_urls": list(subject["source_urls"]),
-                            "source_classes": sorted(
-                                str(value)
-                                for value in evidence.get(
-                                    "source_classes"
-                                )
-                                or []
-                                if str(value)
-                            ),
-                            "source_evidence_ids": list(
-                                subject["source_evidence_ids"]
-                            ),
-                            "acceptance_basis": sorted(
-                                str(value)
-                                for value in evidence.get(
-                                    "acceptance_basis"
-                                )
-                                or []
-                                if str(value)
-                            ),
-                            "first_seen_at": str(
-                                evidence.get("first_seen_at") or ""
-                            ),
-                            "last_seen_at": str(
-                                evidence.get("last_seen_at") or ""
-                            ),
-                            "observation_count": int(
-                                evidence.get("observation_count") or 0
-                            ),
-                        },
-                        "contexts": [],
-                        "review_prompt": (
-                            "¿La evidencia citada satisface específicamente "
-                            "el contrato semántico del tile y puede "
-                            "recuperarlo cuando el escaneo actual queda "
-                            "sin evidencia?"
-                        ),
-                        "runtime_effect": False,
-                        "authority": False,
-                    },
-                )
-                context = {
-                    "lane": lane,
-                    "latest_report_id": (
-                        str(preview.get("latest_report_id") or "")
-                        or None
-                    ),
-                    "latest_state": str(
+                accumulate_candidate(
+                    lane=lane,
+                    preview=preview,
+                    brand=brand,
+                    domain=domain,
+                    evidence=evidence,
+                    component_key=component_key,
+                    tile_id=tile_id,
+                    latest_state=str(
                         recovery.get("latest_state") or ""
                     ),
-                    "proposed_state": str(
+                    proposed_state=str(
                         recovery.get("preview_state") or ""
                     ),
-                }
-                if context not in accumulator["contexts"]:
-                    accumulator["contexts"].append(context)
+                    review_scope="historical_recovery",
+                )
 
     candidates = list(accumulators.values())
     for candidate in candidates:
         candidate["contexts"].sort(
             key=lambda row: (
+                0
+                if row.get("review_scope")
+                == "current_direct_relation"
+                else 1,
+                str(row.get("review_scope") or ""),
                 str(row["lane"]),
                 str(row.get("latest_report_id") or ""),
             )
         )
+        primary_context = candidate["contexts"][0]
+        candidate["tile"]["latest_state"] = str(
+            primary_context["latest_state"]
+        )
+        candidate["tile"]["proposed_state"] = str(
+            primary_context["proposed_state"]
+        )
         _validate_candidate(candidate)
     return sorted(candidates, key=lambda row: str(row["case_id"]))
+
+
+def _latest_claim_tile_mappings(
+    ledger: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if ledger is None:
+        return []
+    if not isinstance(ledger, dict):
+        raise EvidenceScoringRecoveryReviewError(
+            "claim-to-tile ledger must be an object"
+        )
+    if (
+        ledger.get("runtime_effect") is not False
+        or ledger.get("authority") is not False
+    ):
+        raise EvidenceScoringRecoveryReviewError(
+            "claim-to-tile ledger must remain non-authoritative"
+        )
+    latest_series_id = str(
+        ledger.get("latest_mapping_series_id") or ""
+    )
+    rows = [
+        dict(mapping)
+        for mapping in ledger.get("mappings") or []
+        if isinstance(mapping, dict)
+        and (
+            not latest_series_id
+            or str(mapping.get("mapping_series_id") or "")
+            == latest_series_id
+        )
+    ]
+    rows.sort(key=lambda row: str(row.get("mapping_id") or ""))
+    return rows
 
 
 def recovery_review_subject(
