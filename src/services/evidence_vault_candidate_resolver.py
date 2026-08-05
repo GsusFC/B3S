@@ -63,7 +63,7 @@ from src.sv9.rubric import (
 )
 
 
-EVIDENCE_VAULT_CANDIDATE_RESOLVER_VERSION = "evidence-vault-candidate-resolver-v1"
+EVIDENCE_VAULT_CANDIDATE_RESOLVER_VERSION = "evidence-vault-candidate-resolver-v2"
 EVIDENCE_VAULT_AGGREGATION_POLICY_VERSION = "evidence-vault-canonical-aggregation-policy-v1"
 EVIDENCE_VAULT_CLAIM_TILE_REVIEW_PACKET_SET_VERSION = "evidence-reviewed-claim-tile-packet-set-v1"
 EVIDENCE_VAULT_REVIEWED_TILE_RELATION_MEMORY_VERSION = "evidence-vault-reviewed-tile-relation-memory-v1"
@@ -288,6 +288,38 @@ def build_resolved_canonical_memory_candidate(
                     "review_state": decision,
                 },
             )
+            _add_pending_mapping_prerequisites(
+                mapping,
+                review_state=decision,
+                accepted_evidence=accepted_evidence,
+                snapshot_evidence_ids=snapshot_evidence_ids,
+                snapshot_claim_ids=snapshot_claim_ids,
+                unresolved_items=unresolved_items,
+                unresolved_by_tile=unresolved_by_tile,
+            )
+        elif decision == "disputed":
+            _add_unresolved(
+                unresolved_items,
+                unresolved_by_tile,
+                tile_id=tile_id,
+                kind="claim_tile_review_disputed",
+                blocking=True,
+                details={
+                    "mapping_id": mapping_id,
+                    "review_state": decision,
+                },
+            )
+            _add_pending_mapping_prerequisites(
+                mapping,
+                review_state=decision,
+                accepted_evidence=accepted_evidence,
+                snapshot_evidence_ids=snapshot_evidence_ids,
+                snapshot_claim_ids=snapshot_claim_ids,
+                unresolved_items=unresolved_items,
+                unresolved_by_tile=unresolved_by_tile,
+            )
+        elif decision not in {"rejected", "revoked"}:
+            raise EvidenceVaultCandidateResolverError(f"unsupported claim-to-tile review decision: {decision}")
 
     claim_routed_pairs = {
         (
@@ -509,6 +541,56 @@ def _resolve_accepted_mapping(
             "observed_result": None,
         }
     )
+
+
+def _add_pending_mapping_prerequisites(
+    mapping: dict[str, Any],
+    *,
+    review_state: str,
+    accepted_evidence: dict[str, dict[str, Any]],
+    snapshot_evidence_ids: set[str],
+    snapshot_claim_ids: set[str],
+    unresolved_items: list[dict[str, Any]],
+    unresolved_by_tile: dict[str, list[str]],
+) -> None:
+    """Expose downstream prerequisites before a mapping decision is accepted."""
+
+    mapping_id = _sha256(mapping.get("mapping_id"), field="mapping_id")
+    evidence_id = _sha256(
+        mapping.get("source_evidence_id"),
+        field="source_evidence_id",
+    )
+    claim_id = _sha256(
+        mapping.get("claim_variant_id"),
+        field="claim_variant_id",
+    )
+    tile_id = str(mapping.get("tile_id") or "")
+    if evidence_id not in accepted_evidence or evidence_id not in snapshot_evidence_ids:
+        _add_unresolved(
+            unresolved_items,
+            unresolved_by_tile,
+            tile_id=tile_id,
+            kind="pending_mapping_evidence_identity_not_accepted",
+            blocking=True,
+            details={
+                "mapping_id": mapping_id,
+                "evidence_id": evidence_id,
+                "review_state": review_state,
+            },
+        )
+    if claim_id not in snapshot_claim_ids:
+        _add_unresolved(
+            unresolved_items,
+            unresolved_by_tile,
+            tile_id=tile_id,
+            kind="pending_mapping_claim_unresolvable",
+            blocking=True,
+            details={
+                "mapping_id": mapping_id,
+                "claim_variant_id": claim_id,
+                "review_state": review_state,
+            },
+        )
 
 
 def _resolve_direct_tile_relations(
