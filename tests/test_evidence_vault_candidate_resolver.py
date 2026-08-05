@@ -89,10 +89,81 @@ def test_unreviewed_mapping_is_visible_and_blocks_baseline_without_lighting_tile
     unresolved = packet["manifest"]["unresolved_items"]
     assert mission["candidate_state"] == "sin_evidencia"
     assert mission["basis"] == []
-    assert len(unresolved) == 1
-    assert unresolved[0]["kind"] == "claim_tile_review_pending"
-    assert unresolved[0]["blocking"] is True
-    assert mission["unresolved_refs"] == [unresolved[0]["unresolved_id"]]
+    assert {item["kind"] for item in unresolved} == {
+        "claim_tile_review_pending",
+        "pending_mapping_evidence_identity_not_accepted",
+    }
+    assert all(item["blocking"] is True for item in unresolved)
+    identity_blocker = next(
+        item for item in unresolved if item["kind"] == "pending_mapping_evidence_identity_not_accepted"
+    )
+    assert identity_blocker["details"] == {
+        "mapping_id": ledger["mappings"][0]["mapping_id"],
+        "evidence_id": ledger["mappings"][0]["source_evidence_id"],
+        "review_state": "pending",
+    }
+    assert mission["unresolved_refs"] == sorted(item["unresolved_id"] for item in unresolved)
+
+
+def test_rejected_mapping_does_not_require_unused_evidence_identity() -> None:
+    report = _report(
+        "one",
+        "2026-08-01T00:00:00Z",
+        "Our mission is to make financial work radically simpler.",
+    )
+    ledger = build_evidence_claim_tile_ledger([report], mode="shadow")
+    mapping = ledger["mappings"][0]
+
+    result = _resolve(
+        [report],
+        ledger=ledger,
+        mapping_reviews=[_mapping_review(mapping, "rejected")],
+        registered_packets={PACKET_FINGERPRINT},
+    )
+
+    assert _tile(result["packet"], "M1")["candidate_state"] == ("sin_evidencia")
+    assert result["packet"]["manifest"]["unresolved_items"] == []
+
+
+def test_pending_mapping_with_accepted_evidence_has_only_mapping_blocker() -> None:
+    report = _report(
+        "one",
+        "2026-08-01T00:00:00Z",
+        "Our mission is to make financial work radically simpler.",
+    )
+    ledger = build_evidence_claim_tile_ledger([report], mode="shadow")
+    mapping = ledger["mappings"][0]
+
+    result = _resolve(
+        [report],
+        ledger=ledger,
+        adjudications=[_evidence_review(mapping["source_evidence_id"])],
+    )
+
+    unresolved = result["packet"]["manifest"]["unresolved_items"]
+    assert [item["kind"] for item in unresolved] == ["claim_tile_review_pending"]
+
+
+def test_disputed_mapping_and_its_missing_identity_both_block() -> None:
+    report = _report(
+        "one",
+        "2026-08-01T00:00:00Z",
+        "Our mission is to make financial work radically simpler.",
+    )
+    ledger = build_evidence_claim_tile_ledger([report], mode="shadow")
+    mapping = ledger["mappings"][0]
+
+    result = _resolve(
+        [report],
+        ledger=ledger,
+        mapping_reviews=[_mapping_review(mapping, "disputed")],
+        registered_packets={PACKET_FINGERPRINT},
+    )
+
+    assert {item["kind"] for item in result["packet"]["manifest"]["unresolved_items"]} == {
+        "claim_tile_review_disputed",
+        "pending_mapping_evidence_identity_not_accepted",
+    }
 
 
 def test_mapping_acceptance_cannot_bypass_missing_evidence_acceptance() -> None:
