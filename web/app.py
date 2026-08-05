@@ -527,7 +527,13 @@ def _vault_reviewer_profile(domain: str) -> dict[str, Any]:
             "available": False,
             "message": "El journal protegido no está disponible temporalmente.",
             "items": [],
-            "summary": {"candidate_count": 0, "pending_count": 0, "reviewed_count": 0},
+            "summary": {
+                "candidate_count": 0,
+                "pending_count": 0,
+                "disputed_count": 0,
+                "blocking_count": 0,
+                "reviewed_count": 0,
+            },
         }
 
     persistence = preview.get("persistence") if isinstance(preview.get("persistence"), dict) else {}
@@ -592,11 +598,16 @@ def _vault_reviewer_profile(domain: str) -> dict[str, Any]:
                 "decision": decision,
                 "reviewer_id": str(evaluated.get("reviewer_id") or ""),
                 "current_event_id": str(evaluated.get("event_id") or ""),
-                "can_review": journal_ready and decision == "pending",
+                "can_review": journal_ready
+                and decision in {"pending", "disputed"},
+                "requires_resolution": decision == "disputed",
                 "idempotency_key": f"vault-review-{uuid.uuid4()}",
             }
         )
     pending_count = sum(item["decision"] == "pending" for item in items)
+    disputed_count = sum(
+        item["decision"] == "disputed" for item in items
+    )
     return {
         "domain": normalized,
         "brand_name": str(brand.get("name") or normalized),
@@ -609,6 +620,8 @@ def _vault_reviewer_profile(domain: str) -> dict[str, Any]:
         "summary": {
             "candidate_count": len(items),
             "pending_count": pending_count,
+            "disputed_count": disputed_count,
+            "blocking_count": disputed_count,
             "reviewed_count": len(items) - pending_count,
         },
     }
