@@ -32,6 +32,14 @@
       <strong>{{ review.summary.pending_count }}</strong>
     </article>
     <article class="vault-memory-metric">
+      <span>disputadas</span>
+      <strong>{{ review.summary.disputed_count }}</strong>
+    </article>
+    <article class="vault-memory-metric">
+      <span>disputas bloqueantes</span>
+      <strong>{{ review.summary.blocking_count }}</strong>
+    </article>
+    <article class="vault-memory-metric">
       <span>registrados</span>
       <strong>{{ review.summary.reviewed_count }}</strong>
     </article>
@@ -61,6 +69,8 @@
       <span class="label">{{ item.tile_key }} · {{ item.tile_name }}</span>
       {% if item.decision == "pending" %}
       <span class="chip warn">pendiente</span>
+      {% elif item.decision == "disputed" %}
+      <span class="chip warn">disputada · requiere resolución</span>
       {% else %}
       <span class="chip ok">{{ item.decision }}</span>
       {% endif %}
@@ -112,17 +122,22 @@
       <input type="hidden" name="expected_current_event_id" value="{{ item.current_event_id }}">
       <input type="hidden" name="idempotency_key" value="{{ item.idempotency_key }}">
       <p class="text-pretty"><strong>{{ item.review_prompt }}</strong></p>
+      {% if item.requires_resolution %}
+      <p class="text-pretty">Esta disputa bloquea el paquete candidato. Registra una decisión posterior sobre la misma relación exacta.</p>
+      {% endif %}
       <fieldset class="vault-review-options">
-        <legend>Decisión</legend>
+        <legend>{% if item.requires_resolution %}Resolución{% else %}Decisión{% endif %}</legend>
         <label><input type="radio" name="decision" value="accepted" required> Aceptada</label>
+        {% if not item.requires_resolution %}
         <label><input type="radio" name="decision" value="disputed" required> Disputada</label>
+        {% endif %}
         <label><input type="radio" name="decision" value="rejected" required> Rechazada</label>
       </fieldset>
       <label>
         Justificación
         <textarea name="rationale" required minlength="12" maxlength="2000" rows="5" placeholder="Explica por qué la cita satisface o no el contrato concreto de esta baldosa."></textarea>
       </label>
-      <button type="submit">Registrar decisión firmada</button>
+      <button type="submit">{% if item.requires_resolution %}Resolver disputa{% else %}Registrar decisión firmada{% endif %}</button>
       <p class="vault-memory-contract mono muted">runtime_effect=false · authority=false · automatic_scoring_effect=false</p>
     </form>
     {% else %}

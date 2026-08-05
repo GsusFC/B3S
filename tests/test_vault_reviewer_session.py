@@ -295,3 +295,31 @@ def test_registered_candidate_is_read_only(monkeypatch) -> None:
     assert response.status_code == 200
     assert "Decisión registrada: accepted" in response.text
     assert "Registrar decisión firmada" not in response.text
+
+
+def test_disputed_candidate_is_counted_and_can_be_resolved(
+    monkeypatch,
+) -> None:
+    _configure_vault(monkeypatch)
+    monkeypatch.setattr(
+        "web.app.evidence_scoring_memory_preview_for_domain",
+        lambda _domain: _preview(decision="disputed"),
+    )
+    client = TestClient(app, base_url="https://testserver")
+    _login(client)
+
+    response = client.get("/vault/review/example.com")
+
+    assert response.status_code == 200
+    assert "disputada · requiere resolución" in response.text
+    assert "Esta disputa bloquea el paquete candidato" in response.text
+    assert "Resolver disputa" in response.text
+    assert "disputadas</span>\n      <strong>1</strong>" in response.text
+    assert "disputas bloqueantes</span>\n      <strong>1</strong>" in response.text
+    assert (
+        'name="expected_current_event_id" '
+        'value="00000000-0000-0000-0000-000000000042"'
+    ) in response.text
+    assert 'name="decision" value="accepted"' in response.text
+    assert 'name="decision" value="rejected"' in response.text
+    assert 'name="decision" value="disputed"' not in response.text
