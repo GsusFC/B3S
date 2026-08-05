@@ -98,6 +98,10 @@ from src.services.evidence_vault_canonical_core import (
     EvidenceVaultCanonicalCoreError,
     validate_candidate_packet,
 )
+from src.services.evidence_vault_candidate_resolver import (
+    EvidenceVaultCandidateResolverError,
+    build_resolved_canonical_memory_candidate,
+)
 from src.services.scanner_evidence_comparison import (
     CANONICAL_POLICY_VERSION,
     annotate_report_history,
@@ -857,6 +861,106 @@ class PostgresHistoryRepository:
             current_packet,
             reviews,
             registered_packets=registered_packets,
+        )
+
+    def build_and_register_evidence_vault_canonical_memory_packet(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Resolve and register one packet exclusively from durable history."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceVaultCanonicalPacketNotFoundError(
+                "The brand domain does not exist in durable history."
+            )
+        reports: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            batch = self.list_report_payloads_for_domain(
+                domain,
+                workspace_slug=workspace_slug,
+                limit=500,
+                offset=offset,
+            )
+            reports.extend(batch)
+            if len(batch) < 500:
+                break
+            offset += len(batch)
+        if not reports:
+            raise EvidenceVaultCanonicalPacketNotFoundError(
+                "The brand has no immutable report history."
+            )
+        ledger = self.get_evidence_claim_tile_ledger(
+            domain,
+            workspace_slug=workspace_slug,
+        )
+        if not isinstance(ledger, dict):
+            raise EvidenceVaultCanonicalUnavailableError(
+                "The durable claim-to-tile ledger is unavailable."
+            )
+        adjudications = self.list_current_evidence_memory_adjudications(
+            domain,
+            workspace_slug=workspace_slug,
+        )
+        reconciliations = self.list_current_evidence_claim_reconciliations(
+            domain,
+            workspace_slug=workspace_slug,
+        )
+        reviews = self.list_current_evidence_claim_tile_reviews(
+            domain,
+            workspace_slug=workspace_slug,
+        )
+        recovery_reviews = (
+            self.list_current_evidence_scoring_recovery_reviews(
+                domain,
+                workspace_slug=workspace_slug,
+            )
+        )
+        registered_packet_fingerprints = {
+            str(review.get("review_packet_fingerprint") or "")
+            for review in reviews
+        }
+        if "" in registered_packet_fingerprints:
+            raise EvidenceVaultCanonicalUnavailableError(
+                "A current claim-to-tile review has no packet fingerprint."
+            )
+        for fingerprint in sorted(registered_packet_fingerprints):
+            self.get_evidence_claim_tile_review_packet(
+                domain,
+                fingerprint,
+                workspace_slug=workspace_slug,
+            )
+        current_memory = self.get_evidence_vault_canonical_memory(
+            domain,
+            workspace_slug=workspace_slug,
+        )
+        try:
+            resolved = build_resolved_canonical_memory_candidate(
+                brand_identity=domain,
+                reports=reports,
+                evidence_adjudications=adjudications,
+                claim_reconciliations=reconciliations,
+                claim_tile_ledger=ledger,
+                claim_tile_reviews=reviews,
+                scoring_recovery_reviews=recovery_reviews,
+                registered_review_packet_fingerprints=(
+                    registered_packet_fingerprints
+                ),
+                current_canonical_memory=current_memory,
+            )
+        except EvidenceVaultCandidateResolverError as exc:
+            raise EvidenceVaultCanonicalUnavailableError(
+                "Durable history cannot resolve one canonical-memory candidate."
+            ) from exc
+        return self.register_evidence_vault_canonical_memory_packet(
+            domain,
+            resolved["packet"],
+            resolved_references=resolved["resolved_references"],
+            workspace_slug=workspace_slug,
         )
 
     def register_evidence_vault_canonical_memory_packet(
