@@ -17,6 +17,7 @@ from src.services.evidence_memory_identity_v2 import (
 )
 from src.services.evidence_scoring_recovery_review import (
     EVIDENCE_SCORING_RECOVERY_REVIEW_EVENT_VERSION,
+    EvidenceScoringRecoveryReviewCommand,
     build_reviewed_scoring_memory_shadow,
 )
 from src.services.evidence_vault_candidate_resolver import (
@@ -849,6 +850,29 @@ def test_generated_packet_is_idempotent_and_survives_repository_restart(
                 actor_id="gsus",
                 idempotency_key_hash="1" * 64,
                 request_fingerprint="2" * 64,
+            ),
+        )
+        preview = repository.get_evidence_scoring_memory_preview(
+            "example.com"
+        )
+        assert preview is not None
+        candidate = preview["recovery_review_candidates"][0]
+        repository.append_evidence_scoring_recovery_review(
+            "example.com",
+            EvidenceScoringRecoveryReviewCommand(
+                subject_id=candidate["candidate_fingerprint"],
+                case_id=candidate["case_id"],
+                decision="accepted",
+                expected_current_event_id=None,
+                reviewer="gsus",
+                reason_code="tile_contract_reviewed",
+                rationale=(
+                    "The direct evidence-to-tile relation was reviewed."
+                ),
+                evaluator_version="manual-review-v1",
+                actor_id="gsus",
+                idempotency_key_hash="3" * 64,
+                request_fingerprint="4" * 64,
             ),
         )
 

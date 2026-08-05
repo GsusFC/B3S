@@ -80,6 +80,26 @@ def test_claim_routed_current_relation_is_not_duplicated() -> None:
     assert candidates == []
 
 
+def test_current_rubric_unknown_tile_fails_closed() -> None:
+    preview = _preview()
+    preview["accepted_evidence"][0].update(
+        {
+            "present_in_latest": True,
+            "component_key": "value_proposition",
+            "tile_id": "VP1",
+        }
+    )
+    preview["recoveries"] = []
+
+    with pytest.raises(
+        EvidenceScoringRecoveryReviewError,
+        match=r"unknown recovery tile: value_proposition\.VP1",
+    ):
+        build_recovery_review_candidates(
+            [{"lane": "history", "preview": preview}]
+        )
+
+
 def test_unsigned_template_and_missing_reviews_fail_closed() -> None:
     candidates = build_recovery_review_candidates(
         [{"lane": "bridge", "preview": _preview()}]
