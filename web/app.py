@@ -90,6 +90,18 @@ _VAULT_REVIEW_DECISION_REASON_CODES = {
     "rejected": "tile_contract_not_satisfied",
 }
 
+_VAULT_REVIEW_STATE_FILTERS = (
+    ("actionable", "Por gestionar"),
+    ("pending", "Pendientes"),
+    ("disputed", "Disputadas"),
+    ("accepted", "Aceptadas"),
+    ("rejected", "Rechazadas"),
+    ("all", "Todas"),
+)
+_VAULT_REVIEW_STATE_KEYS = frozenset(
+    key for key, _label in _VAULT_REVIEW_STATE_FILTERS
+)
+
 
 def _initialize_runtime() -> None:
     env_file = Path(".env")
@@ -509,12 +521,22 @@ def _vault_reviewer_session(
     return read_vault_reviewer_session(request.cookies.get(VAULT_REVIEWER_COOKIE))
 
 
-def _vault_reviewer_profile(domain: str) -> dict[str, Any]:
+def _vault_review_state_filter(value: str) -> str:
+    normalized = str(value or "").strip().casefold()
+    return normalized if normalized in _VAULT_REVIEW_STATE_KEYS else "actionable"
+
+
+def _vault_reviewer_profile(
+    domain: str,
+    *,
+    state_filter: str = "actionable",
+) -> dict[str, Any]:
     """Expose exact recovery candidates only inside an authenticated view."""
 
     normalized = domain_key(domain)
     if not normalized:
         raise HTTPException(status_code=404, detail="Brand not found")
+    selected_filter = _vault_review_state_filter(state_filter)
     try:
         preview = evidence_scoring_memory_preview_for_domain(normalized)
     except Exception:
@@ -527,6 +549,20 @@ def _vault_reviewer_profile(domain: str) -> dict[str, Any]:
             "available": False,
             "message": "El journal protegido no está disponible temporalmente.",
             "items": [],
+            "state_filter": selected_filter,
+            "state_filters": [
+                {
+                    "key": key,
+                    "label": label,
+                    "count": 0,
+                    "active": key == selected_filter,
+                }
+                for key, label in _VAULT_REVIEW_STATE_FILTERS
+            ],
+            "empty_action": {
+                "href": f"/brand/{normalized}",
+                "label": "Volver a la memoria de baldosas",
+            },
             "summary": {
                 "candidate_count": 0,
                 "pending_count": 0,
@@ -608,6 +644,47 @@ def _vault_reviewer_profile(domain: str) -> dict[str, Any]:
     disputed_count = sum(
         item["decision"] == "disputed" for item in items
     )
+    state_counts = {
+        "actionable": pending_count + disputed_count,
+        "pending": pending_count,
+        "disputed": disputed_count,
+        "accepted": sum(
+            item["decision"] == "accepted" for item in items
+        ),
+        "rejected": sum(
+            item["decision"] == "rejected" for item in items
+        ),
+        "all": len(items),
+    }
+    if selected_filter == "actionable":
+        filtered_items = [
+            item
+            for item in items
+            if item["decision"] in {"pending", "disputed"}
+        ]
+    elif selected_filter == "all":
+        filtered_items = items
+    else:
+        filtered_items = [
+            item
+            for item in items
+            if item["decision"] == selected_filter
+        ]
+    if selected_filter != "actionable" and state_counts["actionable"]:
+        empty_action = {
+            "href": f"/vault/review/{normalized}?state=actionable",
+            "label": "Ver relaciones por gestionar",
+        }
+    elif selected_filter != "all":
+        empty_action = {
+            "href": f"/vault/review/{normalized}?state=all",
+            "label": "Ver todas las relaciones",
+        }
+    else:
+        empty_action = {
+            "href": f"/brand/{normalized}",
+            "label": "Volver a la memoria de baldosas",
+        }
     return {
         "domain": normalized,
         "brand_name": str(brand.get("name") or normalized),
@@ -616,7 +693,18 @@ def _vault_reviewer_profile(domain: str) -> dict[str, Any]:
         "runtime_effect": False,
         "authority": False,
         "automatic_scoring_effect": False,
-        "items": items,
+        "items": filtered_items,
+        "state_filter": selected_filter,
+        "state_filters": [
+            {
+                "key": key,
+                "label": label,
+                "count": state_counts[key],
+                "active": key == selected_filter,
+            }
+            for key, label in _VAULT_REVIEW_STATE_FILTERS
+        ],
+        "empty_action": empty_action,
         "summary": {
             "candidate_count": len(items),
             "pending_count": pending_count,
@@ -661,13 +749,17 @@ def _vault_review_page_response(
     *,
     error: str = "",
     saved: bool = False,
+    state_filter: str = "actionable",
     status_code: int = 200,
 ):
     response = templates.TemplateResponse(
         request,
         "vault_review.html.j2",
         {
-            "review": _vault_reviewer_profile(domain),
+            "review": _vault_reviewer_profile(
+                domain,
+                state_filter=state_filter,
+            ),
             "reviewer": session.reviewer_id,
             "csrf_token": session.csrf_token,
             "error": error,
@@ -1442,16 +1534,18 @@ def vault_review_view(
     request: Request,
     domain: str,
     saved: str = "",
+    state: str = "actionable",
 ):
     if not vault_reviewer_enabled():
         raise HTTPException(status_code=404, detail="Not found")
     normalized = domain_key(domain)
     if not normalized:
         raise HTTPException(status_code=404, detail="Brand not found")
+    state_filter = _vault_review_state_filter(state)
     session = _vault_reviewer_session(request)
     if session is None:
         destination = quote(
-            f"/vault/review/{normalized}",
+            f"/vault/review/{normalized}?state={state_filter}",
             safe="",
         )
         return _vault_response_headers(
@@ -1465,6 +1559,7 @@ def vault_review_view(
         normalized,
         session,
         saved=saved == "1",
+        state_filter=state_filter,
     )
 
 
@@ -1472,6 +1567,7 @@ def vault_review_view(
 def create_vault_review_decision(
     request: Request,
     domain: str,
+    state: str = "actionable",
     csrf_token: str = Form(""),
     subject_id: str = Form(""),
     case_id: str = Form(""),
@@ -1485,10 +1581,11 @@ def create_vault_review_decision(
     normalized = domain_key(domain)
     if not normalized:
         raise HTTPException(status_code=404, detail="Brand not found")
+    state_filter = _vault_review_state_filter(state)
     session = _vault_reviewer_session(request)
     if session is None:
         destination = quote(
-            f"/vault/review/{normalized}",
+            f"/vault/review/{normalized}?state={state_filter}",
             safe="",
         )
         return _vault_response_headers(
@@ -1503,6 +1600,7 @@ def create_vault_review_decision(
             normalized,
             session,
             error="La sesión cambió o el formulario caducó. Recarga antes de firmar.",
+            state_filter=state_filter,
             status_code=403,
         )
     if decision not in _VAULT_REVIEW_DECISION_REASON_CODES:
@@ -1511,6 +1609,7 @@ def create_vault_review_decision(
             normalized,
             session,
             error="Selecciona una decisión válida.",
+            state_filter=state_filter,
             status_code=422,
         )
     try:
@@ -1538,6 +1637,7 @@ def create_vault_review_decision(
             normalized,
             session,
             error="Completa una justificación válida antes de registrar la decisión.",
+            state_filter=state_filter,
             status_code=422,
         )
     except ApiError as exc:
@@ -1547,10 +1647,11 @@ def create_vault_review_decision(
             normalized,
             session,
             error=message,
+            state_filter=state_filter,
             status_code=status_code,
         )
     response = RedirectResponse(
-        f"/vault/review/{normalized}?saved=1",
+        f"/vault/review/{normalized}?state=actionable&saved=1",
         status_code=303,
     )
     return _vault_response_headers(response)
