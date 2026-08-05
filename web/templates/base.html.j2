@@ -826,6 +826,30 @@
   .vault-review-form button { justify-self: start; }
   .vault-review-summary { display: grid; gap: var(--space-md); }
   .vault-review-summary p { margin: 0; }
+  .vault-review-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-xs);
+    margin-top: var(--space-lg);
+  }
+  .vault-review-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    border: 1px solid var(--line-strong);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: var(--type-label);
+    padding: 8px 10px;
+    text-decoration: none;
+  }
+  .vault-review-filter:hover { border-color: var(--accent); color: var(--ink); }
+  .vault-review-filter[aria-current="page"] {
+    background: var(--panel-soft);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .vault-review-filter-count { font-variant-numeric: tabular-nums; }
   .vault-review-notice {
     border: 1px solid var(--ok);
     color: var(--ok);

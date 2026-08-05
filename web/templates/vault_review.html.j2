@@ -46,6 +46,19 @@
   </div>
 </section>
 
+<nav class="vault-review-filters" aria-label="Filtrar relaciones por estado de revisión">
+  {% for state in review.state_filters %}
+  <a
+    class="vault-review-filter"
+    href="/vault/review/{{ review.domain }}?state={{ state.key }}"
+    {% if state.active %}aria-current="page"{% endif %}
+  >
+    <span>{{ state.label }}</span>
+    <span class="vault-review-filter-count">{{ state.count }}</span>
+  </a>
+  {% endfor %}
+</nav>
+
 {% if saved %}
 <p class="vault-review-notice" role="status">Decisión registrada en el journal protegido.</p>
 {% endif %}
@@ -115,7 +128,7 @@
     </div>
 
     {% if item.can_review %}
-    <form method="post" action="/vault/review/{{ review.domain }}/decisions" class="vault-review-form vault-review-decision-form">
+    <form method="post" action="/vault/review/{{ review.domain }}/decisions?state={{ review.state_filter }}" class="vault-review-form vault-review-decision-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="subject_id" value="{{ item.subject_id }}">
       <input type="hidden" name="case_id" value="{{ item.case_id }}">
@@ -151,8 +164,8 @@
 </div>
 {% else %}
 <section class="panel vault-memory-empty">
-  <p class="text-pretty">No hay relaciones directas evidencia → baldosa pendientes para esta marca.</p>
-  <a href="/brand/{{ review.domain }}">Volver a la memoria de baldosas</a>
+  <p class="text-pretty">No hay relaciones en este estado de revisión.</p>
+  <a href="{{ review.empty_action.href }}">{{ review.empty_action.label }}</a>
 </section>
 {% endif %}
 {% endblock %}

@@ -270,7 +270,9 @@ def test_decision_requires_csrf_and_binds_server_reviewer(
     )
 
     assert accepted.status_code == 303
-    assert accepted.headers["location"] == ("/vault/review/example.com?saved=1")
+    assert accepted.headers["location"] == (
+        "/vault/review/example.com?state=actionable&saved=1"
+    )
     assert captured["domain"] == "example.com"
     assert captured["reviewer_id"] == REVIEWER_ID
     assert captured["client_id"] == REVIEWER_ID
@@ -290,7 +292,7 @@ def test_registered_candidate_is_read_only(monkeypatch) -> None:
     client = TestClient(app, base_url="https://testserver")
     _login(client)
 
-    response = client.get("/vault/review/example.com")
+    response = client.get("/vault/review/example.com?state=accepted")
 
     assert response.status_code == 200
     assert "Decisión registrada: accepted" in response.text
@@ -323,3 +325,40 @@ def test_disputed_candidate_is_counted_and_can_be_resolved(
     assert 'name="decision" value="accepted"' in response.text
     assert 'name="decision" value="rejected"' in response.text
     assert 'name="decision" value="disputed"' not in response.text
+
+
+def test_review_state_navigation_filters_candidates_server_side(
+    monkeypatch,
+) -> None:
+    _configure_vault(monkeypatch)
+    monkeypatch.setattr(
+        "web.app.evidence_scoring_memory_preview_for_domain",
+        lambda _domain: _preview(decision="disputed"),
+    )
+    client = TestClient(app, base_url="https://testserver")
+    _login(client)
+
+    actionable = client.get("/vault/review/example.com")
+    pending = client.get("/vault/review/example.com?state=pending")
+    all_items = client.get("/vault/review/example.com?state=all")
+    unknown = client.get("/vault/review/example.com?state=unknown")
+
+    assert actionable.status_code == 200
+    assert 'href="/vault/review/example.com?state=actionable"' in actionable.text
+    assert 'aria-current="page"' in actionable.text
+    assert "Por gestionar" in actionable.text
+    assert "coherencia.C6" in actionable.text
+    assert "Disputadas" in actionable.text
+    assert "Aceptadas" in actionable.text
+    assert "Rechazadas" in actionable.text
+
+    assert pending.status_code == 200
+    assert "coherencia.C6" not in pending.text
+    assert "private evidence" not in pending.text
+    assert "No hay relaciones en este estado de revisión" in pending.text
+    assert "Ver relaciones por gestionar" in pending.text
+
+    assert all_items.status_code == 200
+    assert "coherencia.C6" in all_items.text
+    assert unknown.status_code == 200
+    assert "coherencia.C6" in unknown.text
