@@ -14,6 +14,9 @@ from src.services.evidence_vault_canonical_authority import (
     EvidenceVaultCanonicalPromotionConflictError,
     promotion_request_fingerprint,
 )
+from src.services.evidence_vault_candidate_resolver import (
+    canonical_aggregation_policy_fingerprint,
+)
 from src.services.evidence_vault_canonical_core import (
     build_candidate_packet,
     build_candidate_tile,
@@ -60,6 +63,9 @@ def test_postgres_canonical_promotion_is_durable_idempotent_and_serialized() -> 
         assert stored["authority_state"] == "pending_review"
         assert stored["authority"] is False
         assert stored["packet"] == baseline
+        assert repository.get_or_create_evidence_vault_canonical_score_evaluation(
+            "example.com"
+        ) == (None, False)
 
         repeated, replayed = repository.register_evidence_vault_canonical_memory_packet(
             "example.com",
@@ -80,6 +86,56 @@ def test_postgres_canonical_promotion_is_durable_idempotent_and_serialized() -> 
         assert baseline_event["authority_scope"] == "b3s-vault"
         assert baseline_event["production_runtime_effect"] is False
         assert baseline_event["scanner_runtime_effect"] is False
+
+        baseline_evaluation, replayed = (
+            repository.get_or_create_evidence_vault_canonical_score_evaluation(
+                "example.com"
+            )
+        )
+        assert replayed is False
+        assert baseline_evaluation is not None
+        assert baseline_evaluation["score"] == 1
+        assert baseline_evaluation["authority_scope"] == "b3s-vault"
+        assert baseline_evaluation["scanner_runtime_effect"] is False
+        assert baseline_evaluation["production_runtime_effect"] is False
+        repeated_evaluation, replayed = (
+            repository.get_or_create_evidence_vault_canonical_score_evaluation(
+                "example.com"
+            )
+        )
+        assert replayed is True
+        assert repeated_evaluation == baseline_evaluation
+        assert (
+            repository.get_evidence_vault_canonical_score_evaluation(
+                "example.com"
+            )
+            == baseline_evaluation
+        )
+
+        _insert_brand(dsn, workspace_slug="mirror")
+        mirror = PostgresHistoryRepository(dsn)
+        mirror.register_evidence_vault_canonical_memory_packet(
+            "example.com",
+            baseline,
+            resolved_references=_references(baseline),
+            workspace_slug="mirror",
+        )
+        mirror.append_evidence_vault_canonical_memory_promotion(
+            "example.com",
+            baseline_command,
+            workspace_slug="mirror",
+        )
+        mirror_evaluation, replayed = (
+            mirror.get_or_create_evidence_vault_canonical_score_evaluation(
+                "example.com",
+                workspace_slug="mirror",
+            )
+        )
+        assert replayed is False
+        assert mirror_evaluation is not None
+        assert mirror_evaluation["evaluation_identity"] == (
+            baseline_evaluation["evaluation_identity"]
+        )
 
         repeated_event, replayed = repository.append_evidence_vault_canonical_memory_promotion(
             "example.com",
@@ -156,6 +212,7 @@ def test_postgres_canonical_promotion_is_durable_idempotent_and_serialized() -> 
         assert promoted[0][1]["sequence"] == 2
         assert promoted[0][2] is False
         assert conflicts[0][1] == promoted[0][1]["promoted_canonical_memory_version"]
+        winner_index = 0 if outcomes[0][0] == "promoted" else 1
 
         restarted = PostgresHistoryRepository(dsn)
         evolved = restarted.get_evidence_vault_canonical_memory("example.com")
@@ -163,7 +220,33 @@ def test_postgres_canonical_promotion_is_durable_idempotent_and_serialized() -> 
         assert evolved["promotion_sequence"] == 2
         assert evolved["canonical_memory_version"] == promoted[0][1]["promoted_canonical_memory_version"]
 
-        winner_index = 0 if outcomes[0][0] == "promoted" else 1
+        evolved_evaluation, replayed = (
+            restarted.get_or_create_evidence_vault_canonical_score_evaluation(
+                "example.com"
+            )
+        )
+        assert replayed is False
+        assert evolved_evaluation is not None
+        assert evolved_evaluation["evaluation_identity"] != (
+            baseline_evaluation["evaluation_identity"]
+        )
+        if winner_index == 0:
+            assert evolved_evaluation["score"] == 1
+            assert evolved_evaluation["score_input_fingerprint"] == (
+                baseline_evaluation["score_input_fingerprint"]
+            )
+            assert evolved_evaluation[
+                "reused_from_evaluation_identity"
+            ] == baseline_evaluation["evaluation_identity"]
+        else:
+            assert evolved_evaluation["score"] == 2
+            assert evolved_evaluation["score_input_fingerprint"] != (
+                baseline_evaluation["score_input_fingerprint"]
+            )
+            assert evolved_evaluation[
+                "reused_from_evaluation_identity"
+            ] is None
+
         replay, replayed = restarted.append_evidence_vault_canonical_memory_promotion(
             "example.com",
             commands[winner_index],
@@ -186,12 +269,20 @@ def test_postgres_canonical_promotion_is_durable_idempotent_and_serialized() -> 
                     DELETE FROM b3s_history.evidence_vault_canonical_memory_promotion_events
                     """
                 )
+        with pytest.raises(psycopg.Error):
+            with psycopg.connect(dsn) as conn:
+                conn.execute(
+                    """
+                    UPDATE b3s_history.evidence_vault_canonical_score_evaluations
+                    SET score = score
+                    """
+                )
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
 
 
-def _insert_brand(dsn: str) -> None:
+def _insert_brand(dsn: str, *, workspace_slug: str = "b3s") -> None:
     import psycopg
 
     workspace_id = uuid4()
@@ -201,9 +292,9 @@ def _insert_brand(dsn: str) -> None:
         conn.execute(
             """
             INSERT INTO b3s_history.workspaces (id, slug, name)
-            VALUES (%s, 'b3s', 'B3S')
+            VALUES (%s, %s, %s)
             """,
-            (workspace_id,),
+            (workspace_id, workspace_slug, workspace_slug.upper()),
         )
         conn.execute(
             """
@@ -266,7 +357,9 @@ def _packet(
         accepted_memory_candidate_version=HASH_B,
         reviewed_memory_candidate_version=HASH_C,
         review_packet_set_fingerprint=HASH_D,
-        aggregation_policy_fingerprint=HASH_E,
+        aggregation_policy_fingerprint=(
+            canonical_aggregation_policy_fingerprint()
+        ),
         candidate_tiles=tiles,
         coverage_summary={},
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timezone
 from importlib import resources
 import logging
 from threading import Lock
@@ -101,6 +102,11 @@ from src.services.evidence_vault_canonical_core import (
 from src.services.evidence_vault_candidate_resolver import (
     EvidenceVaultCandidateResolverError,
     build_resolved_canonical_memory_candidate,
+)
+from src.services.evidence_vault_canonical_scoring import (
+    EvidenceVaultCanonicalScoringError,
+    build_canonical_score_evaluation,
+    validate_canonical_score_evaluation,
 )
 from src.services.scanner_evidence_comparison import (
     CANONICAL_POLICY_VERSION,
@@ -1369,6 +1375,222 @@ class PostgresHistoryRepository:
             if brand is None:
                 return None
             return _project_vault_canonical_memory(conn, brand["id"])
+
+    def get_or_create_evidence_vault_canonical_score_evaluation(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Persist the deterministic score for the current promoted memory.
+
+        Returns ``(None, False)`` while no canonical baseline exists.  The
+        promotion advisory lock makes selection of the current memory and
+        insertion of its immutable evaluation one serialized operation.
+        """
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            return None, False
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                return None, False
+            brand_id = brand["id"]
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        "evidence-vault-canonical-promotion",
+                    ),
+                ),
+            )
+            current_memory = _project_vault_canonical_memory(conn, brand_id)
+            if current_memory is None:
+                return None, False
+
+            existing = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_score_evaluations
+                WHERE brand_id = %s
+                  AND canonical_memory_version = %s
+                """,
+                (brand_id, current_memory["canonical_memory_version"]),
+            ).fetchone()
+            if existing is not None:
+                return _vault_canonical_score_evaluation_record(existing), True
+
+            try:
+                evaluation = build_canonical_score_evaluation(
+                    current_memory,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except EvidenceVaultCanonicalScoringError as exc:
+                raise EvidenceVaultCanonicalUnavailableError(
+                    "The promoted canonical memory cannot be scored safely."
+                ) from exc
+
+            reusable_row = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_score_evaluations
+                WHERE brand_id = %s
+                  AND score_input_fingerprint = %s
+                ORDER BY created_at, id
+                LIMIT 1
+                """,
+                (brand_id, evaluation["score_input_fingerprint"]),
+            ).fetchone()
+            if reusable_row is not None:
+                reusable = _vault_canonical_score_evaluation_record(
+                    reusable_row
+                )
+                try:
+                    evaluation = build_canonical_score_evaluation(
+                        current_memory,
+                        created_at=evaluation["created_at"],
+                        reusable_evaluation=reusable,
+                    )
+                except EvidenceVaultCanonicalScoringError as exc:
+                    raise EvidenceVaultCanonicalUnavailableError(
+                        "The canonical score calculation cache is invalid."
+                    ) from exc
+
+            evaluation_id = _stable_uuid(
+                brand_id,
+                "evidence-vault-canonical-score-evaluation",
+                evaluation["evaluation_identity"],
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_vault_canonical_score_evaluations (
+                    id, brand_id, promotion_event_id,
+                    canonical_memory_version, evaluation_identity,
+                    score_input_fingerprint,
+                    derived_tile_state_fingerprint, rubric_version,
+                    tile_contract_registry_fingerprint,
+                    reducer_policy_fingerprint,
+                    aggregation_policy_fingerprint, schema_version,
+                    score, component_breakdown, base_average,
+                    magnetism_capped,
+                    reused_from_evaluation_identity, authority,
+                    authority_scope, production_runtime_effect,
+                    scanner_runtime_effect, created_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, true, %s, false,
+                    false, %s
+                )
+                ON CONFLICT (brand_id, canonical_memory_version) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    evaluation_id,
+                    brand_id,
+                    evaluation["promotion_event_id"],
+                    evaluation["canonical_memory_version"],
+                    evaluation["evaluation_identity"],
+                    evaluation["score_input_fingerprint"],
+                    evaluation["derived_tile_state_fingerprint"],
+                    evaluation["rubric_version"],
+                    evaluation["tile_contract_registry_fingerprint"],
+                    evaluation["reducer_policy_fingerprint"],
+                    evaluation["aggregation_policy_fingerprint"],
+                    evaluation["schema_version"],
+                    evaluation["score"],
+                    _jsonb(evaluation["component_breakdown"]),
+                    evaluation["base_average"],
+                    evaluation["magnetism_capped"],
+                    evaluation["reused_from_evaluation_identity"],
+                    evaluation["authority_scope"],
+                    evaluation["created_at"],
+                ),
+            ).fetchone()
+            replayed = inserted is None
+            row = inserted
+            if row is None:
+                row = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM {_SCHEMA}.evidence_vault_canonical_score_evaluations
+                    WHERE brand_id = %s
+                      AND canonical_memory_version = %s
+                    """,
+                    (brand_id, evaluation["canonical_memory_version"]),
+                ).fetchone()
+            if row is None:
+                raise EvidenceVaultCanonicalUnavailableError(
+                    "The canonical score evaluation could not be persisted."
+                )
+            stored = _vault_canonical_score_evaluation_record(row)
+            if stored != evaluation:
+                mismatched_fields = sorted(
+                    field
+                    for field in evaluation
+                    if stored.get(field) != evaluation.get(field)
+                )
+                raise EvidenceVaultCanonicalUnavailableError(
+                    "The canonical evaluation identity resolves to different "
+                    f"content fields: {', '.join(mismatched_fields)}."
+                )
+            return stored, replayed
+
+    def get_evidence_vault_canonical_score_evaluation(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        """Return the persisted evaluation for the current canonical memory."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            return None
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                return None
+            memory = _project_vault_canonical_memory(conn, brand["id"])
+            if memory is None:
+                return None
+            row = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_score_evaluations
+                WHERE brand_id = %s
+                  AND canonical_memory_version = %s
+                """,
+                (brand["id"], memory["canonical_memory_version"]),
+            ).fetchone()
+        return (
+            _vault_canonical_score_evaluation_record(row)
+            if row is not None
+            else None
+        )
 
     def append_evidence_claim_tile_review(
         self,
@@ -3010,6 +3232,7 @@ class PostgresHistoryRepository:
             "evidence_claim_tile_review_packets",
             "evidence_vault_canonical_memory_packets",
             "evidence_vault_canonical_memory_promotion_events",
+            "evidence_vault_canonical_score_evaluations",
             "evidence_claim_tile_ledger_states",
             "evidence_claim_tile_mapping_series",
             "evidence_claim_tile_mappings",
@@ -4201,6 +4424,58 @@ def _vault_canonical_promotion_event(row: Any) -> dict[str, Any]:
     }
     validate_promotion_event(event)
     return event
+
+
+def _vault_canonical_score_evaluation_record(row: Any) -> dict[str, Any]:
+    created_at = row["created_at"]
+    base_average = row["base_average"]
+    evaluation = {
+        "schema_version": str(row["schema_version"]),
+        "evaluation_identity": str(row["evaluation_identity"]),
+        "canonical_memory_version": str(row["canonical_memory_version"]),
+        "promotion_event_id": str(row["promotion_event_id"]),
+        "score_input_fingerprint": str(row["score_input_fingerprint"]),
+        "derived_tile_state_fingerprint": str(
+            row["derived_tile_state_fingerprint"]
+        ),
+        "rubric_version": str(row["rubric_version"]),
+        "tile_contract_registry_fingerprint": str(
+            row["tile_contract_registry_fingerprint"]
+        ),
+        "reducer_policy_fingerprint": str(
+            row["reducer_policy_fingerprint"]
+        ),
+        "aggregation_policy_fingerprint": str(
+            row["aggregation_policy_fingerprint"]
+        ),
+        "score": int(row["score"]),
+        "component_breakdown": list(row["component_breakdown"]),
+        "base_average": float(base_average),
+        "magnetism_capped": bool(row["magnetism_capped"]),
+        "reused_from_evaluation_identity": (
+            str(row["reused_from_evaluation_identity"])
+            if row["reused_from_evaluation_identity"] is not None
+            else None
+        ),
+        "created_at": (
+            created_at.astimezone(timezone.utc).isoformat()
+            if hasattr(created_at, "isoformat")
+            else str(created_at)
+        ),
+        "authority": bool(row["authority"]),
+        "authority_scope": str(row["authority_scope"]),
+        "production_runtime_effect": bool(
+            row["production_runtime_effect"]
+        ),
+        "scanner_runtime_effect": bool(row["scanner_runtime_effect"]),
+    }
+    try:
+        validate_canonical_score_evaluation(evaluation)
+    except EvidenceVaultCanonicalScoringError as exc:
+        raise EvidenceVaultCanonicalUnavailableError(
+            "The stored canonical score evaluation failed validation."
+        ) from exc
+    return evaluation
 
 
 def _project_vault_canonical_memory(
