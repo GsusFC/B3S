@@ -18,7 +18,13 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
-from src.evidence_identity import stable_artifact_digest
+from src.evidence_identity import (
+    normalize_evidence_text,
+    stable_artifact_digest,
+)
+from src.services.evidence_memory_identity_v2 import (
+    build_evidence_memory_identity_v2,
+)
 from src.services.evidence_scoring_memory_preview import (
     apply_recovery_review_gate,
     build_evidence_scoring_memory_preview,
@@ -40,6 +46,15 @@ REVIEW_DECISIONS = frozenset(
 )
 EVIDENCE_SCORING_REVIEWED_SHADOW_VERSION = (
     "evidence-scoring-reviewed-memory-shadow-v2"
+)
+EVIDENCE_SCORING_RECOVERY_SUPPLEMENT_PACKET_VERSION = (
+    "evidence-scoring-recovery-supplement-packet-v1"
+)
+EVIDENCE_SCORING_RECOVERY_SUPPLEMENT_MANIFEST_VERSION = (
+    "evidence-scoring-recovery-supplement-manifest-v1"
+)
+EVIDENCE_SCORING_RECOVERY_SUPPLEMENT_EVIDENCE_VERSION = (
+    "evidence-scoring-recovery-supplement-evidence-v1"
 )
 SCORING_RECOVERY_REVIEW_SUBJECT_TYPE = "scoring_recovery"
 
@@ -112,6 +127,7 @@ def build_reviewed_scoring_memory_shadow(
     recovery_review_events: Iterable[dict[str, Any]] = (),
     reviewed_claim_tile_memory: dict[str, Any] | None = None,
     claim_tile_ledger: dict[str, Any] | None = None,
+    supplemental_candidate_packets: Iterable[dict[str, Any]] = (),
     ignore_stale_review_events: bool = False,
     review_events_are_current: bool = False,
 ) -> dict[str, Any]:
@@ -137,12 +153,34 @@ def build_reviewed_scoring_memory_shadow(
         mode="shadow",
         evidence_adjudications=evidence_adjudications,
     )
-    candidates = build_recovery_review_candidates(
+    base_candidates = build_recovery_review_candidates(
         [{"lane": lane, "preview": preview}],
         claim_tile_mappings=_latest_claim_tile_mappings(
             claim_tile_ledger
         ),
     )
+    identity_projection = build_evidence_memory_identity_v2(
+        rows,
+        mode="shadow",
+        adjudications=evidence_adjudications,
+    )
+    supplements = merge_recovery_review_supplements(
+        base_candidates,
+        supplemental_candidate_packets,
+        brand_domain=str(preview.get("brand", {}).get("domain") or ""),
+        rubric_version=str(preview.get("rubric_version") or ""),
+        evidence_identity_state_fingerprint=str(
+            identity_projection.get("state_fingerprint") or ""
+        ),
+        accepted_evidence_ids={
+            str(entry.get("evidence_id") or "")
+            for entry in identity_projection.get("entries") or []
+            if isinstance(entry, dict)
+            and entry.get("adjudication_state") == "accepted"
+            and str(entry.get("evidence_id") or "")
+        },
+    )
+    candidates = supplements["candidates"]
     stored_events = [
         dict(event)
         for event in recovery_review_events
@@ -220,6 +258,7 @@ def build_reviewed_scoring_memory_shadow(
     )
     result["recovery_review_candidates"] = candidates
     result["recovery_review"] = review
+    result["recovery_review_supplements"] = supplements["summary"]
     result["reviewed_shadow_version"] = (
         EVIDENCE_SCORING_REVIEWED_SHADOW_VERSION
     )
@@ -232,6 +271,579 @@ def build_reviewed_scoring_memory_shadow(
         },
     )
     return result
+
+
+def build_recovery_review_supplement_packet(
+    *,
+    brand_identity: str,
+    rubric_version: str,
+    base_candidates: Iterable[dict[str, Any]],
+    evidence_identity_state_fingerprint: str,
+    candidates: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    """Freeze additional direct evidence-to-tile subjects for exact review.
+
+    Supplemental candidates use the existing semantic-review subject contract;
+    this packet only makes mapper omissions durable and reproducible. It grants
+    no authority and cannot affect scanner or production scoring.
+    """
+
+    domain = str(brand_identity or "").strip().lower()
+    rubric = str(rubric_version or "").strip()
+    identity_fingerprint = _sha256(
+        evidence_identity_state_fingerprint,
+        field="evidence_identity_state_fingerprint",
+    )
+    base_rows = [dict(row) for row in base_candidates]
+    candidate_rows = [dict(row) for row in candidates]
+    if not domain or not rubric or not candidate_rows:
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement packet requires brand, rubric, and candidates"
+        )
+    evaluate_recovery_reviews(base_rows, [])
+    evaluate_recovery_reviews(candidate_rows, [])
+    if any(
+        str(row.get("brand", {}).get("domain") or "").strip().lower()
+        != domain
+        or str(row.get("rubric_version") or "") != rubric
+        for row in candidate_rows
+    ):
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement candidates do not match packet brand and rubric"
+        )
+    base_case_ids = {str(row["case_id"]) for row in base_rows}
+    supplemental_case_ids = {str(row["case_id"]) for row in candidate_rows}
+    collisions = sorted(base_case_ids & supplemental_case_ids)
+    if collisions:
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement duplicates base candidates: " + ", ".join(collisions)
+        )
+    ordered = sorted(candidate_rows, key=lambda row: str(row["case_id"]))
+    manifest = {
+        "schema_version": (
+            EVIDENCE_SCORING_RECOVERY_SUPPLEMENT_MANIFEST_VERSION
+        ),
+        "brand_identity": domain,
+        "rubric_version": rubric,
+        "base_candidate_set_fingerprint": recovery_candidate_fingerprint(
+            base_rows
+        ),
+        "evidence_identity_state_fingerprint": identity_fingerprint,
+        "supplemental_candidate_set_fingerprint": (
+            recovery_candidate_fingerprint(ordered)
+        ),
+        "candidate_count": len(ordered),
+        "authority": False,
+        "runtime_effect": False,
+        "automatic_scoring_effect": False,
+        "scanner_runtime_effect": False,
+        "production_runtime_effect": False,
+    }
+    packet_fingerprint = stable_artifact_digest(
+        EVIDENCE_SCORING_RECOVERY_SUPPLEMENT_PACKET_VERSION,
+        {"manifest": manifest, "candidates": ordered},
+    )
+    return {
+        "schema_version": EVIDENCE_SCORING_RECOVERY_SUPPLEMENT_PACKET_VERSION,
+        "packet_fingerprint": packet_fingerprint,
+        "manifest": manifest,
+        "candidates": ordered,
+        "authority": False,
+        "runtime_effect": False,
+        "automatic_scoring_effect": False,
+        "scanner_runtime_effect": False,
+        "production_runtime_effect": False,
+    }
+
+
+def build_recovery_review_supplement_packet_from_preview(
+    preview: dict[str, Any],
+    *,
+    source_catalog: dict[str, Any],
+    proposals: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build an exact supplement from identity-accepted report passages."""
+
+    base_candidates = _preview_recovery_candidates(preview)
+    candidates = build_recovery_review_supplement_candidates(
+        preview,
+        source_catalog,
+        proposals,
+    )
+    return build_recovery_review_supplement_packet(
+        brand_identity=str(preview.get("brand", {}).get("domain") or ""),
+        rubric_version=str(preview.get("rubric_version") or ""),
+        base_candidates=base_candidates,
+        evidence_identity_state_fingerprint=(
+            source_catalog.get("identity_state_fingerprint")
+        ),
+        candidates=candidates,
+    )
+
+
+def build_recovery_review_supplement_candidates(
+    preview: dict[str, Any],
+    source_catalog: dict[str, Any],
+    proposals: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project mapper omissions from exact accepted report passages."""
+
+    if not isinstance(preview, dict) or (
+        preview.get("runtime_effect") is not False
+        or preview.get("authority") is not False
+    ):
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement generation requires a non-authoritative preview"
+        )
+    brand = (
+        dict(preview.get("brand"))
+        if isinstance(preview.get("brand"), dict)
+        else {}
+    )
+    domain = str(brand.get("domain") or "").strip().lower()
+    rubric = str(preview.get("rubric_version") or "").strip()
+    if not domain or not rubric:
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement preview brand and rubric are required"
+        )
+    if not isinstance(source_catalog, dict) or (
+        source_catalog.get("runtime_effect") is not False
+        or source_catalog.get("authority") is not False
+    ):
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement source catalog must be non-authoritative"
+        )
+    catalog_domain = str(
+        source_catalog.get("brand", {}).get("domain") or ""
+    ).strip().lower()
+    if catalog_domain != domain:
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement source catalog belongs to a different brand"
+        )
+    _sha256(
+        source_catalog.get("identity_state_fingerprint"),
+        field="evidence_identity_state_fingerprint",
+    )
+    evidence_by_id = {
+        str(row.get("evidence_id") or ""): dict(row)
+        for row in source_catalog.get("entries") or []
+        if isinstance(row, dict)
+        and row.get("adjudication_state") == "accepted"
+        and str(row.get("evidence_id") or "")
+    }
+    proposal_rows = [dict(row) for row in proposals]
+    if not proposal_rows:
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement proposals are required"
+        )
+    synthetic_entries: list[dict[str, Any]] = []
+    seen_proposals: set[str] = set()
+    for proposal in sorted(
+        proposal_rows,
+        key=lambda row: (
+            str(row.get("component_key") or ""),
+            str(row.get("tile_id") or ""),
+            json.dumps(
+                row.get("passages") or [],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ),
+    ):
+        component_key = str(proposal.get("component_key") or "").strip()
+        tile_id = str(proposal.get("tile_id") or "").strip()
+        _tile_spec(component_key, tile_id)
+        passages = proposal.get("passages")
+        if not isinstance(passages, list) or not passages or not all(
+            isinstance(row, dict) for row in passages
+        ):
+            raise EvidenceScoringRecoveryReviewError(
+                "supplement proposal requires exact passages"
+            )
+        normalized_passages: list[dict[str, str]] = []
+        sources: list[dict[str, Any]] = []
+        for passage in passages:
+            evidence_id = _sha256(
+                passage.get("evidence_id"),
+                field="source_evidence_id",
+            )
+            quote = normalize_evidence_text(passage.get("quote"))
+            source = evidence_by_id.get(evidence_id)
+            if source is None:
+                raise EvidenceScoringRecoveryReviewError(
+                    "supplement proposal references unknown accepted evidence: "
+                    + evidence_id
+                )
+            content = normalize_evidence_text(source.get("content"))
+            if not quote or quote not in content:
+                raise EvidenceScoringRecoveryReviewError(
+                    "supplement quote is not literal in accepted evidence: "
+                    + evidence_id
+                )
+            normalized_passages.append(
+                {"evidence_id": evidence_id, "quote": quote}
+            )
+            sources.append(source)
+        proposal_identity = stable_artifact_digest(
+            EVIDENCE_SCORING_RECOVERY_SUPPLEMENT_EVIDENCE_VERSION,
+            {
+                "component_key": component_key,
+                "tile_id": tile_id,
+                "passages": normalized_passages,
+            },
+        )
+        if proposal_identity in seen_proposals:
+            raise EvidenceScoringRecoveryReviewError(
+                "duplicate supplement proposal: "
+                f"{component_key}.{tile_id}"
+            )
+        seen_proposals.add(proposal_identity)
+        combined_quote = "\n\n".join(
+            passage["quote"] for passage in normalized_passages
+        )
+        source_evidence_ids = sorted(
+            {
+                passage["evidence_id"]
+                for passage in normalized_passages
+            }
+        )
+        synthetic_entries.append(
+            {
+                "tile_evidence_id": stable_artifact_digest(
+                    EVIDENCE_SCORING_RECOVERY_SUPPLEMENT_EVIDENCE_VERSION,
+                    {
+                        "brand_domain": domain,
+                        "rubric_version": rubric,
+                        "component_key": component_key,
+                        "tile_id": tile_id,
+                        "passages": normalized_passages,
+                    },
+                ),
+                "component_key": component_key,
+                "tile_id": tile_id,
+                "quote": combined_quote,
+                "source_urls": sorted(
+                    {
+                        str(source.get("url") or "")
+                        for source in sources
+                        if str(source.get("url") or "")
+                    }
+                ),
+                "source_classes": sorted(
+                    {
+                        str(source.get("source_class") or "")
+                        for source in sources
+                        if str(source.get("source_class") or "")
+                    }
+                ),
+                "source_evidence_ids": source_evidence_ids,
+                "supplement_source_passages": normalized_passages,
+                "acceptance_basis": [
+                    "human_identity_accepted",
+                    "literal_source_match",
+                    "mapper_omission_supplement",
+                ],
+                "first_seen_at": min(
+                    str(source.get("first_seen_at") or "")
+                    for source in sources
+                ),
+                "last_seen_at": max(
+                    str(source.get("last_seen_at") or "")
+                    for source in sources
+                ),
+                "observation_count": sum(
+                    int(source.get("observation_count") or 0)
+                    for source in sources
+                ),
+                "present_in_latest": True,
+            }
+        )
+    synthetic_preview = {
+        "runtime_effect": False,
+        "authority": False,
+        "brand": brand,
+        "rubric_version": rubric,
+        "latest_report_id": preview.get("latest_report_id"),
+        "accepted_evidence": synthetic_entries,
+        "recoveries": [],
+    }
+    candidates = build_recovery_review_candidates(
+        [{"lane": "supplement", "preview": synthetic_preview}]
+    )
+    for candidate in candidates:
+        candidate["contexts"][0]["review_scope"] = (
+            "mapper_omission_supplement"
+        )
+        source_entry = next(
+            entry
+            for entry in synthetic_entries
+            if entry["tile_evidence_id"]
+            == candidate["evidence"]["tile_evidence_id"]
+        )
+        candidate["evidence"][
+            "supplement_source_passages"
+        ] = source_entry["supplement_source_passages"]
+        _validate_candidate(candidate)
+    return candidates
+
+
+def validate_recovery_review_supplement_against_preview(
+    packet: dict[str, Any],
+    preview: dict[str, Any],
+    source_catalog: dict[str, Any],
+) -> None:
+    """Prove candidates are exact projections of accepted report passages."""
+
+    validate_recovery_review_supplement_packet(packet)
+    proposals = []
+    for candidate in packet["candidates"]:
+        evidence = candidate.get("evidence") or {}
+        passages = evidence.get("supplement_source_passages")
+        if not isinstance(passages, list) or not passages:
+            raise EvidenceScoringRecoveryReviewError(
+                "supplement candidate source projection is required"
+            )
+        tile = candidate["tile"]
+        proposals.append(
+            {
+                "component_key": tile["component_key"],
+                "tile_id": tile["tile_id"],
+                "passages": passages,
+            }
+        )
+    rebuilt = build_recovery_review_supplement_candidates(
+        preview,
+        source_catalog,
+        proposals,
+    )
+    if rebuilt != packet["candidates"]:
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement candidates do not match accepted report passages"
+        )
+
+
+def _preview_recovery_candidates(
+    preview: dict[str, Any],
+) -> list[dict[str, Any]]:
+    existing = preview.get("recovery_review_candidates")
+    if isinstance(existing, list):
+        candidates = [dict(row) for row in existing]
+        evaluate_recovery_reviews(candidates, [])
+        return candidates
+    return build_recovery_review_candidates(
+        [{"lane": "history", "preview": preview}]
+    )
+
+
+def validate_recovery_review_supplement_packet(
+    packet: dict[str, Any],
+) -> None:
+    if not isinstance(packet, dict):
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement packet must be an object"
+        )
+    if packet.get("schema_version") != (
+        EVIDENCE_SCORING_RECOVERY_SUPPLEMENT_PACKET_VERSION
+    ):
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement packet schema version mismatch"
+        )
+    if any(
+        packet.get(field) is not False
+        for field in (
+            "authority",
+            "runtime_effect",
+            "automatic_scoring_effect",
+            "scanner_runtime_effect",
+            "production_runtime_effect",
+        )
+    ):
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement packet must remain non-authoritative"
+        )
+    manifest = packet.get("manifest")
+    candidates = packet.get("candidates")
+    if not isinstance(manifest, dict) or not isinstance(candidates, list):
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement packet manifest and candidates are required"
+        )
+    if manifest.get("schema_version") != (
+        EVIDENCE_SCORING_RECOVERY_SUPPLEMENT_MANIFEST_VERSION
+    ):
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement manifest schema version mismatch"
+        )
+    for field in (
+        "base_candidate_set_fingerprint",
+        "evidence_identity_state_fingerprint",
+        "supplemental_candidate_set_fingerprint",
+    ):
+        _sha256(manifest.get(field), field=field)
+    if not str(manifest.get("brand_identity") or "").strip() or not str(
+        manifest.get("rubric_version") or ""
+    ).strip():
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement manifest brand and rubric are required"
+        )
+    if manifest.get("candidate_count") != len(candidates) or not candidates:
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement candidate count mismatch"
+        )
+    if any(
+        manifest.get(field) is not False
+        for field in (
+            "authority",
+            "runtime_effect",
+            "automatic_scoring_effect",
+            "scanner_runtime_effect",
+            "production_runtime_effect",
+        )
+    ):
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement manifest must remain non-authoritative"
+        )
+    evaluate_recovery_reviews(candidates, [])
+    if recovery_candidate_fingerprint(candidates) != manifest.get(
+        "supplemental_candidate_set_fingerprint"
+    ):
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement candidate set fingerprint mismatch"
+        )
+    if any(
+        str(row.get("brand", {}).get("domain") or "").strip().lower()
+        != str(manifest["brand_identity"]).strip().lower()
+        or str(row.get("rubric_version") or "")
+        != str(manifest["rubric_version"])
+        for row in candidates
+    ):
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement candidate brand or rubric mismatch"
+        )
+    expected = stable_artifact_digest(
+        EVIDENCE_SCORING_RECOVERY_SUPPLEMENT_PACKET_VERSION,
+        {"manifest": manifest, "candidates": candidates},
+    )
+    if packet.get("packet_fingerprint") != expected:
+        raise EvidenceScoringRecoveryReviewError(
+            "supplement packet fingerprint mismatch"
+        )
+
+
+def merge_recovery_review_supplements(
+    base_candidates: Iterable[dict[str, Any]],
+    packets: Iterable[dict[str, Any]],
+    *,
+    brand_domain: str,
+    rubric_version: str,
+    evidence_identity_state_fingerprint: str,
+    accepted_evidence_ids: Iterable[str],
+) -> dict[str, Any]:
+    """Select exact active packets and merge them fail-closed.
+
+    The global base-candidate and identity fingerprints record the context in
+    which a supplement was generated.  They are deliberately not activation
+    keys: unrelated evidence discovered later must not invalidate a reviewed
+    direct relation.  Activation instead depends on the exact candidate,
+    brand/rubric contract, and continued acceptance of every cited source.
+    """
+
+    base_rows = [dict(row) for row in base_candidates]
+    evaluate_recovery_reviews(base_rows, [])
+    base_fingerprint = recovery_candidate_fingerprint(base_rows)
+    identity_fingerprint = _sha256(
+        evidence_identity_state_fingerprint,
+        field="evidence_identity_state_fingerprint",
+    )
+    domain = str(brand_domain or "").strip().lower()
+    rubric = str(rubric_version or "").strip()
+    accepted_ids = {str(value) for value in accepted_evidence_ids if str(value)}
+    merged = {str(row["case_id"]): row for row in base_rows}
+    active: list[str] = []
+    stale: list[str] = []
+    blocked: list[str] = []
+    context_drift: list[str] = []
+    redundant_case_ids: list[str] = []
+    for packet in packets:
+        validate_recovery_review_supplement_packet(packet)
+        manifest = packet["manifest"]
+        packet_fingerprint = str(packet["packet_fingerprint"])
+        if (
+            str(manifest["brand_identity"]).strip().lower() != domain
+            or str(manifest["rubric_version"]) != rubric
+        ):
+            stale.append(packet_fingerprint)
+            continue
+        if (
+            manifest["base_candidate_set_fingerprint"] != base_fingerprint
+            or manifest["evidence_identity_state_fingerprint"]
+            != identity_fingerprint
+        ):
+            context_drift.append(packet_fingerprint)
+        packet_source_ids = {
+            str(value)
+            for candidate in packet["candidates"]
+            for value in candidate["evidence"].get(
+                "source_evidence_ids", []
+            )
+            if str(value)
+        }
+        if (
+            not packet_source_ids
+            or not packet_source_ids.issubset(accepted_ids)
+        ):
+            blocked.append(packet_fingerprint)
+            continue
+        for candidate in packet["candidates"]:
+            case_id = str(candidate["case_id"])
+            if case_id in merged:
+                if merged[case_id] != candidate:
+                    raise EvidenceScoringRecoveryReviewError(
+                        "active supplement candidate collision: " + case_id
+                    )
+                redundant_case_ids.append(case_id)
+                continue
+            merged[case_id] = dict(candidate)
+        active.append(packet_fingerprint)
+    candidates = [merged[key] for key in sorted(merged)]
+    evaluate_recovery_reviews(candidates, [])
+    return {
+        "candidates": candidates,
+        "summary": {
+            "schema_version": (
+                EVIDENCE_SCORING_RECOVERY_SUPPLEMENT_PACKET_VERSION
+            ),
+            "registered_packet_count": (
+                len(active) + len(stale) + len(blocked)
+            ),
+            "active_packet_count": len(active),
+            "stale_packet_count": len(stale),
+            "blocked_packet_count": len(blocked),
+            "generation_context_drift_count": len(context_drift),
+            "active_packet_fingerprints": sorted(active),
+            "stale_packet_fingerprints": sorted(stale),
+            "blocked_packet_fingerprints": sorted(blocked),
+            "generation_context_drift_fingerprints": sorted(
+                context_drift
+            ),
+            "redundant_case_ids": sorted(set(redundant_case_ids)),
+            "base_candidate_count": len(base_rows),
+            "merged_candidate_count": len(candidates),
+            "authority": False,
+            "runtime_effect": False,
+        },
+    }
+
+
+def _sha256(value: Any, *, field: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if len(normalized) != 64 or any(
+        character not in "0123456789abcdef" for character in normalized
+    ):
+        raise EvidenceScoringRecoveryReviewError(
+            f"{field} must be a lowercase SHA-256 digest"
+        )
+    return normalized
 
 
 def build_recovery_review_candidates(

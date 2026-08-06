@@ -535,6 +535,11 @@ def test_repository_preview_rebuilds_from_durable_inputs(
     )
     monkeypatch.setattr(
         repository,
+        "list_evidence_scoring_recovery_supplement_packets",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        repository,
         "get_reviewed_claim_tile_memory_shadow",
         lambda *_args, **_kwargs: None,
     )
@@ -595,6 +600,11 @@ def test_repository_preview_applies_current_review_after_restart(
         repository,
         "list_current_evidence_scoring_recovery_reviews",
         lambda *_args, **_kwargs: [deepcopy(current_event)],
+    )
+    monkeypatch.setattr(
+        repository,
+        "list_evidence_scoring_recovery_supplement_packets",
+        lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(
         repository,
@@ -671,6 +681,11 @@ def test_repository_preview_revocation_and_stale_events_fail_closed(
         repository,
         "list_current_evidence_scoring_recovery_reviews",
         lambda *_args, **_kwargs: [deepcopy(revoked), deepcopy(stale)],
+    )
+    monkeypatch.setattr(
+        repository,
+        "list_evidence_scoring_recovery_supplement_packets",
+        lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(
         repository,

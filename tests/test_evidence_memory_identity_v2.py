@@ -7,6 +7,7 @@ from pathlib import Path
 
 from src.external_identity_provenance import build_external_identity_provenance
 from src.services.evidence_memory_identity_v2 import (
+    build_accepted_evidence_passage_catalog,
     build_evidence_memory_identity_v2,
 )
 
@@ -38,6 +39,45 @@ def test_multiple_passages_from_one_document_are_not_revision_candidates() -> No
     assert result["summary"]["revision_candidate_count"] == 0
     assert {entry["state"] for entry in result["entries"]} == {"observed"}
     assert all(not entry["claim_slot_id"] for entry in result["entries"])
+
+
+def test_accepted_passage_catalog_rehydrates_exact_immutable_content() -> None:
+    report = _report(
+        "one",
+        "2026-01-01T00:00:00Z",
+        [_owned("web.0", "End the chase between companies.")],
+    )
+    identity = build_evidence_memory_identity_v2([report])
+    evidence_id = identity["entries"][0]["evidence_id"]
+    catalog = build_accepted_evidence_passage_catalog(
+        [report],
+        adjudications=[
+            {
+                "id": "review-1",
+                "subject_type": "evidence",
+                "subject_id": evidence_id,
+                "sequence": 1,
+                "decision": "accepted",
+                "reviewer": "gsus",
+                "reason_code": "brand_named_in_passage",
+                "rationale": "The owned passage identity was reviewed.",
+                "evaluator_version": "manual-review-v1",
+                "actor_id": "gsus",
+                "created_at": "2026-01-02T00:00:00Z",
+                "runtime_effect": False,
+                "authority": False,
+            }
+        ],
+    )
+
+    assert catalog["entry_count"] == 1
+    assert catalog["entries"][0]["evidence_id"] == evidence_id
+    assert catalog["entries"][0]["content"] == (
+        "End the chase between companies."
+    )
+    assert catalog["entries"][0]["adjudication_state"] == "accepted"
+    assert catalog["runtime_effect"] is False
+    assert catalog["authority"] is False
 
 
 def test_new_passage_on_same_url_is_not_assumed_to_replace_old_passage() -> None:

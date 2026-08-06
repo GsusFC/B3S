@@ -129,6 +129,7 @@ def build_resolved_canonical_memory_candidate(
     claim_tile_ledger: dict[str, Any],
     claim_tile_reviews: Iterable[dict[str, Any]] = (),
     scoring_recovery_reviews: Iterable[dict[str, Any]] = (),
+    supplemental_recovery_candidate_packets: Iterable[dict[str, Any]] = (),
     registered_review_packet_fingerprints: Iterable[str] = (),
     current_canonical_memory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -207,6 +208,9 @@ def build_resolved_canonical_memory_candidate(
             report_rows,
             evidence_adjudications=adjudication_rows,
             recovery_review_events=recovery_review_rows,
+            supplemental_candidate_packets=(
+                supplemental_recovery_candidate_packets
+            ),
             reviewed_claim_tile_memory=reviewed_memory,
             claim_tile_ledger=claim_tile_ledger,
             ignore_stale_review_events=True,
@@ -646,8 +650,10 @@ def _resolve_direct_tile_relations(
             "current_direct_relation"
             if any(
                 isinstance(context, dict)
-                and context.get("review_scope")
-                == "current_direct_relation"
+                and context.get("review_scope") in {
+                    "current_direct_relation",
+                    "mapper_omission_supplement",
+                }
                 for context in candidate.get("contexts") or []
             )
             else "historical_recovery"

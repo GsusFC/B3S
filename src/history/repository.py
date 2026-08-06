@@ -64,6 +64,9 @@ from src.services.evidence_memory_adjudication import (
     EvidenceMemoryAdjudicationInvalidTransitionError,
     EvidenceMemoryAdjudicationNotFoundError,
 )
+from src.services.evidence_memory_identity_v2 import (
+    build_accepted_evidence_passage_catalog,
+)
 from src.services.evidence_reviewed_claim_tile_memory import (
     build_reviewed_claim_tile_memory_from_journal_shadow,
 )
@@ -74,9 +77,13 @@ from src.services.evidence_scoring_recovery_review import (
     SCORING_RECOVERY_REVIEW_SUBJECT_TYPE,
     EvidenceScoringRecoveryReviewCommand,
     EvidenceScoringRecoveryReviewConflictError,
+    EvidenceScoringRecoveryReviewError,
     EvidenceScoringRecoveryReviewInvalidTransitionError,
     EvidenceScoringRecoveryReviewNotFoundError,
     build_reviewed_scoring_memory_shadow,
+    merge_recovery_review_supplements,
+    validate_recovery_review_supplement_against_preview,
+    validate_recovery_review_supplement_packet,
 )
 from src.services.evidence_ledger_shadow import (
     build_evidence_ledger_shadow,
@@ -926,6 +933,13 @@ class PostgresHistoryRepository:
                 workspace_slug=workspace_slug,
             )
         )
+        supplemental_packets = [
+            row["packet"]
+            for row in self.list_evidence_scoring_recovery_supplement_packets(
+                domain,
+                workspace_slug=workspace_slug,
+            )
+        ]
         registered_packet_fingerprints = {
             str(review.get("review_packet_fingerprint") or "")
             for review in reviews
@@ -953,6 +967,9 @@ class PostgresHistoryRepository:
                 claim_tile_ledger=ledger,
                 claim_tile_reviews=reviews,
                 scoring_recovery_reviews=recovery_reviews,
+                supplemental_recovery_candidate_packets=(
+                    supplemental_packets
+                ),
                 registered_review_packet_fingerprints=(
                     registered_packet_fingerprints
                 ),
@@ -1990,6 +2007,218 @@ class PostgresHistoryRepository:
             "offset": offset,
         }
 
+    def register_evidence_scoring_recovery_supplement_packet(
+        self,
+        domain_or_url: str,
+        packet: dict[str, Any],
+        *,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Register one immutable mapper-omission supplement fail-closed."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceScoringRecoveryReviewNotFoundError(
+                "The brand domain does not exist in durable history."
+            )
+        validate_recovery_review_supplement_packet(packet)
+        manifest = packet["manifest"]
+        if manifest["brand_identity"] != domain:
+            raise EvidenceScoringRecoveryReviewNotFoundError(
+                "The supplement packet belongs to a different brand."
+            )
+
+        reports: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            batch = self.list_report_payloads_for_domain(
+                domain,
+                workspace_slug=workspace_slug,
+                limit=500,
+                offset=offset,
+            )
+            reports.extend(batch)
+            if len(batch) < 500:
+                break
+            offset += len(batch)
+        if not reports:
+            raise EvidenceScoringRecoveryReviewNotFoundError(
+                "The brand has no immutable report history."
+            )
+        adjudications = self.list_current_evidence_memory_adjudications(
+            domain,
+            workspace_slug=workspace_slug,
+        )
+        claim_tile_ledger = build_evidence_claim_tile_ledger(
+            reports,
+            mode="shadow",
+        )
+        base_preview = build_reviewed_scoring_memory_shadow(
+            reports,
+            evidence_adjudications=adjudications,
+            reviewed_claim_tile_memory=(
+                self.get_reviewed_claim_tile_memory_shadow(
+                    domain,
+                    workspace_slug=workspace_slug,
+                )
+            ),
+            claim_tile_ledger=claim_tile_ledger,
+        )
+        source_catalog = build_accepted_evidence_passage_catalog(
+            reports,
+            adjudications=adjudications,
+        )
+        validate_recovery_review_supplement_against_preview(
+            packet,
+            base_preview,
+            source_catalog,
+        )
+        registered_packets = [
+            row["packet"]
+            for row in self.list_evidence_scoring_recovery_supplement_packets(
+                domain,
+                workspace_slug=workspace_slug,
+            )
+            if row["packet"]["packet_fingerprint"]
+            != packet["packet_fingerprint"]
+        ]
+        supplement_validation = merge_recovery_review_supplements(
+            base_preview["recovery_review_candidates"],
+            [*registered_packets, packet],
+            brand_domain=domain,
+            rubric_version=str(base_preview.get("rubric_version") or ""),
+            evidence_identity_state_fingerprint=str(
+                source_catalog.get("identity_state_fingerprint") or ""
+            ),
+            accepted_evidence_ids={
+                str(entry.get("evidence_id") or "")
+                for entry in source_catalog.get("entries") or []
+                if isinstance(entry, dict)
+                and str(entry.get("evidence_id") or "")
+            },
+        )
+        supplement_summary = supplement_validation["summary"]
+        packet_fingerprint = packet["packet_fingerprint"]
+        if (
+            packet_fingerprint
+            not in supplement_summary["active_packet_fingerprints"]
+            or packet_fingerprint
+            in supplement_summary["stale_packet_fingerprints"]
+            or packet_fingerprint
+            in supplement_summary["blocked_packet_fingerprints"]
+            or packet_fingerprint
+            in supplement_summary[
+                "generation_context_drift_fingerprints"
+            ]
+        ):
+            raise EvidenceScoringRecoveryReviewError(
+                "supplement packet does not match current durable history"
+            )
+
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceScoringRecoveryReviewNotFoundError(
+                    "The brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            packet_id = _stable_uuid(
+                brand_id,
+                "evidence-scoring-recovery-supplement-packet",
+                packet["packet_fingerprint"],
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_scoring_recovery_supplement_packets (
+                    id, brand_id, packet_fingerprint, schema_version,
+                    brand_identity, base_candidate_set_fingerprint,
+                    evidence_identity_state_fingerprint, rubric_version,
+                    manifest, candidates, authority, runtime_effect,
+                    automatic_scoring_effect, production_runtime_effect,
+                    scanner_runtime_effect
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    false, false, false, false, false
+                )
+                ON CONFLICT (brand_id, packet_fingerprint) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    packet_id,
+                    brand_id,
+                    packet["packet_fingerprint"],
+                    packet["schema_version"],
+                    manifest["brand_identity"],
+                    manifest["base_candidate_set_fingerprint"],
+                    manifest["evidence_identity_state_fingerprint"],
+                    manifest["rubric_version"],
+                    _jsonb(manifest),
+                    _jsonb(packet["candidates"]),
+                ),
+            ).fetchone()
+            replayed = inserted is None
+            row = inserted
+            if row is None:
+                row = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM {_SCHEMA}.evidence_scoring_recovery_supplement_packets
+                    WHERE brand_id = %s AND packet_fingerprint = %s
+                    """,
+                    (brand_id, packet["packet_fingerprint"]),
+                ).fetchone()
+            if row is None:
+                raise EvidenceScoringRecoveryReviewNotFoundError(
+                    "The supplement packet could not be registered."
+                )
+            stored = _scoring_recovery_supplement_packet_record(row)
+            if stored["packet"] != packet:
+                raise EvidenceScoringRecoveryReviewConflictError(
+                    "The supplement fingerprint resolves to different content."
+                )
+        return stored, replayed
+
+    def list_evidence_scoring_recovery_supplement_packets(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> list[dict[str, Any]]:
+        """List immutable supplements; active selection is content-bound."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT packets.*
+                FROM {_SCHEMA}.evidence_scoring_recovery_supplement_packets AS packets
+                JOIN {_SCHEMA}.brands ON brands.id = packets.brand_id
+                JOIN {_SCHEMA}.workspaces ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                ORDER BY packets.created_at, packets.id
+                """,
+                (workspace_slug, domain),
+            ).fetchall()
+        return [
+            _scoring_recovery_supplement_packet_record(row)
+            for row in rows
+        ]
+
     def get_evidence_scoring_memory_preview(
         self,
         domain_or_url: str,
@@ -2021,6 +2250,13 @@ class PostgresHistoryRepository:
                 workspace_slug=workspace_slug,
             )
         )
+        supplemental_packets = [
+            row["packet"]
+            for row in self.list_evidence_scoring_recovery_supplement_packets(
+                domain_or_url,
+                workspace_slug=workspace_slug,
+            )
+        ]
         reviewed_claim_tile_memory = (
             self.get_reviewed_claim_tile_memory_shadow(
                 domain_or_url,
@@ -2037,6 +2273,7 @@ class PostgresHistoryRepository:
             recovery_review_events=recovery_reviews,
             reviewed_claim_tile_memory=reviewed_claim_tile_memory,
             claim_tile_ledger=claim_tile_ledger,
+            supplemental_candidate_packets=supplemental_packets,
             ignore_stale_review_events=True,
             review_events_are_current=True,
         )
@@ -3233,6 +3470,7 @@ class PostgresHistoryRepository:
             "evidence_memory_adjudication_events",
             "evidence_claim_reconciliation_events",
             "evidence_scoring_recovery_review_events",
+            "evidence_scoring_recovery_supplement_packets",
             "evidence_claim_tile_review_events",
             "evidence_claim_tile_review_packets",
             "evidence_vault_canonical_memory_packets",
@@ -4951,6 +5189,61 @@ def _is_sha256(value: Any) -> bool:
     return len(text) == 64 and all(
         character in "0123456789abcdef" for character in text
     )
+
+
+def _scoring_recovery_supplement_packet_record(
+    row: Any,
+) -> dict[str, Any]:
+    manifest = dict(row["manifest"])
+    candidates = [dict(candidate) for candidate in row["candidates"]]
+    packet = {
+        "schema_version": str(row["schema_version"]),
+        "packet_fingerprint": str(row["packet_fingerprint"]),
+        "manifest": manifest,
+        "candidates": candidates,
+        "authority": False,
+        "runtime_effect": False,
+        "automatic_scoring_effect": False,
+        "production_runtime_effect": False,
+        "scanner_runtime_effect": False,
+    }
+    validate_recovery_review_supplement_packet(packet)
+    expected_columns = {
+        "brand_identity": manifest["brand_identity"],
+        "base_candidate_set_fingerprint": manifest[
+            "base_candidate_set_fingerprint"
+        ],
+        "evidence_identity_state_fingerprint": manifest[
+            "evidence_identity_state_fingerprint"
+        ],
+        "rubric_version": manifest["rubric_version"],
+    }
+    if any(
+        str(row[column]) != str(value)
+        for column, value in expected_columns.items()
+    ) or any(
+        row[field] is not False
+        for field in (
+            "authority",
+            "runtime_effect",
+            "automatic_scoring_effect",
+            "production_runtime_effect",
+            "scanner_runtime_effect",
+        )
+    ):
+        raise EvidenceScoringRecoveryReviewError(
+            "registered supplement packet metadata mismatch"
+        )
+    created_at = row["created_at"]
+    return {
+        "id": str(row["id"]),
+        "packet": packet,
+        "created_at": (
+            created_at.isoformat()
+            if hasattr(created_at, "isoformat")
+            else str(created_at)
+        ),
+    }
 
 
 def _scoring_recovery_review_event(

@@ -18,6 +18,8 @@ from src.services.evidence_memory_identity_v2 import (
 from src.services.evidence_scoring_recovery_review import (
     EVIDENCE_SCORING_RECOVERY_REVIEW_EVENT_VERSION,
     EvidenceScoringRecoveryReviewCommand,
+    build_recovery_review_candidates,
+    build_recovery_review_supplement_packet,
     build_reviewed_scoring_memory_shadow,
 )
 from src.services.evidence_vault_candidate_resolver import (
@@ -656,6 +658,74 @@ def test_reviewed_recovery_is_accepted_direct_basis_without_a_claim() -> None:
     assert mission["basis"][0]["decision_event_id"] == "recovery-review-1"
 
 
+def test_reviewed_supplement_becomes_direct_basis_without_mapper_output() -> None:
+    report = _direct_report(
+        "one",
+        "2026-08-01T00:00:00Z",
+        state="ok",
+    )
+    ledger = build_evidence_claim_tile_ledger([report], mode="shadow")
+    base_preview = build_reviewed_scoring_memory_shadow([report])
+    base_candidate = base_preview["recovery_review_candidates"][0]
+    source_evidence_id = base_candidate["evidence"][
+        "source_evidence_ids"
+    ][0]
+    adjudications = [_evidence_review(source_evidence_id)]
+    identity = build_evidence_memory_identity_v2(
+        [report],
+        mode="shadow",
+        adjudications=adjudications,
+    )
+    supplement_preview = deepcopy(base_preview)
+    supplemental_evidence = deepcopy(
+        base_preview["accepted_evidence"][0]
+    )
+    supplemental_evidence.update(
+        {
+            "tile_evidence_id": "b" * 64,
+            "component_key": "mission",
+            "tile_id": "M2",
+            "present_in_latest": True,
+        }
+    )
+    supplement_preview["accepted_evidence"] = [supplemental_evidence]
+    supplement_preview["recoveries"] = []
+    supplemental_candidates = build_recovery_review_candidates(
+        [{"lane": "supplement", "preview": supplement_preview}]
+    )
+    supplement = build_recovery_review_supplement_packet(
+        brand_identity="example.com",
+        rubric_version=base_preview["rubric_version"],
+        base_candidates=base_preview["recovery_review_candidates"],
+        evidence_identity_state_fingerprint=identity[
+            "state_fingerprint"
+        ],
+        candidates=supplemental_candidates,
+    )
+    supplemental_review = _recovery_review(
+        supplemental_candidates[0],
+        "accepted",
+    )
+    supplemental_review["event_id"] = "recovery-review-supplement-1"
+
+    result = _resolve(
+        [report],
+        ledger=ledger,
+        adjudications=adjudications,
+        recovery_reviews=[
+            _recovery_review(base_candidate, "rejected"),
+            supplemental_review,
+        ],
+        supplemental_packets=[supplement],
+    )
+
+    mission = _tile(result["packet"], "M2")
+    assert mission["candidate_state"] == "ok"
+    assert mission["basis"][0]["claim_id"] is None
+    assert mission["basis"][0]["review_status"] == "accepted"
+    assert result["packet"]["manifest"]["unresolved_items"] == []
+
+
 def test_revoked_direct_recovery_creates_verified_deprecation() -> None:
     first = _direct_report(
         "one",
@@ -760,6 +830,13 @@ def test_repository_safe_entrypoint_accepts_no_caller_supplied_packet() -> None:
             return [review]
 
         def list_current_evidence_scoring_recovery_reviews(
+            self,
+            *_args,
+            **_kwargs,
+        ):
+            return []
+
+        def list_evidence_scoring_recovery_supplement_packets(
             self,
             *_args,
             **_kwargs,
@@ -898,6 +975,7 @@ def _resolve(
     adjudications: list[dict] | None = None,
     mapping_reviews: list[dict] | None = None,
     recovery_reviews: list[dict] | None = None,
+    supplemental_packets: list[dict] | None = None,
     registered_packets: set[str] | None = None,
     current: dict | None = None,
 ) -> dict:
@@ -908,6 +986,9 @@ def _resolve(
         claim_tile_ledger=ledger,
         claim_tile_reviews=mapping_reviews or [],
         scoring_recovery_reviews=recovery_reviews or [],
+        supplemental_recovery_candidate_packets=(
+            supplemental_packets or []
+        ),
         registered_review_packet_fingerprints=(registered_packets or set()),
         current_canonical_memory=current,
     )

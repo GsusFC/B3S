@@ -33,11 +33,13 @@ from src.services.evidence_memory_adjudication import (
     EvidenceMemoryAdjudicationConflictError,
 )
 from src.services.evidence_memory_identity_v2 import (
+    build_accepted_evidence_passage_catalog,
     build_evidence_memory_identity_v2,
 )
 from src.services.evidence_scoring_recovery_review import (
     EvidenceScoringRecoveryReviewCommand,
     EvidenceScoringRecoveryReviewConflictError,
+    build_recovery_review_supplement_packet_from_preview,
 )
 from src.sv9.rubric import COMPONENTS, component_points
 
@@ -463,6 +465,30 @@ def test_vault_canonical_scoring_migration_is_immutable_and_vault_scoped() -> No
     assert "scanner_runtime_effect = false" in sql
 
 
+def test_recovery_supplement_migration_is_immutable_and_non_authoritative() -> None:
+    from src.history.repository import _migration_files
+
+    filenames = [filename for filename, _sql in _migration_files()]
+    sql = (
+        resources.files("src.history")
+        .joinpath(
+            "migrations/013_evidence_scoring_recovery_supplements.sql"
+        )
+        .read_text(encoding="utf-8")
+    )
+
+    assert filenames[12] == (
+        "013_evidence_scoring_recovery_supplements.sql"
+    )
+    assert "evidence_scoring_recovery_supplement_packets" in sql
+    assert "UNIQUE (brand_id, packet_fingerprint)" in sql
+    assert "BEFORE UPDATE OR DELETE" in sql
+    assert "authority = false" in sql
+    assert "runtime_effect = false" in sql
+    assert "production_runtime_effect = false" in sql
+    assert "scanner_runtime_effect = false" in sql
+
+
 def test_claim_tile_review_requires_packet_fingerprint() -> None:
     from dataclasses import replace
 
@@ -702,6 +728,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
                 "010_evidence_claim_tile_review_packets.sql",
                 "011_evidence_vault_canonical_memory.sql",
                 "012_evidence_vault_canonical_scoring.sql",
+                "013_evidence_scoring_recovery_supplements.sql",
             ]
         assert repository.migrate() == []
 
@@ -788,6 +815,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "evidence_memory_adjudication_events": 0,
             "evidence_claim_reconciliation_events": 0,
             "evidence_scoring_recovery_review_events": 0,
+            "evidence_scoring_recovery_supplement_packets": 0,
             "evidence_claim_tile_review_events": 0,
             "evidence_claim_tile_review_packets": 0,
             "evidence_vault_canonical_memory_packets": 0,
@@ -1203,6 +1231,128 @@ def test_postgres_scoring_recovery_survives_restart_and_revocation() -> None:
     not os.environ.get("B3S_TEST_DATABASE_URL"),
     reason="B3S_TEST_DATABASE_URL is required for PostgreSQL integration",
 )
+def test_postgres_recovery_supplement_survives_restart() -> None:
+    import psycopg
+
+    from src.history.repository import PostgresHistoryRepository
+
+    _require_schema_drop_opt_in()
+    dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+
+    report = _scoring_recovery_report(
+        "recovery-supplement",
+        "2026-07-05T08:00:00Z",
+        target_state="ok",
+    )
+    repository = PostgresHistoryRepository(dsn)
+    try:
+        repository.migrate()
+        repository.import_report(report)
+        subject_id = build_evidence_memory_identity_v2([report])["entries"][
+            0
+        ]["evidence_id"]
+        repository.append_evidence_memory_adjudication(
+            "memory.example",
+            _adjudication_command(
+                subject_id,
+                decision="accepted",
+                expected_current_event_id=None,
+                key_hash="b" * 64,
+                fingerprint="c" * 64,
+            ),
+        )
+        preview = repository.get_evidence_scoring_memory_preview(
+            "memory.example"
+        )
+        assert preview is not None
+        adjudications = (
+            repository.list_current_evidence_memory_adjudications(
+                "memory.example"
+            )
+        )
+        source_catalog = build_accepted_evidence_passage_catalog(
+            [report],
+            adjudications=adjudications,
+        )
+        packet = build_recovery_review_supplement_packet_from_preview(
+            preview,
+            source_catalog=source_catalog,
+            proposals=[
+                {
+                    "component_key": "magnetism",
+                    "tile_id": "MG2",
+                    "passages": [
+                        {
+                            "evidence_id": subject_id,
+                            "quote": (
+                                "A distinctive promise that customers "
+                                "remember."
+                            ),
+                        }
+                    ],
+                }
+            ],
+        )
+
+        stored, replayed = (
+            repository.register_evidence_scoring_recovery_supplement_packet(
+                "memory.example",
+                packet,
+            )
+        )
+        assert replayed is False
+        assert stored["packet"] == packet
+        replay, replayed = (
+            repository.register_evidence_scoring_recovery_supplement_packet(
+                "memory.example",
+                packet,
+            )
+        )
+        assert replayed is True
+        assert replay == stored
+
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            with pytest.raises(
+                psycopg.errors.RaiseException,
+                match="append-only",
+            ):
+                conn.execute(
+                    """
+                    UPDATE b3s_history.evidence_scoring_recovery_supplement_packets
+                    SET rubric_version = rubric_version
+                    WHERE packet_fingerprint = %s
+                    """,
+                    (packet["packet_fingerprint"],),
+                )
+
+        restarted = PostgresHistoryRepository(
+            dsn
+        ).get_evidence_scoring_memory_preview("memory.example")
+        assert restarted is not None
+        assert restarted["recovery_review_supplements"][
+            "active_packet_count"
+        ] == 1
+        supplemented = next(
+            candidate
+            for candidate in restarted["recovery_review_candidates"]
+            if candidate["tile"]["tile_key"] == "magnetism.MG2"
+        )
+        assert supplemented["contexts"][0]["review_scope"] == (
+            "mapper_omission_supplement"
+        )
+        assert supplemented["authority"] is False
+        assert supplemented["runtime_effect"] is False
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL"),
+    reason="B3S_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
 def test_postgres_claim_tile_review_survives_restart_and_revocation(
     monkeypatch,
 ) -> None:
@@ -1497,6 +1647,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "010_evidence_claim_tile_review_packets.sql",
             "011_evidence_vault_canonical_memory.sql",
             "012_evidence_vault_canonical_scoring.sql",
+            "013_evidence_scoring_recovery_supplements.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0
@@ -1525,6 +1676,9 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
                 to_regclass(
                     'b3s_history.evidence_vault_canonical_score_evaluations'
                 )::text AS vault_canonical_score_table,
+                to_regclass(
+                    'b3s_history.evidence_scoring_recovery_supplement_packets'
+                )::text AS recovery_supplement_packet_table,
                 (
                     SELECT count(*)
                     FROM b3s_history.schema_migrations
@@ -1549,7 +1703,10 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
         assert stored[5] == (
             "b3s_history.evidence_vault_canonical_score_evaluations"
         )
-        assert stored[6] == 12
+        assert stored[6] == (
+            "b3s_history.evidence_scoring_recovery_supplement_packets"
+        )
+        assert stored[7] == 13
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
