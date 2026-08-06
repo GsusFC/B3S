@@ -48,6 +48,9 @@ from src.sv9_flow.claim_slot_producer import (
 
 EVIDENCE_MEMORY_IDENTITY_V2_VERSION = "evidence-memory-identity-v2"
 EVIDENCE_MEMORY_IDENTITY_V2_POLICY_VERSION = "evidence-memory-identity-policy-v4"
+EVIDENCE_ACCEPTED_PASSAGE_CATALOG_VERSION = (
+    "evidence-accepted-passage-catalog-v1"
+)
 _CURRENT_STATES = {"observed", "repeated", "validation_candidate"}
 _GOOD_ACQUISITION_STATES = {"pass", "warning"}
 _TTL_DAYS = {
@@ -460,6 +463,106 @@ def build_evidence_memory_identity_v2(
     }
     result = apply_evidence_memory_adjudications(result, adjudications)
     result["state_fingerprint"] = _state_fingerprint(result)
+    return result
+
+
+def build_accepted_evidence_passage_catalog(
+    reports: Iterable[dict[str, Any]],
+    *,
+    adjudications: Iterable[dict[str, Any]] = (),
+) -> dict[str, Any]:
+    """Rehydrate exact accepted passages from immutable report snapshots."""
+
+    ordered = _ordered_reports(reports)
+    adjudication_rows = [
+        dict(row) for row in adjudications if isinstance(row, dict)
+    ]
+    identity = build_evidence_memory_identity_v2(
+        ordered,
+        mode="shadow",
+        adjudications=adjudication_rows,
+    )
+    accepted_by_id = {
+        str(entry["evidence_id"]): entry
+        for entry in identity.get("entries") or []
+        if isinstance(entry, dict)
+        and entry.get("adjudication_state") == "accepted"
+        and str(entry.get("evidence_id") or "")
+    }
+    brand_domain = str(identity.get("brand", {}).get("domain") or "")
+    content_by_id: dict[str, str] = {}
+    for report in ordered:
+        for row in _evidence_rows(report):
+            atom = _atom_from_row(row, brand_domain=brand_domain)
+            if atom is None:
+                continue
+            evidence_id = str(atom["evidence_id"])
+            if evidence_id not in accepted_by_id:
+                continue
+            content = normalize_evidence_text(row.get("content"))
+            if not content:
+                continue
+            existing = content_by_id.setdefault(evidence_id, content)
+            if existing != content:
+                raise ValueError(
+                    "accepted evidence identity resolves to different content: "
+                    + evidence_id
+                )
+    missing = sorted(set(accepted_by_id) - set(content_by_id))
+    if missing:
+        raise ValueError(
+            "accepted evidence passages cannot be rehydrated: "
+            + ", ".join(missing)
+        )
+    entries = []
+    for evidence_id in sorted(accepted_by_id):
+        identity_entry = accepted_by_id[evidence_id]
+        entries.append(
+            {
+                "evidence_id": evidence_id,
+                "document_id": str(identity_entry["document_id"]),
+                "content": content_by_id[evidence_id],
+                "url": str(identity_entry.get("url") or ""),
+                "source_class": str(
+                    identity_entry.get("source_class") or ""
+                ),
+                "evidence_type": str(
+                    identity_entry.get("evidence_type") or ""
+                ),
+                "first_seen_at": str(
+                    identity_entry.get("first_seen_at") or ""
+                ),
+                "last_seen_at": str(
+                    identity_entry.get("last_seen_at") or ""
+                ),
+                "observation_count": int(
+                    identity_entry.get("observation_count") or 0
+                ),
+                "present_in_latest": bool(
+                    identity_entry.get("present_in_latest")
+                ),
+                "adjudication_state": "accepted",
+            }
+        )
+    result = {
+        "schema_version": EVIDENCE_ACCEPTED_PASSAGE_CATALOG_VERSION,
+        "runtime_effect": False,
+        "authority": False,
+        "brand": dict(identity.get("brand") or {}),
+        "identity_state_fingerprint": str(
+            identity.get("state_fingerprint") or ""
+        ),
+        "entry_count": len(entries),
+        "entries": entries,
+    }
+    result["state_fingerprint"] = stable_artifact_digest(
+        EVIDENCE_ACCEPTED_PASSAGE_CATALOG_VERSION,
+        {
+            key: value
+            for key, value in result.items()
+            if key != "state_fingerprint"
+        },
+    )
     return result
 
 

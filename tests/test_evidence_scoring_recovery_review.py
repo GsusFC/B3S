@@ -7,9 +7,14 @@ import pytest
 from src.services.evidence_scoring_recovery_review import (
     EVIDENCE_SCORING_RECOVERY_REVIEW_EVENT_VERSION,
     EvidenceScoringRecoveryReviewError,
+    build_recovery_review_supplement_packet,
+    build_recovery_review_supplement_packet_from_preview,
     build_recovery_review_candidates,
     build_recovery_review_template,
     evaluate_recovery_reviews,
+    merge_recovery_review_supplements,
+    validate_recovery_review_supplement_against_preview,
+    validate_recovery_review_supplement_packet,
 )
 
 
@@ -210,6 +215,255 @@ def test_event_chain_requires_exact_predecessor() -> None:
         evaluate_recovery_reviews(candidates, [first, second])
 
 
+def test_supplement_packet_merges_exact_non_authoritative_candidates() -> None:
+    base = build_recovery_review_candidates(
+        [{"lane": "history", "preview": _preview()}]
+    )
+    supplemental = _supplement_candidates()
+    packet = build_recovery_review_supplement_packet(
+        brand_identity="example.com",
+        rubric_version="baldosas-v3-1",
+        base_candidates=base,
+        evidence_identity_state_fingerprint="d" * 64,
+        candidates=supplemental,
+    )
+
+    validate_recovery_review_supplement_packet(packet)
+    merged = merge_recovery_review_supplements(
+        base,
+        [packet],
+        brand_domain="example.com",
+        rubric_version="baldosas-v3-1",
+        evidence_identity_state_fingerprint="d" * 64,
+        accepted_evidence_ids=["c" * 64],
+    )
+
+    assert len(merged["candidates"]) == 2
+    assert merged["summary"]["active_packet_count"] == 1
+    assert merged["summary"]["blocked_packet_count"] == 0
+    assert merged["summary"]["authority"] is False
+    assert packet["authority"] is False
+    assert packet["runtime_effect"] is False
+
+
+def test_unrelated_generation_context_drift_does_not_expire_supplement() -> None:
+    base = build_recovery_review_candidates(
+        [{"lane": "history", "preview": _preview()}]
+    )
+    supplemental = _supplement_candidates()
+    packet = build_recovery_review_supplement_packet(
+        brand_identity="example.com",
+        rubric_version="baldosas-v3-1",
+        base_candidates=base,
+        evidence_identity_state_fingerprint="d" * 64,
+        candidates=supplemental,
+    )
+
+    merged = merge_recovery_review_supplements(
+        [],
+        [packet],
+        brand_domain="example.com",
+        rubric_version="baldosas-v3-1",
+        evidence_identity_state_fingerprint="e" * 64,
+        accepted_evidence_ids=["c" * 64],
+    )
+
+    assert merged["candidates"] == supplemental
+    assert merged["summary"]["active_packet_count"] == 1
+    assert merged["summary"]["generation_context_drift_count"] == 1
+
+
+def test_supplement_is_blocked_when_cited_identity_is_not_accepted() -> None:
+    supplemental = _supplement_candidates()
+    packet = build_recovery_review_supplement_packet(
+        brand_identity="example.com",
+        rubric_version="baldosas-v3-1",
+        base_candidates=[],
+        evidence_identity_state_fingerprint="d" * 64,
+        candidates=supplemental,
+    )
+
+    merged = merge_recovery_review_supplements(
+        [],
+        [packet],
+        brand_domain="example.com",
+        rubric_version="baldosas-v3-1",
+        evidence_identity_state_fingerprint="d" * 64,
+        accepted_evidence_ids=[],
+    )
+
+    assert merged["candidates"] == []
+    assert merged["summary"]["active_packet_count"] == 0
+    assert merged["summary"]["blocked_packet_count"] == 1
+
+
+def test_mapper_learning_same_relation_deduplicates_supplement() -> None:
+    supplemental = _supplement_candidates()
+    packet = build_recovery_review_supplement_packet(
+        brand_identity="example.com",
+        rubric_version="baldosas-v3-1",
+        base_candidates=[],
+        evidence_identity_state_fingerprint="d" * 64,
+        candidates=supplemental,
+    )
+
+    merged = merge_recovery_review_supplements(
+        supplemental,
+        [packet],
+        brand_domain="example.com",
+        rubric_version="baldosas-v3-1",
+        evidence_identity_state_fingerprint="d" * 64,
+        accepted_evidence_ids=["c" * 64],
+    )
+
+    assert merged["candidates"] == supplemental
+    assert merged["summary"]["redundant_case_ids"] == [
+        supplemental[0]["case_id"]
+    ]
+
+
+def test_supplement_tampering_fails_closed() -> None:
+    packet = build_recovery_review_supplement_packet(
+        brand_identity="example.com",
+        rubric_version="baldosas-v3-1",
+        base_candidates=[],
+        evidence_identity_state_fingerprint="d" * 64,
+        candidates=_supplement_candidates(),
+    )
+    packet["candidates"][0]["evidence"]["quote"] = "Changed silently."
+
+    with pytest.raises(
+        EvidenceScoringRecoveryReviewError,
+        match="candidate fingerprint",
+    ):
+        validate_recovery_review_supplement_packet(packet)
+
+
+def test_preview_based_supplement_reuses_exact_accepted_evidence() -> None:
+    preview = _supplement_source_preview()
+    source_catalog = _supplement_source_catalog()
+    packet = build_recovery_review_supplement_packet_from_preview(
+        preview,
+        source_catalog=source_catalog,
+        proposals=[
+            {
+                "component_key": "magnetism",
+                "tile_id": "MG2",
+                "passages": [
+                    {
+                        "evidence_id": "c" * 64,
+                        "quote": "End the chase between companies.",
+                    }
+                ],
+            },
+            {
+                "component_key": "magnetism",
+                "tile_id": "MG4",
+                "passages": [
+                    {
+                        "evidence_id": "c" * 64,
+                        "quote": "End the chase between companies.",
+                    },
+                    {
+                        "evidence_id": "e" * 64,
+                        "quote": "Chasing became the second job.",
+                    },
+                ],
+            },
+        ],
+    )
+
+    validate_recovery_review_supplement_against_preview(
+        packet,
+        preview,
+        source_catalog,
+    )
+    by_tile = {
+        candidate["tile"]["tile_id"]: candidate
+        for candidate in packet["candidates"]
+    }
+    assert by_tile["MG2"]["evidence"]["quote"] == (
+        "End the chase between companies."
+    )
+    assert by_tile["MG4"]["evidence"]["quote"] == (
+        "End the chase between companies.\n\n"
+        "Chasing became the second job."
+    )
+    assert by_tile["MG4"]["evidence"][
+        "supplement_source_passages"
+    ] == [
+        {
+            "evidence_id": "c" * 64,
+            "quote": "End the chase between companies.",
+        },
+        {
+            "evidence_id": "e" * 64,
+            "quote": "Chasing became the second job.",
+        },
+    ]
+    assert all(
+        candidate["contexts"][0]["review_scope"]
+        == "mapper_omission_supplement"
+        for candidate in packet["candidates"]
+    )
+
+
+def test_preview_evidence_drift_invalidates_supplement_projection() -> None:
+    preview = _supplement_source_preview()
+    source_catalog = _supplement_source_catalog()
+    packet = build_recovery_review_supplement_packet_from_preview(
+        preview,
+        source_catalog=source_catalog,
+        proposals=[
+            {
+                "component_key": "magnetism",
+                "tile_id": "MG2",
+                "passages": [
+                    {
+                        "evidence_id": "c" * 64,
+                        "quote": "End the chase between companies.",
+                    }
+                ],
+            }
+        ],
+    )
+    changed = deepcopy(source_catalog)
+    changed["entries"][0]["content"] = "Changed silently."
+
+    with pytest.raises(
+        EvidenceScoringRecoveryReviewError,
+        match="not literal in accepted evidence",
+    ):
+        validate_recovery_review_supplement_against_preview(
+            packet,
+            preview,
+            changed,
+        )
+
+
+def test_supplement_quote_must_preserve_literal_case() -> None:
+    with pytest.raises(
+        EvidenceScoringRecoveryReviewError,
+        match="not literal in accepted evidence",
+    ):
+        build_recovery_review_supplement_packet_from_preview(
+            _supplement_source_preview(),
+            source_catalog=_supplement_source_catalog(),
+            proposals=[
+                {
+                    "component_key": "magnetism",
+                    "tile_id": "MG2",
+                    "passages": [
+                        {
+                            "evidence_id": "c" * 64,
+                            "quote": "end the chase between companies.",
+                        }
+                    ],
+                }
+            ],
+        )
+
+
 def _preview() -> dict:
     return {
         "runtime_effect": False,
@@ -243,6 +497,60 @@ def _preview() -> dict:
                 "preview_state": "ok",
                 "tile_evidence_ids": ["evidence-1"],
             }
+        ],
+    }
+
+
+def _supplement_candidates() -> list[dict]:
+    preview = _preview()
+    preview["accepted_evidence"][0].update(
+        {
+            "tile_evidence_id": "b" * 64,
+            "source_evidence_ids": ["c" * 64],
+            "component_key": "magnetism",
+            "tile_id": "MG2",
+            "present_in_latest": True,
+        }
+    )
+    preview["recoveries"] = []
+    return build_recovery_review_candidates(
+        [{"lane": "supplement", "preview": preview}]
+    )
+
+
+def _supplement_source_preview() -> dict:
+    return _preview()
+
+
+def _supplement_source_catalog() -> dict:
+    common = {
+        "document_id": "f" * 64,
+        "url": "https://example.com",
+        "source_class": "owned_copy",
+        "evidence_type": "raw_input",
+        "first_seen_at": "2026-07-01T08:00:00+00:00",
+        "last_seen_at": "2026-07-01T08:00:00+00:00",
+        "observation_count": 1,
+        "present_in_latest": True,
+        "adjudication_state": "accepted",
+    }
+    return {
+        "schema_version": "evidence-accepted-passage-catalog-v1",
+        "runtime_effect": False,
+        "authority": False,
+        "brand": {"name": "Example", "domain": "example.com"},
+        "identity_state_fingerprint": "d" * 64,
+        "entries": [
+            {
+                **common,
+                "evidence_id": "c" * 64,
+                "content": "End the chase between companies.",
+            },
+            {
+                **common,
+                "evidence_id": "e" * 64,
+                "content": "Chasing became the second job.",
+            },
         ],
     }
 
