@@ -275,3 +275,40 @@ def test_label_cache_does_not_store_neutral_artifacts_after_provider_failure() -
     assert debug["reason"] == "evidence_labeling_provider_failed:transport_error"
     assert llm.cache == {}
     assert "relevant_blocks" not in pack.evidence[0].metadata
+
+
+def test_label_evidence_pack_filters_workset_but_keeps_full_identity_context() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="selected", source="web", evidence_type="copy",
+                content="Selected mission evidence.",
+                metadata={"source_class": "owned_copy", "identity_match": "domain"},
+            ),
+            EvidenceRecord(
+                ref="context-only", source="web", evidence_type="copy",
+                content="Context that must not be classified.",
+                metadata={"source_class": "owned_copy", "identity_match": "domain"},
+            ),
+        ],
+    )
+    llm = StubLabelingLLM([
+        {
+            "ref": "selected",
+            "relevant_blocks": ["mission"],
+            "stance": "supports",
+            "identity_match": "domain",
+            "specificity": "explicit",
+        }
+    ])
+
+    debug = label_evidence_pack(pack, llm=llm, selected_refs=["selected"])
+
+    prompt = json.loads(llm.calls[0]["user"])
+    assert len(prompt["records"]) == 1
+    assert prompt["records"][0]["content"] == "Selected mission evidence."
+    assert len(prompt["owned_identity_context"]) == 2
+    assert debug["records_labeled"] == 1
+    assert "semantic_labeling_version" not in pack.evidence[1].metadata
