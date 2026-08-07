@@ -20,7 +20,7 @@
     "scripts/generate_evidence_vault_coverage_supplement.py": "909ac3577d8a2eb6d84597ee77f44ac39179e5bd9807f2a1e856aa7c422419ba",
     "scripts/generate_evidence_vault_exact_relation_supplement.py": "443137580d0b754f2922af2243e0977af342d64f0cfb1d3c627315038ca26ea1",
     "scripts/run_evidence_vault_field_shadow.py": "4423efd0cd8bc59571d35376d91afcb9f7d8e145db420e9f6294145c6c982499",
-    "scripts/validate_evidence_vault_field_audit.py": "17da65724c8c68bf9438876c4e0479e22ab2050a333e3c50f9a19a0f7ce2a487",
+    "scripts/validate_evidence_vault_field_audit.py": "f05db65a913de55b889b6b49c46686856396542f686708f562f7a616b6619b48",
     "scripts/validate_evidence_vault_field_replay.py": "f8bddcbbcd03f1fdf8cda5b134123925026a4e024318abe6740d1271fb4f503c",
     "src/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "src/api/__init__.py": "b1bd5022689d991e33f53d2b5d82fd557564a7fba511cd89068cdc107b7903e0",
@@ -331,7 +331,7 @@
     "src/services/evidence_vault_coverage_supplement.py": "58aa768e86637878a1414505c7bf50df52a1e9f277c7812337198d6e09623d34",
     "src/services/evidence_vault_exact_relation_supplement.py": "6cdc0483c28670ff84815d5915a2e01666a3723fc9a4c7927cdf25fed5d23138",
     "src/services/evidence_vault_field_replay.py": "8ae115068937f659c34f26cf1c8967d65ac0ed2509f8251f917edce0b1d7ace2",
-    "src/services/evidence_vault_incremental_executor.py": "79075877532f4c785c88d966c0cca62b3900bb2d20ff52a2f194f274e95b5df6",
+    "src/services/evidence_vault_incremental_executor.py": "019290df40cc0c8bf24b1a68625ad7b46b08dfdbaadfc43948eec27546d76902",
     "src/services/evidence_vault_incremental_refresh.py": "8cfd0d3b903ced1f84401e24eba236005a6e82c68ad94f55208cca904f853384",
     "src/services/evidence_vault_operational_authority.py": "91d386dcdfba16e06ba5a2e41cef24f2be0119feca6e315c69d4300a41da6276",
     "src/services/evidence_vault_operational_candidate.py": "53791e00602cbfa59d29e22c6f1db0d952b202ecf812b89ea32913f5b904bac7",
@@ -887,7 +887,7 @@
     "web/scan_runner.py": "6c923b0150b4470ca541db2311e21a8fdc0fd32cdffff9bc0d89caa94db013bf"
   },
   "git_base": "5de4b02f41bf8b1b0b4f2b58776693dfff181098",
-  "implementation_fingerprint": "cd9bc6d26d70e91b62ffe8d7b86d80def63ad8a5073fecb8edc605cf354e547b",
+  "implementation_fingerprint": "b68ef856a5250fc5eba459ba659564472450859a41840f85b05741950bf211aa",
   "implementation_state": "committed_landing_branch",
   "schema_version": "b3s-evidence-vault-validation-tree-v1",
   "selection_rule": "git-tracked pyproject.toml; src/**/*.{py,sql,json}; tests/**/*.py; docs/evidence_vault_canonical_memory_adr_v{1,2}.md; fixtures/evidence_vault_field_validation_v1/**; scripts/*evidence_vault*.py; web/scan_runner.py"

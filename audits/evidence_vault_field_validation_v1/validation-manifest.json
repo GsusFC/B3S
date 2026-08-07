@@ -93,7 +93,7 @@
     {
       "bytes": 105042,
       "file": "implementation-tree.json",
-      "sha256": "4ab5fcd543777399c4533ecd707a05909e6587c12a527f040700a617f60c6083"
+      "sha256": "1a9b25f2c5f533a693ff4335accd5a731b7b779a5232907ddb3ffd1d6811f368"
     },
     {
       "bytes": 7043,
@@ -302,9 +302,9 @@
     "scores_are_sparse_isolated_baselines": true,
     "soccersolver_score": 6
   },
-  "implementation_fingerprint": "cd9bc6d26d70e91b62ffe8d7b86d80def63ad8a5073fecb8edc605cf354e547b",
+  "implementation_fingerprint": "b68ef856a5250fc5eba459ba659564472450859a41840f85b05741950bf211aa",
   "implementation_state": "committed_landing_branch",
-  "implementation_tree_sha256": "4ab5fcd543777399c4533ecd707a05909e6587c12a527f040700a617f60c6083",
+  "implementation_tree_sha256": "1a9b25f2c5f533a693ff4335accd5a731b7b779a5232907ddb3ffd1d6811f368",
   "legacy_lineage": {
     "cutover_authorized": false,
     "later_normalized_source_packs_missing": 3,
@@ -339,7 +339,8 @@
     "The clean landing tree removes the incidental untracked uv.lock, adds Git whitespace metadata for immutable CRLF review CSVs, normalizes persisted review timestamps to UTC, and completes migration-release assertions. The semantic provider field execution was not repeated; its exact source state remains preserved at recovery commit f9d22c747793447ef18a6855e96f8747f05b2b77.",
     "The three PostgreSQL checkpoints are separately preserved local recovery artifacts, not Git-distributed fixtures. Their hashes are verifiable with the field-audit verifier on this workstation, but a fresh clone cannot restore them without the recovery archive.",
     "The normalized real-brand corpus intentionally preserves audited public-source text and acquisition metadata, including two workstation-local source paths. Raw source envelopes are absent, so their source_report_sha256 values are historical provenance attestations rather than independently reconstructible inputs.",
-    "Pre-landing review hardening added migration 016, database-wide migration serialization, exact multi-operation source bindings, crash-safe implicit review timestamps, expired-lease recovery, legacy scanner isolation, complete semantic-label coverage, deterministic identity exclusion, and bounded literal quotes. The original provider field execution was not repeated."
+    "Pre-landing review hardening added migration 016, database-wide migration serialization, exact multi-operation source bindings, crash-safe implicit review timestamps, expired-lease recovery, legacy scanner isolation, complete semantic-label coverage, deterministic identity exclusion, and bounded literal quotes. The original provider field execution was not repeated.",
+    "The PostgreSQL history repository still packages offline field-supplement registration adapters. They remain production-unwired and side-effect-free on import; a future boundary cleanup should move them behind a dedicated offline adapter before any runtime cutover."
   ],
   "runtime_effect": false,
   "schema_version": "evidence-vault-field-validation-audit-v1",
@@ -355,9 +356,9 @@
     "model": "gemini-3.1-flash-lite",
     "provider_generated_outputs_observed": true
   },
-  "updated_at": "2026-08-07T14:23:20.757128+00:00",
+  "updated_at": "2026-08-07T14:26:07.730103+00:00",
   "validation": {
-    "audit_manifest_verifier": "passed with all 3 external checkpoints required",
+    "audit_manifest_verifier": "passed with all 3 external checkpoints required; final CLI requires clean Git worktree",
     "coverage_lineage_focused": "25 passed",
     "diff_check": "passed",
     "exact_dump_restore": "passed",

@@ -78,6 +78,26 @@ def _git_tracked(repo_root: Path) -> set[str]:
     }
 
 
+def _git_head_and_status(repo_root: Path) -> tuple[str, list[str]]:
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if head.returncode != 0 or status.returncode != 0:
+        raise EvidenceVaultFieldAuditError("audit verification requires a Git worktree")
+    return head.stdout.strip(), status.stdout.splitlines()
+
+
 def expected_implementation_paths(repo_root: Path) -> set[str]:
     tracked = _git_tracked(repo_root)
     result: set[str] = set()
@@ -119,9 +139,15 @@ def validate_field_audit(
     repo_root: Path | None = None,
     external_root: Path | None = None,
     require_external: bool = False,
+    require_clean: bool = False,
 ) -> dict[str, Any]:
     manifest_path = manifest_path.resolve()
     root = (repo_root or Path(__file__).parents[1]).resolve()
+    git_head, git_status = _git_head_and_status(root)
+    if require_clean and git_status:
+        raise EvidenceVaultFieldAuditError(
+            "committed landing verification requires a clean Git worktree"
+        )
     manifest = _json_object(manifest_path)
     if manifest.get("schema_version") != AUDIT_SCHEMA_VERSION:
         raise EvidenceVaultFieldAuditError("audit manifest schema mismatch")
@@ -222,6 +248,8 @@ def validate_field_audit(
         "implementation_fingerprint": fingerprint,
         "external_verified": external_verified,
         "external_unavailable": external_unavailable,
+        "git_head": git_head,
+        "git_worktree_clean": not git_status,
         "authority": False,
         "cutover_authorized": False,
         "status": "passed",
@@ -239,12 +267,18 @@ def main() -> int:
     parser.add_argument("--repo-root", type=Path, default=root)
     parser.add_argument("--external-root", type=Path)
     parser.add_argument("--require-external", action="store_true")
+    parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="Allow a development worktree instead of committed-landing verification.",
+    )
     args = parser.parse_args()
     result = validate_field_audit(
         args.manifest,
         repo_root=args.repo_root,
         external_root=args.external_root,
         require_external=args.require_external,
+        require_clean=not args.allow_dirty,
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
     return 0

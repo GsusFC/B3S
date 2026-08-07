@@ -1234,6 +1234,7 @@ __all__ = [
     "EVIDENCE_VAULT_OPERATION_RESULT_VERSION",
     "EvidenceVaultIncrementalExecutorError",
     "VaultIncrementalExecutorRepository",
+    "derive_vault_tile_shortlists",
     "execute_vault_operation_plan",
     "validate_vault_operation_result",
 ]
