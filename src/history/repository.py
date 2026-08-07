@@ -3,19 +3,34 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timezone
 from importlib import resources
 import logging
 from threading import Lock
-from typing import Any, Callable
-from uuid import UUID, uuid5
+from typing import Any, Callable, Iterable, Mapping
+from uuid import UUID, uuid4, uuid5
 
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from src.history.models import HistoricalReport, ImportOutcome, ReportConflictError
-from src.history.report_parser import canonical_json_bytes, normalize_domain, parse_report
+from src.history.capture_observation import parse_capture_observation
+from src.history.models import (
+    CaptureConflictError,
+    CaptureImportOutcome,
+    CaptureObservation,
+    HistoricalReport,
+    ImportOutcome,
+    OperationalAdoptionCommand,
+    ReportConflictError,
+)
+from src.history.report_parser import (
+    canonical_json_bytes,
+    canonical_json_hash,
+    normalize_domain,
+    parse_report,
+)
 from src.services.evidence_claim_reconciliation import (
     CLAIM_RECONCILIATION_DECISIONS,
     CLAIM_RECONCILIATION_RELATION_TYPES,
@@ -66,6 +81,7 @@ from src.services.evidence_memory_adjudication import (
 )
 from src.services.evidence_memory_identity_v2 import (
     build_accepted_evidence_passage_catalog,
+    project_evidence_memory_row_identity,
 )
 from src.services.evidence_reviewed_claim_tile_memory import (
     build_reviewed_claim_tile_memory_from_journal_shadow,
@@ -104,22 +120,73 @@ from src.services.evidence_vault_canonical_authority import (
 )
 from src.services.evidence_vault_canonical_core import (
     EvidenceVaultCanonicalCoreError,
+    build_candidate_tile,
+    build_tile_contract_registry,
+    canonical_fingerprint,
     validate_candidate_packet,
+    validate_incremental_candidate_tiles,
 )
 from src.services.evidence_vault_candidate_resolver import (
     EvidenceVaultCandidateResolverError,
     build_resolved_canonical_memory_candidate,
+)
+from src.services.evidence_vault_coverage_supplement import (
+    EvidenceVaultCoverageSupplementError,
+    build_coverage_supplement_source_candidate,
+    build_coverage_supplement_source_resolution,
+    validate_coverage_supplement_artifact,
 )
 from src.services.evidence_vault_canonical_scoring import (
     EvidenceVaultCanonicalScoringError,
     build_canonical_score_evaluation,
     validate_canonical_score_evaluation,
 )
+from src.services.evidence_vault_exact_relation_supplement import (
+    EvidenceVaultExactRelationSupplementError,
+    build_exact_relation_source_candidate,
+    build_exact_relation_source_resolution,
+    validate_exact_relation_source_decisions,
+    validate_exact_relation_supplement_artifact,
+)
+from src.services.evidence_vault_incremental_refresh import (
+    EvidenceVaultOperationPlanError,
+    validate_vault_scan_plan,
+)
+from src.services.evidence_vault_operational_authority import (
+    EvidenceVaultOperationalAdoptionConflictError,
+    EvidenceVaultOperationalAuthorityError,
+    adoption_request_fingerprint,
+    build_operational_adoption_event,
+    project_adopted_operational_memory,
+    validate_operational_adoption_event,
+    validate_operational_memory_packet,
+)
+from src.services.evidence_vault_authority_profiles import (
+    build_initial_authority_profile_matrix,
+    evaluate_reviewed_basis_authority,
+    validate_authority_decision,
+)
+from src.services.evidence_vault_operational_candidate import (
+    build_operational_packet_from_reviewed_candidate,
+    build_provisional_operational_packet_from_report,
+)
+from src.services.evidence_vault_operational_review import (
+    EvidenceVaultOperationalReviewError,
+    build_reviewed_operational_source,
+)
+from src.services.evidence_vault_operational_scoring import (
+    EvidenceVaultOperationalScoringError,
+    build_operational_score_evaluation,
+    validate_operational_score_evaluation,
+)
 from src.services.scanner_evidence_comparison import (
     CANONICAL_POLICY_VERSION,
     annotate_report_history,
     build_evidence_snapshot,
+    canonical_evidence_representatives,
 )
+from src.sv9_flow.contracts import EvidenceRecord
+from src.sv9_flow.evidence_labeling_worker import is_evidence_record_labelable
 
 _ID_NAMESPACE = UUID("3ef1b80c-e7b7-4fb3-95ad-fb9e03c59d52")
 _SCHEMA = "b3s_history"
@@ -243,17 +310,84 @@ class PostgresHistoryRepository:
                     report_hash=parsed.report_hash,
                 )
 
+            capture_only = conn.execute(
+                f"""
+                SELECT scan_runs.id AS scan_run_id,
+                       scan_runs.brand_id,
+                       scan_runs.request_payload,
+                       scan_runs.metadata AS scan_metadata,
+                       captures.id AS capture_id,
+                       captures.content_hash,
+                       captures.source_url,
+                       captures.observed_at,
+                       brands.canonical_domain
+                FROM {_SCHEMA}.scan_runs
+                JOIN {_SCHEMA}.captures ON captures.scan_run_id = scan_runs.id
+                JOIN {_SCHEMA}.brands ON brands.id = scan_runs.brand_id
+                WHERE scan_runs.workspace_id = %s
+                  AND scan_runs.source_scan_id = %s
+                """,
+                (workspace_id, parsed.source_report_id),
+            ).fetchone()
             brand_id = self._upsert_brand(conn, workspace_id, parsed)
             conn.execute(
                 "SELECT pg_advisory_xact_lock(%s)",
                 (_advisory_lock_key(workspace_id, "brand", brand_id),),
             )
-            scan_run_id = _stable_uuid(workspace_id, "scan", parsed.source_report_id)
-            capture_id = _stable_uuid(scan_run_id, "capture")
-            evaluation_run_id = _stable_uuid(capture_id, "evaluation", parsed.source_report_id)
-            self._insert_scan_run(conn, scan_run_id, workspace_id, brand_id, parsed)
-            self._insert_capture(conn, capture_id, scan_run_id, brand_id, parsed)
-            evidence_ids = self._insert_evidence(conn, capture_id, parsed)
+            if capture_only is None:
+                scan_run_id = _stable_uuid(
+                    workspace_id,
+                    "scan",
+                    parsed.source_report_id,
+                )
+                capture_id = _stable_uuid(scan_run_id, "capture")
+                self._insert_scan_run(conn, scan_run_id, workspace_id, brand_id, parsed)
+                self._insert_capture(conn, capture_id, scan_run_id, brand_id, parsed)
+                evidence_ids = self._insert_evidence(conn, capture_id, parsed)
+            else:
+                if str(capture_only["brand_id"]) != str(brand_id):
+                    raise ReportConflictError(
+                        "capture-only scan belongs to another brand"
+                    )
+                scan_run_id = capture_only["scan_run_id"]
+                capture_id = capture_only["capture_id"]
+                evidence_ids = _validate_capture_to_report_upgrade(
+                    conn,
+                    capture_only,
+                    parsed,
+                )
+                conn.execute(
+                    f"""
+                    UPDATE {_SCHEMA}.scan_runs
+                    SET source_run_id = %s,
+                        status = 'completed',
+                        pipeline_version = %s,
+                        acquisition_state = %s,
+                        completed_at = %s,
+                        recorded_at = %s,
+                        metadata = metadata || %s
+                    WHERE id = %s
+                    """,
+                    (
+                        parsed.source_run_id,
+                        parsed.pipeline_version,
+                        parsed.acquisition_state,
+                        parsed.recorded_at,
+                        parsed.recorded_at,
+                        _jsonb(
+                            {
+                                "persisted_as": "capture_with_report",
+                                "report_hash": parsed.report_hash,
+                            }
+                        ),
+                        scan_run_id,
+                    ),
+                )
+            evaluation_run_id = _stable_uuid(
+                capture_id,
+                "evaluation",
+                parsed.source_report_id,
+            )
             self._insert_evaluation(conn, evaluation_run_id, capture_id, parsed)
             block_ids = self._insert_blocks(
                 conn,
@@ -268,8 +402,9 @@ class PostgresHistoryRepository:
                 evidence_ids,
                 block_ids,
             )
-            self._insert_attempts(conn, capture_id, parsed)
-            self._insert_artifacts(conn, capture_id, parsed)
+            if capture_only is None:
+                self._insert_attempts(conn, capture_id, parsed)
+                self._insert_artifacts(conn, capture_id, parsed)
             self._insert_report_snapshot(
                 conn,
                 workspace_id,
@@ -296,6 +431,764 @@ class PostgresHistoryRepository:
                 report_hash=parsed.report_hash,
             )
 
+    def persist_capture_observation(
+        self,
+        observation: dict[str, Any],
+        *,
+        workspace_slug: str = "b3s",
+        workspace_name: str = "B3S",
+    ) -> CaptureImportOutcome:
+        """Persist one validated raw acquisition without inventing an evaluation."""
+
+        # Hashes are always recomputed from caller data at this trust boundary.
+        # Preconstructed dataclasses are deliberately rejected so a caller
+        # cannot forge observation_hash/capture_hash or mutate nested payloads.
+        parsed = parse_capture_observation(observation)
+        operation_plan = parsed.metadata.get("operation_plan")
+        if operation_plan is not None:
+            try:
+                validate_vault_scan_plan(operation_plan)
+            except EvidenceVaultOperationPlanError as exc:
+                raise CaptureConflictError(
+                    "capture operation plan is invalid"
+                ) from exc
+            if parsed.metadata.get("operation_plan_fingerprint") != operation_plan.get(
+                "operation_plan_fingerprint"
+            ):
+                raise CaptureConflictError(
+                    "capture operation plan fingerprint is inconsistent"
+                )
+            operations = operation_plan["operations"]
+            work_required = bool(
+                operations["llm_required"]
+                or operations["create_candidate_packet"]
+                or operations["create_diagnostic_report"]
+            )
+            expected_status = "pending" if work_required else "not_required"
+            if parsed.metadata.get("analysis_status") != expected_status:
+                raise CaptureConflictError(
+                    "capture analysis status does not match its operation plan"
+                )
+        self._ensure_migrated()
+        with self._connect() as conn:
+            workspace_id = self._ensure_workspace(
+                conn,
+                workspace_slug,
+                workspace_name,
+            )
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_advisory_lock_key(workspace_id, parsed.source_scan_id),),
+            )
+            existing = conn.execute(
+                f"""
+                SELECT scan_runs.metadata ->> 'observation_hash' AS observation_hash,
+                       brands.id AS brand_id,
+                       captures.id AS capture_id
+                FROM {_SCHEMA}.scan_runs
+                JOIN {_SCHEMA}.captures ON captures.scan_run_id = scan_runs.id
+                JOIN {_SCHEMA}.brands ON brands.id = captures.brand_id
+                WHERE scan_runs.workspace_id = %s
+                  AND scan_runs.source_scan_id = %s
+                """,
+                (workspace_id, parsed.source_scan_id),
+            ).fetchone()
+            if existing:
+                if str(existing.get("observation_hash") or "") != parsed.observation_hash:
+                    raise CaptureConflictError(
+                        f"capture {parsed.source_scan_id} already exists with different content"
+                    )
+                if operation_plan is not None:
+                    plan_row = _vault_operation_row(
+                        conn,
+                        workspace_slug=workspace_slug,
+                        source_scan_id=parsed.source_scan_id,
+                        for_update=False,
+                    )
+                    if plan_row is None:
+                        raise CaptureConflictError(
+                            "persisted capture is missing its operation plan"
+                        )
+                    plan_record = _vault_operation_plan_record(plan_row)
+                    if (
+                        plan_record["operation_plan_fingerprint"]
+                        != operation_plan["operation_plan_fingerprint"]
+                        or plan_record["observation_hash"]
+                        != parsed.observation_hash
+                    ):
+                        raise CaptureConflictError(
+                            "persisted capture operation identity mismatch"
+                        )
+                return CaptureImportOutcome(
+                    source_scan_id=parsed.source_scan_id,
+                    status="unchanged",
+                    brand_id=str(existing["brand_id"]),
+                    capture_id=str(existing["capture_id"]),
+                    observation_hash=parsed.observation_hash,
+                )
+
+            brand_id = self._upsert_brand(conn, workspace_id, parsed)
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_advisory_lock_key(workspace_id, "brand", brand_id),),
+            )
+            scan_run_id = _stable_uuid(
+                workspace_id,
+                "scan",
+                parsed.source_scan_id,
+            )
+            capture_id = _stable_uuid(scan_run_id, "capture")
+            self._insert_capture_only_scan_run(
+                conn,
+                scan_run_id,
+                workspace_id,
+                brand_id,
+                parsed,
+            )
+            if operation_plan is not None:
+                self._insert_vault_operation_plan(
+                    conn,
+                    workspace_id=workspace_id,
+                    brand_id=brand_id,
+                    scan_run_id=scan_run_id,
+                    observation_hash=parsed.observation_hash,
+                    plan=operation_plan,
+                    initial_status=str(parsed.metadata["analysis_status"]),
+                )
+            self._insert_capture_only(
+                conn,
+                capture_id,
+                scan_run_id,
+                brand_id,
+                parsed,
+            )
+            self._insert_evidence(conn, capture_id, parsed)
+            self._insert_attempts(conn, capture_id, parsed)
+            self._insert_artifacts(conn, capture_id, parsed)
+            return CaptureImportOutcome(
+                source_scan_id=parsed.source_scan_id,
+                status="imported",
+                brand_id=str(brand_id),
+                capture_id=str(capture_id),
+                observation_hash=parsed.observation_hash,
+            )
+
+    def get_capture_operation_plan(
+        self,
+        source_scan_id: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        """Load one exact persisted plan directly by scan identity."""
+
+        scan_id = str(source_scan_id or "").strip()
+        if not scan_id:
+            raise CaptureConflictError("source_scan_id is required")
+        self._ensure_migrated()
+        with self._connect() as conn:
+            row = _vault_operation_row(
+                conn,
+                workspace_slug=workspace_slug,
+                source_scan_id=scan_id,
+                for_update=False,
+            )
+            if row is None:
+                return None
+            evidence_rows = conn.execute(
+                f"""
+                SELECT evidence_ref, source, source_class, evidence_type,
+                       url, content, content_raw, confidence, metadata
+                FROM {_SCHEMA}.evidence_records
+                WHERE capture_id = %s
+                ORDER BY evidence_ref, id
+                """,
+                (row["capture_id"],),
+            ).fetchall()
+            evidence = _capture_evidence_rows(evidence_rows)
+            record = _vault_operation_plan_record(row)
+            record["lease_token"] = None
+            record.update(
+                {
+                    "source_scan_id": scan_id,
+                    "brand_identity": str(row["canonical_domain"]),
+                    "capture_id": str(row["capture_id"]),
+                    "capture_hash": str(row["capture_hash"]),
+                    "raw_observation": dict(row["request_payload"] or {}),
+                    "evidence_records": evidence,
+                }
+            )
+            return record
+
+    def claim_capture_operation_plan(
+        self,
+        source_scan_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: int = 300,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any]:
+        """Lease one plan with a monotonic generation that fences old workers."""
+
+        scan_id = str(source_scan_id or "").strip()
+        worker = _bounded_text(worker_id, field="worker_id", maximum=200)
+        if not scan_id:
+            raise CaptureConflictError("source_scan_id is required")
+        if (
+            not isinstance(lease_seconds, int)
+            or isinstance(lease_seconds, bool)
+            or not 1 <= lease_seconds <= 3600
+        ):
+            raise CaptureConflictError("lease_seconds must be between 1 and 3600")
+        self._ensure_migrated()
+        with self._connect() as conn:
+            row = _vault_operation_row(
+                conn,
+                workspace_slug=workspace_slug,
+                source_scan_id=scan_id,
+                for_update=True,
+            )
+            if row is None:
+                raise CaptureConflictError("capture operation plan does not exist")
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_advisory_lock_key(row["brand_id"], "evidence-vault-canonical-promotion"),),
+            )
+            record = _vault_operation_plan_record(row)
+            if record["status"] in {"completed", "result_persisted", "superseded"}:
+                return {**record, "claim_status": record["status"], "claimed": False}
+            current = _project_vault_operational_memory(conn, row["brand_id"])
+            current_version = (
+                current["canonical_memory_version"] if current is not None else None
+            )
+            if (
+                record["mode"] != "diagnostic_full"
+                and current_version != record["canonical_memory_version"]
+            ):
+                superseded = conn.execute(
+                    f"""
+                    UPDATE {_SCHEMA}.evidence_vault_operation_plans
+                    SET status = 'superseded', superseded_at = now(),
+                        lease_owner = NULL, lease_token = NULL,
+                        lease_expires_at = NULL,
+                        last_error = 'canonical_parent_superseded'
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    (row["id"],),
+                ).fetchone()
+                return {
+                    **_vault_operation_plan_record(superseded),
+                    "claim_status": "superseded",
+                    "claimed": False,
+                }
+            lease_active = (
+                record["status"] in {"claimed", "running"}
+                and row["lease_expires_at"] is not None
+                and row["lease_expires_at"] > row["db_now"]
+            )
+            if lease_active:
+                same_owner = str(row["lease_owner"] or "") == worker
+                return {
+                    **record,
+                    "lease_token": None,
+                    "claim_status": "owned_active" if same_owner else "busy",
+                    "claimed": False,
+                }
+            token = uuid4()
+            claimed = conn.execute(
+                f"""
+                UPDATE {_SCHEMA}.evidence_vault_operation_plans
+                SET status = 'claimed',
+                    attempt_count = attempt_count + 1,
+                    lease_owner = %s,
+                    lease_token = %s,
+                    lease_generation = lease_generation + 1,
+                    lease_expires_at = clock_timestamp() + make_interval(secs => %s),
+                    claimed_at = now(), heartbeat_at = now(),
+                    started_at = NULL, last_error = ''
+                WHERE id = %s
+                RETURNING *
+                """,
+                (worker, token, lease_seconds, row["id"]),
+            ).fetchone()
+            return {
+                **_vault_operation_plan_record(claimed),
+                "claim_status": "acquired",
+                "claimed": True,
+            }
+
+    def mark_capture_operation_running(
+        self,
+        source_scan_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        lease_generation: int,
+        lease_seconds: int = 300,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any]:
+        return self._advance_capture_operation_lease(
+            source_scan_id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            lease_generation=lease_generation,
+            lease_seconds=lease_seconds,
+            workspace_slug=workspace_slug,
+            start=True,
+        )
+
+    def heartbeat_capture_operation_plan(
+        self,
+        source_scan_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        lease_generation: int,
+        lease_seconds: int = 300,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any]:
+        return self._advance_capture_operation_lease(
+            source_scan_id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            lease_generation=lease_generation,
+            lease_seconds=lease_seconds,
+            workspace_slug=workspace_slug,
+            start=False,
+        )
+
+    def _advance_capture_operation_lease(
+        self,
+        source_scan_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        lease_generation: int,
+        lease_seconds: int,
+        workspace_slug: str,
+        start: bool,
+    ) -> dict[str, Any]:
+        scan_id = str(source_scan_id or "").strip()
+        worker = _bounded_text(worker_id, field="worker_id", maximum=200)
+        token = _uuid_text(lease_token, field="lease_token")
+        generation = _positive_int(lease_generation, field="lease_generation")
+        if (
+            not isinstance(lease_seconds, int)
+            or isinstance(lease_seconds, bool)
+            or not 1 <= lease_seconds <= 3600
+        ):
+            raise CaptureConflictError("lease_seconds must be between 1 and 3600")
+        self._ensure_migrated()
+        with self._connect() as conn:
+            row = _vault_operation_row(
+                conn,
+                workspace_slug=workspace_slug,
+                source_scan_id=scan_id,
+                for_update=True,
+            )
+            if row is None:
+                raise CaptureConflictError("capture operation plan does not exist")
+            allowed = {"claimed"} if start else {"claimed", "running"}
+            if str(row["status"]) not in allowed or not _lease_matches(
+                row,
+                worker_id=worker,
+                lease_token=token,
+                lease_generation=generation,
+            ):
+                raise CaptureConflictError("operation lease is stale or owned by another worker")
+            if row["lease_expires_at"] <= row["db_now"]:
+                raise CaptureConflictError("operation lease has expired")
+            updated = conn.execute(
+                f"""
+                UPDATE {_SCHEMA}.evidence_vault_operation_plans
+                SET status = %s,
+                    started_at = CASE WHEN %s THEN COALESCE(started_at, now()) ELSE started_at END,
+                    heartbeat_at = now(),
+                    lease_expires_at = clock_timestamp() + make_interval(secs => %s)
+                WHERE id = %s
+                RETURNING *
+                """,
+                ("running" if start else str(row["status"]), start, lease_seconds, row["id"]),
+            ).fetchone()
+            return _vault_operation_plan_record(updated)
+
+    def persist_capture_operation_result(
+        self,
+        source_scan_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        lease_generation: int,
+        result_payload: Mapping[str, Any],
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any]:
+        """Persist exact analyzer output once; late fenced workers cannot write."""
+
+        scan_id = str(source_scan_id or "").strip()
+        worker = _bounded_text(worker_id, field="worker_id", maximum=200)
+        token = _uuid_text(lease_token, field="lease_token")
+        generation = _positive_int(lease_generation, field="lease_generation")
+        detached = _strict_json_object(result_payload, field="result_payload")
+        result_fingerprint = canonical_fingerprint(
+            "evidence-vault-operation-result-v1",
+            detached,
+        )
+        self._ensure_migrated()
+        with self._connect() as conn:
+            row = _vault_operation_row(
+                conn,
+                workspace_slug=workspace_slug,
+                source_scan_id=scan_id,
+                for_update=True,
+            )
+            if row is None:
+                raise CaptureConflictError("capture operation plan does not exist")
+            _validate_vault_operation_result_for_plan(
+                conn,
+                detached,
+                operation=row,
+            )
+            existing_result = str(row["result_fingerprint"] or "")
+            if existing_result:
+                if existing_result != result_fingerprint or dict(
+                    row["result_payload"] or {}
+                ) != detached:
+                    raise CaptureConflictError(
+                        "operation already has a different immutable result"
+                    )
+                return {**_vault_operation_plan_record(row), "result_replayed": True}
+            if str(row["status"]) != "running" or not _lease_matches(
+                row,
+                worker_id=worker,
+                lease_token=token,
+                lease_generation=generation,
+            ):
+                raise CaptureConflictError("operation result writer has a stale lease")
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_advisory_lock_key(row["brand_id"], "evidence-vault-canonical-promotion"),),
+            )
+            wall_clock = conn.execute(
+                "SELECT clock_timestamp() AS value"
+            ).fetchone()["value"]
+            if row["lease_expires_at"] <= wall_clock:
+                raise CaptureConflictError("operation result lease has expired")
+            current = _project_vault_operational_memory(conn, row["brand_id"])
+            current_version = (
+                current["canonical_memory_version"] if current is not None else None
+            )
+            stale_parent = (
+                str(row["mode"]) != "diagnostic_full"
+                and current_version != row["canonical_memory_version"]
+            )
+            updated = conn.execute(
+                f"""
+                UPDATE {_SCHEMA}.evidence_vault_operation_plans
+                SET status = %s,
+                    result_fingerprint = %s,
+                    result_payload = %s,
+                    result_persisted_at = now(),
+                    superseded_at = CASE WHEN %s THEN now() ELSE NULL END,
+                    lease_owner = NULL, lease_token = NULL,
+                    lease_expires_at = NULL,
+                    last_error = CASE WHEN %s
+                        THEN 'canonical_parent_superseded' ELSE '' END
+                WHERE id = %s
+                RETURNING *
+                """,
+                (
+                    "superseded" if stale_parent else "result_persisted",
+                    result_fingerprint,
+                    _jsonb(detached),
+                    stale_parent,
+                    stale_parent,
+                    row["id"],
+                ),
+            ).fetchone()
+            return {
+                **_vault_operation_plan_record(updated),
+                "result_replayed": False,
+            }
+
+    def finalize_capture_operation_plan(
+        self,
+        source_scan_id: str,
+        *,
+        operation_plan_fingerprint: str,
+        result_fingerprint: str,
+        candidate_packet_fingerprint: str | None = None,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any]:
+        """Finalize only a stored result and an idempotently persisted output."""
+
+        scan_id = str(source_scan_id or "").strip()
+        plan_fingerprint = _require_sha256_text(
+            operation_plan_fingerprint,
+            field="operation_plan_fingerprint",
+        )
+        expected_result = _require_sha256_text(
+            result_fingerprint,
+            field="result_fingerprint",
+        )
+        candidate_fingerprint = (
+            _require_sha256_text(
+                candidate_packet_fingerprint,
+                field="candidate_packet_fingerprint",
+            )
+            if candidate_packet_fingerprint is not None
+            else None
+        )
+        self._ensure_migrated()
+        with self._connect() as conn:
+            row = _vault_operation_row(
+                conn,
+                workspace_slug=workspace_slug,
+                source_scan_id=scan_id,
+                for_update=True,
+            )
+            if row is None:
+                raise CaptureConflictError("capture operation plan does not exist")
+            record = _vault_operation_plan_record(row)
+            if record["operation_plan_fingerprint"] != plan_fingerprint:
+                raise CaptureConflictError("operation plan fingerprint mismatch")
+            if record.get("result_fingerprint") != expected_result:
+                raise CaptureConflictError("operation result fingerprint mismatch")
+            if record["status"] == "completed":
+                if record.get("candidate_packet_fingerprint") != candidate_fingerprint:
+                    raise CaptureConflictError(
+                        "completed operation references another output packet"
+                    )
+                return {**record, "finalization_replayed": True}
+            if record["status"] == "superseded":
+                return {**record, "finalization_replayed": True}
+            if record["status"] != "result_persisted":
+                raise CaptureConflictError(
+                    "operation must persist its result before finalization"
+                )
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_advisory_lock_key(row["brand_id"], "evidence-vault-canonical-promotion"),),
+            )
+            current = _project_vault_operational_memory(conn, row["brand_id"])
+            current_version = (
+                current["canonical_memory_version"] if current is not None else None
+            )
+            if (
+                record["mode"] != "diagnostic_full"
+                and current_version != record["canonical_memory_version"]
+            ):
+                superseded = conn.execute(
+                    f"""
+                    UPDATE {_SCHEMA}.evidence_vault_operation_plans
+                    SET status = 'superseded', superseded_at = now(),
+                        last_error = 'canonical_parent_superseded'
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    (row["id"],),
+                ).fetchone()
+                return {
+                    **_vault_operation_plan_record(superseded),
+                    "finalization_replayed": False,
+                }
+            result_payload = dict(row["result_payload"] or {})
+            output_kind = str(result_payload.get("output_kind") or "")
+            if output_kind == "candidate_overlay":
+                if candidate_fingerprint is None or result_payload.get(
+                    "candidate_packet_fingerprint"
+                ) != candidate_fingerprint:
+                    raise CaptureConflictError(
+                        "candidate result is not bound to its stored packet"
+                    )
+                source_fingerprint = str(
+                    result_payload.get(
+                        "source_candidate_packet_fingerprint"
+                    )
+                    or ""
+                )
+                source_row = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                    WHERE brand_id = %s
+                      AND packet_fingerprint = %s
+                      AND packet_kind = 'operational_source_v2'
+                    """,
+                    (row["brand_id"], source_fingerprint),
+                ).fetchone()
+                if source_row is None:
+                    raise CaptureConflictError(
+                        "executor source packet is not durably registered"
+                    )
+                source_record = _vault_operational_source_packet_record(
+                    source_row
+                )
+                source_resolution = source_record["reference_resolution"]
+                if (
+                    source_record["packet"]
+                    != result_payload.get("source_candidate_packet")
+                    or source_resolution.get("operation_plan_fingerprint")
+                    != plan_fingerprint
+                    or source_resolution.get("result_fingerprint")
+                    != expected_result
+                ):
+                    raise CaptureConflictError(
+                        "executor source packet is not bound to its immutable result"
+                    )
+                packet_row = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                    WHERE brand_id = %s
+                      AND packet_fingerprint = %s
+                      AND packet_kind = 'operational_v2'
+                    """,
+                    (row["brand_id"], candidate_fingerprint),
+                ).fetchone()
+                if packet_row is None:
+                    raise CaptureConflictError(
+                        "candidate result packet is not durably registered"
+                    )
+                packet = _vault_operational_packet_record(packet_row)["packet"]
+                if result_payload.get("operational_candidate_packet") != packet:
+                    raise CaptureConflictError(
+                        "stored executor packet differs from the immutable result"
+                    )
+                if (
+                    packet["has_accepted_change"] is not False
+                    or packet["current_canonical_memory_version"]
+                    != record["canonical_memory_version"]
+                ):
+                    raise CaptureConflictError(
+                        "executor candidate packet crosses the authority boundary"
+                    )
+            elif output_kind == "no_delta":
+                if candidate_fingerprint is not None:
+                    raise CaptureConflictError("no-delta result cannot reference a packet")
+                operations = record["plan"]["operations"]
+                if (
+                    operations["llm_required"]
+                    or operations["create_candidate_packet"]
+                    or operations["create_diagnostic_report"]
+                ):
+                    raise CaptureConflictError(
+                        "no-delta result conflicts with the stored work contract"
+                    )
+            else:
+                raise CaptureConflictError(
+                    f"unsupported executor output kind: {output_kind or 'missing'}"
+                )
+            completed = conn.execute(
+                f"""
+                UPDATE {_SCHEMA}.evidence_vault_operation_plans
+                SET status = 'completed',
+                    candidate_packet_fingerprint = %s,
+                    completed_at = now(), last_error = ''
+                WHERE id = %s
+                RETURNING *
+                """,
+                (candidate_fingerprint, row["id"]),
+            ).fetchone()
+            conn.execute(
+                f"""
+                UPDATE {_SCHEMA}.scan_runs
+                SET metadata = metadata || %s
+                WHERE id = %s
+                """,
+                (
+                    _jsonb(
+                        {
+                            "analysis_status": "completed",
+                            "analysis_result_fingerprint": expected_result,
+                            "candidate_packet_fingerprint": candidate_fingerprint,
+                        }
+                    ),
+                    row["scan_run_id"],
+                ),
+            )
+            return {
+                **_vault_operation_plan_record(completed),
+                "finalization_replayed": False,
+            }
+
+    def fail_capture_operation_plan(
+        self,
+        source_scan_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        lease_generation: int,
+        error: str,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any]:
+        scan_id = str(source_scan_id or "").strip()
+        worker = _bounded_text(worker_id, field="worker_id", maximum=200)
+        token = _uuid_text(lease_token, field="lease_token")
+        generation = _positive_int(lease_generation, field="lease_generation")
+        message = _bounded_text(error, field="error", maximum=4000)
+        self._ensure_migrated()
+        with self._connect() as conn:
+            row = _vault_operation_row(
+                conn,
+                workspace_slug=workspace_slug,
+                source_scan_id=scan_id,
+                for_update=True,
+            )
+            if row is None or str(row["status"]) not in {"claimed", "running"}:
+                raise CaptureConflictError("capture operation has no active lease")
+            if not _lease_matches(
+                row,
+                worker_id=worker,
+                lease_token=token,
+                lease_generation=generation,
+            ):
+                raise CaptureConflictError("operation failure writer has a stale lease")
+            if row["lease_expires_at"] <= row["db_now"]:
+                raise CaptureConflictError("operation failure lease has expired")
+            failed = conn.execute(
+                f"""
+                UPDATE {_SCHEMA}.evidence_vault_operation_plans
+                SET status = 'failed_retryable', last_error = %s,
+                    lease_owner = NULL, lease_token = NULL,
+                    lease_expires_at = NULL
+                WHERE id = %s
+                RETURNING *
+                """,
+                (message, row["id"]),
+            ).fetchone()
+            return _vault_operation_plan_record(failed)
+
+    def mark_capture_analysis_completed(
+        self,
+        source_scan_id: str,
+        *,
+        operation_plan_fingerprint: str,
+        analysis_result_fingerprint: str,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any]:
+        """Compatibility finalizer; it cannot create or forge a result."""
+
+        operation = self.get_capture_operation_plan(
+            source_scan_id,
+            workspace_slug=workspace_slug,
+        )
+        if operation is None or operation.get("result_payload") is None:
+            raise CaptureConflictError(
+                "analysis result must be durably persisted before completion"
+            )
+        candidate = operation["result_payload"].get(
+            "candidate_packet_fingerprint"
+        )
+        return self.finalize_capture_operation_plan(
+            source_scan_id,
+            operation_plan_fingerprint=operation_plan_fingerprint,
+            result_fingerprint=analysis_result_fingerprint,
+            candidate_packet_fingerprint=(
+                str(candidate) if candidate is not None else None
+            ),
+            workspace_slug=workspace_slug,
+        )
+
     def get_current_brand_state(
         self,
         domain_or_url: str,
@@ -314,6 +1207,141 @@ class PostgresHistoryRepository:
                 (workspace_slug, domain),
             ).fetchone()
         return dict(row) if row else None
+
+    def list_capture_observations_for_domain(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Read acquisition history without requiring evaluations or reports."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        bounded_limit = max(1, min(int(limit), 500))
+        if not domain:
+            return []
+        with self._connect() as conn:
+            capture_rows = conn.execute(
+                f"""
+                SELECT captures.id, captures.observed_at, captures.recorded_at,
+                       captures.source_url, captures.content_hash,
+                       captures.acquisition_summary, captures.limitations,
+                       captures.raw_payload, scan_runs.source_scan_id,
+                       scan_runs.source_run_id, scan_runs.pipeline_version,
+                       scan_runs.acquisition_state, scan_runs.request_payload,
+                       scan_runs.metadata,
+                       operation_plans.status AS operation_status,
+                       operation_plans.operation_plan_fingerprint AS stored_plan_fingerprint,
+                       operation_plans.result_fingerprint AS stored_result_fingerprint,
+                       operation_plans.candidate_packet_fingerprint AS stored_candidate_packet_fingerprint
+                FROM {_SCHEMA}.captures
+                JOIN {_SCHEMA}.scan_runs ON scan_runs.id = captures.scan_run_id
+                LEFT JOIN {_SCHEMA}.evidence_vault_operation_plans AS operation_plans
+                  ON operation_plans.scan_run_id = scan_runs.id
+                JOIN {_SCHEMA}.brands ON brands.id = captures.brand_id
+                JOIN {_SCHEMA}.workspaces ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                ORDER BY captures.observed_at DESC,
+                         captures.recorded_at DESC,
+                         captures.id DESC
+                LIMIT %s
+                """,
+                (workspace_slug, domain, bounded_limit),
+            ).fetchall()
+            observations: list[dict[str, Any]] = []
+            for capture in capture_rows:
+                evidence_rows = conn.execute(
+                    f"""
+                    SELECT evidence_ref, source, source_class, evidence_type,
+                           url, content, content_raw, confidence, metadata
+                    FROM {_SCHEMA}.evidence_records
+                    WHERE capture_id = %s
+                    ORDER BY evidence_ref, id
+                    """,
+                    (capture["id"],),
+                ).fetchall()
+                evidence: list[dict[str, Any]] = []
+                for row in evidence_rows:
+                    metadata = dict(row["metadata"] or {})
+                    metadata.setdefault("source_class", str(row["source_class"]))
+                    raw_content = row["content_raw"]
+                    content = (
+                        bytes(raw_content).decode("utf-8")
+                        if raw_content is not None
+                        else str(row["content"])
+                    )
+                    evidence.append(
+                        {
+                            "ref": str(row["evidence_ref"]),
+                            "source": str(row["source"]),
+                            "evidence_type": str(row["evidence_type"]),
+                            "url": str(row["url"]),
+                            "content": content,
+                            "confidence": str(row["confidence"]),
+                            "metadata": metadata,
+                        }
+                    )
+                raw_observation = dict(capture["request_payload"] or {})
+                metadata_payload = dict(capture["metadata"] or {})
+                if capture.get("operation_status") is not None:
+                    metadata_payload["analysis_status"] = str(
+                        capture["operation_status"]
+                    )
+                    metadata_payload["operation_plan_fingerprint"] = str(
+                        capture["stored_plan_fingerprint"]
+                    )
+                    metadata_payload["analysis_result_fingerprint"] = (
+                        str(capture["stored_result_fingerprint"])
+                        if capture.get("stored_result_fingerprint") is not None
+                        else None
+                    )
+                    metadata_payload["candidate_packet_fingerprint"] = (
+                        str(capture["stored_candidate_packet_fingerprint"])
+                        if capture.get("stored_candidate_packet_fingerprint") is not None
+                        else None
+                    )
+                stored_observation_hash = str(
+                    metadata_payload.get("observation_hash") or ""
+                )
+                if metadata_payload.get("persisted_as") in {
+                    "capture_only",
+                    "capture_with_report",
+                }:
+                    if (
+                        not raw_observation
+                        or canonical_json_hash(raw_observation)
+                        != stored_observation_hash
+                    ):
+                        raise CaptureConflictError(
+                            f"capture {capture['source_scan_id']} failed observation integrity"
+                        )
+                observed_at = capture["observed_at"]
+                recorded_at = capture["recorded_at"]
+                observations.append(
+                    {
+                        "source_scan_id": str(capture["source_scan_id"]),
+                        "source_run_id": str(capture["source_run_id"]),
+                        "source_url": str(capture["source_url"]),
+                        "observed_at": observed_at.astimezone(timezone.utc).isoformat(),
+                        "recorded_at": recorded_at.astimezone(timezone.utc).isoformat(),
+                        "pipeline_version": str(capture["pipeline_version"]),
+                        "acquisition_state": str(capture["acquisition_state"]),
+                        "capture_hash": str(capture["content_hash"]),
+                        "acquisition_summary": dict(
+                            capture["acquisition_summary"] or {}
+                        ),
+                        "limitations": list(capture["limitations"] or []),
+                        "capture_payload": dict(capture["raw_payload"] or {}),
+                        "metadata": metadata_payload,
+                        "raw_observation": raw_observation,
+                        "observation_hash": stored_observation_hash,
+                        "evidence_records": evidence,
+                    }
+                )
+        return observations
 
     def get_current_report(
         self,
@@ -1091,6 +2119,7 @@ class PostgresHistoryRepository:
                     FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
                     WHERE brand_id = %s
                       AND packet_fingerprint = %s
+                      AND packet_kind = 'canonical_v1'
                     """,
                     (brand_id, packet["candidate_packet_fingerprint"]),
                 ).fetchone()
@@ -1136,6 +2165,7 @@ class PostgresHistoryRepository:
                 WHERE workspaces.slug = %s
                   AND brands.canonical_domain = %s
                   AND packets.packet_fingerprint = %s
+                  AND packets.packet_kind = 'canonical_v1'
                 """,
                 (workspace_slug, domain, normalized_fingerprint),
             ).fetchone()
@@ -1232,6 +2262,7 @@ class PostgresHistoryRepository:
                 FROM {_SCHEMA}.evidence_vault_canonical_memory_promotion_events
                 WHERE brand_id = %s
                   AND idempotency_key_hash = %s
+                  AND adoption_kind = 'human_promotion_v1'
                 """,
                 (brand_id, idempotency_hash),
             ).fetchone()
@@ -1250,6 +2281,7 @@ class PostgresHistoryRepository:
                 FROM {_SCHEMA}.evidence_vault_canonical_memory_promotion_events
                 WHERE brand_id = %s
                   AND candidate_packet_fingerprint = %s
+                  AND adoption_kind = 'human_promotion_v1'
                 """,
                 (brand_id, packet_fingerprint),
             ).fetchone()
@@ -1270,6 +2302,7 @@ class PostgresHistoryRepository:
                 FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
                 WHERE brand_id = %s
                   AND packet_fingerprint = %s
+                  AND packet_kind = 'canonical_v1'
                 """,
                 (brand_id, packet_fingerprint),
             ).fetchone()
@@ -1608,6 +2641,1869 @@ class PostgresHistoryRepository:
             if row is not None
             else None
         )
+
+    def activate_provisional_evidence_vault_operational_baseline(
+        self,
+        report: dict[str, Any],
+        *,
+        workspace_slug: str = "b3s",
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Create N1 from a diagnostic report without adopting its LLM states."""
+
+        domain = normalize_domain(str(report.get("url") or ""))
+        current = self.get_evidence_vault_operational_memory(
+            domain,
+            workspace_slug=workspace_slug,
+        )
+        if current is not None:
+            return {
+                "created": False,
+                "reason": "canonical_memory_already_exists",
+                "memory": current,
+                "score": self.get_or_create_evidence_vault_operational_score_evaluation(
+                    domain,
+                    workspace_slug=workspace_slug,
+                )[0],
+            }
+        packet = build_provisional_operational_packet_from_report(report)
+        stored, packet_replayed = self.register_evidence_vault_operational_memory_packet(
+            domain,
+            packet,
+            workspace_slug=workspace_slug,
+        )
+        policy_fingerprint = canonical_fingerprint(
+            "evidence-vault-provisional-baseline-policy-v1",
+            {
+                "accepted_subset": "empty",
+                "scanner_states": "candidate_overlay_only",
+                "authority_scope": "b3s-vault",
+            },
+        )
+        actor_id = "automatic-provisional-baseline-v1"
+        request_fingerprint = adoption_request_fingerprint(
+            candidate_packet_fingerprint=packet[
+                "candidate_packet_fingerprint"
+            ],
+            parent_canonical_memory_version=None,
+            adopted_by="policy",
+            actor_id=actor_id,
+            policy_fingerprint=policy_fingerprint,
+        )
+        command = OperationalAdoptionCommand(
+            candidate_packet_fingerprint=packet[
+                "candidate_packet_fingerprint"
+            ],
+            parent_canonical_memory_version=None,
+            adopted_by="policy",
+            actor_id=actor_id,
+            policy_fingerprint=policy_fingerprint,
+            created_at=created_at or datetime.now(timezone.utc).isoformat(),
+            idempotency_key_hash=canonical_fingerprint(
+                "evidence-vault-provisional-baseline-idempotency-v1",
+                packet["candidate_packet_fingerprint"],
+            ),
+            request_fingerprint=request_fingerprint,
+        )
+        _, adoption_replayed = self.append_evidence_vault_operational_adoption(
+            domain,
+            command,
+            workspace_slug=workspace_slug,
+        )
+        memory = self.get_evidence_vault_operational_memory(
+            domain,
+            workspace_slug=workspace_slug,
+        )
+        score, score_replayed = (
+            self.get_or_create_evidence_vault_operational_score_evaluation(
+                domain,
+                workspace_slug=workspace_slug,
+            )
+        )
+        return {
+            "created": True,
+            "packet_replayed": packet_replayed,
+            "adoption_replayed": adoption_replayed,
+            "score_replayed": score_replayed,
+            "memory": memory,
+            "score": score,
+            "diagnostic_score": report.get("score"),
+        }
+
+    def build_and_register_evidence_vault_operational_baseline_packet(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Bridge current reviewed history into one partial v2 baseline packet."""
+
+        if self.get_evidence_vault_operational_memory(
+            domain_or_url,
+            workspace_slug=workspace_slug,
+        ) is not None:
+            raise EvidenceVaultOperationalAuthorityError(
+                "Operational canonical memory already exists; use incremental refresh."
+            )
+        # A legacy v1 memory remains immutable and authoritative in its own
+        # ledger.  The v2 baseline is an explicit, separately adopted projection
+        # of only the currently policy-eligible reviewed subset.
+        source, _ = self.build_and_register_evidence_vault_canonical_memory_packet(
+            domain_or_url,
+            workspace_slug=workspace_slug,
+        )
+        operational = build_operational_packet_from_reviewed_candidate(
+            source["packet"]
+        )
+        return self.register_evidence_vault_operational_memory_packet(
+            domain_or_url,
+            operational,
+            workspace_slug=workspace_slug,
+        )
+
+    def build_and_register_evidence_vault_operational_incremental_packet(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Bridge latest reviewed evidence onto the exact active v2 parent."""
+
+        current = self.get_evidence_vault_operational_memory(
+            domain_or_url,
+            workspace_slug=workspace_slug,
+        )
+        if current is None:
+            raise EvidenceVaultOperationalAuthorityError(
+                "Incremental operational memory requires an active v2 parent."
+            )
+        source, _ = self.build_and_register_evidence_vault_canonical_memory_packet(
+            domain_or_url,
+            workspace_slug=workspace_slug,
+        )
+        operational = build_operational_packet_from_reviewed_candidate(
+            source["packet"],
+            current_operational_memory=current,
+        )
+        return self.register_evidence_vault_operational_memory_packet(
+            domain_or_url,
+            operational,
+            workspace_slug=workspace_slug,
+        )
+
+    def activate_evidence_vault_operational_incremental_refresh(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Adopt newly policy-eligible reviewed relations onto active v2 memory."""
+
+        current = self.get_evidence_vault_operational_memory(
+            domain_or_url,
+            workspace_slug=workspace_slug,
+        )
+        if current is None:
+            raise EvidenceVaultOperationalAuthorityError(
+                "Incremental operational refresh requires active memory."
+            )
+        stored, packet_replayed = (
+            self.build_and_register_evidence_vault_operational_incremental_packet(
+                domain_or_url,
+                workspace_slug=workspace_slug,
+            )
+        )
+        packet = stored["packet"]
+        if packet["has_accepted_change"] is not True:
+            score, score_replayed = (
+                self.get_or_create_evidence_vault_operational_score_evaluation(
+                    domain_or_url,
+                    workspace_slug=workspace_slug,
+                )
+            )
+            return {
+                "memory": current,
+                "score": score,
+                "packet_replayed": packet_replayed,
+                "adoption_replayed": True,
+                "score_replayed": score_replayed,
+                "reason": "no_accepted_change",
+            }
+        policy_fingerprint = str(
+            build_initial_authority_profile_matrix()[
+                "authority_matrix_fingerprint"
+            ]
+        )
+        actor_id = "automatic-reviewed-basis-incremental-v1"
+        request_fingerprint = adoption_request_fingerprint(
+            candidate_packet_fingerprint=packet[
+                "candidate_packet_fingerprint"
+            ],
+            parent_canonical_memory_version=current[
+                "canonical_memory_version"
+            ],
+            adopted_by="policy",
+            actor_id=actor_id,
+            policy_fingerprint=policy_fingerprint,
+        )
+        command = OperationalAdoptionCommand(
+            candidate_packet_fingerprint=packet[
+                "candidate_packet_fingerprint"
+            ],
+            parent_canonical_memory_version=current[
+                "canonical_memory_version"
+            ],
+            adopted_by="policy",
+            actor_id=actor_id,
+            policy_fingerprint=policy_fingerprint,
+            created_at=created_at or datetime.now(timezone.utc).isoformat(),
+            idempotency_key_hash=canonical_fingerprint(
+                "evidence-vault-operational-incremental-idempotency-v1",
+                {
+                    "candidate_packet_fingerprint": packet[
+                        "candidate_packet_fingerprint"
+                    ],
+                    "parent_canonical_memory_version": current[
+                        "canonical_memory_version"
+                    ],
+                    "policy_fingerprint": policy_fingerprint,
+                },
+            ),
+            request_fingerprint=request_fingerprint,
+        )
+        _, adoption_replayed = self.append_evidence_vault_operational_adoption(
+            domain_or_url,
+            command,
+            workspace_slug=workspace_slug,
+        )
+        memory = self.get_evidence_vault_operational_memory(
+            domain_or_url,
+            workspace_slug=workspace_slug,
+        )
+        score, score_replayed = (
+            self.get_or_create_evidence_vault_operational_score_evaluation(
+                domain_or_url,
+                workspace_slug=workspace_slug,
+            )
+        )
+        return {
+            "memory": memory,
+            "score": score,
+            "packet_replayed": packet_replayed,
+            "adoption_replayed": adoption_replayed,
+            "score_replayed": score_replayed,
+        }
+
+    def activate_evidence_vault_operational_baseline(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Activate the deterministic reviewed subset and persist its score."""
+
+        current = self.get_evidence_vault_operational_memory(
+            domain_or_url,
+            workspace_slug=workspace_slug,
+        )
+        if current is not None:
+            return self.activate_evidence_vault_operational_incremental_refresh(
+                domain_or_url,
+                workspace_slug=workspace_slug,
+                created_at=created_at,
+            )
+        stored, packet_replayed = (
+            self.build_and_register_evidence_vault_operational_baseline_packet(
+                domain_or_url,
+                workspace_slug=workspace_slug,
+            )
+        )
+        packet = stored["packet"]
+        policy_fingerprint = str(
+            build_initial_authority_profile_matrix()[
+                "authority_matrix_fingerprint"
+            ]
+        )
+        actor_id = "automatic-reviewed-basis-baseline-v1"
+        request_fingerprint = adoption_request_fingerprint(
+            candidate_packet_fingerprint=packet[
+                "candidate_packet_fingerprint"
+            ],
+            parent_canonical_memory_version=None,
+            adopted_by="policy",
+            actor_id=actor_id,
+            policy_fingerprint=policy_fingerprint,
+        )
+        idempotency_key_hash = canonical_fingerprint(
+            "evidence-vault-operational-baseline-idempotency-v1",
+            {
+                "candidate_packet_fingerprint": packet[
+                    "candidate_packet_fingerprint"
+                ],
+                "policy_fingerprint": policy_fingerprint,
+            },
+        )
+        command = OperationalAdoptionCommand(
+            candidate_packet_fingerprint=packet[
+                "candidate_packet_fingerprint"
+            ],
+            parent_canonical_memory_version=None,
+            adopted_by="policy",
+            actor_id=actor_id,
+            policy_fingerprint=policy_fingerprint,
+            created_at=(
+                created_at or datetime.now(timezone.utc).isoformat()
+            ),
+            idempotency_key_hash=idempotency_key_hash,
+            request_fingerprint=request_fingerprint,
+        )
+        _, adoption_replayed = self.append_evidence_vault_operational_adoption(
+            domain_or_url,
+            command,
+            workspace_slug=workspace_slug,
+        )
+        memory = self.get_evidence_vault_operational_memory(
+            domain_or_url,
+            workspace_slug=workspace_slug,
+        )
+        score, score_replayed = (
+            self.get_or_create_evidence_vault_operational_score_evaluation(
+                domain_or_url,
+                workspace_slug=workspace_slug,
+            )
+        )
+        return {
+            "memory": memory,
+            "score": score,
+            "packet_replayed": packet_replayed,
+            "adoption_replayed": adoption_replayed,
+            "score_replayed": score_replayed,
+        }
+
+    def register_evidence_vault_exact_relation_supplement_source_packet(
+        self,
+        domain_or_url: str,
+        artifact: Mapping[str, Any],
+        *,
+        assessment_artifact: Mapping[str, Any],
+        assessment_review_rows: list[Mapping[str, Any]],
+        assessment_worksheet_sha256: str,
+        evidence_pack: Mapping[str, Any],
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist exact assessment-derived relations as pending-only source."""
+
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceVaultOperationalAuthorityError(
+                "Exact relation supplement brand is required."
+            )
+        try:
+            validate_exact_relation_supplement_artifact(
+                artifact,
+                assessment_artifact=assessment_artifact,
+                assessment_review_rows=assessment_review_rows,
+                assessment_worksheet_sha256=assessment_worksheet_sha256,
+                evidence_pack=evidence_pack,
+            )
+        except EvidenceVaultExactRelationSupplementError as exc:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The exact relation supplement artifact is invalid."
+            ) from exc
+        if str(artifact["brand_identity"]) != domain:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The exact relation supplement belongs to another brand."
+            )
+        self._ensure_migrated()
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The exact relation supplement brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        "evidence-vault-canonical-promotion",
+                    ),
+                ),
+            )
+            existing_rows = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_kind = 'operational_source_v2'
+                  AND reference_resolution ->> 'source_kind' = 'exact_relation_supplement'
+                  AND reference_resolution ->> 'artifact_fingerprint' = %s
+                FOR UPDATE
+                """,
+                (brand_id, artifact["artifact_fingerprint"]),
+            ).fetchall()
+            if len(existing_rows) > 1:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "Exact relation supplement resolves to multiple sources."
+                )
+            if existing_rows:
+                stored = _vault_operational_source_packet_record(existing_rows[0])
+                expected_resolution = build_exact_relation_source_resolution(
+                    artifact,
+                    source_candidate_packet=stored["packet"],
+                )
+                if stored["reference_resolution"] != expected_resolution:
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "Exact relation replay differs from its immutable source."
+                    )
+                return stored, True
+            current = _project_vault_operational_memory(conn, brand_id)
+            current_version = (
+                current["canonical_memory_version"]
+                if current is not None
+                else None
+            )
+            if current_version != artifact["parent_canonical_memory_version"]:
+                raise EvidenceVaultOperationalAdoptionConflictError(
+                    "Exact relation supplement has a stale canonical parent."
+                )
+            try:
+                source = build_exact_relation_source_candidate(
+                    artifact,
+                    current_operational_memory=current,
+                )
+                resolution = build_exact_relation_source_resolution(
+                    artifact,
+                    source_candidate_packet=source,
+                )
+            except EvidenceVaultExactRelationSupplementError as exc:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The exact relation source projection is invalid."
+                ) from exc
+            resolution_fingerprint = canonical_fingerprint(
+                "evidence-vault-operational-source-resolution-v1",
+                resolution,
+            )
+            packet_id = _stable_uuid(
+                brand_id,
+                "evidence-vault-exact-relation-supplement-source-packet",
+                source["candidate_packet_fingerprint"],
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_vault_canonical_memory_packets (
+                    id, brand_id, packet_fingerprint, schema_version,
+                    brand_identity, parent_canonical_memory_version,
+                    reference_resolution_fingerprint, reference_resolution,
+                    manifest, candidate_tiles, authority_state, authority,
+                    production_runtime_effect, scanner_runtime_effect,
+                    packet_kind, packet_payload
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    'pending_review', false, false, false,
+                    'operational_source_v2', %s
+                )
+                ON CONFLICT (brand_id, packet_fingerprint) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    packet_id,
+                    brand_id,
+                    source["candidate_packet_fingerprint"],
+                    source["manifest"]["schema_version"],
+                    source["manifest"]["brand_identity"],
+                    source["manifest"]["parent_canonical_memory_version"],
+                    resolution_fingerprint,
+                    _jsonb(resolution),
+                    _jsonb(source["manifest"]),
+                    _jsonb(source["candidate_tiles"]),
+                    _jsonb(source),
+                ),
+            ).fetchone()
+            replayed = inserted is None
+            row = inserted or conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                  AND packet_kind = 'operational_source_v2'
+                """,
+                (brand_id, source["candidate_packet_fingerprint"]),
+            ).fetchone()
+            if row is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The exact relation source could not be persisted."
+                )
+            stored = _vault_operational_source_packet_record(row)
+            expected = {
+                "packet": source,
+                "reference_resolution": resolution,
+                "authority": False,
+                "authority_scope": "b3s-vault",
+                "production_runtime_effect": False,
+                "scanner_runtime_effect": False,
+            }
+            if stored != expected:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "Exact relation source identity resolves to different content."
+                )
+            return stored, replayed
+
+    def register_evidence_vault_coverage_supplement_source_packet(
+        self,
+        domain_or_url: str,
+        artifact: Mapping[str, Any],
+        *,
+        evidence_pack: Mapping[str, Any],
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist one exact coverage supplement as pending-only source."""
+
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceVaultOperationalAuthorityError(
+                "Coverage supplement brand is required."
+            )
+        try:
+            validate_coverage_supplement_artifact(
+                artifact,
+                evidence_pack=evidence_pack,
+            )
+        except EvidenceVaultCoverageSupplementError as exc:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The coverage supplement artifact is invalid."
+            ) from exc
+        request = artifact["request"]
+        result = artifact["result"]
+        if str(request["brand_identity"]) != domain:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The coverage supplement belongs to another brand."
+            )
+        self._ensure_migrated()
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The coverage supplement brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        "evidence-vault-canonical-promotion",
+                    ),
+                ),
+            )
+            existing_rows = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_kind = 'operational_source_v2'
+                  AND reference_resolution ->> 'source_kind' = 'coverage_supplement'
+                  AND reference_resolution ->> 'result_fingerprint' = %s
+                FOR UPDATE
+                """,
+                (brand_id, result["result_fingerprint"]),
+            ).fetchall()
+            if len(existing_rows) > 1:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "Coverage supplement result resolves to multiple sources."
+                )
+            if existing_rows:
+                stored = _vault_operational_source_packet_record(
+                    existing_rows[0]
+                )
+                expected_resolution = (
+                    build_coverage_supplement_source_resolution(
+                        artifact,
+                        source_candidate_packet=stored["packet"],
+                    )
+                )
+                if stored["reference_resolution"] != expected_resolution:
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "Coverage supplement replay differs from its immutable source."
+                    )
+                return stored, True
+            current = _project_vault_operational_memory(conn, brand_id)
+            current_version = (
+                current["canonical_memory_version"]
+                if current is not None
+                else None
+            )
+            if current_version != request[
+                "parent_canonical_memory_version"
+            ]:
+                raise EvidenceVaultOperationalAdoptionConflictError(
+                    "Coverage supplement has a stale canonical parent."
+                )
+            try:
+                source = build_coverage_supplement_source_candidate(
+                    artifact,
+                    evidence_pack=evidence_pack,
+                    current_operational_memory=current,
+                )
+                resolution = build_coverage_supplement_source_resolution(
+                    artifact,
+                    source_candidate_packet=source,
+                )
+            except EvidenceVaultCoverageSupplementError as exc:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The coverage supplement source projection is invalid."
+                ) from exc
+            resolution_fingerprint = canonical_fingerprint(
+                "evidence-vault-operational-source-resolution-v1",
+                resolution,
+            )
+            packet_id = _stable_uuid(
+                brand_id,
+                "evidence-vault-coverage-supplement-source-packet",
+                source["candidate_packet_fingerprint"],
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_vault_canonical_memory_packets (
+                    id, brand_id, packet_fingerprint, schema_version,
+                    brand_identity, parent_canonical_memory_version,
+                    reference_resolution_fingerprint, reference_resolution,
+                    manifest, candidate_tiles, authority_state, authority,
+                    production_runtime_effect, scanner_runtime_effect,
+                    packet_kind, packet_payload
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    'pending_review', false, false, false,
+                    'operational_source_v2', %s
+                )
+                ON CONFLICT (brand_id, packet_fingerprint) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    packet_id,
+                    brand_id,
+                    source["candidate_packet_fingerprint"],
+                    source["manifest"]["schema_version"],
+                    source["manifest"]["brand_identity"],
+                    source["manifest"][
+                        "parent_canonical_memory_version"
+                    ],
+                    resolution_fingerprint,
+                    _jsonb(resolution),
+                    _jsonb(source["manifest"]),
+                    _jsonb(source["candidate_tiles"]),
+                    _jsonb(source),
+                ),
+            ).fetchone()
+            replayed = inserted is None
+            row = inserted or conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                  AND packet_kind = 'operational_source_v2'
+                """,
+                (brand_id, source["candidate_packet_fingerprint"]),
+            ).fetchone()
+            if row is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The coverage supplement source could not be persisted."
+                )
+            stored = _vault_operational_source_packet_record(row)
+            expected = {
+                "packet": source,
+                "reference_resolution": resolution,
+                "authority": False,
+                "authority_scope": "b3s-vault",
+                "production_runtime_effect": False,
+                "scanner_runtime_effect": False,
+            }
+            if stored != expected:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "Coverage supplement source identity resolves to different content."
+                )
+            return stored, replayed
+
+    def register_evidence_vault_operational_source_packet(
+        self,
+        domain_or_url: str,
+        packet: Mapping[str, Any],
+        *,
+        source_scan_id: str,
+        operation_plan_fingerprint: str,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist one model-only source packet bound to a frozen plan result."""
+
+        candidate = dict(packet)
+        try:
+            validate_candidate_packet(candidate)
+        except EvidenceVaultCanonicalCoreError as exc:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The operational source candidate packet is invalid."
+            ) from exc
+        domain = normalize_domain(domain_or_url)
+        plan_fingerprint = _require_sha256_text(
+            operation_plan_fingerprint,
+            field="operation_plan_fingerprint",
+        )
+        scan_id = str(source_scan_id or "").strip()
+        if not domain or not scan_id:
+            raise EvidenceVaultOperationalAuthorityError(
+                "Operational source brand and scan are required."
+            )
+        if candidate["manifest"]["brand_identity"] != domain:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The operational source packet belongs to another brand."
+            )
+        self._ensure_migrated()
+        with self._connect() as conn:
+            operation = _vault_operation_row(
+                conn,
+                workspace_slug=workspace_slug,
+                source_scan_id=scan_id,
+                for_update=True,
+            )
+            if operation is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The source operation plan does not exist."
+                )
+            if (
+                str(operation["operation_plan_fingerprint"]) != plan_fingerprint
+                or str(operation["status"])
+                not in {"result_persisted", "completed"}
+            ):
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The source operation has no exact persisted result."
+                )
+            operation_plan = dict(operation.get("plan_payload") or {})
+            if (
+                domain != str(operation["canonical_domain"])
+                or domain != str(operation_plan.get("brand_identity") or "")
+            ):
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The source packet brand is not bound to the capture operation."
+                )
+            brand_id = operation["brand_id"]
+            if str(operation["status"]) == "completed":
+                replay_row = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                    WHERE brand_id = %s
+                      AND packet_fingerprint = %s
+                      AND packet_kind = 'operational_source_v2'
+                    """,
+                    (brand_id, candidate["candidate_packet_fingerprint"]),
+                ).fetchone()
+                if replay_row is None:
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "Completed operation has no exact source packet."
+                    )
+                replay_record = _vault_operational_source_packet_record(
+                    replay_row
+                )
+                replay_resolution = replay_record["reference_resolution"]
+                if (
+                    replay_record["packet"] != candidate
+                    or replay_resolution.get(
+                        "operation_plan_fingerprint"
+                    )
+                    != plan_fingerprint
+                    or replay_resolution.get("result_fingerprint")
+                    != str(operation["result_fingerprint"])
+                ):
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "Completed source replay differs from its immutable result."
+                    )
+                return replay_record, True
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_advisory_lock_key(brand_id, "evidence-vault-canonical-promotion"),),
+            )
+            current = _project_vault_operational_memory(conn, brand_id)
+            _validate_operational_source_packet_for_storage(
+                candidate,
+                operation=operation,
+                current_memory=current,
+            )
+            resolution = {
+                "schema_version": "evidence-vault-operational-source-resolution-v1",
+                "operation_plan_fingerprint": plan_fingerprint,
+                "observation_hash": str(operation["observation_hash"]),
+                "result_fingerprint": str(operation["result_fingerprint"]),
+                "source_candidate_packet_fingerprint": candidate[
+                    "candidate_packet_fingerprint"
+                ],
+            }
+            resolution_fingerprint = canonical_fingerprint(
+                "evidence-vault-operational-source-resolution-v1",
+                resolution,
+            )
+            packet_id = _stable_uuid(
+                brand_id,
+                "evidence-vault-operational-source-packet",
+                candidate["candidate_packet_fingerprint"],
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_vault_canonical_memory_packets (
+                    id, brand_id, packet_fingerprint, schema_version,
+                    brand_identity, parent_canonical_memory_version,
+                    reference_resolution_fingerprint, reference_resolution,
+                    manifest, candidate_tiles, authority_state, authority,
+                    production_runtime_effect, scanner_runtime_effect,
+                    packet_kind, packet_payload
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    'pending_review', false, false, false,
+                    'operational_source_v2', %s
+                )
+                ON CONFLICT (brand_id, packet_fingerprint) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    packet_id,
+                    brand_id,
+                    candidate["candidate_packet_fingerprint"],
+                    candidate["manifest"]["schema_version"],
+                    candidate["manifest"]["brand_identity"],
+                    candidate["manifest"]["parent_canonical_memory_version"],
+                    resolution_fingerprint,
+                    _jsonb(resolution),
+                    _jsonb(candidate["manifest"]),
+                    _jsonb(candidate["candidate_tiles"]),
+                    _jsonb(candidate),
+                ),
+            ).fetchone()
+            replayed = inserted is None
+            row = inserted or conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                  AND packet_kind = 'operational_source_v2'
+                """,
+                (brand_id, candidate["candidate_packet_fingerprint"]),
+            ).fetchone()
+            if row is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The operational source packet could not be persisted."
+                )
+            stored = _vault_operational_source_packet_record(row)
+            expected = {
+                "packet": candidate,
+                "reference_resolution": resolution,
+                "authority": False,
+                "authority_scope": "b3s-vault",
+                "production_runtime_effect": False,
+                "scanner_runtime_effect": False,
+            }
+            if stored != expected:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The source packet identity resolves to different content."
+                )
+            return stored, replayed
+
+    def review_and_adopt_evidence_vault_operational_source(
+        self,
+        domain_or_url: str,
+        *,
+        source_candidate_packet_fingerprint: str,
+        decisions: Iterable[Mapping[str, Any]],
+        reviewer_id: str,
+        workspace_slug: str = "b3s",
+        reviewed_at: str | None = None,
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Record exact human relation reviews, then CAS-adopt eligible tiles."""
+
+        domain = normalize_domain(domain_or_url)
+        source_fingerprint = _require_sha256_text(
+            source_candidate_packet_fingerprint,
+            field="source_candidate_packet_fingerprint",
+        )
+        reviewer = _bounded_text(
+            reviewer_id,
+            field="reviewer_id",
+            maximum=200,
+        )
+        reviewed_timestamp = _normalized_event_timestamp(
+            reviewed_at or created_at or datetime.now(timezone.utc).isoformat(),
+            field="reviewed_at",
+        )
+        normalized: dict[str, dict[str, str]] = {}
+        for raw in decisions:
+            if not isinstance(raw, Mapping) or set(raw) != {
+                "relation_id",
+                "decision",
+                "rationale",
+            }:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "Operational review decision fields mismatch."
+                )
+            relation_id = _require_sha256_text(
+                raw.get("relation_id"),
+                field="relation_id",
+            )
+            decision = str(raw.get("decision") or "").strip()
+            if decision not in {"accept", "reject"}:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "Operational relation review decision is invalid."
+                )
+            rationale = _bounded_text(
+                raw.get("rationale"),
+                field="rationale",
+                maximum=2000,
+            )
+            if relation_id in normalized:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "Operational relation review contains duplicates."
+                )
+            normalized[relation_id] = {
+                "decision": decision,
+                "rationale": rationale,
+            }
+        if not domain or not normalized:
+            raise EvidenceVaultOperationalAuthorityError(
+                "Operational relation review is incomplete."
+            )
+        request_fingerprint = canonical_fingerprint(
+            "evidence-vault-operational-relation-review-request-v1",
+            {
+                "source_candidate_packet_fingerprint": source_fingerprint,
+                "reviewer_id": reviewer,
+                "reviewed_at": reviewed_timestamp,
+                "decisions": normalized,
+            },
+        )
+        self._ensure_migrated()
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_advisory_lock_key(brand_id, "evidence-vault-canonical-promotion"),),
+            )
+            source_row = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                  AND packet_kind = 'operational_source_v2'
+                FOR UPDATE
+                """,
+                (brand_id, source_fingerprint),
+            ).fetchone()
+            if source_row is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The pending operational source packet does not exist."
+                )
+            source_packet = _vault_operational_source_packet_record(source_row)[
+                "packet"
+            ]
+            pending_ids = {
+                str(basis["relation_id"])
+                for candidate in source_packet["candidate_tiles"]
+                for basis in candidate.get("basis") or []
+                if basis.get("review_status") == "unreviewed"
+            }
+            if set(normalized) != pending_ids:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "Human decisions must resolve every pending source relation."
+                )
+            try:
+                validate_exact_relation_source_decisions(
+                    source_packet,
+                    normalized,
+                )
+            except EvidenceVaultExactRelationSupplementError as exc:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The exact relation decision group is invalid."
+                ) from exc
+            existing_rows = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_operational_relation_reviews
+                WHERE brand_id = %s AND source_packet_id = %s
+                ORDER BY relation_id
+                """,
+                (brand_id, source_row["id"]),
+            ).fetchall()
+            existing_by_relation = {
+                str(row["relation_id"]): row for row in existing_rows
+            }
+            if existing_by_relation and set(existing_by_relation) != pending_ids:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The source has a partial conflicting review set."
+                )
+            review_events: list[dict[str, Any]] = []
+            for relation_id, decision in sorted(normalized.items()):
+                event_id = _stable_uuid(
+                    brand_id,
+                    "evidence-vault-operational-relation-review",
+                    source_fingerprint,
+                    relation_id,
+                    request_fingerprint,
+                )
+                existing = existing_by_relation.get(relation_id)
+                if existing is None:
+                    existing = conn.execute(
+                        f"""
+                        INSERT INTO {_SCHEMA}.evidence_vault_operational_relation_reviews (
+                            id, brand_id, source_packet_id,
+                            source_packet_fingerprint, relation_id, decision,
+                            reviewer_id, rationale, review_request_fingerprint,
+                            created_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING *
+                        """,
+                        (
+                            event_id,
+                            brand_id,
+                            source_row["id"],
+                            source_fingerprint,
+                            relation_id,
+                            decision["decision"],
+                            reviewer,
+                            decision["rationale"],
+                            request_fingerprint,
+                            reviewed_timestamp,
+                        ),
+                    ).fetchone()
+                if (
+                    str(existing["decision"]) != decision["decision"]
+                    or str(existing["reviewer_id"]) != reviewer
+                    or str(existing["rationale"]) != decision["rationale"]
+                    or str(existing["review_request_fingerprint"])
+                    != request_fingerprint
+                    or existing["created_at"].astimezone(timezone.utc).isoformat()
+                    != reviewed_timestamp
+                ):
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "The source relation already has another human decision."
+                    )
+                review_events.append(_vault_operational_relation_review(existing))
+            if existing_rows:
+                reviewed_existing = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                    WHERE brand_id = %s
+                      AND packet_kind = 'operational_reviewed_v2'
+                      AND reference_resolution ->> 'review_request_fingerprint' = %s
+                      AND reference_resolution ->> 'source_candidate_packet_fingerprint' = %s
+                    """,
+                    (brand_id, request_fingerprint, source_fingerprint),
+                ).fetchone()
+                if reviewed_existing is not None:
+                    reviewed_record = _vault_operational_source_packet_record(
+                        reviewed_existing
+                    )
+                    operational_existing = conn.execute(
+                        f"""
+                        SELECT *
+                        FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                        WHERE brand_id = %s
+                          AND packet_kind = 'operational_v2'
+                          AND packet_payload ->> 'source_candidate_packet_fingerprint' = %s
+                        """,
+                        (
+                            brand_id,
+                            reviewed_record["packet"][
+                                "candidate_packet_fingerprint"
+                            ],
+                        ),
+                    ).fetchone()
+                    if operational_existing is not None:
+                        operational_record = _vault_operational_packet_record(
+                            operational_existing
+                        )
+                        adoption_existing = conn.execute(
+                            f"""
+                            SELECT *
+                            FROM {_SCHEMA}.evidence_vault_canonical_memory_promotion_events
+                            WHERE brand_id = %s
+                              AND adoption_kind = 'operational_v2'
+                              AND candidate_packet_fingerprint = %s
+                            """,
+                            (
+                                brand_id,
+                                operational_record["packet"][
+                                    "candidate_packet_fingerprint"
+                                ],
+                            ),
+                        ).fetchone()
+                        if (
+                            operational_record["packet"]["has_accepted_change"]
+                            is False
+                            or adoption_existing is not None
+                        ):
+                            return {
+                                "review_events": review_events,
+                                "review_request_fingerprint": request_fingerprint,
+                                "reviewed_source_packet": reviewed_record,
+                                "operational_packet": operational_record,
+                                "packet_replayed": True,
+                                "adoption": (
+                                    _vault_operational_adoption_event_record(
+                                        adoption_existing
+                                    )
+                                    if adoption_existing is not None
+                                    else None
+                                ),
+                                "adoption_replayed": True,
+                                "memory": _project_vault_operational_memory(
+                                    conn, brand_id
+                                ),
+                                "score": None,
+                            }
+            current = _project_vault_operational_memory(conn, brand_id)
+            try:
+                reviewed_source, operational = build_reviewed_operational_source(
+                    source_packet,
+                    decisions={
+                        event["relation_id"]: {
+                            "decision": event["decision"],
+                            "decision_event_id": event["decision_event_id"],
+                        }
+                        for event in review_events
+                    },
+                    current_operational_memory=current,
+                )
+            except EvidenceVaultOperationalReviewError as exc:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The reviewed operational source is invalid."
+                ) from exc
+            resolution = {
+                "schema_version": "evidence-vault-operational-reviewed-resolution-v1",
+                "source_candidate_packet_fingerprint": source_fingerprint,
+                "review_request_fingerprint": request_fingerprint,
+                "decision_event_ids": sorted(
+                    event["decision_event_id"] for event in review_events
+                ),
+            }
+            resolution_fingerprint = canonical_fingerprint(
+                "evidence-vault-operational-reviewed-resolution-v1",
+                resolution,
+            )
+            packet_id = _stable_uuid(
+                brand_id,
+                "evidence-vault-operational-reviewed-packet",
+                reviewed_source["candidate_packet_fingerprint"],
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_vault_canonical_memory_packets (
+                    id, brand_id, packet_fingerprint, schema_version,
+                    brand_identity, parent_canonical_memory_version,
+                    reference_resolution_fingerprint, reference_resolution,
+                    manifest, candidate_tiles, authority_state, authority,
+                    production_runtime_effect, scanner_runtime_effect,
+                    packet_kind, packet_payload
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    'pending_review', false, false, false,
+                    'operational_reviewed_v2', %s
+                )
+                ON CONFLICT (brand_id, packet_fingerprint) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    packet_id,
+                    brand_id,
+                    reviewed_source["candidate_packet_fingerprint"],
+                    reviewed_source["manifest"]["schema_version"],
+                    reviewed_source["manifest"]["brand_identity"],
+                    reviewed_source["manifest"][
+                        "parent_canonical_memory_version"
+                    ],
+                    resolution_fingerprint,
+                    _jsonb(resolution),
+                    _jsonb(reviewed_source["manifest"]),
+                    _jsonb(reviewed_source["candidate_tiles"]),
+                    _jsonb(reviewed_source),
+                ),
+            ).fetchone()
+            stored_row = inserted or conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                  AND packet_kind = 'operational_reviewed_v2'
+                """,
+                (brand_id, reviewed_source["candidate_packet_fingerprint"]),
+            ).fetchone()
+            if stored_row is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The reviewed operational source could not be persisted."
+                )
+            stored_reviewed = _vault_operational_source_packet_record(stored_row)
+            if (
+                stored_reviewed["packet"] != reviewed_source
+                or stored_reviewed["reference_resolution"] != resolution
+            ):
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The reviewed source identity resolves to different content."
+                )
+
+        stored_operational, packet_replayed = (
+            self.register_evidence_vault_operational_memory_packet(
+                domain,
+                operational,
+                workspace_slug=workspace_slug,
+            )
+        )
+        packet = stored_operational["packet"]
+        adoption = None
+        adoption_replayed = True
+        if packet["has_accepted_change"] is True:
+            policy_fingerprint = request_fingerprint
+            actor_id = reviewer
+            adoption_request = adoption_request_fingerprint(
+                candidate_packet_fingerprint=packet[
+                    "candidate_packet_fingerprint"
+                ],
+                parent_canonical_memory_version=packet[
+                    "current_canonical_memory_version"
+                ],
+                adopted_by="human",
+                actor_id=actor_id,
+                policy_fingerprint=policy_fingerprint,
+            )
+            command = OperationalAdoptionCommand(
+                candidate_packet_fingerprint=packet[
+                    "candidate_packet_fingerprint"
+                ],
+                parent_canonical_memory_version=packet[
+                    "current_canonical_memory_version"
+                ],
+                adopted_by="human",
+                actor_id=actor_id,
+                policy_fingerprint=policy_fingerprint,
+                created_at=created_at or reviewed_timestamp,
+                idempotency_key_hash=canonical_fingerprint(
+                    "evidence-vault-operational-human-review-adoption-v1",
+                    {
+                        "review_request_fingerprint": request_fingerprint,
+                        "candidate_packet_fingerprint": packet[
+                            "candidate_packet_fingerprint"
+                        ],
+                    },
+                ),
+                request_fingerprint=adoption_request,
+            )
+            adoption, adoption_replayed = (
+                self.append_evidence_vault_operational_adoption(
+                    domain,
+                    command,
+                    workspace_slug=workspace_slug,
+                )
+            )
+        return {
+            "review_events": review_events,
+            "review_request_fingerprint": request_fingerprint,
+            "reviewed_source_packet": stored_reviewed,
+            "operational_packet": stored_operational,
+            "packet_replayed": packet_replayed,
+            "adoption": adoption,
+            "adoption_replayed": adoption_replayed,
+            "memory": self.get_evidence_vault_operational_memory(
+                domain,
+                workspace_slug=workspace_slug,
+            ),
+            "score": None,
+        }
+
+    def register_evidence_vault_operational_memory_packet(
+        self,
+        domain_or_url: str,
+        packet: dict[str, Any],
+        *,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Store one immutable v2 packet in the existing canonical packet store."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The brand domain does not exist in durable history."
+            )
+        validate_operational_memory_packet(packet)
+        if str(packet.get("brand_identity") or "") != domain:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The operational packet belongs to a different brand."
+            )
+        resolution = _operational_storage_resolution(packet)
+        manifest = {
+            "schema_version": str(packet["schema_version"]),
+            "packet_kind": "operational_v2",
+            "brand_identity": domain,
+            "current_canonical_memory_version": packet[
+                "current_canonical_memory_version"
+            ],
+            "proposed_canonical_memory_version": packet[
+                "proposed_canonical_memory_version"
+            ],
+            "accepted_memory_candidate_version": packet[
+                "accepted_memory_candidate_version"
+            ],
+            "candidate_overlay_version": packet["candidate_overlay_version"],
+            "authority": False,
+            "runtime_effect": False,
+        }
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_advisory_lock_key(brand_id, "evidence-vault-canonical-promotion"),),
+            )
+            current_memory = _project_vault_operational_memory(conn, brand_id)
+            source_row = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                  AND packet_kind IN (
+                      'canonical_v1',
+                      'operational_source_v2',
+                      'operational_reviewed_v2'
+                  )
+                """,
+                (brand_id, packet["source_candidate_packet_fingerprint"]),
+            ).fetchone()
+            source_packet = None
+            if source_row is not None:
+                source_packet = (
+                    _vault_canonical_packet_record(source_row)["packet"]
+                    if str(source_row["packet_kind"]) == "canonical_v1"
+                    else _vault_operational_source_packet_record(source_row)[
+                        "packet"
+                    ]
+                )
+            if (
+                source_row is not None
+                and str(source_row["packet_kind"]) == "operational_reviewed_v2"
+            ):
+                _validate_operational_reviewed_source_events(
+                    conn,
+                    brand_id=brand_id,
+                    source_row=source_row,
+                    source_packet=source_packet,
+                )
+            _validate_operational_packet_lineage_for_storage(
+                packet,
+                current_memory=current_memory,
+                source_candidate_packet=source_packet,
+            )
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        "evidence-vault-operational-packet",
+                        packet["candidate_packet_fingerprint"],
+                    ),
+                ),
+            )
+            packet_id = _stable_uuid(
+                brand_id,
+                "evidence-vault-operational-memory-packet",
+                packet["candidate_packet_fingerprint"],
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_vault_canonical_memory_packets (
+                    id, brand_id, packet_fingerprint, schema_version,
+                    brand_identity, parent_canonical_memory_version,
+                    reference_resolution_fingerprint,
+                    reference_resolution, manifest, candidate_tiles,
+                    authority_state, authority,
+                    production_runtime_effect, scanner_runtime_effect,
+                    packet_kind, packet_payload,
+                    accepted_memory_candidate_version,
+                    candidate_overlay_version
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    'pending_review', false, false, false,
+                    'operational_v2', %s, %s, %s
+                )
+                ON CONFLICT (brand_id, packet_fingerprint) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    packet_id,
+                    brand_id,
+                    packet["candidate_packet_fingerprint"],
+                    packet["schema_version"],
+                    domain,
+                    packet["current_canonical_memory_version"],
+                    resolution["reference_resolution_fingerprint"],
+                    _jsonb(resolution),
+                    _jsonb(manifest),
+                    _jsonb(packet["scoring_projection"]["tiles"]),
+                    _jsonb(packet),
+                    packet["accepted_memory_candidate_version"],
+                    packet["candidate_overlay_version"],
+                ),
+            ).fetchone()
+            replayed = inserted is None
+            row = inserted or conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                  AND packet_kind = 'operational_v2'
+                """,
+                (brand_id, packet["candidate_packet_fingerprint"]),
+            ).fetchone()
+            if row is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The operational packet could not be registered."
+                )
+            stored = _vault_operational_packet_record(row)
+            if stored["packet"] != packet:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The operational packet fingerprint resolves to different content."
+                )
+        return stored, replayed
+
+    def get_evidence_vault_operational_memory_packet(
+        self,
+        domain_or_url: str,
+        packet_fingerprint: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any]:
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        fingerprint = str(packet_fingerprint or "").strip().lower()
+        if not domain or not _is_sha256(fingerprint):
+            raise EvidenceVaultOperationalAuthorityError(
+                "The operational packet does not exist."
+            )
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT packets.*
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets AS packets
+                JOIN {_SCHEMA}.brands ON brands.id = packets.brand_id
+                JOIN {_SCHEMA}.workspaces ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                  AND packets.packet_fingerprint = %s
+                  AND packets.packet_kind = 'operational_v2'
+                """,
+                (workspace_slug, domain, fingerprint),
+            ).fetchone()
+        if row is None:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The operational packet does not exist."
+            )
+        return _vault_operational_packet_record(row)
+
+    def append_evidence_vault_operational_adoption(
+        self,
+        domain_or_url: str,
+        command: OperationalAdoptionCommand,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Append one policy or human adoption with parent compare-and-swap."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The brand domain does not exist in durable history."
+            )
+        expected_request = adoption_request_fingerprint(
+            candidate_packet_fingerprint=command.candidate_packet_fingerprint,
+            parent_canonical_memory_version=command.parent_canonical_memory_version,
+            adopted_by=command.adopted_by,
+            actor_id=command.actor_id,
+            policy_fingerprint=command.policy_fingerprint,
+        )
+        if command.request_fingerprint != expected_request:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The operational adoption request fingerprint is invalid."
+            )
+        if not _is_sha256(command.idempotency_key_hash):
+            raise EvidenceVaultOperationalAuthorityError(
+                "The operational adoption idempotency hash is invalid."
+            )
+
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_advisory_lock_key(brand_id, "evidence-vault-canonical-promotion"),),
+            )
+            existing = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_promotion_events
+                WHERE brand_id = %s AND idempotency_key_hash = %s
+                """,
+                (brand_id, command.idempotency_key_hash),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["adoption_kind"]) != "operational_v2":
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "The idempotency key belongs to a legacy promotion."
+                    )
+                event = _vault_operational_adoption_event_record(existing)
+                if event["request_fingerprint"] != command.request_fingerprint:
+                    raise EvidenceVaultOperationalAdoptionConflictError(
+                        "The idempotency key was used for another adoption."
+                    )
+                return event, True
+
+            packet_row = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                  AND packet_kind = 'operational_v2'
+                """,
+                (brand_id, command.candidate_packet_fingerprint),
+            ).fetchone()
+            if packet_row is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The exact operational packet does not exist."
+                )
+            stored_packet = _vault_operational_packet_record(packet_row)
+            current = _project_vault_operational_memory(conn, brand_id)
+            current_version = (
+                current["canonical_memory_version"] if current is not None else None
+            )
+            if command.parent_canonical_memory_version != current_version:
+                raise EvidenceVaultOperationalAdoptionConflictError(
+                    "The canonical memory changed after the packet was built."
+                )
+            _validate_operational_adoption_attribution(
+                stored_packet["packet"],
+                current_memory=current,
+                adopted_by=command.adopted_by,
+                policy_fingerprint=command.policy_fingerprint,
+            )
+            previous = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_promotion_events
+                WHERE brand_id = %s AND adoption_kind = 'operational_v2'
+                ORDER BY sequence DESC
+                LIMIT 1
+                """,
+                (brand_id,),
+            ).fetchone()
+            sequence = int(previous["sequence"]) + 1 if previous is not None else 1
+            previous_event_id = str(previous["id"]) if previous is not None else None
+            event_id = _stable_uuid(
+                brand_id,
+                "evidence-vault-operational-adoption",
+                command.idempotency_key_hash,
+            )
+            event = build_operational_adoption_event(
+                stored_packet["packet"],
+                event_id=str(event_id),
+                sequence=sequence,
+                previous_event_id=previous_event_id,
+                adopted_by=command.adopted_by,
+                actor_id=command.actor_id,
+                policy_fingerprint=command.policy_fingerprint,
+                created_at=command.created_at,
+                idempotency_key_hash=command.idempotency_key_hash,
+                expected_current_canonical_memory_version=current_version,
+            )
+            if event["request_fingerprint"] != command.request_fingerprint:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The stored adoption request does not match the command."
+                )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_vault_canonical_memory_promotion_events (
+                    id, brand_id, event_type, sequence, previous_event_id,
+                    brand_identity, candidate_packet_fingerprint,
+                    reference_resolution_fingerprint,
+                    promotion_policy_fingerprint,
+                    parent_canonical_memory_version,
+                    promoted_canonical_memory_version, decision,
+                    reviewer_id, reviewed_at, rationale, schema_version,
+                    idempotency_key_hash, request_fingerprint, authority,
+                    authority_scope, production_runtime_effect,
+                    scanner_runtime_effect, adoption_kind, adopted_by,
+                    actor_id, event_payload
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, 'promote', %s, %s, %s, %s, %s, %s, true,
+                    'b3s-vault', false, false, 'operational_v2', %s, %s, %s
+                )
+                RETURNING *
+                """,
+                (
+                    event["event_id"],
+                    brand_id,
+                    event["event_type"],
+                    event["sequence"],
+                    event["previous_event_id"],
+                    event["brand_identity"],
+                    event["candidate_packet_fingerprint"],
+                    packet_row["reference_resolution_fingerprint"],
+                    event["policy_fingerprint"],
+                    event["parent_canonical_memory_version"],
+                    event["promoted_canonical_memory_version"],
+                    event["actor_id"],
+                    event["created_at"],
+                    f"Operational adoption by {event['adopted_by']} policy.",
+                    event["schema_version"],
+                    event["idempotency_key_hash"],
+                    event["request_fingerprint"],
+                    event["adopted_by"],
+                    event["actor_id"],
+                    _jsonb(event),
+                ),
+            ).fetchone()
+        return _vault_operational_adoption_event_record(inserted), False
+
+    def get_evidence_vault_operational_memory(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            return None
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                return None
+            return _project_vault_operational_memory(conn, brand["id"])
+
+    def get_or_create_evidence_vault_operational_score_evaluation(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Persist or reuse the deterministic v2 score for current memory."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            return None, False
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                return None, False
+            brand_id = brand["id"]
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_advisory_lock_key(brand_id, "evidence-vault-canonical-promotion"),),
+            )
+            memory = _project_vault_operational_memory(conn, brand_id)
+            if memory is None:
+                return None, False
+            existing = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_score_evaluations
+                WHERE brand_id = %s
+                  AND canonical_memory_version = %s
+                  AND evaluation_kind = 'operational_v2'
+                """,
+                (brand_id, memory["canonical_memory_version"]),
+            ).fetchone()
+            if existing is not None:
+                return _vault_operational_score_record(existing), True
+
+            evaluation = build_operational_score_evaluation(
+                memory,
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+            reusable_row = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_score_evaluations
+                WHERE brand_id = %s
+                  AND score_input_fingerprint = %s
+                  AND evaluation_kind = 'operational_v2'
+                ORDER BY created_at, id
+                LIMIT 1
+                """,
+                (brand_id, evaluation["score_input_fingerprint"]),
+            ).fetchone()
+            if reusable_row is not None:
+                evaluation = build_operational_score_evaluation(
+                    memory,
+                    created_at=evaluation["created_at"],
+                    reusable_evaluation=_vault_operational_score_record(reusable_row),
+                )
+            evaluation_id = _stable_uuid(
+                brand_id,
+                "evidence-vault-operational-score",
+                evaluation["evaluation_identity"],
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_vault_canonical_score_evaluations (
+                    id, brand_id, promotion_event_id,
+                    canonical_memory_version, evaluation_identity,
+                    score_input_fingerprint, derived_tile_state_fingerprint,
+                    rubric_version, tile_contract_registry_fingerprint,
+                    reducer_policy_fingerprint,
+                    aggregation_policy_fingerprint, schema_version,
+                    score, component_breakdown, base_average,
+                    magnetism_capped, reused_from_evaluation_identity,
+                    authority, authority_scope, production_runtime_effect,
+                    scanner_runtime_effect, created_at, evaluation_kind,
+                    authority_coverage, evaluation_payload
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, true, 'b3s-vault',
+                    false, false, %s, 'operational_v2', %s, %s
+                )
+                ON CONFLICT (brand_id, canonical_memory_version) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    evaluation_id,
+                    brand_id,
+                    evaluation["adoption_event_id"],
+                    evaluation["canonical_memory_version"],
+                    evaluation["evaluation_identity"],
+                    evaluation["score_input_fingerprint"],
+                    evaluation["derived_tile_state_fingerprint"],
+                    evaluation["rubric_version"],
+                    evaluation["tile_contract_registry_fingerprint"],
+                    evaluation["reducer_policy_fingerprint"],
+                    evaluation["aggregation_policy_fingerprint"],
+                    evaluation["schema_version"],
+                    evaluation["score"],
+                    _jsonb(evaluation["component_breakdown"]),
+                    evaluation["base_average"],
+                    evaluation["magnetism_capped"],
+                    evaluation["reused_from_evaluation_identity"],
+                    evaluation["created_at"],
+                    _jsonb(evaluation["authority_coverage"]),
+                    _jsonb(evaluation),
+                ),
+            ).fetchone()
+            replayed = inserted is None
+            row = inserted or conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_score_evaluations
+                WHERE brand_id = %s
+                  AND canonical_memory_version = %s
+                  AND evaluation_kind = 'operational_v2'
+                """,
+                (brand_id, evaluation["canonical_memory_version"]),
+            ).fetchone()
+            if row is None:
+                raise EvidenceVaultOperationalScoringError(
+                    "The operational score evaluation could not be persisted."
+                )
+            stored = _vault_operational_score_record(row)
+            if stored != evaluation:
+                raise EvidenceVaultOperationalScoringError(
+                    "The operational evaluation identity resolves to different content."
+                )
+            return stored, replayed
 
     def append_evidence_claim_tile_review(
         self,
@@ -3519,7 +6415,11 @@ class PostgresHistoryRepository:
         return row["id"]
 
     @staticmethod
-    def _upsert_brand(conn, workspace_id: UUID, report: HistoricalReport) -> UUID:
+    def _upsert_brand(
+        conn,
+        workspace_id: UUID,
+        report: HistoricalReport | CaptureObservation,
+    ) -> UUID:
         brand_id = _stable_uuid(workspace_id, "brand", report.canonical_domain)
         row = conn.execute(
             f"""
@@ -3585,6 +6485,137 @@ class PostgresHistoryRepository:
         )
 
     @staticmethod
+    def _insert_capture_only_scan_run(
+        conn,
+        scan_run_id: UUID,
+        workspace_id: UUID,
+        brand_id: UUID,
+        observation: CaptureObservation,
+    ) -> None:
+        conn.execute(
+            f"""
+            INSERT INTO {_SCHEMA}.scan_runs (
+                id, workspace_id, brand_id, source_scan_id, source_run_id,
+                status, pipeline_version, acquisition_state, requested_at,
+                started_at, completed_at, recorded_at, request_payload, metadata
+            ) VALUES (%s, %s, %s, %s, %s, 'completed', %s, %s, %s, %s, %s,
+                      %s, %s, %s)
+            """,
+            (
+                scan_run_id,
+                workspace_id,
+                brand_id,
+                observation.source_scan_id,
+                observation.source_run_id,
+                observation.pipeline_version,
+                observation.acquisition_state,
+                observation.observed_at,
+                observation.observed_at,
+                observation.recorded_at,
+                observation.recorded_at,
+                _jsonb(observation.raw_observation),
+                _jsonb(
+                    {
+                        "persisted_as": "capture_only",
+                        "observation_hash": observation.observation_hash,
+                        "operation_plan": observation.metadata.get("operation_plan"),
+                        "operation_plan_fingerprint": observation.metadata.get(
+                            "operation_plan_fingerprint"
+                        ),
+                        "analysis_status": observation.metadata.get(
+                            "analysis_status",
+                            "pending",
+                        ),
+                        "observation": observation.metadata,
+                    }
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _insert_vault_operation_plan(
+        conn: Any,
+        *,
+        workspace_id: UUID,
+        brand_id: UUID,
+        scan_run_id: UUID,
+        observation_hash: str,
+        plan: Mapping[str, Any],
+        initial_status: str,
+    ) -> None:
+        validate_vault_scan_plan(plan)
+        if initial_status not in {"pending", "not_required"}:
+            raise CaptureConflictError(
+                "initial Vault operation status must be pending or not_required"
+            )
+        plan_id = _stable_uuid(
+            scan_run_id,
+            "evidence-vault-operation-plan",
+            plan["operation_plan_fingerprint"],
+        )
+        conn.execute(
+            f"""
+            INSERT INTO {_SCHEMA}.evidence_vault_operation_plans (
+                id, workspace_id, brand_id, scan_run_id,
+                observation_hash, operation_plan_fingerprint,
+                canonical_memory_version,
+                mode, status, plan_payload,
+                authority, authority_scope,
+                production_runtime_effect, scanner_runtime_effect
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                false, 'b3s-vault', false, false
+            )
+            """,
+            (
+                plan_id,
+                workspace_id,
+                brand_id,
+                scan_run_id,
+                observation_hash,
+                plan["operation_plan_fingerprint"],
+                plan["canonical_memory_version"],
+                plan["mode"],
+                initial_status,
+                _jsonb(dict(plan)),
+            ),
+        )
+
+    @staticmethod
+    def _insert_capture_only(
+        conn,
+        capture_id: UUID,
+        scan_run_id: UUID,
+        brand_id: UUID,
+        observation: CaptureObservation,
+    ) -> None:
+        conn.execute(
+            f"""
+            INSERT INTO {_SCHEMA}.captures (
+                id, scan_run_id, brand_id, observed_at, recorded_at, source_url,
+                content_hash, acquisition_summary, limitations, raw_payload
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                capture_id,
+                scan_run_id,
+                brand_id,
+                observation.observed_at,
+                observation.recorded_at,
+                observation.canonical_url,
+                observation.capture_hash,
+                _jsonb(
+                    {
+                        **observation.acquisition_summary,
+                        "state": observation.acquisition_state,
+                    }
+                ),
+                _jsonb(list(observation.limitations)),
+                _jsonb(observation.capture_payload),
+            ),
+        )
+
+    @staticmethod
     def _insert_capture(
         conn,
         capture_id: UUID,
@@ -3617,7 +6648,7 @@ class PostgresHistoryRepository:
     def _insert_evidence(
         conn,
         capture_id: UUID,
-        report: HistoricalReport,
+        report: HistoricalReport | CaptureObservation,
     ) -> dict[str, UUID]:
         evidence_ids: dict[str, UUID] = {}
         for record in report.evidence_records:
@@ -3845,7 +6876,11 @@ class PostgresHistoryRepository:
         )
 
     @staticmethod
-    def _insert_attempts(conn, capture_id: UUID, report: HistoricalReport) -> None:
+    def _insert_attempts(
+        conn,
+        capture_id: UUID,
+        report: HistoricalReport | CaptureObservation,
+    ) -> None:
         for index, attempt in enumerate(report.acquisition_attempts):
             conn.execute(
                 f"""
@@ -3865,7 +6900,11 @@ class PostgresHistoryRepository:
             )
 
     @staticmethod
-    def _insert_artifacts(conn, capture_id: UUID, report: HistoricalReport) -> None:
+    def _insert_artifacts(
+        conn,
+        capture_id: UUID,
+        report: HistoricalReport | CaptureObservation,
+    ) -> None:
         for index, artifact in enumerate(report.artifacts):
             uri = str(
                 artifact.get("public_url")
@@ -4721,6 +7760,1268 @@ def _vault_canonical_score_evaluation_record(row: Any) -> dict[str, Any]:
     return evaluation
 
 
+def _operational_storage_resolution(packet: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "schema_version": "evidence-vault-operational-storage-resolution-v1",
+        "candidate_packet_fingerprint": str(
+            packet["candidate_packet_fingerprint"]
+        ),
+        "references": {},
+    }
+    return {
+        **payload,
+        "reference_resolution_fingerprint": canonical_fingerprint(
+            "evidence-vault-operational-storage-resolution-v1",
+            payload,
+        ),
+    }
+
+
+def _vault_operation_row(
+    conn: Any,
+    *,
+    workspace_slug: str,
+    source_scan_id: str,
+    for_update: bool,
+) -> Any:
+    lock_clause = "FOR UPDATE OF operation_plans" if for_update else ""
+    return conn.execute(
+        f"""
+        SELECT operation_plans.*,
+               scan_runs.source_scan_id,
+               scan_runs.request_payload,
+               scan_runs.metadata AS scan_metadata,
+               captures.id AS capture_id,
+               captures.content_hash AS capture_hash,
+               brands.canonical_domain,
+               clock_timestamp() AS db_now
+        FROM {_SCHEMA}.evidence_vault_operation_plans AS operation_plans
+        JOIN {_SCHEMA}.scan_runs ON scan_runs.id = operation_plans.scan_run_id
+        JOIN {_SCHEMA}.captures ON captures.scan_run_id = scan_runs.id
+        JOIN {_SCHEMA}.brands ON brands.id = operation_plans.brand_id
+        JOIN {_SCHEMA}.workspaces ON workspaces.id = operation_plans.workspace_id
+        WHERE workspaces.slug = %s
+          AND scan_runs.source_scan_id = %s
+        {lock_clause}
+        """,
+        (workspace_slug, source_scan_id),
+    ).fetchone()
+
+
+def _vault_operation_plan_record(row: Mapping[str, Any]) -> dict[str, Any]:
+    plan = dict(row["plan_payload"] or {})
+    try:
+        validate_vault_scan_plan(plan)
+    except EvidenceVaultOperationPlanError as exc:
+        raise CaptureConflictError("stored operation plan is invalid") from exc
+    expected_pairs = {
+        "operation_plan_fingerprint": plan["operation_plan_fingerprint"],
+        "canonical_memory_version": plan["canonical_memory_version"],
+        "mode": plan["mode"],
+    }
+    if any(row.get(field) != value for field, value in expected_pairs.items()):
+        raise CaptureConflictError("stored operation plan columns are inconsistent")
+    observation_hash = _require_sha256_text(
+        row.get("observation_hash"),
+        field="observation_hash",
+    )
+    result_payload = (
+        dict(row["result_payload"])
+        if isinstance(row.get("result_payload"), Mapping)
+        else None
+    )
+    result_fingerprint = (
+        str(row["result_fingerprint"])
+        if row.get("result_fingerprint") is not None
+        else None
+    )
+    if result_payload is not None:
+        expected_result = canonical_fingerprint(
+            "evidence-vault-operation-result-v1",
+            result_payload,
+        )
+        if result_fingerprint != expected_result:
+            raise CaptureConflictError("stored operation result fingerprint mismatch")
+    elif result_fingerprint is not None:
+        raise CaptureConflictError("stored operation result payload is missing")
+    return {
+        "operation_plan_id": str(row["id"]),
+        "operation_plan_fingerprint": str(row["operation_plan_fingerprint"]),
+        "observation_hash": observation_hash,
+        "canonical_memory_version": row.get("canonical_memory_version"),
+        "mode": str(row["mode"]),
+        "status": str(row["status"]),
+        "plan": plan,
+        "attempt_count": int(row["attempt_count"]),
+        "lease_owner": (
+            str(row["lease_owner"]) if row.get("lease_owner") is not None else None
+        ),
+        "lease_token": (
+            str(row["lease_token"]) if row.get("lease_token") is not None else None
+        ),
+        "lease_generation": int(row["lease_generation"]),
+        "lease_expires_at": (
+            row["lease_expires_at"].astimezone(timezone.utc).isoformat()
+            if row.get("lease_expires_at") is not None
+            else None
+        ),
+        "result_fingerprint": result_fingerprint,
+        "result_payload": result_payload,
+        "candidate_packet_fingerprint": (
+            str(row["candidate_packet_fingerprint"])
+            if row.get("candidate_packet_fingerprint") is not None
+            else None
+        ),
+        "last_error": str(row.get("last_error") or ""),
+        "authority": False,
+        "authority_scope": "b3s-vault",
+        "production_runtime_effect": False,
+        "scanner_runtime_effect": False,
+    }
+
+
+def _capture_evidence_rows(rows: Any) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for row in rows:
+        metadata = dict(row["metadata"] or {})
+        metadata.setdefault("source_class", str(row["source_class"]))
+        raw_content = row["content_raw"]
+        content = (
+            bytes(raw_content).decode("utf-8")
+            if raw_content is not None
+            else str(row["content"])
+        )
+        evidence.append(
+            {
+                "ref": str(row["evidence_ref"]),
+                "source": str(row["source"]),
+                "evidence_type": str(row["evidence_type"]),
+                "url": str(row["url"]),
+                "content": content,
+                "confidence": str(row["confidence"]),
+                "metadata": metadata,
+            }
+        )
+    return evidence
+
+
+def _validate_vault_operation_result_for_plan(
+    conn: Any,
+    result: Mapping[str, Any],
+    *,
+    operation: Mapping[str, Any],
+) -> None:
+    from src.services.evidence_vault_incremental_executor import (
+        EvidenceVaultIncrementalExecutorError,
+        _tile_shortlists,
+        validate_vault_operation_result,
+    )
+
+    try:
+        validate_vault_operation_result(result)
+    except EvidenceVaultIncrementalExecutorError as exc:
+        raise CaptureConflictError("operation result contract is invalid") from exc
+    plan = dict(operation.get("plan_payload") or {})
+    if (
+        result.get("operation_plan_fingerprint")
+        != operation.get("operation_plan_fingerprint")
+        or result.get("observation_hash") != operation.get("observation_hash")
+        or result.get("canonical_memory_version")
+        != operation.get("canonical_memory_version")
+    ):
+        raise CaptureConflictError("operation result is not bound to its frozen plan")
+    operations = dict(plan.get("operations") or {})
+    expected_kind = (
+        "candidate_overlay"
+        if operations.get("create_candidate_packet") is True
+        else "no_delta"
+    )
+    if plan.get("mode") == "diagnostic_full":
+        raise CaptureConflictError(
+            "diagnostic_full has no Vault incremental result contract"
+        )
+    if result.get("output_kind") != expected_kind:
+        raise CaptureConflictError(
+            "operation result kind does not match its frozen plan"
+        )
+    if expected_kind == "no_delta":
+        delta = dict(plan.get("delta") or {})
+        if (
+            result.get("delta_fingerprint") != delta.get("delta_fingerprint")
+            or result.get("delta_summary") != dict(delta.get("summary") or {})
+        ):
+            raise CaptureConflictError(
+                "no-delta result differs from the frozen delta"
+            )
+        return
+
+    evidence_rows = conn.execute(
+        f"""
+        SELECT evidence_ref, source, source_class, evidence_type,
+               url, content, content_raw, confidence, metadata
+        FROM {_SCHEMA}.evidence_records
+        WHERE capture_id = %s
+        ORDER BY evidence_ref, id
+        """,
+        (operation["capture_id"],),
+    ).fetchall()
+    evidence = _capture_evidence_rows(evidence_rows)
+    representatives = canonical_evidence_representatives(
+        evidence,
+        subject_url=str(plan.get("subject_url") or ""),
+    )
+    context_fingerprints = sorted(representatives)
+    if plan.get("semantic_context", {}).get(
+        "evidence_fingerprints"
+    ) != context_fingerprints:
+        raise CaptureConflictError(
+            "frozen semantic context differs from the exact capture"
+        )
+    planned_fingerprints = sorted(
+        operations.get("classify_evidence_fingerprints") or []
+    )
+    if (
+        result.get("selected_evidence_fingerprints") != planned_fingerprints
+        or not set(planned_fingerprints).issubset(representatives)
+    ):
+        raise CaptureConflictError(
+            "executor result evidence workset differs from the frozen plan"
+        )
+    identities: dict[str, dict[str, Any]] = {}
+    expected_dispositions: dict[str, str] = {}
+    for fingerprint in planned_fingerprints:
+        representative = representatives[fingerprint]
+        record = EvidenceRecord(
+            ref=str(representative.get("ref") or ""),
+            source=str(representative.get("source") or "unknown"),
+            evidence_type=str(
+                representative.get("evidence_type") or "unknown"
+            ),
+            content=str(representative.get("content") or ""),
+            url=str(representative.get("url") or "") or None,
+            confidence=str(representative.get("confidence") or "medium"),
+            metadata=dict(representative.get("metadata") or {}),
+        )
+        if not is_evidence_record_labelable(record):
+            expected_dispositions[fingerprint] = "ineligible_label_type"
+            continue
+        identity = project_evidence_memory_row_identity(
+            representative,
+            brand_domain=str(operation["canonical_domain"]),
+        )
+        if identity is None:
+            expected_dispositions[fingerprint] = "non_material_identity"
+            continue
+        expected_dispositions[fingerprint] = "semantic_candidate"
+        identities[fingerprint] = identity
+    if result.get("evidence_work_dispositions") != expected_dispositions:
+        raise CaptureConflictError(
+            "executor evidence eligibility dispositions are invalid"
+        )
+    if result.get("selected_evidence_ids") != sorted(
+        {row["evidence_id"] for row in identities.values()}
+    ) or result.get("selected_document_ids") != sorted(
+        {row["document_id"] for row in identities.values()}
+    ):
+        raise CaptureConflictError(
+            "executor result durable evidence identities are invalid"
+        )
+    shortlists = result.get("tile_shortlists")
+    semantic_fingerprints = {
+        fingerprint
+        for fingerprint, disposition in expected_dispositions.items()
+        if disposition == "semantic_candidate"
+    }
+    if not isinstance(shortlists, Mapping) or set(shortlists) != semantic_fingerprints:
+        raise CaptureConflictError("executor result shortlist workset is invalid")
+    derived_shortlists, derived_truncations = _tile_shortlists(
+        [
+            {
+                "evidence_fingerprint": fingerprint,
+                "labels": labels,
+            }
+            for fingerprint, labels in result["semantic_labels"].items()
+        ],
+        forced_tile_ids=list(operations.get("reevaluate_tile_ids") or []),
+    )
+    derived_shortlist_ids = {
+        fingerprint: [row["tile_id"] for row in rows]
+        for fingerprint, rows in sorted(derived_shortlists.items())
+    }
+    if (
+        shortlists != derived_shortlist_ids
+        or result.get("shortlist_truncations") != derived_truncations
+    ):
+        raise CaptureConflictError(
+            "executor shortlists are not derived from its semantic labels"
+        )
+    relation_pair_count = sum(len(rows) for rows in shortlists.values())
+    if (
+        plan.get("mode") != "baseline"
+        and relation_pair_count > 120
+    ):
+        raise CaptureConflictError(
+            "incremental relation workset exceeds its single-call bound"
+        )
+    proposal = result.get("relation_proposal")
+    if (
+        not isinstance(proposal, Mapping)
+        or proposal.get("schema_version")
+        != "evidence-tile-relation-proposal-v2"
+        or not isinstance(proposal.get("relations"), list)
+    ):
+        raise CaptureConflictError("executor relation proposal is invalid")
+    expected_basis: list[dict[str, Any]] = []
+    seen_relations: set[tuple[str, str, str]] = set()
+    for raw in proposal["relations"]:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "evidence_fingerprint",
+            "tile_id",
+            "polarity",
+            "literal_quote",
+            "rationale",
+        }:
+            raise CaptureConflictError("executor relation fields mismatch")
+        fingerprint = str(raw.get("evidence_fingerprint") or "")
+        identity = identities.get(fingerprint)
+        tile_id = str(raw.get("tile_id") or "")
+        polarity = str(raw.get("polarity") or "")
+        quote = str(raw.get("literal_quote") or "").strip()
+        rationale = str(raw.get("rationale") or "").strip()
+        if (
+            identity is None
+            or tile_id not in shortlists.get(fingerprint, [])
+            or polarity not in {"supports", "contradicts"}
+            or not quote
+            or quote not in str(representatives[fingerprint].get("content") or "")
+            or not rationale
+            or len(rationale) > 1000
+        ):
+            raise CaptureConflictError(
+                "executor relation crosses its durable evidence bounds"
+            )
+        relation_key = (fingerprint, tile_id, polarity)
+        if relation_key in seen_relations:
+            raise CaptureConflictError("executor result has duplicate relations")
+        seen_relations.add(relation_key)
+        relation_id = canonical_fingerprint(
+            "evidence-vault-model-relation-v1",
+            {
+                "operation_plan_fingerprint": operation[
+                    "operation_plan_fingerprint"
+                ],
+                "evidence_id": identity["evidence_id"],
+                "source_identity_id": identity["document_id"],
+                "tile_id": tile_id,
+                "polarity": polarity,
+                "literal_quote": quote,
+            },
+        )
+        expected_basis.append(
+            {
+                "tile_id": tile_id,
+                "relation_id": relation_id,
+                "evidence_id": identity["evidence_id"],
+                "source_identity_id": identity["document_id"],
+                "claim_id": None,
+                "polarity": polarity,
+                "review_status": "unreviewed",
+                "decision_event_id": None,
+                "absence_test_contract_id": None,
+                "coverage_assessment_id": None,
+                "coverage_status": None,
+                "tested_scope": None,
+                "observed_result": None,
+            }
+        )
+    expected_basis.sort(key=lambda row: (row["tile_id"], row["relation_id"]))
+    if result.get("basis_relations") != expected_basis:
+        raise CaptureConflictError(
+            "executor basis relations are not derived from its literal proposals"
+        )
+    source = result["source_candidate_packet"]
+    operational = result["operational_candidate_packet"]
+    if (
+        source["manifest"]["brand_identity"]
+        != str(operation["canonical_domain"])
+        or source["manifest"]["brand_identity"]
+        != plan.get("brand_identity")
+        or source["manifest"]["parent_canonical_memory_version"]
+        != operation.get("canonical_memory_version")
+        or operational.get("brand_identity") != str(operation["canonical_domain"])
+        or operational.get("current_canonical_memory_version")
+        != operation.get("canonical_memory_version")
+    ):
+        raise CaptureConflictError(
+            "executor packets are not bound to the operation brand and parent"
+        )
+
+
+def _lease_matches(
+    row: Mapping[str, Any],
+    *,
+    worker_id: str,
+    lease_token: str,
+    lease_generation: int,
+) -> bool:
+    return (
+        str(row.get("lease_owner") or "") == worker_id
+        and str(row.get("lease_token") or "") == lease_token
+        and int(row.get("lease_generation") or 0) == lease_generation
+    )
+
+
+def _bounded_text(value: Any, *, field: str, maximum: int) -> str:
+    text = str(value or "").strip()
+    if not text or len(text) > maximum or "\x00" in text:
+        raise CaptureConflictError(f"{field} is invalid")
+    return text
+
+
+def _normalized_event_timestamp(value: Any, *, field: str) -> str:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise EvidenceVaultOperationalAuthorityError(
+            f"{field} must be an aware ISO-8601 timestamp."
+        )
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise EvidenceVaultOperationalAuthorityError(
+            f"{field} must be an aware ISO-8601 timestamp."
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise EvidenceVaultOperationalAuthorityError(
+            f"{field} must be an aware ISO-8601 timestamp."
+        )
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _uuid_text(value: Any, *, field: str) -> str:
+    try:
+        return str(UUID(str(value or "")))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise CaptureConflictError(f"{field} must be a UUID") from exc
+
+
+def _positive_int(value: Any, *, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise CaptureConflictError(f"{field} must be a positive integer")
+    return value
+
+
+def _strict_json_object(value: Any, *, field: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise CaptureConflictError(f"{field} must be an object")
+    try:
+        encoded = json.dumps(
+            dict(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        detached = json.loads(encoded)
+    except (TypeError, ValueError) as exc:
+        raise CaptureConflictError(f"{field} must contain strict JSON") from exc
+    if "\x00" in encoded:
+        raise CaptureConflictError(f"{field} contains a NUL character")
+    return detached
+
+
+def _validate_capture_to_report_upgrade(
+    conn: Any,
+    capture_row: Mapping[str, Any],
+    report: HistoricalReport,
+) -> dict[str, UUID]:
+    """Verify that a full report evaluates the exact persisted capture."""
+
+    raw_observation = capture_row.get("request_payload")
+    if not isinstance(raw_observation, dict):
+        raise ReportConflictError("capture-only scan has no exact raw observation")
+    try:
+        observation = parse_capture_observation(raw_observation)
+    except Exception as exc:
+        raise ReportConflictError(
+            "capture-only scan has an invalid raw observation"
+        ) from exc
+    report_raw = report.report_payload.get("raw")
+    source_capture = (
+        report_raw.get("source_capture")
+        if isinstance(report_raw, Mapping)
+        and isinstance(report_raw.get("source_capture"), Mapping)
+        else None
+    )
+    if (
+        observation.source_scan_id != report.source_report_id
+        or observation.canonical_domain != report.canonical_domain
+        or normalize_domain(str(capture_row.get("source_url") or ""))
+        != report.canonical_domain
+        or str(capture_row.get("content_hash") or "")
+        != observation.capture_hash
+        or source_capture is None
+        or source_capture.get("observation_hash")
+        != observation.observation_hash
+        or source_capture.get("capture_hash") != observation.capture_hash
+    ):
+        raise ReportConflictError(
+            "full report does not bind the exact capture-only observation"
+        )
+
+    stored_rows = conn.execute(
+        f"""
+        SELECT id, evidence_ref, source, evidence_type, url, content,
+               confidence, metadata
+        FROM {_SCHEMA}.evidence_records
+        WHERE capture_id = %s
+        ORDER BY evidence_ref
+        """,
+        (capture_row["capture_id"],),
+    ).fetchall()
+    stored_by_ref = {str(row["evidence_ref"]): row for row in stored_rows}
+    report_by_ref = {
+        str(row.get("ref") or ""): row
+        for row in report.evidence_records
+        if isinstance(row, dict)
+    }
+    if (
+        len(report_by_ref) != len(report.evidence_records)
+        or set(stored_by_ref) != set(report_by_ref)
+    ):
+        raise ReportConflictError(
+            "full report evidence differs from the capture-only observation"
+        )
+    for evidence_ref, expected in report_by_ref.items():
+        stored = stored_by_ref[evidence_ref]
+        expected_metadata = (
+            expected.get("metadata")
+            if isinstance(expected.get("metadata"), dict)
+            else {}
+        )
+        comparisons = {
+            "source": str(expected.get("source") or "unknown"),
+            "evidence_type": str(expected.get("evidence_type") or "unknown"),
+            "url": str(expected.get("url") or ""),
+            "content": _pg_text(str(expected.get("content") or "")),
+            "confidence": str(expected.get("confidence") or "medium"),
+            "metadata": expected_metadata,
+        }
+        if any(stored[field] != value for field, value in comparisons.items()):
+            raise ReportConflictError(
+                f"full report evidence differs for ref {evidence_ref}"
+            )
+    return {
+        evidence_ref: stored_by_ref[evidence_ref]["id"]
+        for evidence_ref in stored_by_ref
+    }
+
+
+def _vault_operational_source_packet_record(row: Mapping[str, Any]) -> dict[str, Any]:
+    if str(row.get("packet_kind") or "") not in {
+        "operational_source_v2",
+        "operational_reviewed_v2",
+    }:
+        raise EvidenceVaultOperationalAuthorityError(
+            "The stored packet is not an operational source."
+        )
+    packet = dict(row.get("packet_payload") or {})
+    try:
+        validate_candidate_packet(packet)
+    except EvidenceVaultCanonicalCoreError as exc:
+        raise EvidenceVaultOperationalAuthorityError(
+            "The stored operational source packet is invalid."
+        ) from exc
+    resolution = dict(row.get("reference_resolution") or {})
+    expected_resolution = canonical_fingerprint(
+        (
+            "evidence-vault-operational-reviewed-resolution-v1"
+            if str(row.get("packet_kind") or "")
+            == "operational_reviewed_v2"
+            else "evidence-vault-operational-source-resolution-v1"
+        ),
+        resolution,
+    )
+    if (
+        str(row.get("packet_fingerprint") or "")
+        != packet["candidate_packet_fingerprint"]
+        or str(row.get("reference_resolution_fingerprint") or "")
+        != expected_resolution
+        or bool(row.get("authority"))
+        or bool(row.get("production_runtime_effect"))
+        or bool(row.get("scanner_runtime_effect"))
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "The stored operational source metadata is inconsistent."
+        )
+    return {
+        "packet": packet,
+        "reference_resolution": resolution,
+        "authority": False,
+        "authority_scope": "b3s-vault",
+        "production_runtime_effect": False,
+        "scanner_runtime_effect": False,
+    }
+
+
+def _vault_operational_relation_review(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "decision_event_id": str(row["id"]),
+        "source_candidate_packet_fingerprint": str(
+            row["source_packet_fingerprint"]
+        ),
+        "relation_id": str(row["relation_id"]),
+        "decision": str(row["decision"]),
+        "reviewer_id": str(row["reviewer_id"]),
+        "rationale": str(row["rationale"]),
+        "review_request_fingerprint": str(
+            row["review_request_fingerprint"]
+        ),
+        "authority": bool(row["authority"]),
+        "authority_scope": str(row["authority_scope"]),
+        "production_runtime_effect": bool(
+            row["production_runtime_effect"]
+        ),
+        "scanner_runtime_effect": bool(row["scanner_runtime_effect"]),
+        "created_at": row["created_at"].isoformat(),
+    }
+
+
+def _validate_operational_source_packet_for_storage(
+    packet: Mapping[str, Any],
+    *,
+    operation: Mapping[str, Any],
+    current_memory: Mapping[str, Any] | None,
+) -> None:
+    result = dict(operation.get("result_payload") or {})
+    if (
+        result.get("output_kind") != "candidate_overlay"
+        or result.get("source_candidate_packet_fingerprint")
+        != packet.get("candidate_packet_fingerprint")
+        or result.get("source_candidate_packet") != packet
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "Operational source packet is not bound to the persisted result."
+        )
+    expected_parent = (
+        current_memory["canonical_memory_version"]
+        if current_memory is not None
+        else None
+    )
+    if (
+        packet["manifest"]["parent_canonical_memory_version"]
+        != expected_parent
+        or operation.get("canonical_memory_version") != expected_parent
+    ):
+        raise EvidenceVaultOperationalAdoptionConflictError(
+            "Operational source packet has a stale canonical parent."
+        )
+    selected_evidence_ids = {
+        _require_sha256_text(value, field="selected_evidence_id")
+        for value in result.get("selected_evidence_ids") or []
+    }
+    selected_document_ids = {
+        _require_sha256_text(value, field="selected_document_id")
+        for value in result.get("selected_document_ids") or []
+    }
+    shortlisted_tile_ids = {
+        str(value or "").strip()
+        for value in result.get("shortlisted_tile_ids") or []
+        if str(value or "").strip()
+    }
+    registry_ids = {
+        str(row["tile_id"]) for row in build_tile_contract_registry()["tiles"]
+    }
+    if not shortlisted_tile_ids.issubset(registry_ids):
+        raise EvidenceVaultOperationalAuthorityError(
+            "Operational result has an unknown tile shortlist."
+        )
+    expected_relations = {
+        str(row.get("relation_id") or ""): dict(row)
+        for row in result.get("basis_relations") or []
+        if isinstance(row, Mapping)
+    }
+    if (
+        len(expected_relations) != len(result.get("basis_relations") or [])
+        or any(not _is_sha256(relation_id) for relation_id in expected_relations)
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "Operational result relation identities are invalid."
+        )
+
+    previous_tiles: list[dict[str, Any]] = []
+    current_relations: dict[str, dict[str, Any]] = {}
+    accepted_by_id = {
+        str(row["tile_id"]): row
+        for row in (
+            current_memory["content"]["accepted_tiles"]
+            if current_memory is not None
+            else []
+        )
+    }
+    for contract in build_tile_contract_registry()["tiles"]:
+        tile_id = str(contract["tile_id"])
+        accepted = accepted_by_id.get(tile_id)
+        basis = list(accepted.get("basis") or []) if accepted is not None else []
+        for relation in basis:
+            current_relations[str(relation["relation_id"])] = dict(relation)
+        previous_tiles.append(
+            build_candidate_tile(
+                tile_id=tile_id,
+                basis=basis,
+                coverage_refs=(
+                    accepted.get("coverage_refs") or []
+                    if accepted is not None
+                    else []
+                ),
+                unresolved_refs=(
+                    accepted.get("unresolved_refs") or []
+                    if accepted is not None
+                    else []
+                ),
+            )
+        )
+    if current_memory is not None:
+        try:
+            validate_incremental_candidate_tiles(
+                previous_candidate_tiles=previous_tiles,
+                candidate_tiles=packet["candidate_tiles"],
+            )
+        except EvidenceVaultCanonicalCoreError as exc:
+            raise EvidenceVaultOperationalAuthorityError(
+                "Operational source packet does not evolve its exact parent."
+            ) from exc
+
+    observed_new_relations: dict[str, dict[str, Any]] = {}
+    for candidate in packet["candidate_tiles"]:
+        tile_id = str(candidate["tile_id"])
+        for basis in candidate.get("basis") or []:
+            relation_id = str(basis.get("relation_id") or "")
+            previous = current_relations.get(relation_id)
+            if previous is not None:
+                if dict(basis) != previous:
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "Operational source mutates an accepted relation."
+                    )
+                continue
+            if (
+                tile_id not in shortlisted_tile_ids
+                or basis.get("review_status") != "unreviewed"
+                or basis.get("decision_event_id") is not None
+                or basis.get("polarity") not in {"supports", "contradicts"}
+                or basis.get("evidence_id") not in selected_evidence_ids
+                or basis.get("source_identity_id") not in selected_document_ids
+            ):
+                raise EvidenceVaultOperationalAuthorityError(
+                    "Model relation crosses the pending-only source boundary."
+                )
+            observed_new_relations[relation_id] = {
+                "tile_id": tile_id,
+                **dict(basis),
+            }
+    if observed_new_relations != expected_relations:
+        raise EvidenceVaultOperationalAuthorityError(
+            "Operational source relations differ from the persisted result."
+        )
+
+
+def _validate_operational_reviewed_source_events(
+    conn: Any,
+    *,
+    brand_id: Any,
+    source_row: Mapping[str, Any],
+    source_packet: Mapping[str, Any],
+) -> None:
+    resolution = dict(source_row.get("reference_resolution") or {})
+    original_fingerprint = str(
+        resolution.get("source_candidate_packet_fingerprint") or ""
+    )
+    request_fingerprint = str(
+        resolution.get("review_request_fingerprint") or ""
+    )
+    event_ids = {
+        str(value) for value in resolution.get("decision_event_ids") or []
+    }
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM {_SCHEMA}.evidence_vault_operational_relation_reviews
+        WHERE brand_id = %s
+          AND source_packet_fingerprint = %s
+          AND review_request_fingerprint = %s
+        """,
+        (brand_id, original_fingerprint, request_fingerprint),
+    ).fetchall()
+    durable_by_id = {str(row["id"]): row for row in rows}
+    if set(durable_by_id) != event_ids or not event_ids:
+        raise EvidenceVaultOperationalAuthorityError(
+            "Reviewed source is not bound to its complete durable event set."
+        )
+    accepted_event_ids = {
+        str(basis.get("decision_event_id") or "")
+        for candidate in source_packet.get("candidate_tiles") or []
+        for basis in candidate.get("basis") or []
+        if isinstance(basis, Mapping)
+        and basis.get("review_status") == "accepted"
+        and basis.get("decision_event_id") is not None
+        and str(basis.get("decision_event_id")) in event_ids
+    }
+    if any(
+        basis.get("review_status") == "unreviewed"
+        for candidate in source_packet.get("candidate_tiles") or []
+        for basis in candidate.get("basis") or []
+        if isinstance(basis, Mapping)
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "Reviewed source still contains unreviewed relations."
+        )
+    for event_id in accepted_event_ids:
+        row = durable_by_id.get(event_id)
+        if row is None or str(row["decision"]) != "accept":
+            raise EvidenceVaultOperationalAuthorityError(
+                "Reviewed accepted relation has no matching human event."
+            )
+    durable_accepts = {
+        str(row["id"])
+        for row in rows
+        if str(row["decision"]) == "accept"
+    }
+    if accepted_event_ids != durable_accepts:
+        raise EvidenceVaultOperationalAuthorityError(
+            "Reviewed source omits or fabricates accepted decisions."
+        )
+
+
+def _validate_operational_adoption_attribution(
+    packet: Mapping[str, Any],
+    *,
+    current_memory: Mapping[str, Any] | None,
+    adopted_by: str,
+    policy_fingerprint: str,
+) -> None:
+    accepted_rows = packet["accepted_memory"]["accepted_tiles"]
+    current_rows = (
+        current_memory["content"]["accepted_tiles"]
+        if current_memory is not None
+        else []
+    )
+    current_by_id = {str(row["tile_id"]): row for row in current_rows}
+    changed = [
+        row
+        for row in accepted_rows
+        if current_by_id.get(str(row["tile_id"])) != row
+    ]
+    if adopted_by == "policy":
+        if any(row.get("authority_source") != "policy" for row in changed):
+            raise EvidenceVaultOperationalAuthorityError(
+                "Policy adoption cannot grant authority to human-asserted tiles."
+            )
+        if changed:
+            matrix_fingerprints = {
+                str(row.get("authority_matrix_fingerprint") or "")
+                for row in changed
+            }
+            if matrix_fingerprints != {policy_fingerprint}:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "Adoption policy does not match the tile authority matrix."
+                )
+        else:
+            provisional_policy = canonical_fingerprint(
+                "evidence-vault-provisional-baseline-policy-v1",
+                {
+                    "accepted_subset": "empty",
+                    "scanner_states": "candidate_overlay_only",
+                    "authority_scope": "b3s-vault",
+                },
+            )
+            if current_memory is not None or policy_fingerprint != provisional_policy:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "Policy adoption has no attributable accepted change."
+                )
+    elif adopted_by == "human":
+        if not changed:
+            raise EvidenceVaultOperationalAuthorityError(
+                "Human adoption has no accepted change."
+            )
+    else:
+        raise EvidenceVaultOperationalAuthorityError(
+            "Operational adoption actor is invalid."
+        )
+
+
+def _validate_operational_packet_lineage_for_storage(
+    packet: Mapping[str, Any],
+    *,
+    current_memory: Mapping[str, Any] | None,
+    source_candidate_packet: Mapping[str, Any] | None,
+) -> None:
+    """Bind one v2 packet to the durable parent and resolved v1 source packet."""
+
+    expected_parent = (
+        str(current_memory["canonical_memory_version"])
+        if current_memory is not None
+        else None
+    )
+    if packet.get("current_canonical_memory_version") != expected_parent:
+        raise EvidenceVaultOperationalAdoptionConflictError(
+            "The operational packet parent is not the durable current memory."
+        )
+    accepted_content = packet.get("accepted_memory")
+    if not isinstance(accepted_content, Mapping):
+        raise EvidenceVaultOperationalAuthorityError(
+            "The operational packet has no accepted-memory content."
+        )
+    if accepted_content.get("parent_canonical_memory_version") != expected_parent:
+        raise EvidenceVaultOperationalAdoptionConflictError(
+            "The accepted memory does not declare the durable parent."
+        )
+    if accepted_content.get("brand_identity") != packet.get("brand_identity"):
+        raise EvidenceVaultOperationalAuthorityError(
+            "The accepted memory belongs to another brand."
+        )
+
+    current_content = (
+        current_memory.get("content") if current_memory is not None else None
+    )
+    if current_content is not None:
+        for field in (
+            "brand_identity",
+            "tile_contract_registry_fingerprint",
+            "reducer_policy_fingerprint",
+            "aggregation_policy_fingerprint",
+        ):
+            if accepted_content.get(field) != current_content.get(field):
+                raise EvidenceVaultOperationalAuthorityError(
+                    f"The operational packet changes canonical policy: {field}."
+                )
+    current_rows = (
+        current_content.get("accepted_tiles")
+        if isinstance(current_content, Mapping)
+        else []
+    )
+    accepted_rows = accepted_content.get("accepted_tiles")
+    if not isinstance(current_rows, list) or not isinstance(accepted_rows, list):
+        raise EvidenceVaultOperationalAuthorityError(
+            "Operational accepted tiles must be arrays."
+        )
+    current_by_id = {
+        str(row.get("tile_id") or ""): dict(row)
+        for row in current_rows
+        if isinstance(row, Mapping)
+    }
+    accepted_by_id = {
+        str(row.get("tile_id") or ""): dict(row)
+        for row in accepted_rows
+        if isinstance(row, Mapping)
+    }
+    if len(accepted_by_id) != len(accepted_rows):
+        raise EvidenceVaultOperationalAuthorityError(
+            "Operational accepted memory has duplicate or invalid tiles."
+        )
+    if not set(current_by_id).issubset(accepted_by_id):
+        raise EvidenceVaultOperationalAuthorityError(
+            "An operational packet cannot silently delete an accepted tile."
+        )
+    changed = {
+        tile_id: row
+        for tile_id, row in accepted_by_id.items()
+        if current_by_id.get(tile_id) != row
+    }
+    expected_change = (
+        bool(accepted_rows) if current_memory is None else bool(changed)
+    )
+    if packet.get("has_accepted_change") is not expected_change:
+        raise EvidenceVaultOperationalAuthorityError(
+            "Operational accepted-change flag does not match its parent."
+        )
+    if not changed:
+        return
+    if source_candidate_packet is None:
+        raise EvidenceVaultOperationalAuthorityError(
+            "Accepted operational changes require a registered resolved source packet."
+        )
+    source_manifest = source_candidate_packet.get("manifest")
+    source_rows = source_candidate_packet.get("candidate_tiles")
+    if not isinstance(source_manifest, Mapping) or not isinstance(source_rows, list):
+        raise EvidenceVaultOperationalAuthorityError(
+            "The operational source candidate packet is invalid."
+        )
+    if source_manifest.get("brand_identity") != packet.get("brand_identity"):
+        raise EvidenceVaultOperationalAuthorityError(
+            "The operational source packet belongs to another brand."
+        )
+    for field in (
+        "tile_contract_registry_fingerprint",
+        "reducer_policy_fingerprint",
+        "aggregation_policy_fingerprint",
+    ):
+        if source_manifest.get(field) != accepted_content.get(field):
+            raise EvidenceVaultOperationalAuthorityError(
+                f"The source packet changes canonical policy: {field}."
+            )
+    source_by_id = {
+        str(row.get("tile_id") or ""): row
+        for row in source_rows
+        if isinstance(row, Mapping)
+    }
+    source_fingerprint = str(
+        source_candidate_packet.get("candidate_packet_fingerprint") or ""
+    )
+    for tile_id, accepted in changed.items():
+        source = source_by_id.get(tile_id)
+        if source is None:
+            raise EvidenceVaultOperationalAuthorityError(
+                f"Accepted tile {tile_id} is absent from the source packet."
+            )
+        expected_pairs = {
+            "semantic_state": source.get("candidate_state"),
+            "basis": source.get("basis"),
+            "coverage_refs": source.get("coverage_refs"),
+            "unresolved_refs": source.get("unresolved_refs"),
+            "source_delta_kind": source.get("delta_kind"),
+            "source_candidate_packet_fingerprint": source_fingerprint,
+        }
+        if any(accepted.get(field) != value for field, value in expected_pairs.items()):
+            raise EvidenceVaultOperationalAuthorityError(
+                f"Accepted tile {tile_id} does not match its resolved source candidate."
+            )
+        authority_source = str(accepted.get("authority_source") or "")
+        if authority_source not in {"policy", "human"}:
+            raise EvidenceVaultOperationalAuthorityError(
+                f"Accepted tile {tile_id} has no authority source."
+            )
+        if source.get("candidate_state") == "contradiction":
+            raise EvidenceVaultOperationalAuthorityError(
+                f"Contradictory tile {tile_id} must remain pending."
+            )
+        if authority_source == "human":
+            decision_event_id = str(
+                accepted.get("decision_event_id") or ""
+            ).strip()
+            durable_review_events = {
+                str(basis.get("decision_event_id") or "").strip()
+                for basis in source.get("basis") or []
+                if isinstance(basis, Mapping)
+                and basis.get("review_status") == "accepted"
+                and str(basis.get("decision_event_id") or "").strip()
+            }
+            if decision_event_id not in durable_review_events:
+                raise EvidenceVaultOperationalAuthorityError(
+                    f"Human-accepted tile {tile_id} is not linked to a durable reviewed relation."
+                )
+            if (
+                accepted.get("authority_matrix_fingerprint") is not None
+                or accepted.get("authority_decision_fingerprint") is not None
+            ):
+                raise EvidenceVaultOperationalAuthorityError(
+                    f"Human-accepted tile {tile_id} asserts policy authority."
+                )
+        else:
+            matrix = build_initial_authority_profile_matrix()
+            decision = evaluate_reviewed_basis_authority(
+                candidate_tile=source,
+                authority_matrix=matrix,
+            )
+            validate_authority_decision(
+                decision,
+                candidate_tile=source,
+            )
+            if (
+                decision.get("eligible") is not True
+                or decision.get("decision") != "accept"
+                or accepted.get("authority_profile_id")
+                != decision.get("authority_profile_id")
+                or accepted.get("authority_matrix_fingerprint")
+                != decision.get("authority_matrix_fingerprint")
+                or accepted.get("authority_decision_fingerprint")
+                != decision.get("authority_decision_fingerprint")
+                or accepted.get("decision_event_id") is not None
+            ):
+                raise EvidenceVaultOperationalAuthorityError(
+                    f"Policy-accepted tile {tile_id} does not match the current deterministic authority matrix."
+                )
+
+
+def _vault_operational_packet_record(row: Any) -> dict[str, Any]:
+    if str(row["packet_kind"]) != "operational_v2":
+        raise EvidenceVaultOperationalAuthorityError(
+            "The stored packet is not operational memory v2."
+        )
+    packet = dict(row["packet_payload"])
+    validate_operational_memory_packet(packet)
+    resolution = dict(row["reference_resolution"])
+    expected_resolution = _operational_storage_resolution(packet)
+    if resolution != expected_resolution:
+        raise EvidenceVaultOperationalAuthorityError(
+            "The operational storage resolution is invalid."
+        )
+    if (
+        str(row["packet_fingerprint"])
+        != packet["candidate_packet_fingerprint"]
+        or str(row["schema_version"]) != packet["schema_version"]
+        or str(row["brand_identity"]) != packet["brand_identity"]
+        or (
+            str(row["parent_canonical_memory_version"])
+            if row["parent_canonical_memory_version"] is not None
+            else None
+        )
+        != packet["current_canonical_memory_version"]
+        or str(row["accepted_memory_candidate_version"])
+        != packet["accepted_memory_candidate_version"]
+        or str(row["candidate_overlay_version"])
+        != packet["candidate_overlay_version"]
+        or str(row["reference_resolution_fingerprint"])
+        != resolution["reference_resolution_fingerprint"]
+        or list(row["candidate_tiles"])
+        != packet["scoring_projection"]["tiles"]
+        or str(row["authority_state"]) != "pending_review"
+        or bool(row["authority"])
+        or bool(row["production_runtime_effect"])
+        or bool(row["scanner_runtime_effect"])
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "The stored operational packet metadata is inconsistent."
+        )
+    created_at = row["created_at"]
+    return {
+        "packet": packet,
+        "reference_resolution": resolution,
+        "authority": False,
+        "runtime_effect": False,
+        "created_at": (
+            created_at.astimezone(timezone.utc).isoformat()
+            if hasattr(created_at, "astimezone")
+            else str(created_at)
+        ),
+    }
+
+
+def _vault_operational_adoption_event_record(row: Any) -> dict[str, Any]:
+    if str(row["adoption_kind"]) != "operational_v2":
+        raise EvidenceVaultOperationalAuthorityError(
+            "The stored event is not operational adoption v2."
+        )
+    event = dict(row["event_payload"])
+    validate_operational_adoption_event(event)
+    if (
+        str(row["id"]) != event["event_id"]
+        or str(row["event_type"]) != event["event_type"]
+        or int(row["sequence"]) != event["sequence"]
+        or (
+            str(row["previous_event_id"])
+            if row["previous_event_id"] is not None
+            else None
+        )
+        != event["previous_event_id"]
+        or str(row["brand_identity"]) != event["brand_identity"]
+        or str(row["candidate_packet_fingerprint"])
+        != event["candidate_packet_fingerprint"]
+        or str(row["promotion_policy_fingerprint"])
+        != event["policy_fingerprint"]
+        or (
+            str(row["parent_canonical_memory_version"])
+            if row["parent_canonical_memory_version"] is not None
+            else None
+        )
+        != event["parent_canonical_memory_version"]
+        or str(row["promoted_canonical_memory_version"])
+        != event["promoted_canonical_memory_version"]
+        or str(row["adopted_by"]) != event["adopted_by"]
+        or str(row["actor_id"]) != event["actor_id"]
+        or str(row["idempotency_key_hash"])
+        != event["idempotency_key_hash"]
+        or str(row["request_fingerprint"]) != event["request_fingerprint"]
+        or not bool(row["authority"])
+        or str(row["authority_scope"]) != "b3s-vault"
+        or bool(row["production_runtime_effect"])
+        or bool(row["scanner_runtime_effect"])
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "The stored operational adoption metadata is inconsistent."
+        )
+    return event
+
+
+def _vault_operational_score_record(row: Any) -> dict[str, Any]:
+    if str(row["evaluation_kind"]) != "operational_v2":
+        raise EvidenceVaultOperationalScoringError(
+            "The stored evaluation is not operational scoring v2."
+        )
+    evaluation = dict(row["evaluation_payload"])
+    validate_operational_score_evaluation(evaluation)
+    if (
+        str(row["evaluation_identity"]) != evaluation["evaluation_identity"]
+        or str(row["canonical_memory_version"])
+        != evaluation["canonical_memory_version"]
+        or str(row["promotion_event_id"])
+        != evaluation["adoption_event_id"]
+        or str(row["score_input_fingerprint"])
+        != evaluation["score_input_fingerprint"]
+        or int(row["score"]) != evaluation["score"]
+        or list(row["component_breakdown"])
+        != evaluation["component_breakdown"]
+        or dict(row["authority_coverage"])
+        != evaluation["authority_coverage"]
+        or not bool(row["authority"])
+        or str(row["authority_scope"]) != "b3s-vault"
+        or bool(row["production_runtime_effect"])
+        or bool(row["scanner_runtime_effect"])
+    ):
+        raise EvidenceVaultOperationalScoringError(
+            "The stored operational score metadata is inconsistent."
+        )
+    return evaluation
+
+
+def _project_vault_operational_memory(
+    conn: Any,
+    brand_id: Any,
+) -> dict[str, Any] | None:
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM {_SCHEMA}.evidence_vault_canonical_memory_promotion_events
+        WHERE brand_id = %s AND adoption_kind = 'operational_v2'
+        ORDER BY sequence
+        """,
+        (brand_id,),
+    ).fetchall()
+    current: dict[str, Any] | None = None
+    previous_event_id: str | None = None
+    for expected_sequence, row in enumerate(rows, start=1):
+        event = _vault_operational_adoption_event_record(row)
+        if (
+            event["sequence"] != expected_sequence
+            or event["previous_event_id"] != previous_event_id
+        ):
+            raise EvidenceVaultOperationalAuthorityError(
+                "The operational adoption chain is not contiguous."
+            )
+        packet_row = conn.execute(
+            f"""
+            SELECT *
+            FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+            WHERE brand_id = %s
+              AND packet_fingerprint = %s
+              AND packet_kind = 'operational_v2'
+            """,
+            (brand_id, event["candidate_packet_fingerprint"]),
+        ).fetchone()
+        if packet_row is None:
+            raise EvidenceVaultOperationalAuthorityError(
+                "An adopted operational packet is unavailable."
+            )
+        packet = _vault_operational_packet_record(packet_row)["packet"]
+        expected_parent = (
+            current["canonical_memory_version"] if current is not None else None
+        )
+        if packet["current_canonical_memory_version"] != expected_parent:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The operational packet chain has a parent gap."
+            )
+        current = project_adopted_operational_memory(packet, event)
+        previous_event_id = event["event_id"]
+    return current
+
+
 def _project_vault_canonical_memory(
     conn: Any,
     brand_id: Any,
@@ -4730,6 +9031,7 @@ def _project_vault_canonical_memory(
         SELECT *
         FROM {_SCHEMA}.evidence_vault_canonical_memory_promotion_events
         WHERE brand_id = %s
+          AND adoption_kind = 'human_promotion_v1'
         ORDER BY sequence
         """,
         (brand_id,),
@@ -4751,6 +9053,7 @@ def _project_vault_canonical_memory(
             FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
             WHERE brand_id = %s
               AND packet_fingerprint = %s
+              AND packet_kind = 'canonical_v1'
             """,
             (brand_id, event["candidate_packet_fingerprint"]),
         ).fetchone()
@@ -5189,6 +9492,13 @@ def _is_sha256(value: Any) -> bool:
     return len(text) == 64 and all(
         character in "0123456789abcdef" for character in text
     )
+
+
+def _require_sha256_text(value: Any, *, field: str) -> str:
+    text = str(value or "")
+    if not _is_sha256(text):
+        raise CaptureConflictError(f"{field} must be a lowercase SHA-256")
+    return text
 
 
 def _scoring_recovery_supplement_packet_record(
