@@ -62,9 +62,18 @@ def _relative_file(base: Path, raw: Any, *, field: str) -> Path:
     return candidate
 
 
-def _git_tracked(repo_root: Path) -> set[str]:
+def _git_tracked(
+    repo_root: Path,
+    *,
+    git_commit: str | None = None,
+) -> set[str]:
+    command = (
+        ["git", "ls-tree", "-r", "--name-only", "-z", git_commit]
+        if git_commit is not None
+        else ["git", "ls-files", "-z"]
+    )
     result = subprocess.run(
-        ["git", "ls-files", "-z"],
+        command,
         cwd=repo_root,
         check=False,
         capture_output=True,
@@ -98,8 +107,45 @@ def _git_head_and_status(repo_root: Path) -> tuple[str, list[str]]:
     return head.stdout.strip(), status.stdout.splitlines()
 
 
-def expected_implementation_paths(repo_root: Path) -> set[str]:
-    tracked = _git_tracked(repo_root)
+def _audited_implementation_commit(repo_root: Path) -> str:
+    relative_tree = (
+        "audits/evidence_vault_field_validation_v1/implementation-tree.json"
+    )
+    result = subprocess.run(
+        ["git", "log", "-1", "--format=%H", "--", relative_tree],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    commit = result.stdout.strip()
+    if result.returncode != 0 or len(commit) != 40:
+        raise EvidenceVaultFieldAuditError(
+            "audited implementation commit cannot be resolved"
+        )
+    return commit
+
+
+def _git_blob(repo_root: Path, git_commit: str, relative: str) -> bytes:
+    result = subprocess.run(
+        ["git", "show", f"{git_commit}:{relative}"],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise EvidenceVaultFieldAuditError(
+            f"audited implementation blob is missing: {relative}"
+        )
+    return result.stdout
+
+
+def expected_implementation_paths(
+    repo_root: Path,
+    *,
+    git_commit: str | None = None,
+) -> set[str]:
+    tracked = _git_tracked(repo_root, git_commit=git_commit)
     result: set[str] = set()
     for relative in tracked:
         path = Path(relative)
@@ -185,19 +231,30 @@ def validate_field_audit(
         or tree.get("file_count") != len(files)
     ):
         raise EvidenceVaultFieldAuditError("implementation tree contract mismatch")
-    expected_paths = expected_implementation_paths(root)
+    audited_commit = _audited_implementation_commit(root)
+    expected_paths = expected_implementation_paths(
+        root,
+        git_commit=audited_commit,
+    )
     if set(files) != expected_paths:
         missing = sorted(expected_paths - set(files))
         unexpected = sorted(set(files) - expected_paths)
         raise EvidenceVaultFieldAuditError(
             f"implementation selection mismatch; missing={missing[:5]} unexpected={unexpected[:5]}"
         )
+    current_implementation_matches_audit = True
     for relative, expected_hash in files.items():
-        path = _relative_file(root, relative, field="implementation file")
-        if _sha256(path) != expected_hash:
+        audited_blob = _git_blob(root, audited_commit, relative)
+        if hashlib.sha256(audited_blob).hexdigest() != expected_hash:
             raise EvidenceVaultFieldAuditError(
-                f"implementation file SHA-256 mismatch: {relative}"
+                f"audited implementation blob SHA-256 mismatch: {relative}"
             )
+        current_path = (root / relative).resolve()
+        if (
+            not current_path.is_file()
+            or _sha256(current_path) != expected_hash
+        ):
+            current_implementation_matches_audit = False
     fingerprint = hashlib.sha256(
         json.dumps(
             files,
@@ -246,6 +303,10 @@ def validate_field_audit(
         "artifact_count": len(artifact_names),
         "implementation_file_count": len(files),
         "implementation_fingerprint": fingerprint,
+        "audited_git_commit": audited_commit,
+        "current_implementation_matches_audit": (
+            current_implementation_matches_audit
+        ),
         "external_verified": external_verified,
         "external_unavailable": external_unavailable,
         "git_head": git_head,

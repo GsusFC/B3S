@@ -32,6 +32,10 @@ def test_committed_field_audit_is_content_addressed_and_non_authoritative() -> N
     assert result["artifact_count"] == 26
     assert result["authority"] is False
     assert result["cutover_authorized"] is False
+    assert result["audited_git_commit"] == (
+        "d0abcd9e6d1a7c7671996ca311ce5d3011727dd6"
+    )
+    assert result["current_implementation_matches_audit"] is False
     assert len(result["external_unavailable"]) == 3
 
 
