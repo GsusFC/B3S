@@ -1,6 +1,7 @@
 # ADR v1 — Memoria canónica, autoridad y scoring determinista del Evidence Vault
 
-- **Estado:** Aprobado como contrato arquitectónico; implementación pendiente
+- **Estado:** Supersedido por
+  [`evidence_vault_canonical_memory_adr_v2.md`](evidence_vault_canonical_memory_adr_v2.md)
 - **Fecha:** 2026-08-04
 - **Ámbito inicial de autoridad:** `b3s-vault`
 - **Fuera de alcance:** producción y scanner actual
