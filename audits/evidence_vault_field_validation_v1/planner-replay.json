@@ -1,0 +1,190 @@
+{
+  "authority": false,
+  "cases": [
+    {
+      "baseline": {
+        "classify_count": 130,
+        "context_count": 137,
+        "operation_plan_fingerprint": "b8f0f3b187b0e5c6e67667d70977631a884b4cfce12cb936d9c45dcd8882fccd"
+      },
+      "brand_identity": "soccersolver.com",
+      "case_id": "soccersolver",
+      "identical_replays": [
+        {
+          "delta_fingerprint": "b01baf19e4a78daae75b8ac38a9ea84fa90903987c9fb1ae8522f1e506c38f4f",
+          "llm_required": false,
+          "operation_plan_fingerprint": "b4e912f20f2db3bd5964b3ca947f0d961bc65eeaf55047ec1e0ccf3ad6ac3cb1",
+          "report_id": "6a2fac4fca28"
+        },
+        {
+          "delta_fingerprint": "b01baf19e4a78daae75b8ac38a9ea84fa90903987c9fb1ae8522f1e506c38f4f",
+          "llm_required": false,
+          "operation_plan_fingerprint": "226fe32e7644f3c72f310a9475ea3f6d1e28bfd45ee603f20fe16534ee7e9ca4",
+          "report_id": "9540ae0d36ff"
+        },
+        {
+          "delta_fingerprint": "9a1067d99693feb28ced9c936ef87aec08f938d6996d6715092faee536c0a069",
+          "llm_required": false,
+          "operation_plan_fingerprint": "3b6f1e04ac1dc2ac777c9461929330e3af7222a52a36322b531bd900d91a2f68",
+          "report_id": "e833668cb2b0"
+        }
+      ],
+      "observation_count": 3,
+      "transitions": [
+        {
+          "canonical_impact": "none",
+          "classify_count": 0,
+          "delta_fingerprint": "b01baf19e4a78daae75b8ac38a9ea84fa90903987c9fb1ae8522f1e506c38f4f",
+          "delta_summary": {
+            "added_count": 0,
+            "affected_tile_count": 0,
+            "current_count": 137,
+            "known_count": 137,
+            "modified_count": 0,
+            "not_reacquired_count": 0,
+            "previous_capture_count": 137,
+            "reacquired_count": 0,
+            "superseded_count": 0,
+            "unanalysed_unchanged_count": 0,
+            "unchanged_count": 137
+          },
+          "from_report_id": "6a2fac4fca28",
+          "historical_diagnostic_score_change": [
+            57,
+            57
+          ],
+          "operation_plan_fingerprint": "98d843d69c77f8851c27cc4d522131bd9bca5249f020534ad9e93ca5cc95956b",
+          "reevaluate_tile_count": 0,
+          "semantic_context_fingerprint": "fed2e5bf6512353e9a8b10585f31b427ec4c5d52c9d5bb4b8024c137152dd3ec",
+          "to_report_id": "9540ae0d36ff"
+        },
+        {
+          "canonical_impact": "review_required",
+          "classify_count": 10,
+          "delta_fingerprint": "8f5380354878bc089ac536de1e531e4edabe6a35858abf216a290a4a0bf29027",
+          "delta_summary": {
+            "added_count": 0,
+            "affected_tile_count": 0,
+            "current_count": 136,
+            "known_count": 137,
+            "modified_count": 10,
+            "not_reacquired_count": 1,
+            "previous_capture_count": 137,
+            "reacquired_count": 0,
+            "superseded_count": 10,
+            "unanalysed_unchanged_count": 0,
+            "unchanged_count": 126
+          },
+          "from_report_id": "9540ae0d36ff",
+          "historical_diagnostic_score_change": [
+            57,
+            68
+          ],
+          "operation_plan_fingerprint": "ae88315abca8f886cbd383b379d8d0cf566282d25070a8bae1c06ac618a48cf0",
+          "reevaluate_tile_count": 0,
+          "semantic_context_fingerprint": "5f6047acaa154920dc2725c9ba75609a92cb51d8868ee42463912495c6d3e46b",
+          "to_report_id": "e833668cb2b0"
+        }
+      ]
+    },
+    {
+      "baseline": {
+        "classify_count": 42,
+        "context_count": 47,
+        "operation_plan_fingerprint": "c47ba510d66e140accf9cd197756229bc0ba0401fc84ab0bb18ec3e0922de728"
+      },
+      "brand_identity": "causaprima.ai",
+      "case_id": "causa_prima",
+      "identical_replays": [
+        {
+          "delta_fingerprint": "ac5bc5b4ef255bdce3319a3100ca9dbc6ad8da48261b9b8979936e42dd4152cd",
+          "llm_required": false,
+          "operation_plan_fingerprint": "c36188a6df5a1a845f9b800f4832631fe8e47c28424787c454c27a43a0fe9694",
+          "report_id": "a8ba05137817"
+        },
+        {
+          "delta_fingerprint": "55168b764cee47aaf8521995c54bff2ffdd90065da950d15c5856be670262958",
+          "llm_required": false,
+          "operation_plan_fingerprint": "e80511e9c05bb69c1951b95c81f824dd4b249218bf52ea48be9050b76260a08f",
+          "report_id": "5bbeaa6dc58f"
+        }
+      ],
+      "observation_count": 2,
+      "transitions": [
+        {
+          "canonical_impact": "review_required",
+          "classify_count": 7,
+          "delta_fingerprint": "86510abbf19037d4183c9287e780b8af0a705423db9736acc844c1ac32ccf5bf",
+          "delta_summary": {
+            "added_count": 4,
+            "affected_tile_count": 0,
+            "current_count": 47,
+            "known_count": 47,
+            "modified_count": 3,
+            "not_reacquired_count": 4,
+            "previous_capture_count": 47,
+            "reacquired_count": 0,
+            "superseded_count": 3,
+            "unanalysed_unchanged_count": 0,
+            "unchanged_count": 40
+          },
+          "from_report_id": "a8ba05137817",
+          "historical_diagnostic_score_change": [
+            60,
+            57
+          ],
+          "operation_plan_fingerprint": "9a36790dfc0f0c7da978421a9d55d5d85175ef31023f9e7a4eae7e556f4156b8",
+          "reevaluate_tile_count": 0,
+          "semantic_context_fingerprint": "7859058b33f4562d9416acbf07c40232938f92a9cea7e19fa1fcbddb7072d8ea",
+          "to_report_id": "5bbeaa6dc58f"
+        }
+      ]
+    }
+  ],
+  "cutover_authorized": false,
+  "downstream_reference": {
+    "accepted_evidence_count": 137,
+    "accepted_evidence_occurrence_count": 250,
+    "authority": false,
+    "brand_identity": "causaprima.ai",
+    "classification": "derived_non_authoritative_legacy_reference",
+    "current_score": 91,
+    "identity_review_case_count": 30,
+    "identity_review_decisions": {
+      "accepted": 30
+    },
+    "importable_as_v2_review": false,
+    "preview_score": 93,
+    "recomputed_current_score": 91,
+    "reference_id": "causa-prima-legacy-memory-preview-v1",
+    "report_chronology": [
+      "a8ba05137817",
+      "5bbeaa6dc58f",
+      "76b281740607",
+      "c08a4847f063",
+      "5d713fcfb53a"
+    ],
+    "tile_count": 80
+  },
+  "gate_status": "pass",
+  "not_validated": [
+    "raw_acquisition_replay",
+    "real_llm_semantic_quality",
+    "human_review_quality",
+    "legacy_review_import_as_v2_authority",
+    "authorized_memory_or_score",
+    "production_cutover"
+  ],
+  "replay_level": "normalized_evidence_pack_only",
+  "result_fingerprint": "b47681fe1493d5f7ac8986c5a91890c3219ceae3a36995eed404198d64543fc4",
+  "runtime_effect": false,
+  "schema_version": "evidence-vault-normalized-field-replay-result-v1",
+  "source_manifest_sha256": "096b611cc6a6708bb17c462f18782a5a22d914857b2e45ec9c54783ddc98c60b",
+  "validated_claims": [
+    "normalized_evidence_fixture_integrity",
+    "two_brand_plan_contract",
+    "identical_refresh_zero_llm_plan",
+    "scoped_material_delta_plan",
+    "legacy_downstream_reference_integrity"
+  ]
+}

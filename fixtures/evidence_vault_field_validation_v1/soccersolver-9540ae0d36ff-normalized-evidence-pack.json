@@ -1,0 +1,2454 @@
+{
+  "brand_name": "SoccerSolver",
+  "evidence": [
+    {
+      "confidence": "medium",
+      "content": "{\"ai_plugin_found\": false, \"avg_internal_links\": 0, \"avg_words\": 0, \"confidence\": 0.0, \"confidence_reason\": [\"homepage_unavailable\", \"low_coverage\"], \"context_score\": 0.0, \"coverage\": 0.0, \"error\": \"homepage_unavailable\", \"homepage_status\": 0, \"key_pages\": {}, \"llms_full_found\": false, \"llms_txt_found\": false, \"opportunities\": [\"Homepage could not be fetched for context pre-scan\"], \"pages_crawled\": 0, \"robots_found\": false, \"schema_types\": [], \"sitemap_found\": false, \"sitemap_url_count\": 0, \"url\": \"https://soccersolver.com\"}",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "acquisition_metadata"
+      },
+      "ref": "raw_inputs.0",
+      "source": "context",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "high",
+      "content": "Owned page selection captured 12 of 12 known pages after attempting 12; policy=owned-page-selection-v6-vault-live-links.",
+      "evidence_type": "acquisition.page_selection",
+      "metadata": {
+        "page_selection": {
+          "attempted_page_count": 12,
+          "budget": 11,
+          "budget_exhausted": false,
+          "captured_count": 11,
+          "captured_page_count": 12,
+          "coverage_ratio": 1.0,
+          "discovery": {
+            "candidate_count": 0,
+            "disallowed_count": 0,
+            "errors": [
+              "robots:HTTP Error 404: Not Found",
+              "sitemap:https://soccersolver.com/sitemap.xml:HTTP Error 404: Not Found"
+            ],
+            "excluded_pages": [],
+            "known_page_count": 0,
+            "known_pages": [],
+            "latest_lastmod": "",
+            "reason": "",
+            "robots_status": "unavailable",
+            "robots_url": "https://soccersolver.com/robots.txt",
+            "sitemaps_read": [],
+            "status": "unavailable"
+          },
+          "discovery_limitations": [
+            "owned_page_enumeration_unverified"
+          ],
+          "discovery_sources": [
+            "firecrawl_live_links"
+          ],
+          "discovery_status": "observed_only",
+          "eligible_captured_page_count": 12,
+          "eligible_not_visited_count": 0,
+          "eligible_page_count": 12,
+          "excluded_pages": [],
+          "known_page_count": 12,
+          "known_pages": [
+            {
+              "lastmod": "",
+              "navigation_status": "homepage",
+              "role": "homepage",
+              "source": "input",
+              "url": "https://soccersolver.com"
+            },
+            {
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "role": "other",
+              "source": "observed",
+              "url": "https://soccersolver.com/round"
+            },
+            {
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "role": "research",
+              "source": "observed",
+              "url": "https://soccersolver.com/research.html"
+            },
+            {
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "role": "about",
+              "source": "observed",
+              "url": "https://soccersolver.com/aboutus.html"
+            },
+            {
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "role": "about",
+              "source": "observed",
+              "url": "https://soccersolver.com/aboutus"
+            },
+            {
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "role": "other",
+              "source": "observed",
+              "url": "https://soccersolver.com/betis"
+            },
+            {
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "role": "other",
+              "source": "observed",
+              "url": "https://soccersolver.com/nastic"
+            },
+            {
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "role": "other",
+              "source": "observed",
+              "url": "https://soccersolver.com/vuskovic"
+            },
+            {
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "role": "other",
+              "source": "observed",
+              "url": "https://soccersolver.com/spainsub"
+            },
+            {
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "role": "other",
+              "source": "observed",
+              "url": "https://soccersolver.com/mateus"
+            },
+            {
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "role": "other",
+              "source": "observed",
+              "url": "https://soccersolver.com/strikerswc"
+            },
+            {
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "role": "other",
+              "source": "observed",
+              "url": "https://soccersolver.com/austriawc"
+            }
+          ],
+          "language_detection": {
+            "captured_page_count": 12,
+            "declared_mismatch_count": 0,
+            "distribution": [
+              {
+                "language": "en",
+                "page_count": 12,
+                "share": 1.0
+              }
+            ],
+            "evaluated_page_count": 12,
+            "mixed_language_site": false,
+            "status": "single_language",
+            "supported_languages": [
+              "en",
+              "es"
+            ],
+            "unknown_page_count": 0,
+            "version": "owned-page-language-en-es-v1"
+          },
+          "latest_lastmod": "",
+          "maximum_budget": 24,
+          "not_visited_pages": [],
+          "observed_candidate_count": 11,
+          "profile": "vault_evidence_expansion",
+          "selected": [
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 109,
+                "es": 7
+              },
+              "language_token_count": 621,
+              "observed_language": "en",
+              "role": "about",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/aboutus.html"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 91,
+                "es": 5
+              },
+              "language_token_count": 560,
+              "observed_language": "en",
+              "role": "research",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/research.html"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 285,
+                "es": 9
+              },
+              "language_token_count": 1011,
+              "observed_language": "en",
+              "role": "proof",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/round"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 109,
+                "es": 7
+              },
+              "language_token_count": 621,
+              "observed_language": "en",
+              "role": "about",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/aboutus"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 129,
+                "es": 10
+              },
+              "language_token_count": 632,
+              "observed_language": "en",
+              "role": "other",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/betis"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 135,
+                "es": 10
+              },
+              "language_token_count": 571,
+              "observed_language": "en",
+              "role": "other",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/nastic"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 332,
+                "es": 11
+              },
+              "language_token_count": 1280,
+              "observed_language": "en",
+              "role": "other",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/vuskovic"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 284,
+                "es": 12
+              },
+              "language_token_count": 1119,
+              "observed_language": "en",
+              "role": "other",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/spainsub"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 399,
+                "es": 12
+              },
+              "language_token_count": 1468,
+              "observed_language": "en",
+              "role": "other",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/mateus"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 221,
+                "es": 7
+              },
+              "language_token_count": 903,
+              "observed_language": "en",
+              "role": "other",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/strikerswc"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 292,
+                "es": 8
+              },
+              "language_token_count": 1113,
+              "observed_language": "en",
+              "role": "other",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/austriawc"
+            }
+          ],
+          "sitemap_candidate_count": 0,
+          "unique_candidate_count": 11,
+          "version": "owned-page-selection-v6-vault-live-links",
+          "visited_pages": [
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 371,
+                "es": 80
+              },
+              "language_token_count": 3208,
+              "lastmod": "",
+              "navigation_status": "homepage",
+              "observed_language": "en",
+              "role": "homepage",
+              "source": "input",
+              "status": "captured",
+              "url": "https://soccersolver.com"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 109,
+                "es": 7
+              },
+              "language_token_count": 621,
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "observed_language": "en",
+              "role": "about",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/aboutus.html"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 91,
+                "es": 5
+              },
+              "language_token_count": 560,
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "observed_language": "en",
+              "role": "research",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/research.html"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 285,
+                "es": 9
+              },
+              "language_token_count": 1011,
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "observed_language": "en",
+              "role": "proof",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/round"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 109,
+                "es": 7
+              },
+              "language_token_count": 621,
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "observed_language": "en",
+              "role": "about",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/aboutus"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 129,
+                "es": 10
+              },
+              "language_token_count": 632,
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "observed_language": "en",
+              "role": "other",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/betis"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 135,
+                "es": 10
+              },
+              "language_token_count": 571,
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "observed_language": "en",
+              "role": "other",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/nastic"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 332,
+                "es": 11
+              },
+              "language_token_count": 1280,
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "observed_language": "en",
+              "role": "other",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/vuskovic"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 284,
+                "es": 12
+              },
+              "language_token_count": 1119,
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "observed_language": "en",
+              "role": "other",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/spainsub"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 399,
+                "es": 12
+              },
+              "language_token_count": 1468,
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "observed_language": "en",
+              "role": "other",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/mateus"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 221,
+                "es": 7
+              },
+              "language_token_count": 903,
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "observed_language": "en",
+              "role": "other",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/strikerswc"
+            },
+            {
+              "declared_language": "",
+              "declared_language_mismatch": false,
+              "language_confidence": "high",
+              "language_detection_version": "owned-page-language-en-es-v1",
+              "language_scores": {
+                "en": 292,
+                "es": 8
+              },
+              "language_token_count": 1113,
+              "lastmod": "",
+              "navigation_status": "linked_from_home",
+              "observed_language": "en",
+              "role": "other",
+              "source": "observed",
+              "status": "captured",
+              "url": "https://soccersolver.com/austriawc"
+            }
+          ]
+        },
+        "provider": "web",
+        "source_class": "acquisition_metadata"
+      },
+      "ref": "raw_inputs.1.diagnostics.page_selection",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "# We help clubs to be efficient.\n\nTo maximize the money they spend and convert it into wins, more money, or both.\n\n[Book a Demo!](https://soccersolver.com/#) [See how value is created ↓](https://soccersolver.com/#model)\n\n**+750M** data points\n\n**+546K** transfers analysed\n\n**100+** models per decision\n\nEnable sound _▶_\n\nSquad value **€286.4M** ↗ €38.2M projected\n\nOpportunity detected **ROI +27.4%** Downside controlled\n\nNEWS AND RESEARCH ABOUT US\n\n[![MIT SSAC](<Base64-Image-Removed>)MIT SSAC ↗](https://soccersolver.com/#mit-video-player) [![MARCA](<Base64-Image-Removed>)MARCA ↗](https://www.marca.com/futbol/2026/03/23/dato-gol-nueva-fichajes.html) [![Hult](<Base64-Image-Removed>)Hult ↗](https",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "ca.com/futbol/2026/03/23/dato-gol-nueva-fichajes.html) [![Hult](<Base64-Image-Removed>)Hult ↗](https://www.hult.edu/blog/is-paying-for-elite-players-always-the-best-strategy/) [![Dealroom](<Base64-Image-Removed>)Dealroom ↗](https://app.dealroom.co/news/feed/spanish-startup-soccersolver-raises-960-000-pre-seed-for-ai-powered-football-planning-platform) [![El Referente](<Base64-Image-Removed>)El Referente ↗](https://elreferente.es/inversiones/soccersolver-cierra-una-ronda-pre-seed-de-850-000-euros-para-impulsar-su-plataforma-de-planificacion-deportiva-basada-en-ia/) [![Cadena SER](<Base64-Image-Removed>)Cadena SER ↗](https://www.tiktok.com/@soccersolver_esp/video/7616085097632124182) [![El Día",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.2",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "Removed>)Cadena SER ↗](https://www.tiktok.com/@soccersolver_esp/video/7616085097632124182) [![El Día](<Base64-Image-Removed>)El Día ↗](https://www.eldia.es/deportes-canarias/2026/03/15/fichar-estrellas-exploten-haaland-mbappe-127973514.html) [![Canarias7](<Base64-Image-Removed>)Canarias7 ↗](https://www.canarias7.es/deportes/futbol/fichar-barato-vender-caro-gracias-ia-algoritmos-20260318070000-nt.html) [![La Provincia](<Base64-Image-Removed>)La Provincia ↗](https://soccersolver.com/assets/laprovincia.jpeg) [![MIT SSAC](<Base64-Image-Removed>)MIT SSAC ↗](https://soccersolver.com/#mit-video-player) [![MARCA](<Base64-Image-Removed>)MARCA ↗](https://www.marca.com/futbol/2026/03/23/dato-gol-nueva-",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.3",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "r) [![MARCA](<Base64-Image-Removed>)MARCA ↗](https://www.marca.com/futbol/2026/03/23/dato-gol-nueva-fichajes.html) [![Hult](<Base64-Image-Removed>)Hult ↗](https://www.hult.edu/blog/is-paying-for-elite-players-always-the-best-strategy/) [![Dealroom](<Base64-Image-Removed>)Dealroom ↗](https://app.dealroom.co/news/feed/spanish-startup-soccersolver-raises-960-000-pre-seed-for-ai-powered-football-planning-platform) [![El Referente](<Base64-Image-Removed>)El Referente ↗](https://elreferente.es/inversiones/soccersolver-cierra-una-ronda-pre-seed-de-850-000-euros-para-impulsar-su-plataforma-de-planificacion-deportiva-basada-en-ia/) [![Cadena SER](<Base64-Image-Removed>)Cadena SER ↗](https://www.tikto",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.4",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "acion-deportiva-basada-en-ia/) [![Cadena SER](<Base64-Image-Removed>)Cadena SER ↗](https://www.tiktok.com/@soccersolver_esp/video/7616085097632124182) [![El Día](<Base64-Image-Removed>)El Día ↗](https://www.eldia.es/deportes-canarias/2026/03/15/fichar-estrellas-exploten-haaland-mbappe-127973514.html) [![Canarias7](<Base64-Image-Removed>)Canarias7 ↗](https://www.canarias7.es/deportes/futbol/fichar-barato-vender-caro-gracias-ia-algoritmos-20260318070000-nt.html) [![La Provincia](<Base64-Image-Removed>)La Provincia ↗](https://soccersolver.com/assets/laprovincia.jpeg)\n\nTHE PROBLEM",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.5",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "## We help clubs  _to be efficient._\n\nOur scientifically grounded models find the combination of player assets that maximises sporting output, financial return or both for the club’s available capital and risk.\n\nTHE EFFICIENT CLUB · MAXIMUM OUTPUT PER EURO\n\n**Is your club efficient?** Choose your league and run a free simulation. [Test it here **↗**](https://backend-app-nur7rgzyzbhqdzv6zkr24w.streamlit.app/)\n\n95.3% OF CLUBS ARE NOT OPERATING EFFICIENTLY. PLAY THE COMPLETE ANALYSIS.\n\nGLOBAL RECOGNITION\n\n**MIT SSAC** MIT SLOAN SPORTS",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.6",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Selected among the _Top 8 sports science startups._\n\nAlejandro Sánchez presented SoccerSolver at MIT SSAC , where football, science and investment meet.\n\n[Watch the complete MIT SSAC presentation ↗](https://www.youtube.com/watch?v=fb-TvDpwuC4)\n\nSSAC26: Startup Competition: SoccerSolver - YouTube\n\nTap to unmute\n\n![thumbnail-image](https://yt3.ggpht.com/ytc/AIdro_ls7rc8NjNNTDpuUiS8d0clFs7x9MaNUvEJd7hKOIvZQM4=s68-c-k-c0x00ffffff-no-rj)\n\n[Watch on](https://www.youtube.com/watch?v=fb-TvDpwuC4)\n\n![SoccerSolver team after closing its investment round](<Base64-Image-Removed>)\n\nCOMPANY UPDATE",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.7",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "## €850K raised.  _Before revenue._\n\nA €700K pre-seed plus €150K family-and-friends round, closed before the company had revenue or announced clubs. The market launch begins in 2026.\n\n[Read Full Article](https://soccersolver.com/round)\n\nCLUBS ALSO ARE COMPANIES",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.8",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Invest more.  _Grow more._\n\nIn 2017, Florentino Pérez described the club as a company and its players as its defining financial assets. SoccerSolver turns that thesis into an operating system.\n\n**50+ FINANCIAL METRICS PER PLAYER**\n\nFlorentino Pérez desvela la clave del éxito en la gestión del Real Madrid #shorts - YouTube\n\nTap to unmute\n\n![thumbnail-image](https://yt3.ggpht.com/77pZ2fpkaShac-qEHaf0zS5SfXenJ3K4pyUPxkzKRHirrRI2T3gj4hK9olSLENqdRYopKH2dpA=s68-c-k-c0x00ffffff-no-rj)\n\nCristian Barros225K subscribers\n\n> “Treat a sports club like a company. And this club’s assets are not machines. They are players.”\n\nFlorentino Pérez · 2017\n\nYOUR PLAYERS ARE YOUR FINANCIAL ASSETS",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.9",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Players are sporting talent.  _Players are financial assets._\n\nSoccerSolver evaluates each player as an asset through more than 50 financial metrics , while preserving the sporting context that makes every club different.\n\n![K. Mbappé](<Base64-Image-Removed>)\n\nDETECTED 2016\n\n### K. Mbappé\n\n**€1.5M** detected price\n\n**€200M** maximum value\n\n![E. Haaland](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### E. Haaland\n\n**€5M** detected price\n\n**€200M** maximum value\n\n![M. Olise](<Base64-Image-Removed>)\n\nDETECTED 2020\n\n### M. Olise\n\n**€800K** detected price\n\n**€145M** maximum value\n\n![J. Musiala](<Base64-Image-Removed>)\n\nDETECTED 2019",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.10",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "### J. Musiala\n\n**€1M** detected price\n\n**€140M** maximum value\n\n![A. Isak](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### A. Isak\n\n**€8M** detected price\n\n**€140M** maximum value\n\n![C. Palmer](<Base64-Image-Removed>)\n\nDETECTED 2021\n\n### C. Palmer\n\n**€500K** detected price\n\n**€130M** maximum value\n\n![M. Caicedo](<Base64-Image-Removed>)\n\nDETECTED 2020\n\n### M. Caicedo\n\n**€50K** detected price\n\n**€110M** maximum value\n\n![J. Neves](<Base64-Image-Removed>)\n\nDETECTED 2022\n\n### J. Neves\n\n**€400K** detected price\n\n**€110M** maximum value\n\n![E. Camavinga](<Base64-Image-Removed>)\n\nDETECTED 2019",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.11",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "### E. Camavinga\n\n**€4M** detected price\n\n**€100M** maximum value\n\n![F. López](<Base64-Image-Removed>)\n\nDETECTED 2023\n\n### F. López\n\n**€300K** detected price\n\n**€100M** maximum value\n\n![A. Tchouaméni](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### A. Tchouaméni\n\n**€7M** detected price\n\n**€100M** maximum value\n\n![D. Doué](<Base64-Image-Removed>)\n\nDETECTED 2022\n\n### D. Doué\n\n**€400K** detected price\n\n**€90M** maximum value\n\n![K. Kvaratskhelia](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### K. Kvaratskhelia\n\n**€900K** detected price\n\n**€90M** maximum value\n\n![Raphinha](<Base64-Image-Removed>)\n\nDETECTED 2019",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.12",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "### Raphinha\n\n**€8M** detected price\n\n**€90M** maximum value\n\n![A. Güler](<Base64-Image-Removed>)\n\nDETECTED 2022\n\n### A. Güler\n\n**€6M** detected price\n\n**€90M** maximum value\n\n![D. Vlahovic](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### D. Vlahovic\n\n**€1.5M** detected price\n\n**€85M** maximum value\n\n![B. Mbeumo](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### B. Mbeumo\n\n**€3.5M** detected price\n\n**€80M** maximum value\n\n![M. Thuram](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### M. Thuram\n\n**€9M** detected price\n\n**€75M** maximum value\n\n![Antony](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### Antony\n\n**€9M** detected price\n\n**€75M** maximum value\n\n![B. Barcola](<Base64-Image-Removed>)\n\nDETECTED 2022",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.13",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "### B. Barcola\n\n**€1M** detected price\n\n**€70M** maximum value\n\n![N. Woltemade](<Base64-Image-Removed>)\n\nDETECTED 2020\n\n### N. Woltemade\n\n**€325K** detected price\n\n**€70M** maximum value\n\n![R. James](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### R. James\n\n**€7M** detected price\n\n**€70M** maximum value\n\n![D. Núñez](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### D. Núñez\n\n**€700K** detected price\n\n**€70M** maximum value\n\n![D. Huijsen](<Base64-Image-Removed>)\n\nDETECTED 2023\n\n### D. Huijsen\n\n**€400K** detected price\n\n**€70M** maximum value\n\n![K. Mbappé](<Base64-Image-Removed>)\n\nDETECTED 2016",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.14",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "### K. Mbappé\n\n**€1.5M** detected price\n\n**€200M** maximum value\n\n![E. Haaland](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### E. Haaland\n\n**€5M** detected price\n\n**€200M** maximum value\n\n![M. Olise](<Base64-Image-Removed>)\n\nDETECTED 2020\n\n### M. Olise\n\n**€800K** detected price\n\n**€145M** maximum value\n\n**JM** PHOTO TO BE ADDED\n\nDETECTED 2019\n\n### J. Musiala\n\n**€1M** detected price\n\n**€140M** maximum value\n\n![A. Isak](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### A. Isak\n\n**€8M** detected price\n\n**€140M** maximum value\n\n![C. Palmer](<Base64-Image-Removed>)\n\nDETECTED 2021\n\n### C. Palmer\n\n**€500K** detected price\n\n**€130M** maximum value\n\n![M. Caicedo](<Base64-Image-Removed>)\n\nDETECTED 2020",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.15",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "### M. Caicedo\n\n**€50K** detected price\n\n**€110M** maximum value\n\n![J. Neves](<Base64-Image-Removed>)\n\nDETECTED 2022\n\n### J. Neves\n\n**€400K** detected price\n\n**€110M** maximum value\n\n![E. Camavinga](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### E. Camavinga\n\n**€4M** detected price\n\n**€100M** maximum value\n\n![F. López](<Base64-Image-Removed>)\n\nDETECTED 2023\n\n### F. López\n\n**€300K** detected price\n\n**€100M** maximum value\n\n![A. Tchouaméni](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### A. Tchouaméni\n\n**€7M** detected price\n\n**€100M** maximum value\n\n![D. Doué](<Base64-Image-Removed>)\n\nDETECTED 2022",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.16",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "### D. Doué\n\n**€400K** detected price\n\n**€90M** maximum value\n\n![K. Kvaratskhelia](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### K. Kvaratskhelia\n\n**€900K** detected price\n\n**€90M** maximum value\n\n![Raphinha](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### Raphinha\n\n**€8M** detected price\n\n**€90M** maximum value\n\n![A. Güler](<Base64-Image-Removed>)\n\nDETECTED 2022\n\n### A. Güler\n\n**€6M** detected price\n\n**€90M** maximum value\n\n![D. Vlahovic](<Base64-Image-Removed>)\n\nDETECTED 2019\n\n### D. Vlahovic\n\n**€1.5M** detected price\n\n**€85M** maximum value\n\n![B. Mbeumo](<Base64-Image-Removed>)\n\nDETECTED 2019",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.17",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Science is not the destination.  It is how we move.\n\nSoccerSolver is the first step in a wider mission: making decision-making across sport increasingly efficient, measurable and accountable.\n\n[Explore our mission, team and research](https://soccersolver.com/aboutus.html)\n\n**16** RESEARCH PROJECTS\n\n**3** MIT SEMIFINALISTS\n\n**10+** NEW PAPERS THIS YEAR\n\nPRIVATE CLUB ANALYSIS",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.18",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "low",
+      "content": "Web evidence sampling homepage: selected 18 of 67 chunks; strategic prioritization=enabled.",
+      "evidence_type": "acquisition.evidence_sampling",
+      "metadata": {
+        "provider": "web",
+        "selected_chunks": 18,
+        "source_class": "acquisition_metadata",
+        "strategic_prioritization": true,
+        "subpage_index": null,
+        "total_chunks": 67
+      },
+      "ref": "raw_inputs.1.diagnostics.sampling",
+      "source": "web",
+      "url": "https://soccersolver.com"
+    },
+    {
+      "confidence": "medium",
+      "content": "# A team defined by _impact_,  not by names.\n\n![](<Base64-Image-Removed>)\n\n## Nº1 Disruptive Innovation Startup.\n\nFounded by the Government of the Canary Islands, it is the number one start-up in disruptive innovation.\n\n![](<Base64-Image-Removed>)\n\n## ENISA Certified Startup\n\nAwarded by the Spanish Ministry of Industry and Tourism. Spain’s national innovation agency that supports entrepreneurship and innovative SMEs through public funding and strategic guidance.\n\n![](<Base64-Image-Removed>)\n\n## BF Sport · Aceleradora Galega Do Deporte\n\nSports innovation and entrepreneurship hub focused on supporting startups and projects in the sports and wellness industry.\n\n![](<Base64-Image-Removed>)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "duplicate_refs": [
+          "raw_inputs.1.subpage.4.chunk.1"
+        ],
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/aboutus.html"
+      },
+      "ref": "raw_inputs.1.subpage.1.chunk.1",
+      "source": "web",
+      "url": "https://soccersolver.com/aboutus.html"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Methods applied for predictions against bookmakers.\n\nWe were blocked by the bookmakers to a maximum of €1 per bet.\n\n## Other _titles_ of the team\n\n![](<Base64-Image-Removed>)\n\n### \\#1 Winner Math Olympiads.\n\nWinner and 3-time TOP3 of the LIII ULPGC Mathematical Olympiad.\n\n![](<Base64-Image-Removed>)\n\n### MSC Imperial College London.\n\n50% Scholarship for Entrepreneurial Impact in MBAn in Boston.\n\n![](<Base64-Image-Removed>)\n\n### Boston AI week Speaker\n\nSpeaker in the Boston AI week about the impact of artificial intelligence.\n\n![](<Base64-Image-Removed>)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "duplicate_refs": [
+          "raw_inputs.1.subpage.4.chunk.2"
+        ],
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/aboutus.html"
+      },
+      "ref": "raw_inputs.1.subpage.1.chunk.2",
+      "source": "web",
+      "url": "https://soccersolver.com/aboutus.html"
+    },
+    {
+      "confidence": "medium",
+      "content": "### Co-founder Talky\n\nCo-founded a tech startup focused on AI-powered automation for sales.\n\n![](https://soccersolver.com/assets/spain_la-liga_3000x3000.football-logos.cc.png)\n\n### Data Analyst - LaLiga\n\nData Analyst at one football team of LaLiga.\n\n![](<Base64-Image-Removed>)\n\n### McKinsey Forward Program\n\nProblem-solving, digital skills, and impactful communication.\n\n![](<Base64-Image-Removed>)\n\n### UK Chevening Scholarship\n\n100% scholarship by UK government to foreign students.\n\n![](<Base64-Image-Removed>)\n\n### Microsoft certified\n\nAzure Solutions · Azure Administrator · Azure Engineer\n\n![](<Base64-Image-Removed>)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "duplicate_refs": [
+          "raw_inputs.1.subpage.4.chunk.3"
+        ],
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/aboutus.html"
+      },
+      "ref": "raw_inputs.1.subpage.1.chunk.3",
+      "source": "web",
+      "url": "https://soccersolver.com/aboutus.html"
+    },
+    {
+      "confidence": "medium",
+      "content": "### Founder & ex-CEO\n\nRecord-Breaking University Events \\| AI applied to boost revenue in sales.\n\n![](<Base64-Image-Removed>)\n\n### \\#1 Winner Math Olympiads.\n\nRegional phase of the LIII Spanish Mathematical Olympiad.\n\n![](<Base64-Image-Removed>)\n\n### AI Cloud Development\n\nAI-driven solutions and designing robust Cloud architectures.\n\n![](<Base64-Image-Removed>)\n\n### Semifinalist\n\nImpact Social Cup, Biggest Spanish entrepreneurial competition.\n\n![](<Base64-Image-Removed>)\n\n### Co-authors of the book on Sports Analysis\n\nBook in collaboration with De La Maza, M. (MIT).\n\n![](<Base64-Image-Removed>)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "duplicate_refs": [
+          "raw_inputs.1.subpage.4.chunk.4"
+        ],
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/aboutus.html"
+      },
+      "ref": "raw_inputs.1.subpage.1.chunk.4",
+      "source": "web",
+      "url": "https://soccersolver.com/aboutus.html"
+    },
+    {
+      "confidence": "medium",
+      "content": "### \\+ 6 Mathematicians and Software Engineers\n\nAll our decision makers are formed with a data-heavy base.\n\n![](<Base64-Image-Removed>)\n\n### Speaker Coordinator\n\nTedX Imperial College.\n\n![](<Base64-Image-Removed>)\n\n### Harvard Publishing Skills\n\nBusiness for all program.\n\n\n\n\n\n\n\n\n\n\n\n\n[Privacy Policy](https://soccersolver.com/aboutus.html#) [Terms & Conditions](https://soccersolver.com/aboutus.html#)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/aboutus.html"
+      },
+      "ref": "raw_inputs.1.subpage.1.chunk.5",
+      "source": "web",
+      "url": "https://soccersolver.com/aboutus.html"
+    },
+    {
+      "confidence": "medium",
+      "content": "# \\#1 Best University  in the world  by QS Ranking.\n\nResearch MIT Paper Competition 25/26\n\n**+1k** Competitors\n\n**15** Papers Submitted\n\n**3** Semifinalist\n\n![Footballers as Financial Assets](<Base64-Image-Removed>)\n\n## 1\\. Footballers as Financial Assets\n\nA Quantitative Model for Market Valuation and Forecasting.\n\n![Making 98% Clubs Profitable](<Base64-Image-Removed>)\n\n## 2\\. Making 98% Clubs Profitable\n\nAn AI-Driven Operating System for Financial Optimization in Football.\n\n![Redefining Scouting Intelligence](<Base64-Image-Removed>)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/research.html"
+      },
+      "ref": "raw_inputs.1.subpage.2.chunk.1",
+      "source": "web",
+      "url": "https://soccersolver.com/research.html"
+    },
+    {
+      "confidence": "medium",
+      "content": "## 3\\. Redefining Scouting Intelligence\n\nA Quantitative Framework for Player Similarity and Tactical Fit in Football.\n\n![Football as a Financial Market](<Base64-Image-Removed>)\n\n## 4\\. Football as a Financial Market\n\nA Quantitative Blueprint for Transferable Assets and Capital Allocation.\n\n![The Football Efficient Frontier](<Base64-Image-Removed>)\n\n## 5\\. The Football Efficient Frontier\n\n![Redefining Player Ratings](<Base64-Image-Removed>)\n\n## 6\\. Redefining Player Ratings\n\n![The Universal Translator](<Base64-Image-Removed>)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/research.html"
+      },
+      "ref": "raw_inputs.1.subpage.2.chunk.2",
+      "source": "web",
+      "url": "https://soccersolver.com/research.html"
+    },
+    {
+      "confidence": "medium",
+      "content": "## 7\\. The Universal Translator\n\nBridging the Gap Between Data Scientists and Football Decision-Makers Using NLP and Structured Queries.\n\n![Quantifying Potential](<Base64-Image-Removed>)\n\n## 8\\. Quantifying Potential\n\n![From Empty Sheets to Full Coverage](<Base64-Image-Removed>)\n\n## 9\\. From Empty Sheets to Full Coverage\n\nThe Data Revolution in Football.\n\n![The Billion-Euro Era](<Base64-Image-Removed>)\n\n## 10\\. The Billion-Euro Era\n\nFootball’s Shift from Sport to Market Machine.\n\n![Multi-Horizon Forecasting](<Base64-Image-Removed>)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/research.html"
+      },
+      "ref": "raw_inputs.1.subpage.2.chunk.3",
+      "source": "web",
+      "url": "https://soccersolver.com/research.html"
+    },
+    {
+      "confidence": "medium",
+      "content": "## 11\\. Multi-Horizon Forecasting\n\nFootball Player Valuations Using Ensemble Machine Learning Models.\n\nDetecting Overvaluation and Undervaluation at Scale.\n\n![From Arbitrary to Algorithmic](<Base64-Image-Removed>)\n\n## 13\\. From Arbitrary to Algorithmic\n\nData-Driven Optimization of Soccer Player Release Clauses.\n\n![The OI Model](<Base64-Image-Removed>)\n\n## 14\\. The OI Model\n\nA Multi-Criteria Utility Framework for Wage-Value Efficiency in Football.\n\n![Quantifying the Coach Effect](<Base64-Image-Removed>)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/research.html"
+      },
+      "ref": "raw_inputs.1.subpage.2.chunk.4",
+      "source": "web",
+      "url": "https://soccersolver.com/research.html"
+    },
+    {
+      "confidence": "medium",
+      "content": "## 15\\. Quantifying the Coach Effect\n\nA Residual-Based Model of Managerial Efficiency in Football.\n\n\n\n\n\n\n\n\n\n\n\n\n[Privacy Policy](https://soccersolver.com/research.html#) [Terms & Conditions](https://soccersolver.com/research.html#)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/research.html"
+      },
+      "ref": "raw_inputs.1.subpage.2.chunk.5",
+      "source": "web",
+      "url": "https://soccersolver.com/research.html"
+    },
+    {
+      "confidence": "medium",
+      "content": "# 'SoccerSolver' closes its first investment round at €850,000\n\nToday we're announcing a closed investment round of €700K pre-seed + €150K family and friends, raised when the company had €0 in revenue and no clubs signed. Now the company is already working with clubs, to be announced soon.\n\n![Members of the SoccerSolver team](<Base64-Image-Removed>)Some of the members of the 'SoccerSolver' team.\n\nHow much does it cost to build a product the football industry genuinely likes? In our case, a little over a year of work: more than 16 algorithms developed, more than 400 meetings with investment funds, more than 14 people working on this full-time (not counting collaborators), more than 750 millio",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/round"
+      },
+      "ref": "raw_inputs.1.subpage.3.chunk.1",
+      "source": "web",
+      "url": "https://soccersolver.com/round"
+    },
+    {
+      "confidence": "medium",
+      "content": "ds, more than 14 people working on this full-time (not counting collaborators), more than 750 million data points processed one by one, more than 546,000 transfers analyzed, and more than 10 years of historical data. Also more than 200 validation meetings with people from MIT, Harvard, Y Combinator, data analysts, and club owners — listening, correcting, and starting over until we landed on a product that solved a real problem for clubs.\n\nAlong the way we were fortunate to be selected as one of MIT's eight scientific startups. It was an important boost, but it was just that: a boost. And even with all this work, we still have only a fraction of what remains to be built — and sometimes, even",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/round"
+      },
+      "ref": "raw_inputs.1.subpage.3.chunk.2",
+      "source": "web",
+      "url": "https://soccersolver.com/round"
+    },
+    {
+      "confidence": "medium",
+      "content": "with all this work, we still have only a fraction of what remains to be built — and sometimes, even so, it still isn't enough.\n\nToday, after a good while working almost in silence, we can finally share something we closed some time ago: our first investment round, worth €850,000 (€700,000 pre-seed + €150,000 family and friends).\n\n![Alejandro Sánchez Díaz-Casanova speaking at Boston AI Week](<Base64-Image-Removed>)Alejandro Sánchez Díaz-Casanova at the Power Panel at Boston AI Week 2025.\n\nROUND CLOSED · PRE-REVENUE **€850.000**\n\nRaised before generating revenue, to accelerate product development and the brand's international expansion.\n\nThere's one detail that makes this round especially mean",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/round"
+      },
+      "ref": "raw_inputs.1.subpage.3.chunk.3",
+      "source": "web",
+      "url": "https://soccersolver.com/round"
+    },
+    {
+      "confidence": "medium",
+      "content": "t and the brand's international expansion.\n\nThere's one detail that makes this round especially meaningful for us: we closed it when the company still hadn't earned a single euro and had no clubs signed. A pre-revenue round, resting mainly on the work done up to that point and on the trust of those who saw it up close. Today the company is already working with clubs, whose names we'll announce over the coming weeks.\n\nThis investment doesn't change who we are, but it does give us something very valuable: time. With this round we have a little over two years of runway ahead to keep hiring better people, grow the team, and finish turning what began as a research study into a company that provid",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/round"
+      },
+      "ref": "raw_inputs.1.subpage.3.chunk.4",
+      "source": "web",
+      "url": "https://soccersolver.com/round"
+    },
+    {
+      "confidence": "medium",
+      "content": "people, grow the team, and finish turning what began as a research study into a company that provides real service to clubs.\n\nAlejandro Sánchez, founder of 'SoccerSolver,' sums it up like this:\n\n“We did a study that reached the semifinals at MIT, and we found that 95.38% of clubs weren't spending their money on signings efficiently. In football we all assume that more investment in signings means more results, but that relationship doesn't always hold. That's where we saw a market opportunity, and we decided to go for it.”\n\nPerhaps what surprised us most in the whole process was how the investors arrived. We contacted more than 400 funds and investors actively seeking financing, but in the",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/round"
+      },
+      "ref": "raw_inputs.1.subpage.3.chunk.5",
+      "source": "web",
+      "url": "https://soccersolver.com/round"
+    },
+    {
+      "confidence": "medium",
+      "content": "tors arrived. We contacted more than 400 funds and investors actively seeking financing, but in the end much of this round didn't come from there — it came from meetings where we were simply presenting the product to potential clients and people in the sector, and it was they who ended up asking whether they could invest.\n\nThat's how this first round of smart money came together, bringing in sporting directors, business angels, and professionals connected to clubs in the Premier League, LaLiga, Saudi Arabia, and other major European competitions. That professional football's own people — including profiles from the Premier League — chose to invest in SoccerSolver is, for us, one of the most",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/round"
+      },
+      "ref": "raw_inputs.1.subpage.3.chunk.6",
+      "source": "web",
+      "url": "https://soccersolver.com/round"
+    },
+    {
+      "confidence": "medium",
+      "content": "ding profiles from the Premier League — chose to invest in SoccerSolver is, for us, one of the most important validations we could receive.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/round"
+      },
+      "ref": "raw_inputs.1.subpage.3.chunk.7",
+      "source": "web",
+      "url": "https://soccersolver.com/round"
+    },
+    {
+      "confidence": "medium",
+      "content": "### Leagues represented in the round:\n\nLaLigaPremier LeagueSaudi ArabiaOther European leagues\n\nOne thing we want to make clear: the source code, the algorithms, and all our internal processes remain, and will continue to remain, the exclusive property of the company. None of it is shared with any investor.\n\nOur technology has a specific goal: to become the bridge between data providers and clubs, helping information translate into better sporting and economic decisions.\n\n![SoccerSolver presentation at LaLiga Business School](<Base64-Image-Removed>)SoccerSolver’s talk at the LaLiga Business School in Valencia.\n\n\n\n\n\n\n\n\n\n\n\n\n[Privacy Policy](https://soccersolver.com/round#) [Terms & Conditions](",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/round"
+      },
+      "ref": "raw_inputs.1.subpage.3.chunk.8",
+      "source": "web",
+      "url": "https://soccersolver.com/round"
+    },
+    {
+      "confidence": "medium",
+      "content": "ool in Valencia.\n\n\n\n\n\n\n\n\n\n\n\n\n[Privacy Policy](https://soccersolver.com/round#) [Terms & Conditions](https://soccersolver.com/round#)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/round"
+      },
+      "ref": "raw_inputs.1.subpage.3.chunk.9",
+      "source": "web",
+      "url": "https://soccersolver.com/round"
+    },
+    {
+      "confidence": "medium",
+      "content": "### \\+ 6 Mathematicians and Software Engineers\n\nAll our decision makers are formed with a data-heavy base.\n\n![](<Base64-Image-Removed>)\n\n### Speaker Coordinator\n\nTedX Imperial College.\n\n![](<Base64-Image-Removed>)\n\n### Harvard Publishing Skills\n\nBusiness for all program.\n\n\n\n\n\n\n\n\n\n\n\n\n[Privacy Policy](https://soccersolver.com/aboutus#) [Terms & Conditions](https://soccersolver.com/aboutus#)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/aboutus"
+      },
+      "ref": "raw_inputs.1.subpage.4.chunk.5",
+      "source": "web",
+      "url": "https://soccersolver.com/aboutus"
+    },
+    {
+      "confidence": "medium",
+      "content": "# Real Betis Balompié and SoccerSolver have entered into a strategic partnership.\n\nThe Spanish startup's software will support the club's sporting department in scouting, player valuation, and strategic decision-making.\n\n![Real Betis Balompié and SoccerSolver strategic partnership](https://soccersolver.com/assets/betis-cover.png)Real Betis and SoccerSolver enter into a strategic partnership.\n\nAs part of the agreement, Real Betis also becomes SoccerSolver's **Official Founding Partner**, recognising the club's commitment to technological innovation and the development of advanced tools for professional football.\n\nSoccerSolver combines up to **16 proprietary mathematical algorithms and artific",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/betis"
+      },
+      "ref": "raw_inputs.1.subpage.5.chunk.1",
+      "source": "web",
+      "url": "https://soccersolver.com/betis"
+    },
+    {
+      "confidence": "medium",
+      "content": "essional football.\n\nSoccerSolver combines up to **16 proprietary mathematical algorithms and artificial intelligence models** within a platform designed to support football clubs across both sporting and financial decision-making. The software processes more than **700 million data points** and analyses over **400 variables per player**, including financial risk indicators applied to recruitment.\n\nThe platform also runs more than **100 cross-data models**, taking into account each club's sporting strategy, budget constraints, and operational requirements to generate a ranked shortlist of optimal transfer targets aimed at maximising long-term value.\n\nRamón Alarcón, CEO of Real Betis, welcomed",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/betis"
+      },
+      "ref": "raw_inputs.1.subpage.5.chunk.2",
+      "source": "web",
+      "url": "https://soccersolver.com/betis"
+    },
+    {
+      "confidence": "medium",
+      "content": "al transfer targets aimed at maximising long-term value.\n\nRamón Alarcón, CEO of Real Betis, welcomed the partnership, emphasising how technology will strengthen the club's sporting department.\n\n“Football is becoming increasingly competitive, demanding constant evolution. Integrating analytical tools and financial models allows us to reinforce our decision-making processes while remaining true to our knowledge, experience, and identity. In such a competitive market, innovation is no longer optional.”\n\n![Ramón Alarcón, CEO of Real Betis](https://soccersolver.com/assets/ramon-alarcon.png)Ramón Alarcón, CEO of Real Betis Balompié.\n\nAlejandro Sánchez Díaz-Casanova, CEO of SoccerSolver, highlighte",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/betis"
+      },
+      "ref": "raw_inputs.1.subpage.5.chunk.3",
+      "source": "web",
+      "url": "https://soccersolver.com/betis"
+    },
+    {
+      "confidence": "medium",
+      "content": "arcón, CEO of Real Betis Balompié.\n\nAlejandro Sánchez Díaz-Casanova, CEO of SoccerSolver, highlighted the importance of combining professional expertise with technology and data.\n\n“Football clubs make critical decisions during every transfer window that can shape both their sporting and financial future. The experience and analytical expertise of professionals are irreplaceable, but they also need technological support that enhances decision-making and helps optimise every move. Our goal is to enable clubs to understand not only the sporting impact of each transfer, but also its financial potential and associated risks through our platform.”\n\n![Alejandro Sánchez Díaz-Casanova, CEO of SoccerS",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/betis"
+      },
+      "ref": "raw_inputs.1.subpage.5.chunk.4",
+      "source": "web",
+      "url": "https://soccersolver.com/betis"
+    },
+    {
+      "confidence": "medium",
+      "content": "ntial and associated risks through our platform.”\n\n![Alejandro Sánchez Díaz-Casanova, CEO of SoccerSolver](https://soccersolver.com/assets/alejandro-sanchez.jpg)Alejandro Sánchez Díaz-Casanova, founder and CEO of SoccerSolver.\n\n**About SoccerSolver:**\n\nYou can also read it at: [https://www.realbetisbalompie.es/noticias/actualidad/el-real-betis-se-alia-con-la-tecnologica-soccersolver-para-reforzar-su-analisis-deportivo-financiero](https://www.realbetisbalompie.es/noticias/actualidad/el-real-betis-se-alia-con-la-tecnologica-soccersolver-para-reforzar-su-analisis-deportivo-financiero)\n\n\n\nWORLD CUP **The financial assets behind Austria’s generation** **Read Full Article ↗**](https://soccersolver",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/betis"
+      },
+      "ref": "raw_inputs.1.subpage.5.chunk.5",
+      "source": "web",
+      "url": "https://soccersolver.com/betis"
+    },
+    {
+      "confidence": "medium",
+      "content": "P **The financial assets behind Austria’s generation** **Read Full Article ↗**](https://soccersolver.com/austriawc) [![Gimnàstic de Tarragona and SoccerSolver strategic agreement](https://soccersolver.com/assets/acuerdo-gimn%C3%A0stic-betis.png)\\\\\nWORLD CUP **The financial assets behind Austria’s generation** **Read Full Article ↗**](https://soccersolver.com/austriawc) [![Gimnàstic de Tarragona and SoccerSolver strategic agreement](https://soccersolver.com/assets/acuerdo-gimn%C3%A0stic-betis.png)\\\\\n\n\n\n\n\n\n\n\n\n[Privacy Policy](https://soccersolver.com/betis#) [Terms & Conditions](https://soccersolver.com/betis#)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/betis"
+      },
+      "ref": "raw_inputs.1.subpage.5.chunk.6",
+      "source": "web",
+      "url": "https://soccersolver.com/betis"
+    },
+    {
+      "confidence": "medium",
+      "content": "# Nàstic de Tarragona signs a strategic agreement with SoccerSolver.\n\nThe Tarragona club incorporates advanced tools to strengthen its sporting and financial operations, with a particular focus on scouting.\n\n![Nàstic de Tarragona and SoccerSolver strategic agreement](https://soccersolver.com/assets/acuerdo-gimn%C3%A0stic-betis.png)Gimnàstic de Tarragona and SoccerSolver seal their partnership for this season.\n\nWith this move, the club takes a key strategic step in its methodological area through the implementation of data intelligence applied to elite football. Both organisations join forces with the aim of strengthening the sporting department, becoming one of the pioneering clubs in Spain",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/nastic"
+      },
+      "ref": "raw_inputs.1.subpage.6.chunk.1",
+      "source": "web",
+      "url": "https://soccersolver.com/nastic"
+    },
+    {
+      "confidence": "medium",
+      "content": "ith the aim of strengthening the sporting department, becoming one of the pioneering clubs in Spain to make use of the first sports investment software. The goal is to quantify the risk of buying and selling players through SoccerSolver, which is capable of delivering more than 50 financial metrics and generating an average return on investment of 17–35%.\n\nThe synergy between the two organisations is already a reality, and the objectives set will safeguard the wellbeing and success of both parties. The integration of SoccerSolver into the club's day-to-day operations will begin immediately, adding to the latest-generation technologies that drive continued growth on the pitch. Gimnàstic and S",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/nastic"
+      },
+      "ref": "raw_inputs.1.subpage.6.chunk.2",
+      "source": "web",
+      "url": "https://soccersolver.com/nastic"
+    },
+    {
+      "confidence": "medium",
+      "content": "ding to the latest-generation technologies that drive continued growth on the pitch. Gimnàstic and SoccerSolver will work together to build a unique and solid project in Primera Federación.\n\nTomeu Nadal, Sporting Director of Gimnàstic de Tarragona:\n\n“Technology does not replace scouting work; it complements it. Having this tool gives us an additional layer of information to evaluate players, anticipate their development and reduce uncertainty in decision-making.”\n\n![Tomeu Nadal, Sporting Director of Gimnàstic de Tarragona](https://soccersolver.com/assets/tomeu-nadal.jpeg)On the right, Tomeu Nadal, Sporting Director of Gimnàstic de Tarragona.\n\nAlejandro Sánchez, founder of SoccerSolver:\n\n![Al",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/nastic"
+      },
+      "ref": "raw_inputs.1.subpage.6.chunk.3",
+      "source": "web",
+      "url": "https://soccersolver.com/nastic"
+    },
+    {
+      "confidence": "medium",
+      "content": "dal, Sporting Director of Gimnàstic de Tarragona.\n\nAlejandro Sánchez, founder of SoccerSolver:\n\n![Alejandro Sánchez Díaz-Casanova, founder and CEO of SoccerSolver](https://soccersolver.com/assets/alejandro-sanchez.jpg)Alejandro Sánchez Díaz-Casanova, founder and CEO of SoccerSolver.\n\nSoccerSolver has the backing of leading mathematical experts in the world of football and data. Last February it was named among the Top 8 sports startups in the world by MIT (the Massachusetts Institute of Technology), one of the most important technological institutions in the world.\n\n\n\nWORLD CUP **The financial assets behind Austria’s generation** **Read Full Article ↗**](https://soccersolver.com/austriawc) [",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/nastic"
+      },
+      "ref": "raw_inputs.1.subpage.6.chunk.4",
+      "source": "web",
+      "url": "https://soccersolver.com/nastic"
+    },
+    {
+      "confidence": "medium",
+      "content": "assets behind Austria’s generation** **Read Full Article ↗**](https://soccersolver.com/austriawc) [![](<Base64-Image-Removed>)\\\\\nWORLD CUP **The financial assets behind Austria’s generation** **Read Full Article ↗**](https://soccersolver.com/austriawc)\n\n\n\n\n\n\n\n\n\n[Privacy Policy](https://soccersolver.com/nastic#) [Terms & Conditions](https://soccersolver.com/nastic#)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/nastic"
+      },
+      "ref": "raw_inputs.1.subpage.6.chunk.5",
+      "source": "web",
+      "url": "https://soccersolver.com/nastic"
+    },
+    {
+      "confidence": "medium",
+      "content": "# 'Luka Vuskovic: why Brighton's €54M may be the bargain of the season.'\n\nAt just 19 is a centre-back whose value is exploding. Luka Vuskovic is on the move: Brighton signs him for €54M. And unlike other recent deals, the question here isn't whether the club has overpaid, but the opposite: are they buying below what the player is already worth? The numbers point clearly in that direction.\n\n![Luka Vuskovic at Brighton & Hove Albion](<Base64-Image-Removed>)\n\n\n**What is Fair Price?**",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/vuskovic"
+      },
+      "ref": "raw_inputs.1.subpage.7.chunk.1",
+      "source": "web",
+      "url": "https://soccersolver.com/vuskovic"
+    },
+    {
+      "confidence": "medium",
+      "content": "## The track record: explosive growth without a single scare\n\nVuskovic's trajectory is the kind that excites any analyst.\n\nHis **total return of +400.0%** —the cumulative appreciation since his early days— means his value has multiplied fivefold, with a **historical CAGR of +116.9%**, that is, the average rate at which it has grown each year, extremely high. And far from slowing, it's accelerating: the **6-month rolling return (+50.0%)** —how much he has appreciated over the last half-year— and, above all, the **1-year Career Value Slope of +197.5%** —the steepness of his value curve over the last year, well above the +80.8% of his whole career— show that the climb is getting steeper right n",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/vuskovic"
+      },
+      "ref": "raw_inputs.1.subpage.7.chunk.2",
+      "source": "web",
+      "url": "https://soccersolver.com/vuskovic"
+    },
+    {
+      "confidence": "medium",
+      "content": "last year, well above the +80.8% of his whole career— show that the climb is getting steeper right now.\n\nThe most striking part is that this growth has come with no appreciable risk:\n\n- **Max Drawdown: 0.0%.** This metric measures the largest drop from a peak to the following trough; in his case, his value has never fallen back. The same goes for **Average Drawdown (0.0%)** and **Max Drawdown since transfer (0.0%)**.\n- **Annual VaR (0.0%) and Expected Shortfall / CVaR (0.0%).** VaR estimates the maximum loss to be expected in a bad year, and CVaR the average loss in those bad scenarios. Both at zero: his history records no realized loss risk.\n- **Downside Volatility: 0.0%.** The portion of t",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/vuskovic"
+      },
+      "ref": "raw_inputs.1.subpage.7.chunk.3",
+      "source": "web",
+      "url": "https://soccersolver.com/vuskovic"
+    },
+    {
+      "confidence": "medium",
+      "content": "t zero: his history records no realized loss risk.\n- **Downside Volatility: 0.0%.** The portion of the swings corresponding only to downward moves is nil: when he moves, he moves up.\n\nThe one sign of tension is the **1-year volatility of 109.6%** —how much his value swings over the last year— typical of a very young player whose price is rapidly repricing upward.\n\nAnd the ratios that cross return and risk confirm it: the **Sharpe Ratio** —how much return you get per unit of risk taken— is not only good (1.66 historically) but **improves in recent windows: 3.65 over one year and 4.66 since his last transfer**, top-class figures. The **Sortino** (a variant that only penalizes drops) and the **",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/vuskovic"
+      },
+      "ref": "raw_inputs.1.subpage.7.chunk.4",
+      "source": "web",
+      "url": "https://soccersolver.com/vuskovic"
+    },
+    {
+      "confidence": "medium",
+      "content": "last transfer**, top-class figures. The **Sortino** (a variant that only penalizes drops) and the **Calmar** (return versus the worst drawdown) come up undefined precisely because there are no drops to penalize. In scouting terms: a 19-year-old centre-back, rising vertically, without a single stumble and with an almost laboratory-clean risk profile.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/vuskovic"
+      },
+      "ref": "raw_inputs.1.subpage.7.chunk.5",
+      "source": "web",
+      "url": "https://soccersolver.com/vuskovic"
+    },
+    {
+      "confidence": "medium",
+      "content": "## What the future says: two very different readings\n\nThis is where the case gets interesting, because SoccerSolver offers two projections of the same player:\n\n- The **Predicted Value** —what he'd be worth in the future _if he stays in the same conditions as today_— is virtually flat: €60.6M (1 year) → €60.0M (2 years) → €58.4M (3 years). In fact, the profile flags him as **projected to reach his financial peak in 1 year (€60.6M)**. This is consistent with a **forward ROI of just +0.9%** —the expected return from here on out— and an **Upside Potential of +€1.1M (+1.8%)** —the remaining room to appreciate: in his inertial scenario, he's already close to his ceiling.\n- The **Fair Price** tells",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/vuskovic"
+      },
+      "ref": "raw_inputs.1.subpage.7.chunk.6",
+      "source": "web",
+      "url": "https://soccersolver.com/vuskovic"
+    },
+    {
+      "confidence": "medium",
+      "content": "appreciate: in his inertial scenario, he's already close to his ceiling.\n- The **Fair Price** tells another story. It's the maximum value he _could_ reach if he **accessed optimal conditions** —the ideal club, league and role for his profile— regardless of where he plays now; it works as a reference ceiling, not an immediate sale price. And that ceiling is enormous: **€145.3M at 1 year (+142.2%, top 1% of his category), €152.8M at 2 years and €167.8M at 3 years.**\n\nThe gap between the two curves —from ~€60M realistic to ~€145M of potential— is the key: it's value that exists but is only unlocked if the environment cooperates.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/vuskovic"
+      },
+      "ref": "raw_inputs.1.subpage.7.chunk.7",
+      "source": "web",
+      "url": "https://soccersolver.com/vuskovic"
+    },
+    {
+      "confidence": "medium",
+      "content": "## The verdict on the €54M\n\nUnlike an expensive signing, here Brighton is buying below almost every reference point:\n\n- **10% below his current market value** (€60M).\n- **Below his 1-year expected value** (€60.6M), which is moreover stable, not bearish.\n- **And at a fraction of his Fair Price** (€145.3M already in the first year).\n\nThis completely flips the risk profile of the deal. In the worst case —that Brighton isn't the environment that awakens his best version and the player stays on his realistic path— we're talking about a 19-year-old centre-back who will still be worth ~€60M. In other words, **the floor of the investment sits above what was paid**: a capital loss is highly unlikely.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/vuskovic"
+      },
+      "ref": "raw_inputs.1.subpage.7.chunk.8",
+      "source": "web",
+      "url": "https://soccersolver.com/vuskovic"
+    },
+    {
+      "confidence": "medium",
+      "content": "words, **the floor of the investment sits above what was paid**: a capital loss is highly unlikely.\n\nAnd the ceiling is asymmetric in the buyer's favor. If Brighton gives him minutes and a showcase —exactly their business model: buy young, grow them, resell— appreciation toward the Fair Price turns the €54M into a potentially historic gain. He doesn't even need to reach €145M: a partial realization would already be a home run.\n\nIn short: whereas many signings are conviction bets where you pay for the potential upfront, **Vuskovic's is the opposite: you pay less than the player is already worth, with an enormous ceiling and a protected floor.** At 19, under contract until 2030, with zero dra",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/vuskovic"
+      },
+      "ref": "raw_inputs.1.subpage.7.chunk.9",
+      "source": "web",
+      "url": "https://soccersolver.com/vuskovic"
+    },
+    {
+      "confidence": "medium",
+      "content": "h, with an enormous ceiling and a protected floor.** At 19, under contract until 2030, with zero drawdowns in his history and a Sharpe that improves quarter after quarter, he's the definition of a low-risk, high-convexity buy. The one real caveat is that 109.6% volatility: in such a young player, the price can move a lot in the short term. But when you buy with such a margin below value, that volatility works far more in your favor than against you.\n\n\n\n[![Spain U-19 European champions](<Base64-Image-Removed>)\\\\\nSTATEMENT **Nàstic de Tarragona signs a strategic agreement with SoccerSolver** **Read Full Article ↗**](https://soccersolver.com/nastic) [![Spain U-19 European champions](<Base64-Ima",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/vuskovic"
+      },
+      "ref": "raw_inputs.1.subpage.7.chunk.10",
+      "source": "web",
+      "url": "https://soccersolver.com/vuskovic"
+    },
+    {
+      "confidence": "medium",
+      "content": "ead Full Article ↗**](https://soccersolver.com/nastic) [![Spain U-19 European champions](<Base64-Image-Removed>)\\\\\n\n\n\n\n\n\n\n\n\n[Privacy Policy](https://soccersolver.com/vuskovic#) [Terms & Conditions](https://soccersolver.com/vuskovic#)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/vuskovic"
+      },
+      "ref": "raw_inputs.1.subpage.7.chunk.11",
+      "source": "web",
+      "url": "https://soccersolver.com/vuskovic"
+    },
+    {
+      "confidence": "medium",
+      "content": "# European U-19 Champions! the five assets that map out Spain's future.\n\nSpain is once again ruling Europe at U-19 level, and beyond the trophy, this generation leaves an obvious question for clubs, scouts and investors: which of these players are the best assets?\n\n![Spain U-19 European champions team](<Base64-Image-Removed>)\n\n\nThis is where SoccerSolver offers a reading that goes beyond the scout's eye, treating each player's value like that of a financial asset. To read the cards properly, it helps to be clear on the two projections the platform uses:\n\n- **Predicted Value:** what the model expects the player to be worth in 1, 2 and 3 years **if he stays in his current conditions** (same cl",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/spainsub"
+      },
+      "ref": "raw_inputs.1.subpage.8.chunk.1",
+      "source": "web",
+      "url": "https://soccersolver.com/spainsub"
+    },
+    {
+      "confidence": "medium",
+      "content": "xpects the player to be worth in 1, 2 and 3 years **if he stays in his current conditions** (same club, role and level). It's the realistic scenario, the inertia.\n- **Fair Price:** the maximum value he could reach **if he accessed optimal conditions** —the ideal club, league and role for his profile. It's a ceiling of potential, not an immediate sale price. The gap between the two figures is precisely the potential still to be unlocked.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/spainsub"
+      },
+      "ref": "raw_inputs.1.subpage.8.chunk.2",
+      "source": "web",
+      "url": "https://soccersolver.com/spainsub"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Thiago Pitarch — the crown jewel\n\n's central midfielder is, by some distance, the most valuable asset of the generation. He already starts from a current value of **€18.5M** —well above the rest— and his realistic path is solid and rising (€23.7M → €27.9M → €31.5M over three years). But what sets his profile apart is the **Fair Price of €113.6M at three years**: a ceiling that multiplies his current value more than sixfold, and which already sits at €67.1M in the first year. He is also the only profile combining the highest absolute ceiling with the most decisive position (central midfield) and the youngest age in the group (18). If Madrid gives him minutes, the gap between his €31M reali",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/spainsub"
+      },
+      "ref": "raw_inputs.1.subpage.8.chunk.3",
+      "source": "web",
+      "url": "https://soccersolver.com/spainsub"
+    },
+    {
+      "confidence": "medium",
+      "content": "and the youngest age in the group (18). If Madrid gives him minutes, the gap between his €31M realistic value and his €113M potential is the single biggest appreciation opportunity in the whole squad.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/spainsub"
+      },
+      "ref": "raw_inputs.1.subpage.8.chunk.4",
+      "source": "web",
+      "url": "https://soccersolver.com/spainsub"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Jorge Salinas — the highest absolute ceiling after Pitarch\n\nRacing's left-back is the second-highest ceiling of the generation in absolute terms: a **Fair Price of €31.7M at three years**, starting from €7.5M. His realistic path is more contained (€8.1M → €9M → €10.1M), which signals that the bulk of his value lies in untapped potential rather than in inertia: a profile whose leap depends heavily on stepping up to a higher-level club. The scarcity of reliable left-backs works in his favor.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/spainsub"
+      },
+      "ref": "raw_inputs.1.subpage.8.chunk.5",
+      "source": "web",
+      "url": "https://soccersolver.com/spainsub"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Xavi Espart — the most convex\n\nBarça's right-back is the most interesting case in terms of relative return. Starting from a modest value ( **€4.5M**), he has the **highest ceiling multiple in the group: 6.7×** (Fair Price of €30.3M at three years). And unlike others, he doesn't rely solely on the optimal scenario: his own **Predicted Value already grows strongly** (€4.5M → €8.2M → €13M), almost tripling on the realistic path. In other words, even if nothing extraordinary happens, the market expects him to rise sharply; and if he unlocks his potential, the runway is enormous. Buying a profile with that dual engine cheaply is any selling club's dream.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/spainsub"
+      },
+      "ref": "raw_inputs.1.subpage.8.chunk.6",
+      "source": "web",
+      "url": "https://soccersolver.com/spainsub"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Buba Sangaré — late-acceleration potential\n\nElche's right-back is the \"cheapest\" at the outset ( **€4M**), but his Fair Price hides a striking pattern: barely €5.8M at one year, but **€12.6M at two and €20.5M at three** (5.1× his current value). That is, his ceiling doesn't spike immediately but **accelerates over time**: a medium-to-long-term profile, ideal for a club with patience and a gradual minutes plan. At 18, time is on his side.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/spainsub"
+      },
+      "ref": "raw_inputs.1.subpage.8.chunk.7",
+      "source": "web",
+      "url": "https://soccersolver.com/spainsub"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Daniel Yáñez — the most contained, but with room\n\n's right winger closes the group with the most modest figures: **€3.5M current value and a Fair Price of €13.4M at three years** (3.8×). His realistic path is understated (€4.2M → €5M → €5.5M), placing most of his value in the optimal-conditions potential. As a winger at a fiercely competitive club, his challenge is clear: find the minutes that turn that ceiling into reality.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/spainsub"
+      },
+      "ref": "raw_inputs.1.subpage.8.chunk.8",
+      "source": "web",
+      "url": "https://soccersolver.com/spainsub"
+    },
+    {
+      "confidence": "medium",
+      "content": "## The bigger picture\n\nBeyond the title, the financial analysis confirms that **this generation has real substance.** There's an undisputed leader — **Thiago Pitarch**, with a nine-figure ceiling and the most valuable position—, a maximum-efficiency asset — **Xavi Espart**, with the best potential-to-price ratio—, and three full-back and wide profiles with runways between 3.8× and 5.1× that, well managed, can multiply their value.\n\nThe common thread sums up SoccerSolver's philosophy: in almost all of them, the **Fair Price doubles or triples the Predicted Value.** The talent is there; what will decide how much of that potential converts into euros is the environment —minutes, level and role—",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/spainsub"
+      },
+      "ref": "raw_inputs.1.subpage.8.chunk.9",
+      "source": "web",
+      "url": "https://soccersolver.com/spainsub"
+    },
+    {
+      "confidence": "medium",
+      "content": "l decide how much of that potential converts into euros is the environment —minutes, level and role— that each club manages to give them. European champions today; assets with enormous appreciation upside tomorrow.\n\n\n\nNEW SIGNING **Why Brighton’s €54M may be the bargain of the season** **Read Full Article ↗**](https://soccersolver.com/vuskovic) [![](<Base64-Image-Removed>)\\\\\nNEW SIGNING **Why Brighton’s €54M may be the bargain of the season** **Read Full Article ↗**](https://soccersolver.com/vuskovic) [![](<Base64-Image-Removed>)\\\\\n\n\n\n\n\n\n\n\n\n[Privacy Policy](https://soccersolver.com/spainsub#) [Terms & Conditions](https://soccersolver.com/spainsub#)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/spainsub"
+      },
+      "ref": "raw_inputs.1.subpage.8.chunk.10",
+      "source": "web",
+      "url": "https://soccersolver.com/spainsub"
+    },
+    {
+      "confidence": "medium",
+      "content": "# 'Mateus Fernandes: is the midfielder Tottenham just signed worth €99M?'\n\nAt 21, under contract until 2031 and with a track record of value growth that borders on the surreal, Mateus Fernandes arrives at Tottenham for €99M. The question isn't whether he's a good player —the numbers say he is— but whether the price paid makes sense as an investment. And that's where the profile gets interesting, because the indicators point in two opposite directions.\n\n![Mateus Fernandes holding a Tottenham shirt at his presentation](<Base64-Image-Removed>)\n\n_At SoccerSolver we work with three references for each player: the **current market value**, our model's **prediction** at one, two and three years, an",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/mateus"
+      },
+      "ref": "raw_inputs.1.subpage.9.chunk.1",
+      "source": "web",
+      "url": "https://soccersolver.com/mateus"
+    },
+    {
+      "confidence": "medium",
+      "content": "ach player: the **current market value**, our model's **prediction** at one, two and three years, and the **fair price**, the \"fair\" value obtained by extrapolating the trend of recent valuations and damping it for age. The most interesting insight appears when those three figures diverge._",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/mateus"
+      },
+      "ref": "raw_inputs.1.subpage.9.chunk.2",
+      "source": "web",
+      "url": "https://soccersolver.com/mateus"
+    },
+    {
+      "confidence": "medium",
+      "content": "## The track record: a textbook asset\n\nHis **historical CAGR of +386.4%** —the average annual rate at which his value has grown over his career— and a **total return of +233.3%** —the cumulative appreciation since his early days— describe a value curve that has risen almost vertically, crowned by a **Career Value Slope of +2,253%**, that is, the steepness of that value curve, which here is extraordinarily sharp. The **6-month rolling return (+56.3%)** —how much he has appreciated over the last half-year— confirms that the acceleration is recent, not old news. He has reached his **peak market value (€50M)** —the highest point of his entire career— right now, at 21, placing him in the top 14%",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/mateus"
+      },
+      "ref": "raw_inputs.1.subpage.9.chunk.3",
+      "source": "web",
+      "url": "https://soccersolver.com/mateus"
+    },
+    {
+      "confidence": "medium",
+      "content": "alue (€50M)** —the highest point of his entire career— right now, at 21, placing him in the top 14% of his category.\n\nBut the truly striking part is the risk-return combination:\n\n- **Max Drawdown: 0.0%.** This metric measures the largest drop in value from a peak to the following trough. In his case, his value has never fallen: not a single meaningful correction in his entire career.\n- **Downside Volatility: 0.0%** —the portion of the swings that corresponds only to downward moves— **and an annual historical VaR of just €1.6M (3.2%)** —the maximum loss to be expected in a bad year based on his history. Realized loss risk has been nil.\n- **Sharpe Ratio of 3.28 (2.18 over one year).** The Shar",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/mateus"
+      },
+      "ref": "raw_inputs.1.subpage.9.chunk.4",
+      "source": "web",
+      "url": "https://soccersolver.com/mateus"
+    },
+    {
+      "confidence": "medium",
+      "content": "history. Realized loss risk has been nil.\n- **Sharpe Ratio of 3.28 (2.18 over one year).** The Sharpe measures how much return you get per unit of risk taken; a value above 3 is excellent and means the appreciation has come with very little \"bad\" volatility. The **Sortino** (a variant that only penalizes drops, not sharp rises) and the **Calmar** (return versus the worst drawdown suffered) appear undefined precisely because there are no drops to penalize: the model finds no downside to divide by.\n\nIn scouting terms: he's a young asset, in explosive growth, without a single stumble. As a track record, he's the kind any sporting director wants in their portfolio.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/mateus"
+      },
+      "ref": "raw_inputs.1.subpage.9.chunk.5",
+      "source": "web",
+      "url": "https://soccersolver.com/mateus"
+    },
+    {
+      "confidence": "medium",
+      "content": "## The warning sign: the future doesn't match the past\n\nHere the profile splits in two. Against a flawless track record, the forward-looking metrics turn red.\n\nThe **forward ROI is -14.7%** —the expected return from here on out, which is negative— and the **Expected Value at 1 year** —the market value forecast twelve months out— falls to €42.7M from the current €50M. The **Predicted Value** —what he'd be worth in the future if he stays in the same conditions as today— doesn't recover over the medium term: €42.7M (1 year) → €44.6M (2 years) → €48.4M (3 years), always below today's market value. The **Upside Potential is negative: -€1.6M (-3.3%)**; this metric measures the room left to appreci",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/mateus"
+      },
+      "ref": "raw_inputs.1.subpage.9.chunk.6",
+      "source": "web",
+      "url": "https://soccersolver.com/mateus"
+    },
+    {
+      "confidence": "medium",
+      "content": "The **Upside Potential is negative: -€1.6M (-3.3%)**; this metric measures the room left to appreciate, and in negative territory it signals there's virtually no headroom from the current level. In other words, the model considers that his market value, **as things stand now, has topped out** and that the appreciation is running out of steam.\n\nOn top of that comes the one risk metric that spikes: **1-year volatility of 107.2%** —how much his value swings over the last year. After years of clean growth, the model detects a phase of far greater uncertainty about where the price is heading.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/mateus"
+      },
+      "ref": "raw_inputs.1.subpage.9.chunk.7",
+      "source": "web",
+      "url": "https://soccersolver.com/mateus"
+    },
+    {
+      "confidence": "medium",
+      "content": "## The key contradiction: Fair Price vs. Predicted Value\n\nThe point to grasp in order to judge the signing is the divergence between two different projections of the same player:\n\n- The **Fair Price** is the maximum value he _could_ reach **if he accessed optimal conditions** —the ideal club, league and role for his profile— regardless of where he plays now. It's a ceiling of potential, not an immediate sale price. The model puts it at €90.4M at 1 year (+80.9%, top 7%) and climbing sharply: €127.6M at 2 years and €182.7M at 3 years. In other words, his real ceiling, in the right environment, is far higher than his value today.\n- The **Predicted Value / Expected Value** is the flip side: the",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/mateus"
+      },
+      "ref": "raw_inputs.1.subpage.9.chunk.8",
+      "source": "web",
+      "url": "https://soccersolver.com/mateus"
+    },
+    {
+      "confidence": "medium",
+      "content": "s far higher than his value today.\n- The **Predicted Value / Expected Value** is the flip side: the realistic projection **if everything stays as it is now**. And it says the opposite: the market price stalls or drifts down toward €42-48M.\n\nThat tension is the essence of the case. The Fair Price says \"he could be worth much more if he lands in the ideal spot\"; the Predicted Value says \"in his current conditions, the market won't revalue him.\" One measures maximum potential; the other, realistic inertia. The gap between the two is, precisely, the potential yet to be unlocked.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/mateus"
+      },
+      "ref": "raw_inputs.1.subpage.9.chunk.9",
+      "source": "web",
+      "url": "https://soccersolver.com/mateus"
+    },
+    {
+      "confidence": "medium",
+      "content": "## The verdict on the €99M\n\nTottenham hasn't landed a bargain. They've paid:\n\n- **~2x his current market value** (€50M),\n- **above even his 1-year Fair Price** (€90.4M) —that is, more than he'd be worth at twelve months even in the best-case scenario—,\n- and at a moment when the realistic projection points to stagnation or a decline in resale value over the short-to-medium term.\n\nIf the criterion is _trading_ —buy to appreciate and sell at a profit in 2-3 years— the deal is expensive and risky: the Predicted Value suggests he'd struggle to recoup the €99M on the market in the short term, and a book loss could be recorded.\n\nIf the criterion is _long-term investment in a proven, high-quality a",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/mateus"
+      },
+      "ref": "raw_inputs.1.subpage.9.chunk.10",
+      "source": "web",
+      "url": "https://soccersolver.com/mateus"
+    },
+    {
+      "confidence": "medium",
+      "content": "book loss could be recorded.\n\nIf the criterion is _long-term investment in a proven, high-quality asset_, the reading improves: the €99M fee sits between the Fair Price at 1 year (€90M) and at 2 years (€127.6M). That is, you pay upfront for a ceiling of potential the model believes is reachable **if the club can give him the optimal environment**. Add a very long contract (2031), a nil historical drawdown and a Sharpe of 3.28, and you're buying a profile with extremely low sporting risk and a very high ceiling.\n\nIn short: this isn't an opportunistic signing but a **conviction bet**. The price prices in Fernandes reaching his Fair Price, not his current market value. It's good business if th",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/mateus"
+      },
+      "ref": "raw_inputs.1.subpage.9.chunk.11",
+      "source": "web",
+      "url": "https://soccersolver.com/mateus"
+    },
+    {
+      "confidence": "medium",
+      "content": "prices in Fernandes reaching his Fair Price, not his current market value. It's good business if the club trusts the potential and gives him the conditions to unlock it (and is patient); it's an expensive, fragile one if they expected to flip him quickly for resale. Given his age, his contractual lock-in and the total absence of drawdowns in his history, it leans toward the former —provided that 107% one-year volatility doesn't turn into the first real correction of his career.\n\n\n\nSTATEMENT **SoccerSolver closes its €850K investment round** **Read Full Article ↗**](https://soccersolver.com/round) [![Ismael Saibari celebrating for Morocco](<Base64-Image-Removed>)\\\\\nSTATEMENT **SoccerSolver c",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/mateus"
+      },
+      "ref": "raw_inputs.1.subpage.9.chunk.12",
+      "source": "web",
+      "url": "https://soccersolver.com/mateus"
+    },
+    {
+      "confidence": "low",
+      "content": "Web evidence sampling subpage=9: selected 12 of 13 chunks; strategic prioritization=enabled.",
+      "evidence_type": "acquisition.evidence_sampling",
+      "metadata": {
+        "provider": "web",
+        "selected_chunks": 12,
+        "source_class": "acquisition_metadata",
+        "strategic_prioritization": true,
+        "subpage_index": 9,
+        "total_chunks": 13
+      },
+      "ref": "raw_inputs.1.diagnostics.sampling.subpage.9",
+      "source": "web",
+      "url": "https://soccersolver.com/mateus"
+    },
+    {
+      "confidence": "medium",
+      "content": "# The 3 Strikers of the World Cup.\n\nA strong World Cup moves the market. Three forwards prove it this summer —Folarin Balogun (AS Monaco), Ismael Saibari (just signed by FC Bayern Münich) and Brian Brobbey (Sunderland)— and, seen through our valuation models, each tells a very different financial story. For every player we weigh three references: the current market value, our model's prediction at one, two and three years, and the fair price, the \"fair\" value obtained by extrapolating the recent valuation trend. When those figures diverge, the interesting signal appears.\n\n![Ismael Saibari celebrating for Morocco](<Base64-Image-Removed>)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/strikerswc"
+      },
+      "ref": "raw_inputs.1.subpage.10.chunk.1",
+      "source": "web",
+      "url": "https://soccersolver.com/strikerswc"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Folarin Balogun (Monaco, €40M).\n\nThe most speculative of the three. His fair price explodes to **€99.8M at one year** and climbs to €155M at three, far above a cautious model prediction of €45M tapering to €33.8M. That gap between prediction and fair price is the widest of the trio, which means both the highest upside and the highest risk: the market has yet to settle on his mature value.\n\nHis metrics capture a player in a hot streak but with a bumpy history. The six-month rolling return was **+66.7%**, with a one-year Sharpe of **1.63** and a one-year Sortino of **3.86** —excellent in the short term— yet he carries a maximum drawdown of 40% and annual volatility of 41%. Whoever signs him",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/strikerswc"
+      },
+      "ref": "raw_inputs.1.subpage.10.chunk.2",
+      "source": "web",
+      "url": "https://soccersolver.com/strikerswc"
+    },
+    {
+      "confidence": "medium",
+      "content": "short term— yet he carries a maximum drawdown of 40% and annual volatility of 41%. Whoever signs him is buying form, not stability.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/strikerswc"
+      },
+      "ref": "raw_inputs.1.subpage.10.chunk.3",
+      "source": "web",
+      "url": "https://soccersolver.com/strikerswc"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Ismael Saibari (new at Bayern, €40M).\n\nThe most explosive appreciation in the analysis, and now a closed deal. His historical total return is a staggering **+7,011%** and his CAGR **+247.6%**, achieved with an outstanding risk-return balance: a one-year Sharpe of **1.86**, a historical Calmar of **10.6** and a return-to-drawdown ratio of **300**, all with contained annual volatility of just 21%.\n\nThe model is more conservative here, projecting stabilisation —€39.8M at one year, €35.8M at two and €28.5M at three— while the fair price rises in orderly fashion to €54.6M, €62.8M and €71.1M. The prediction-to-fair-price gap is real but far narrower than Balogun's, pointing to a more settled va",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/strikerswc"
+      },
+      "ref": "raw_inputs.1.subpage.10.chunk.4",
+      "source": "web",
+      "url": "https://soccersolver.com/strikerswc"
+    },
+    {
+      "confidence": "medium",
+      "content": "prediction-to-fair-price gap is real but far narrower than Balogun's, pointing to a more settled valuation. His move to Bayern is the real-market confirmation of that curve, and the three-year fair price suggests there is still room to grow if his progression continues in Munich.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/strikerswc"
+      },
+      "ref": "raw_inputs.1.subpage.10.chunk.5",
+      "source": "web",
+      "url": "https://soccersolver.com/strikerswc"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Brian Brobbey (Sunderland, €30M).\n\nThe healthiest, most balanced profile. He shows the lowest risk of the group: a maximum drawdown of just **9.1%**, a historical CAGR of **+28%**, a historical Sharpe of **0.66** and a Calmar of **3.08**, with a solid value-stability index. The model sees him as essentially flat (around €30M across all horizons), while the fair price is more optimistic —€52.8M rising to €80.3M— reflecting his recent recovery from a dip to €20M. This is reliability rather than speculation: the profile a club buys for consistency.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/strikerswc"
+      },
+      "ref": "raw_inputs.1.subpage.10.chunk.6",
+      "source": "web",
+      "url": "https://soccersolver.com/strikerswc"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Conclusions\n\nIn all three cases the fair price sits above the current market value, a sign of headroom after a good World Cup. And in all three, the distance between that fair price and the model's more conservative prediction is the best thermometer of the risk in the deal: huge for Balogun, intermediate for Brobbey, and more contained for Saibari —whose transfer to Bayern has already put a real price on that reading.\n\n\n\nNEW SIGNING **Is Tottenham’s new midfielder worth €99M?** **Read Full Article ↗**](https://soccersolver.com/mateus) [![Austria players celebrating at the 2026 World Cup](<Base64-Image-Removed>)\\\\\nNEW SIGNING **Is Tottenham’s new midfielder worth €99M?** **Read Full Artic",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/strikerswc"
+      },
+      "ref": "raw_inputs.1.subpage.10.chunk.7",
+      "source": "web",
+      "url": "https://soccersolver.com/strikerswc"
+    },
+    {
+      "confidence": "medium",
+      "content": "Base64-Image-Removed>)\\\\\nNEW SIGNING **Is Tottenham’s new midfielder worth €99M?** **Read Full Article ↗**](https://soccersolver.com/mateus) [![Austria players celebrating at the 2026 World Cup](<Base64-Image-Removed>)\\\\\n\n\n\n\n\n\n\n\n\n[Privacy Policy](https://soccersolver.com/strikerswc#) [Terms & Conditions](https://soccersolver.com/strikerswc#)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/strikerswc"
+      },
+      "ref": "raw_inputs.1.subpage.10.chunk.8",
+      "source": "web",
+      "url": "https://soccersolver.com/strikerswc"
+    },
+    {
+      "confidence": "medium",
+      "content": "# 'Austria's Financial Assets'.\n\nOn Thursday Austria meets Spain at the World Cup, and it does so backed by a generation that competes not only on the pitch but also on the market, where these players have appreciated sharply. Three names carry much of that story: Paul Wanner, Nicolas Seiwald and David Affengruber. They embody three distinct profiles —the young talent in full bloom, the dependable holding midfielder and the centre-back who has made the definitive leap— and, read through our valuation models, they tell three equally different financial tales.\n\n![Austria players celebrating at the 2026 World Cup](<Base64-Image-Removed>)\n\n_At SoccerSolver we work with three references for each",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/austriawc"
+      },
+      "ref": "raw_inputs.1.subpage.11.chunk.1",
+      "source": "web",
+      "url": "https://soccersolver.com/austriawc"
+    },
+    {
+      "confidence": "medium",
+      "content": "he 2026 World Cup](<Base64-Image-Removed>)\n\n_At SoccerSolver we work with three references for each player: the **current market value**, our model's **prediction** at one, two and three years, and the **fair price**, the “fair” value obtained by extrapolating the trend of recent valuations and damping it for age. The most interesting insight appears when those three figures diverge._",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/austriawc"
+      },
+      "ref": "raw_inputs.1.subpage.11.chunk.2",
+      "source": "web",
+      "url": "https://soccersolver.com/austriawc"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Paul Wanner (PSV Eindhoven): the bet on the future.\n\nAt 20, Wanner is the youngest of the three and the one with the most upside ahead. His current market value is **€22 million**, a figure that makes sense within an almost uninterrupted growth path: he rose from €3 million in 2023 to €22 million in the spring of 2026, stringing together stages of progression at Elversberg, Heidenheim and now PSV Eindhoven.\n\nHe is the only one of the three for whom our model projects sustained growth: the prediction climbs to **€26.2 million at one year, €28.6 million at two and €30.1 million at three**. The fair price is even more optimistic — **€42.5 / 61.2 / 79.9 million**— because the extrapolation of",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/austriawc"
+      },
+      "ref": "raw_inputs.1.subpage.11.chunk.3",
+      "source": "web",
+      "url": "https://soccersolver.com/austriawc"
+    },
+    {
+      "confidence": "medium",
+      "content": "e fair price is even more optimistic — **€42.5 / 61.2 / 79.9 million**— because the extrapolation of his upward trend, combined with his youth, pushes the theoretical ceiling sharply higher. That wide gap between the model's cautious prediction and the fair price is precisely the signature of a high-potential, high-risk asset: the market has yet to settle on his mature value.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/austriawc"
+      },
+      "ref": "raw_inputs.1.subpage.11.chunk.4",
+      "source": "web",
+      "url": "https://soccersolver.com/austriawc"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Nicolas Seiwald (RB Leipzig): reliability over spectacle.\n\nIf Wanner is volatility, Seiwald is calm. The 25-year-old RB Leipzig holding midfielder carries a market value of **€25 million** and, above all, the most stable profile of the three: his value-stability index (3.23) is the highest in the group, with annual volatility of just 17% and a maximum drawdown contained at 20%. His valuation has barely shifted in recent years, drifting gently between €16 and €25 million.\n\nHere the two indicators point in opposite directions, and that is what makes him interesting. The model's prediction is slightly downward — **€26.1 million at one year, €24.0 million at two and €21.0 million at three**—,",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/austriawc"
+      },
+      "ref": "raw_inputs.1.subpage.11.chunk.5",
+      "source": "web",
+      "url": "https://soccersolver.com/austriawc"
+    },
+    {
+      "confidence": "medium",
+      "content": "slightly downward — **€26.1 million at one year, €24.0 million at two and €21.0 million at three**—, penalised by age and position. The fair price, by contrast, rises in orderly fashion to **€41.4 / 49.4 / 57.5 million**, because his historical trend remains positive. It is the typical contrast of an established footballer: the model sees little room for explosive growth, while his steady trajectory suggests the market could keep recognising value.\n\nHis positive historical CAGR (+3.6%) and a modest but stable Sharpe ratio paint exactly what he is: a low-risk asset, free of shocks, from whom a club expects consistency rather than appreciation. Against Spain, he will be the balance in Austria'",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/austriawc"
+      },
+      "ref": "raw_inputs.1.subpage.11.chunk.6",
+      "source": "web",
+      "url": "https://soccersolver.com/austriawc"
+    },
+    {
+      "confidence": "medium",
+      "content": "club expects consistency rather than appreciation. Against Spain, he will be the balance in Austria's midfield.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/austriawc"
+      },
+      "ref": "raw_inputs.1.subpage.11.chunk.7",
+      "source": "web",
+      "url": "https://soccersolver.com/austriawc"
+    },
+    {
+      "confidence": "medium",
+      "content": "## David Affengruber (Elche CF): the leap that changed his curve.\n\nOf the three, Affengruber offers the best risk-return profile in our data. The 25-year-old centre-back is now worth **€20 million**, after a notable rise: from €2.5 million at Sturm Graz to today's €20 million at Elche, with an accelerated final stretch.\n\nThat acceleration explains some outstanding metrics at his calculation date: a historical CAGR of **+87.5%**, a total return of **+125%**, a Sharpe ratio of **2.42** and, most strikingly, a maximum drawdown of **0%** —his value had never retreated—. These are the numbers of an asset at its peak.\n\nA precise reading is warranted, however. Those metrics were calculated when he",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/austriawc"
+      },
+      "ref": "raw_inputs.1.subpage.11.chunk.8",
+      "source": "web",
+      "url": "https://soccersolver.com/austriawc"
+    },
+    {
+      "confidence": "medium",
+      "content": "asset at its peak.\n\nA precise reading is warranted, however. Those metrics were calculated when he was still worth €9 million, before his latest jump to €20 million, so indicators such as “upside potential” have fallen out of date on the low side. The most up-to-date picture comes from the prediction — **€22.8 million at one year, €20.6 million at two and €18.9 million at three**— and the fair price — **€41.3 / 52.8 / 64.3 million**—. The model is cautious and sees little additional growth, while the fair price, faithful to his trajectory, comfortably doubles his market value. For Austria, he is the defensive solidity that will have to measure up to the Spanish attack.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/austriawc"
+      },
+      "ref": "raw_inputs.1.subpage.11.chunk.9",
+      "source": "web",
+      "url": "https://soccersolver.com/austriawc"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Conclusions\n\nThree players, three curves. Wanner is the prospect whose value has no defined ceiling yet; Seiwald, the reliability the market prices slowly; Affengruber, the recent consolidation that has driven his return metrics. In all three cases the fair price sits above both the market value and the model's prediction, a sign that their historical trend remains bullish. And in all three, the distance between that optimistic fair price and the more conservative model prediction is the best thermometer of risk: narrow for Seiwald and Affengruber, wide for Wanner.\n\n\n\nWORLD CUP **The three strikers moving the market** **Read Full Article ↗**](https://soccersolver.com/strikerswc) [![Real B",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/austriawc"
+      },
+      "ref": "raw_inputs.1.subpage.11.chunk.10",
+      "source": "web",
+      "url": "https://soccersolver.com/austriawc"
+    },
+    {
+      "confidence": "medium",
+      "content": "strikers moving the market** **Read Full Article ↗**](https://soccersolver.com/strikerswc) [![Real Betis Balompié and SoccerSolver strategic partnership](https://soccersolver.com/assets/betis-cover.png)\\\\\nWORLD CUP **The three strikers moving the market** **Read Full Article ↗**](https://soccersolver.com/strikerswc) [![Real Betis Balompié and SoccerSolver strategic partnership](https://soccersolver.com/assets/betis-cover.png)\\\\\n\n\n\n\n\n\n\n\n\n[Privacy Policy](https://soccersolver.com/austriawc#) [Terms & Conditions](https://soccersolver.com/austriawc#)",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy",
+        "subpage_url": "https://soccersolver.com/austriawc"
+      },
+      "ref": "raw_inputs.1.subpage.11.chunk.11",
+      "source": "web",
+      "url": "https://soccersolver.com/austriawc"
+    },
+    {
+      "confidence": "low",
+      "content": "soccersolver --- title: SoccerSolver description: \"The #1 AI-Investment Software for soccer clubs.\" published: \"Jul 29, 2026, 7:53 PM UTC\" --- ... [About Us](./about-us) ... [Contact Us](./contact-us ... # The #1 AI Investment Software for soccer clubs. ... We help clubs to earn more money by trading players profitably. ... ## How does the Software work? ... “We help clubs make money through smarter player buying and selling.” ... ## We run 100+ ML models against your club's constraints, budget, and strategy. The result: a ranked list of the optimal signings for maximum long-term value. Watch what would have happened to PSG from 2015-2024 if they had used SoccerSolver. ## Successful Simulati",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "2026-06-06T00:00:00.000Z",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.0",
+      "source": "exa",
+      "url": "https://soccersolver.com/"
+    },
+    {
+      "confidence": "low",
+      "content": "--- title: SoccerSolver description: \"The #1 AI-Investment Software for soccer clubs.\" published: \"Jul 29, 2026, 7:53 PM UTC\" --- ... [Home](./) ... [About Us](./about-us) [News & Media](./media-and-press) [Validation Meetings](./validation-meetings) [New Way of Signings](./new-way-of-signings) [Research](./research) [Detected Players](./detected-players) [Club Simulations](./club-simulations) ... [The Algorithms](./the-algorithms) [The Software](./the-software) [Let's Collaborate](./collaborate) [Contact Us](./contact-us) ... # A team defined by impact, not by names. ... Nº1 Disruptive Innovation Startup. ... Founded by the Government of the Canary Islands, it is the number one start-up in ",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.1",
+      "source": "exa",
+      "url": "https://soccersolver.com/about-us"
+    },
+    {
+      "confidence": "low",
+      "content": "--- title: SoccerSolver description: \"The #1 AI-Investment Software for soccer clubs.\" published: \"Jul 10, 2026, 3:24 AM UTC\" --- ... [About Us](./about-us) ... [The Algorithms](./the-algorithms) ... [The Software](./the-software) ... [Contact Us](./contact-us) ... # Software Explanations ... # Discover all the features ... ### 1. Onboarding Personalization ... ### 2. Principal Dashboard ... ### 3. Main Player List ... ### 4. Player Profile - Performance Analytics ... ### 5. Player Market Intelligence ... ### 6. Career Insights ... ### 7. Scouting Notes ... ### 8. Squad Players ... ### 9. Team Performance Overview ... ### 10. Team Financial Overview ... ### 11. Team Performance - Tactical An",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.2",
+      "source": "exa",
+      "url": "https://soccersolver.com/the-software"
+    },
+    {
+      "confidence": "low",
+      "content": "--- title: SoccerSolver description: \"The #1 AI-Investment Software for soccer clubs.\" published: \"Jul 10, 2026, 3:24 AM UTC\" ... [Home](./) ... [About Us](./about-us) ... [News & Media](./media-and-press) ... [Validation Meetings](./validation-meetings) [New Way of Signings](./new-way-of-signings) [Research](./research) [Detected Players](./detected-players) ... [Club Simulations](./club-simulations) ... [The Algorithms](./the-algorithms) [The Software](./the-software) ... [Let's Collaborate](./collaborate) ... [Contact Us](./contact-us) ... Transfer Strategy Simulation ... [Long Video Simulation](./detected-players ... ZzS ... - [alejandro@soccersolver.com](mailto:alejandro@soccersolver.co",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.3",
+      "source": "exa",
+      "url": "https://soccersolver.com/club-simulations"
+    },
+    {
+      "confidence": "low",
+      "content": "Terms of Service --- title: SoccerSolver description: \"The #1 AI-Investment Software for soccer clubs.\" published: \"Jul 3, 2026, 6:39 PM UTC\" --- ... [About Us](./about-us) ... Media](./media-and-press) ... [Validation Meetings](./validation-meetings) ... [New Way of Signings](./new-way-of-signings) ... [Research](./research) ... [Detected Players](./detected-players ... [Club Simulations](./club-simulations) ... [The Algorithms](./the-algorithms) ... [The Software](./the-software) ... [Contact Us](./contact-us) ... *SoccerSolver is a product of BALONO SUMPTER, S.L.U. — C/ Clavel No 2, CP 35002, Las Palmas de Gran Canaria, Spain — privacy@soccersolver.com* ... [About Us](./about-us) ... [The",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.4",
+      "source": "exa",
+      "url": "https://soccersolver.com/terms-of-service"
+    },
+    {
+      "confidence": "low",
+      "content": "--- title: SoccerSolver description: \"The #1 AI-Investment Software for soccer clubs.\" published: \"Jul 10, 2026, 3:24 AM UTC\" ... [About Us](./about-us) ... [News & Media](./media-and-press) ... [Validation Meetings](./validation-meetings) ... [New Way of Signings](./new-way-of-signings) ... [Research](./research) [Detected Players](./detected-players) ... [Club Simulations](./club-simulations) ... [The Algorithms](./the-algorithms) ... [The Software](./the-software) ... [Let's Collaborate](./collaborate) ... [Contact Us](./contact-us) ... 200 Validations ... ## What make us unique ... Variables per player, match and competition. ... personalised consulting service ... - [alejandro@soccersol",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.5",
+      "source": "exa",
+      "url": "https://soccersolver.com/validation-meetings"
+    },
+    {
+      "confidence": "low",
+      "content": "Home About Us News & Media Validation Meetings New Way of Signings Research Detected Players Club Simulations The Algorithms The Software Let's Collaborate Contact Us # Let's Collaborate Navigation Home About Us Validation Meetings New Way of Signings Our Values Research Science & Business Success Simulations The Algorithms The Software Contact Us Social Linkedin Instagram TikTok Privacy Policy Terms of Service All rights reserved. © Home About Us News & Media Validation Meetings New Way of Signings Research Detected Players Club Simulations The Algorithms The Software Let's Collaborate Contact Us # Let's Collaborate Navigation Home About Us Validation Meetings New Way of Signings Our Values",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.6",
+      "source": "exa",
+      "url": "https://soccersolver.com/collaborate"
+    },
+    {
+      "confidence": "low",
+      "content": "SoccerSolver Raises $968K Pre | Signalbase SoccerSolver Raises $968K Pre | Signalbase ... The complex world of professional soccer player transfers, often a high-stakes gamble, is getting a new layer of AI-driven strategy. SoccerSolver, a startup developing investment software for the sport, has secured $968K in pre-seed funding. ... The company's platform, which it describes as the #1 AI Investment Software for soccer clubs, is specifically designed to help clubs earn more money by trading players profitably, aiming to optimize financial returns from player assets. ... SoccerSolver raises an €850,000 funding round with €0 in revenue.After 6 months, more than 400 conversations with VCs and b",
+      "evidence_type": "external_proof.external_mentions",
+      "metadata": {
+        "external_identity_provenance": {
+          "candidate_strength": "strong",
+          "collector_relation": "external",
+          "collector_source_class": "external",
+          "match_method": "alias_in_title",
+          "match_score": 0.95,
+          "matched_alias": "soccersolver",
+          "policy_version": "external-identity-policy-v1",
+          "provider": "exa",
+          "requires_human_review": false,
+          "schema_version": "external-identity-provenance-v1",
+          "source_domain": "trysignalbase.com",
+          "subject_domain": "soccersolver.com"
+        },
+        "identity_match": "brand_name",
+        "intent": "external_mentions",
+        "provider": "exa",
+        "published_date": "2026-07-15T00:00:00.000Z",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.mentions.7",
+      "source": "exa",
+      "url": "https://www.trysignalbase.com/news/funding/soccersolver-raises-968k-pre"
+    },
+    {
+      "confidence": "low",
+      "content": "SoccerSolver and Media company ... clubs. SoccerSolver employs ... people, founded in ... 2025. Headquartered in Spain, with presence in United States. Its ... is distributed across Spain and India. ... - Industry: Technology, Information and Media - Type: Privately Held - Founded Year: 2025 - Homepage: soccersolver.com - Aliases: soccersolver - LinkedIn: linkedin.com/company/soccersolver - Linkedin Followers: 402 (Monthly: +4.1%) - Phone: 2015-2024 ... - [2026-08-04 · Posted · 80 reactions] [Official Announcement We are proud to announce that Real Betis...](https://www.linkedin.com/posts/soccersolver_official-announcement-we-are-proud-to-announce-activity-7490336902819262464-iuM6) > Officia",
+      "evidence_type": "external_proof.external_mentions",
+      "metadata": {
+        "external_identity_provenance": {
+          "candidate_strength": "strong",
+          "collector_relation": "external",
+          "collector_source_class": "external",
+          "match_method": "alias_in_title",
+          "match_score": 0.95,
+          "matched_alias": "soccersolver",
+          "policy_version": "external-identity-policy-v1",
+          "provider": "exa",
+          "requires_human_review": false,
+          "schema_version": "external-identity-provenance-v1",
+          "source_domain": "exa.ai",
+          "subject_domain": "soccersolver.com"
+        },
+        "identity_match": "brand_name",
+        "intent": "external_mentions",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.mentions.8",
+      "source": "exa",
+      "url": "https://exa.ai/library/organization/nnwmb8tqskp"
+    },
+    {
+      "confidence": "low",
+      "content": "SoccerSolver Funding SoccerSolver Funding | FundedIQ SoccerSolver specializing in software development for the sports and financial planning of professional football clubs SoccerSolver has raised $970k across 1 round. Its most recent round was a Pre-Seed of $970k in Jul 2026. Full funding history, investors, and team are detailed below. Date Round Amount Lead investor Jul 14, 2026 Pre-Seed $970k — Unlock the lead investor and full details for this round. Unlock funding history → Name Role LinkedIn See who runs this company — founders and key execs, with titles and LinkedIn profiles, ready to export. Unlock people data → ## SoccerSolver is featured in Funded Startups in Spain Funded Startups ",
+      "evidence_type": "external_proof.external_mentions",
+      "metadata": {
+        "external_identity_provenance": {
+          "candidate_strength": "strong",
+          "collector_relation": "external",
+          "collector_source_class": "external",
+          "match_method": "alias_in_title",
+          "match_score": 0.95,
+          "matched_alias": "soccersolver",
+          "policy_version": "external-identity-policy-v1",
+          "provider": "exa",
+          "requires_human_review": false,
+          "schema_version": "external-identity-provenance-v1",
+          "source_domain": "fundediq.co",
+          "subject_domain": "soccersolver.com"
+        },
+        "identity_match": "brand_name",
+        "intent": "external_mentions",
+        "provider": "exa",
+        "published_date": "2026-07-14T00:00:00.000Z",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.mentions.9",
+      "source": "exa",
+      "url": "https://fundediq.co/soccersolver-soccersolver-com-funding/"
+    },
+    {
+      "confidence": "low",
+      "content": "El Betis se alía con la tecnológica SoccerSolver para reforzar su análisis deportivo-financiero El Betis se alía con la tecnológica SoccerSolver para reforzar su análisis deportivo-financiero # El Betis se alía con la tecnológica SoccerSolver para reforzar su análisis deportivo-financiero El software de la startup española prestará apoyo al área deportiva en los procesos de scouting, valoración de jugadores y toma de decisiones estratégicas - ROCÍO GUEVARA Actualizado 04/08/2026 - 12:07 CEST El Betis y SoccerSolver han firmado una alianza por la que el club verdiblanco incorporará el software de análisis predictivo y financiero desarrollado por la startup española, reforzando así los proceso",
+      "evidence_type": "external_proof.news",
+      "metadata": {
+        "external_identity_provenance": {
+          "candidate_strength": "strong",
+          "collector_relation": "external",
+          "collector_source_class": "external",
+          "match_method": "alias_in_title",
+          "match_score": 0.95,
+          "matched_alias": "soccersolver",
+          "policy_version": "external-identity-policy-v1",
+          "provider": "exa",
+          "requires_human_review": false,
+          "schema_version": "external-identity-provenance-v1",
+          "source_domain": "marca.com",
+          "subject_domain": "soccersolver.com"
+        },
+        "identity_match": "brand_name",
+        "intent": "news",
+        "provider": "exa",
+        "published_date": "2026-08-04T00:00:00.000Z",
+        "result_group": "news",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.news.0",
+      "source": "exa",
+      "url": "https://www.marca.com/futbol/betis/2026/08/04/betis-alia-tecnologica-soccersolver-reforzar-analisis-deportivo-financiero.html"
+    },
+    {
+      "confidence": "low",
+      "content": "Spanish AI Sports Tech Startup SoccerSolver Secures €850,000 in Pre-Seed Funding - EU Startups News Spanish AI Sports Tech Startup SoccerSolver Secures €850,000 in Pre-Seed Funding - EU Startups News ... SoccerSolver, a Spanish startup focused on developing artificial intelligence software for professional football clubs, has announced the closure of its pre-seed funding round, raising €850,000 (approximately $909,500 USD). The capital injection marks a significant milestone for the company, which was founded in 2025 and is already attracting investor backing. ... The startup’s founding in 2025 demonstrates that investor appetite for specialized enterprise software serving niche sectors rema",
+      "evidence_type": "external_proof.news",
+      "metadata": {
+        "external_identity_provenance": {
+          "candidate_strength": "strong",
+          "collector_relation": "external",
+          "collector_source_class": "external",
+          "match_method": "alias_in_title",
+          "match_score": 0.95,
+          "matched_alias": "soccersolver",
+          "policy_version": "external-identity-policy-v1",
+          "provider": "exa",
+          "requires_human_review": false,
+          "schema_version": "external-identity-provenance-v1",
+          "source_domain": "eustartups.news",
+          "subject_domain": "soccersolver.com"
+        },
+        "identity_match": "brand_name",
+        "intent": "news",
+        "provider": "exa",
+        "published_date": "2026-07-14T00:00:00.000Z",
+        "result_group": "news",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.news.1",
+      "source": "exa",
+      "url": "https://eustartups.news/spanish-ai-sports-tech-startup-soccersolver-secures-e850000-in-pre-seed-funding/"
+    },
+    {
+      "confidence": "low",
+      "content": "SoccerSolver capta 850.000 euros para llevar la planificación deportiva con IA a más clubes SoccerSolver capta 850.000 euros para llevar la planificación deportiva con IA a más clubes ... SoccerSolver ha cerrado una ronda pre-seed de 850.000 euros para impulsar su plataforma de planificación deportiva basada en inteligencia artificial, según publicó El Referente. La startup española trabaja en una categoría donde el software empieza a entrar con más fuerza: la gestión diaria de entrenamientos, metodologías, seguimiento de jugadores y coordinación entre cuerpos técnicos. SoccerSolver capta 850.000 euros para llevar la planificación deportiva con IA a más clubes SoccerSolver ha cerrado una ron",
+      "evidence_type": "external_proof.news",
+      "metadata": {
+        "external_identity_provenance": {
+          "candidate_strength": "strong",
+          "collector_relation": "external",
+          "collector_source_class": "external",
+          "match_method": "alias_in_title",
+          "match_score": 0.95,
+          "matched_alias": "soccersolver",
+          "policy_version": "external-identity-policy-v1",
+          "provider": "exa",
+          "requires_human_review": false,
+          "schema_version": "external-identity-provenance-v1",
+          "source_domain": "elcapitaldigital.com",
+          "subject_domain": "soccersolver.com"
+        },
+        "identity_match": "brand_name",
+        "intent": "news",
+        "provider": "exa",
+        "published_date": "2026-07-18T00:00:00.000Z",
+        "result_group": "news",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.news.2",
+      "source": "exa",
+      "url": "https://elcapitaldigital.com/soccersolver-850000-euros-planificacion-deportiva-ia/"
+    },
+    {
+      "confidence": "low",
+      "content": "El Real Betis refuerza su apuesta por el ‘sportstech’ tras aliarse con SoccerSolver El Real Betis refuerza su apuesta por el ‘sportstech’ tras aliarse con SoccerSolver # El Real Betis refuerza su apuesta por el ‘sportstech’ tras aliarse con SoccerSolver ## El club de LaLiga EA Sports trabajará junto a la ‘start up’ española especializada en el análisis deportivo-financiero para los procesos internos de ‘scouting’, valoración de jugadores y toma de decisiones estratégicas. 2Playbook 4 de agosto de 2026 El Real Betis refuerza su apuesta por el sportstech. El club de LaLiga EA Sports ha firmado una alianza estratégica con SoccerSolver, start up española especializada en el análisis deportivo-fi",
+      "evidence_type": "external_proof.news",
+      "metadata": {
+        "external_identity_provenance": {
+          "candidate_strength": "strong",
+          "collector_relation": "external",
+          "collector_source_class": "external",
+          "match_method": "alias_in_title",
+          "match_score": 0.95,
+          "matched_alias": "soccersolver",
+          "policy_version": "external-identity-policy-v1",
+          "provider": "exa",
+          "requires_human_review": false,
+          "schema_version": "external-identity-provenance-v1",
+          "source_domain": "2playbook.com",
+          "subject_domain": "soccersolver.com"
+        },
+        "identity_match": "brand_name",
+        "intent": "news",
+        "provider": "exa",
+        "published_date": "2026-08-04T00:00:00.000Z",
+        "result_group": "news",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.news.3",
+      "source": "exa",
+      "url": "https://www.2playbook.com/patrocinio/real-betis-refuerza-su-apuesta-por-sportstech-aliarse-con-soccersolver_23190_102.html"
+    },
+    {
+      "confidence": "low",
+      "content": "El Betis recurre a SoccerSolver para su análisis deportivo-financiero # El Betis recurre a SoccerSolver para su análisis deportivo-financiero ## El software de la startup española prestará apoyo al área deportiva en los procesos de scouting, valoración de jugadores y toma de decisiones estratégicas ## Alineación probable del Betis ante el Arsenal La imagen del acuerdo entre Soccer Solver y el Real Betis / RBB Redacción DDS SEVILLA, 04 de agosto 2026 - 17:13 El Real Betis y SoccerSolver han firmado una alianza por la que la entidad verdiblanca incorporará el software de análisis predictivo y financiero desarrollado por la startup española, reforzando así los procesos de scouting, valoración d",
+      "evidence_type": "external_proof.news",
+      "metadata": {
+        "external_identity_provenance": {
+          "candidate_strength": "strong",
+          "collector_relation": "external",
+          "collector_source_class": "external",
+          "match_method": "alias_in_title",
+          "match_score": 0.95,
+          "matched_alias": "soccersolver",
+          "policy_version": "external-identity-policy-v1",
+          "provider": "exa",
+          "requires_human_review": false,
+          "schema_version": "external-identity-provenance-v1",
+          "source_domain": "diariodesevilla.es",
+          "subject_domain": "soccersolver.com"
+        },
+        "identity_match": "brand_name",
+        "intent": "news",
+        "provider": "exa",
+        "published_date": "2026-08-04T00:00:00.000Z",
+        "result_group": "news",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.news.4",
+      "source": "exa",
+      "url": "https://www.diariodesevilla.es/realbetis/betis-recurre-soccersolver-analisis-deportivo_0_2007654531.html"
+    },
+    {
+      "confidence": "low",
+      "content": "--- title: SoccerSolver description: \"The #1 AI-Investment Software for soccer clubs.\" published: \"Jul 10, 2026, 3:24 AM UTC\" ... ## A Software with Powerful Features. ... 16 Algorithms ... We have developed 16 algorithms in order to create a PSTO. (PreSeason Theory Optimal Solution) ... Despite the product is complex, we synthetic everything into 1 only software with the 16 functionalities. ... 750M Data ... We combine data from our suppliers and our own data with the aim of offering solutions. ... 1 Optimal Decision ... From all the optimal possible combinations, we give you the optimal solution. ... Other Interesting Features ... The New Way of Signings ... ## What Sets Soccer Solver Apar",
+      "evidence_type": "external_proof.ai_visibility",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "ai_visibility",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "ai_visibility_results",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.ai_visibility_results.2",
+      "source": "exa",
+      "url": "https://soccersolver.com/new-way-of-signings"
+    },
+    {
+      "confidence": "low",
+      "content": "Exa no_results for external proof intent 'external_profiles'. Query: \"SoccerSolver\" \"soccersolver.com\" company profile linkedin crunchbase business directory services.",
+      "evidence_type": "acquisition.no_results",
+      "metadata": {
+        "intent": "external_profiles",
+        "provider": "exa",
+        "source_class": "acquisition_metadata",
+        "status": "no_results"
+      },
+      "ref": "raw_inputs.2.exa.diagnostics.no_results.0",
+      "source": "exa",
+      "url": null
+    },
+    {
+      "confidence": "low",
+      "content": "github acquisition attempt for 'repository_proof' ended with status 'skipped'. Query: no GitHub repository links observed on owned capture.",
+      "evidence_type": "acquisition.attempt.repository_proof",
+      "metadata": {
+        "error": "",
+        "intent": "repository_proof",
+        "provider": "github",
+        "query": "no GitHub repository links observed on owned capture",
+        "source_class": "acquisition_metadata",
+        "status": "skipped"
+      },
+      "ref": "acquisition_steps.github",
+      "source": "github",
+      "url": null
+    },
+    {
+      "confidence": "low",
+      "content": "searchapi acquisition attempt for 'external_proof' ended with status 'skipped'. Query: no Exa acquisition condition eligible for SearchAPI fallback.",
+      "evidence_type": "acquisition.attempt.external_proof",
+      "metadata": {
+        "error": "",
+        "intent": "external_proof",
+        "provider": "searchapi",
+        "query": "no Exa acquisition condition eligible for SearchAPI fallback",
+        "source_class": "acquisition_metadata",
+        "status": "skipped"
+      },
+      "ref": "acquisition_steps.searchapi",
+      "source": "searchapi",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "capture_status=usable; first_fold_evaluable=True",
+      "evidence_type": "visual_capture",
+      "metadata": {
+        "capture": {
+          "available": true,
+          "capture_recovery": null,
+          "capture_variant": "viewport",
+          "captured_at": "2026-08-06T11:13:53.509892",
+          "first_fold_evaluable": true,
+          "obstruction": {
+            "confidence": 0.0,
+            "coverage_ratio": 0.0,
+            "first_impression_valid": true,
+            "present": false,
+            "severity": "none",
+            "signals": [],
+            "type": "none"
+          },
+          "path": "/data/screenshots/brand3-screenshot-jq4grrd8.png",
+          "quality": "usable",
+          "section_capture_status": null,
+          "status": "usable",
+          "structured_capture_errors": [],
+          "url_final": "https://soccersolver.com",
+          "url_requested": "https://soccersolver.com",
+          "viewport": {
+            "height": 900,
+            "width": 1440
+          }
+        },
+        "source_class": "visual_signal"
+      },
+      "ref": "visual_signature.capture",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "multimodal_semantics_unavailable copy_visual_alignment:unknown consistency:0.29",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "coherencia.C6"
+      },
+      "ref": "visual_signature.tile_signals.0",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "identity_evidence_missing logo_detected:false text_brand_mark:false confidence:0.0",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "weakens",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "brand_idea.I1"
+      },
+      "ref": "visual_signature.tile_signals.1",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "visual_signal_score:0.29 visual_tone:unknown consistency:0.29",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "weakens",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "brand_idea.I2"
+      },
+      "ref": "visual_signature.tile_signals.2",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "multimodal_semantics_unavailable first_impression:unknown polish:0.0",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "brand_idea.I3"
+      },
+      "ref": "visual_signature.tile_signals.3",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "visual_signal_score:0.72 layout_patterns:unknown",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "supports",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "brand_idea.I6"
+      },
+      "ref": "visual_signature.tile_signals.4",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "visual_signal_score:0.4 visual_density:unknown",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "weakens",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "brand_idea.I7"
+      },
+      "ref": "visual_signature.tile_signals.5",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "palette_typography_evidence_weak palette_complexity:unknown",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "weakens",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "brand_idea.I8"
+      },
+      "ref": "visual_signature.tile_signals.6",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "visual_signal_score:0.43 distinctiveness:low score:0.43",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "brand_idea.I9"
+      },
+      "ref": "visual_signature.tile_signals.7",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "multimodal_semantics_unavailable copy_visual_alignment:unknown",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "core_purpose.PR8"
+      },
+      "ref": "visual_signature.tile_signals.8",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "multimodal_semantics_unavailable visual_polish:0.0",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "magnetism.MG1"
+      },
+      "ref": "visual_signature.tile_signals.9",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "visual_signal_score:0.43 category_fit:unknown distinctiveness:0.43",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "magnetism.MG5"
+      },
+      "ref": "visual_signature.tile_signals.10",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "multimodal_semantics_unavailable copy_alignment_present:false",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "magnetism.MG7"
+      },
+      "ref": "visual_signature.tile_signals.11",
+      "source": "visual_signature",
+      "url": null
+    }
+  ],
+  "limitations": [
+    "deduplicated_raw_input_records:4"
+  ],
+  "schema_version": "brand-evidence-pack-v1",
+  "url": "https://soccersolver.com"
+}

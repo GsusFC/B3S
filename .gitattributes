@@ -1,0 +1,2 @@
+# Preserve generated human-review CSVs while treating CRLF as line endings.
+audits/evidence_vault_field_validation_v1/*.csv whitespace=cr-at-eol
