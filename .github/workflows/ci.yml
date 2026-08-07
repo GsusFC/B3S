@@ -17,6 +17,7 @@ jobs:
     env:
       B3S_TEST_DATABASE_URL: postgresql://b3s:b3s@127.0.0.1:5432/b3s_test
       B3S_ALLOW_SCHEMA_DROP: "1"
+      B3S_TEST_ALLOW_SCHEMA_DROP: "1"
     services:
       postgres:
         image: postgres:16
