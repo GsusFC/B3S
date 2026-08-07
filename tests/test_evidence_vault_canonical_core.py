@@ -613,6 +613,25 @@ def test_packet_fails_closed_on_mixed_versions_and_unknown_references() -> None:
         _packet(tiles)
 
 
+def test_candidate_packet_rejects_relation_id_reused_across_tiles() -> None:
+    repeated = _basis(1, "supports")
+    tiles = _all_empty_candidate_tiles()
+    tiles[0] = build_candidate_tile(tile_id="M1", basis=[repeated])
+    vision_index = next(
+        index for index, tile in enumerate(tiles) if tile["tile_id"] == "V1"
+    )
+    tiles[vision_index] = build_candidate_tile(
+        tile_id="V1",
+        basis=[deepcopy(repeated)],
+    )
+
+    with pytest.raises(
+        EvidenceVaultCanonicalCoreError,
+        match="repeats relation id across tiles",
+    ):
+        _packet(tiles)
+
+
 def test_schema_rejects_coerced_text_and_derived_field_tampering() -> None:
     invalid_review = _basis(1, "supports")
     invalid_review["review_status"] = 1

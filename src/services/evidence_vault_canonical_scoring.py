@@ -216,6 +216,68 @@ def build_canonical_score_evaluation(
     return evaluation
 
 
+def calculate_score_from_tile_states(
+    tile_states: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Calculate SV9 from one complete, authority-filtered tile projection.
+
+    This is the shared deterministic calculation boundary.  Callers remain
+    responsible for proving authority; this function only validates the exact
+    80-tile registry and performs the versioned arithmetic.
+    """
+
+    registry = build_tile_contract_registry()["tiles"]
+    expected = {
+        str(row["tile_id"]): {
+            "component_key": str(row["component_key"]),
+            "tile_key": str(row["tile_key"]),
+        }
+        for row in registry
+    }
+    if not isinstance(tile_states, list) or len(tile_states) != len(registry):
+        raise EvidenceVaultCanonicalScoringError(
+            "deterministic scoring requires exactly 80 tile states"
+        )
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in tile_states:
+        if not isinstance(row, dict):
+            raise EvidenceVaultCanonicalScoringError("tile state must be an object")
+        tile_id = str(row.get("tile_id") or "")
+        contract = expected.get(tile_id)
+        if contract is None or tile_id in seen:
+            raise EvidenceVaultCanonicalScoringError(
+                f"unknown or duplicate scoring tile: {tile_id}"
+            )
+        seen.add(tile_id)
+        state = str(row.get("state") or "")
+        if state not in {
+            TileState.OK.value,
+            TileState.NO.value,
+            TileState.SIN_EVIDENCIA.value,
+        }:
+            raise EvidenceVaultCanonicalScoringError(
+                f"invalid effective scoring state for {tile_id}"
+            )
+        component_key = str(row.get("component_key") or "")
+        tile_key = str(row.get("tile_key") or "")
+        if component_key != contract["component_key"] or tile_key != contract["tile_key"]:
+            raise EvidenceVaultCanonicalScoringError(
+                f"scoring tile contract mismatch for {tile_id}"
+            )
+        normalized.append(
+            {
+                "component_key": component_key,
+                "tile_id": tile_id,
+                "tile_key": tile_key,
+                "state": state,
+            }
+        )
+    order = {str(row["tile_id"]): index for index, row in enumerate(registry)}
+    normalized.sort(key=lambda row: order[row["tile_id"]])
+    return _calculate(normalized)
+
+
 def validate_canonical_score_evaluation(evaluation: dict[str, Any]) -> None:
     """Reject altered, incompatible, or arithmetically inconsistent results."""
 
@@ -659,5 +721,6 @@ __all__ = [
     "EVIDENCE_VAULT_SCORE_INPUT_VERSION",
     "EvidenceVaultCanonicalScoringError",
     "build_canonical_score_evaluation",
+    "calculate_score_from_tile_states",
     "validate_canonical_score_evaluation",
 ]
