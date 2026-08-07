@@ -13,6 +13,9 @@ from typing import Any, Mapping
 
 AUDIT_SCHEMA_VERSION = "evidence-vault-field-validation-audit-v1"
 TREE_SCHEMA_VERSION = "b3s-evidence-vault-validation-tree-v1"
+AUDITED_IMPLEMENTATION_COMMIT = (
+    "d0abcd9e6d1a7c7671996ca311ce5d3011727dd6"
+)
 SELECTION_RULE = (
     "git-tracked pyproject.toml; src/**/*.{py,sql,json}; tests/**/*.py; "
     "docs/evidence_vault_canonical_memory_adr_v{1,2}.md; "
@@ -108,21 +111,39 @@ def _git_head_and_status(repo_root: Path) -> tuple[str, list[str]]:
 
 
 def _audited_implementation_commit(repo_root: Path) -> str:
-    relative_tree = (
-        "audits/evidence_vault_field_validation_v1/implementation-tree.json"
-    )
-    result = subprocess.run(
-        ["git", "log", "-1", "--format=%H", "--", relative_tree],
+    commit = AUDITED_IMPLEMENTATION_COMMIT
+    object_name = f"{commit}^{{commit}}"
+    present = subprocess.run(
+        ["git", "cat-file", "-e", object_name],
         cwd=repo_root,
         check=False,
         capture_output=True,
-        text=True,
     )
-    commit = result.stdout.strip()
-    if result.returncode != 0 or len(commit) != 40:
-        raise EvidenceVaultFieldAuditError(
-            "audited implementation commit cannot be resolved"
+    if present.returncode != 0:
+        fetched = subprocess.run(
+            [
+                "git",
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--depth=1",
+                "origin",
+                commit,
+            ],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
         )
+        present = subprocess.run(
+            ["git", "cat-file", "-e", object_name],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+        )
+        if fetched.returncode != 0 or present.returncode != 0:
+            raise EvidenceVaultFieldAuditError(
+                "audited implementation commit cannot be resolved"
+            )
     return commit
 
 
