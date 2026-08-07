@@ -239,6 +239,10 @@ def build_reviewed_operational_source(
         current_accepted_tiles=current.get("content", {}).get("accepted_tiles")
         or [],
         parent_canonical_memory_version=parent,
+        current_pending_reassessments=current.get("content", {}).get(
+            "pending_reassessments"
+        )
+        or [],
     )
     return reviewed_source, operational
 

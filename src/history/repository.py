@@ -141,12 +141,22 @@ from src.services.evidence_vault_canonical_scoring import (
     build_canonical_score_evaluation,
     validate_canonical_score_evaluation,
 )
+from src.services.evidence_vault_composite_group_lifecycle import (
+    COMPOSITE_GROUP_REOPEN_POLICY_ACTOR,
+    EvidenceVaultCompositeGroupLifecycleError,
+    build_composite_group_reopen_artifact,
+    build_composite_group_reopen_operational_packet,
+    build_composite_group_reopen_source_candidate,
+    build_composite_group_reopen_source_resolution,
+    validate_composite_group_reopen_source_resolution,
+)
 from src.services.evidence_vault_exact_relation_supplement import (
     EvidenceVaultExactRelationSupplementError,
     build_exact_relation_source_candidate,
     build_exact_relation_source_resolution,
     validate_exact_relation_source_decisions,
     validate_exact_relation_supplement_artifact,
+    validate_exact_relation_supplement_structure,
 )
 from src.services.evidence_vault_incremental_refresh import (
     EvidenceVaultOperationPlanError,
@@ -3214,6 +3224,518 @@ class PostgresHistoryRepository:
                 )
             return stored, replayed
 
+    def reopen_evidence_vault_composite_group(
+        self,
+        domain_or_url: str,
+        *,
+        exact_source_candidate_packet_fingerprint: str,
+        source_scan_id: str | None = None,
+        accepted_contradiction_review_event_id: str | None = None,
+        workspace_slug: str = "b3s",
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically reopen one accepted C7 ``all_of`` group.
+
+        The trigger must already be durable: either a completed incremental
+        operation plan whose delta materially supersedes a group member, or an
+        accepted contradictory relation-review event.  The source transition,
+        score-lowering operational packet, and CAS adoption are inserted in one
+        transaction under the brand promotion lock.
+        """
+
+        domain = normalize_domain(domain_or_url)
+        exact_fingerprint = _require_sha256_text(
+            exact_source_candidate_packet_fingerprint,
+            field="exact_source_candidate_packet_fingerprint",
+        )
+        scan_id = str(source_scan_id or "").strip()
+        review_event_text = str(
+            accepted_contradiction_review_event_id or ""
+        ).strip()
+        if not domain or bool(scan_id) == bool(review_event_text):
+            raise EvidenceVaultOperationalAuthorityError(
+                "Exactly one durable composite-group reopen trigger is required."
+            )
+        timestamp = _normalized_event_timestamp(
+            created_at or datetime.now(timezone.utc).isoformat(),
+            field="created_at",
+        )
+        self._ensure_migrated()
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The composite-group brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            operation = None
+            if scan_id:
+                operation_row = _vault_operation_row(
+                    conn,
+                    workspace_slug=workspace_slug,
+                    source_scan_id=scan_id,
+                    for_update=True,
+                )
+                if (
+                    operation_row is None
+                    or str(operation_row["canonical_domain"]) != domain
+                ):
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "The material-change operation plan does not exist."
+                    )
+                operation = _vault_operation_plan_record(operation_row)
+                if operation["status"] != "completed":
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "The material-change operation is not complete."
+                    )
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        "evidence-vault-canonical-promotion",
+                    ),
+                ),
+            )
+            exact_row = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                  AND packet_kind = 'operational_source_v2'
+                  AND reference_resolution ->> 'source_kind' =
+                      'exact_relation_supplement'
+                ORDER BY created_at, id
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (brand_id, exact_fingerprint),
+            ).fetchone()
+            if exact_row is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The exact composite-group source does not exist."
+                )
+            exact_record = _vault_operational_source_packet_record(exact_row)
+
+            evidence_delta = None
+            accepted_contradiction = None
+            if scan_id:
+                if operation is None:
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "The material-change operation plan does not exist."
+                    )
+                evidence_delta = dict(operation["plan"].get("delta") or {})
+                durable_fingerprint = _require_sha256_text(
+                    evidence_delta.get("delta_fingerprint"),
+                    field="delta_fingerprint",
+                )
+                durable_trigger = {
+                    "kind": "operation_plan",
+                    "id": operation["operation_plan_id"],
+                    "fingerprint": durable_fingerprint,
+                }
+                expected_parent = operation["canonical_memory_version"]
+            else:
+                try:
+                    review_event_uuid = UUID(review_event_text)
+                except (TypeError, ValueError, AttributeError) as exc:
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "The contradiction review event id must be a UUID."
+                    ) from exc
+                review_row = conn.execute(
+                    f"""
+                    SELECT reviews.*, packets.packet_payload
+                    FROM {_SCHEMA}.evidence_vault_operational_relation_reviews
+                         AS reviews
+                    JOIN {_SCHEMA}.evidence_vault_canonical_memory_packets
+                         AS packets
+                      ON packets.id = reviews.source_packet_id
+                    WHERE reviews.brand_id = %s
+                      AND reviews.id = %s
+                      AND packets.packet_kind = 'operational_source_v2'
+                    FOR UPDATE OF reviews
+                    """,
+                    (brand_id, review_event_uuid),
+                ).fetchone()
+                if review_row is None or str(review_row["decision"]) != "accept":
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "The accepted contradiction review does not exist."
+                    )
+                contradiction_source = dict(review_row["packet_payload"] or {})
+                try:
+                    validate_candidate_packet(contradiction_source)
+                except EvidenceVaultCanonicalCoreError as exc:
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "The contradiction source packet is invalid."
+                    ) from exc
+                matches = [
+                    (str(tile["tile_id"]), dict(relation))
+                    for tile in contradiction_source["candidate_tiles"]
+                    for relation in tile.get("basis") or []
+                    if str(relation.get("relation_id") or "")
+                    == str(review_row["relation_id"])
+                ]
+                if len(matches) != 1:
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "The contradiction review relation cannot be resolved."
+                    )
+                tile_id, relation = matches[0]
+                accepted_contradiction = {
+                    "kind": "accepted_contradiction",
+                    "source_candidate_packet_fingerprint": str(
+                        review_row["source_packet_fingerprint"]
+                    ),
+                    "relation_id": str(review_row["relation_id"]),
+                    "tile_id": tile_id,
+                    "evidence_id": str(relation["evidence_id"]),
+                    "source_identity_id": str(relation["source_identity_id"]),
+                    "decision_event_id": str(review_row["id"]),
+                    "review_request_fingerprint": str(
+                        review_row["review_request_fingerprint"]
+                    ),
+                    "decision": "accept",
+                    "polarity": str(relation["polarity"]),
+                }
+                durable_fingerprint = canonical_fingerprint(
+                    "evidence-vault-composite-group-contradiction-review-trigger-v1",
+                    accepted_contradiction,
+                )
+                durable_trigger = {
+                    "kind": "relation_review",
+                    "id": str(review_row["id"]),
+                    "fingerprint": durable_fingerprint,
+                }
+                expected_parent = contradiction_source["manifest"][
+                    "parent_canonical_memory_version"
+                ]
+
+            replay_row = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_kind = 'operational_source_v2'
+                  AND reference_resolution ->> 'source_kind' =
+                      'composite_group_reopen'
+                  AND reference_resolution ->>
+                      'prior_group_source_candidate_packet_fingerprint' = %s
+                  AND reference_resolution #>>
+                      '{{durable_trigger,fingerprint}}' = %s
+                ORDER BY created_at, id
+                LIMIT 1
+                """,
+                (brand_id, exact_fingerprint, durable_fingerprint),
+            ).fetchone()
+            if replay_row is not None:
+                return _composite_group_reopen_repository_result(
+                    conn,
+                    brand_id=brand_id,
+                    source_row=replay_row,
+                    replayed=True,
+                )
+
+            current = _project_vault_operational_memory(conn, brand_id)
+            current_version = (
+                current["canonical_memory_version"]
+                if current is not None
+                else None
+            )
+            if current is None or expected_parent != current_version:
+                raise EvidenceVaultOperationalAdoptionConflictError(
+                    "The durable reopen trigger has a stale canonical parent."
+                )
+            reopen_event_id = _stable_uuid(
+                brand_id,
+                "evidence-vault-composite-group-reopen",
+                exact_fingerprint,
+                durable_fingerprint,
+                current_version,
+            )
+            try:
+                artifact = build_composite_group_reopen_artifact(
+                    current_operational_memory=current,
+                    exact_source_record=exact_record,
+                    reopen_event_id=str(reopen_event_id),
+                    evidence_delta=evidence_delta,
+                    accepted_contradiction=accepted_contradiction,
+                )
+                source = build_composite_group_reopen_source_candidate(
+                    artifact,
+                    current_operational_memory=current,
+                )
+                resolution = build_composite_group_reopen_source_resolution(
+                    artifact,
+                    source_candidate_packet=source,
+                    durable_trigger=durable_trigger,
+                )
+                validate_composite_group_reopen_source_resolution(
+                    resolution,
+                    source_candidate_packet=source,
+                )
+                operational = build_composite_group_reopen_operational_packet(
+                    artifact,
+                    source_candidate_packet=source,
+                    current_operational_memory=current,
+                )
+            except EvidenceVaultCompositeGroupLifecycleError as exc:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The composite-group reopen transition is invalid."
+                ) from exc
+            _validate_operational_packet_lineage_for_storage(
+                operational,
+                current_memory=current,
+                source_candidate_packet=source,
+                source_reference_resolution=resolution,
+            )
+
+            resolution_fingerprint = canonical_fingerprint(
+                "evidence-vault-operational-source-resolution-v1",
+                resolution,
+            )
+            inserted_source = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_vault_canonical_memory_packets (
+                    id, brand_id, packet_fingerprint, schema_version,
+                    brand_identity, parent_canonical_memory_version,
+                    reference_resolution_fingerprint, reference_resolution,
+                    manifest, candidate_tiles, authority_state, authority,
+                    production_runtime_effect, scanner_runtime_effect,
+                    packet_kind, packet_payload
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    'pending_review', false, false, false,
+                    'operational_source_v2', %s
+                )
+                ON CONFLICT (
+                    brand_id, packet_fingerprint,
+                    reference_resolution_fingerprint
+                ) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    reopen_event_id,
+                    brand_id,
+                    source["candidate_packet_fingerprint"],
+                    source["manifest"]["schema_version"],
+                    source["manifest"]["brand_identity"],
+                    source["manifest"]["parent_canonical_memory_version"],
+                    resolution_fingerprint,
+                    _jsonb(resolution),
+                    _jsonb(source["manifest"]),
+                    _jsonb(source["candidate_tiles"]),
+                    _jsonb(source),
+                ),
+            ).fetchone()
+            source_row = inserted_source or conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                  AND reference_resolution_fingerprint = %s
+                  AND packet_kind = 'operational_source_v2'
+                """,
+                (
+                    brand_id,
+                    source["candidate_packet_fingerprint"],
+                    resolution_fingerprint,
+                ),
+            ).fetchone()
+            if source_row is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The composite-group reopen source could not be persisted."
+                )
+            stored_source = _vault_operational_source_packet_record(source_row)
+            if (
+                stored_source["packet"] != source
+                or stored_source["reference_resolution"] != resolution
+            ):
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The composite-group reopen source replay differs."
+                )
+
+            storage_resolution = _operational_storage_resolution(operational)
+            operational_id = _stable_uuid(
+                brand_id,
+                "evidence-vault-operational-memory-packet",
+                operational["candidate_packet_fingerprint"],
+            )
+            operational_row = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_vault_canonical_memory_packets (
+                    id, brand_id, packet_fingerprint, schema_version,
+                    brand_identity, parent_canonical_memory_version,
+                    reference_resolution_fingerprint,
+                    reference_resolution, manifest, candidate_tiles,
+                    authority_state, authority,
+                    production_runtime_effect, scanner_runtime_effect,
+                    packet_kind, packet_payload,
+                    accepted_memory_candidate_version,
+                    candidate_overlay_version
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    'pending_review', false, false, false,
+                    'operational_v2', %s, %s, %s
+                )
+                RETURNING *
+                """,
+                (
+                    operational_id,
+                    brand_id,
+                    operational["candidate_packet_fingerprint"],
+                    operational["schema_version"],
+                    domain,
+                    operational["current_canonical_memory_version"],
+                    storage_resolution["reference_resolution_fingerprint"],
+                    _jsonb(storage_resolution),
+                    _jsonb(
+                        {
+                            "schema_version": operational["schema_version"],
+                            "packet_kind": "operational_v2",
+                            "brand_identity": domain,
+                            "current_canonical_memory_version": operational[
+                                "current_canonical_memory_version"
+                            ],
+                            "proposed_canonical_memory_version": operational[
+                                "proposed_canonical_memory_version"
+                            ],
+                            "accepted_memory_candidate_version": operational[
+                                "accepted_memory_candidate_version"
+                            ],
+                            "candidate_overlay_version": operational[
+                                "candidate_overlay_version"
+                            ],
+                            "authority": False,
+                            "runtime_effect": False,
+                        }
+                    ),
+                    _jsonb(operational["scoring_projection"]["tiles"]),
+                    _jsonb(operational),
+                    operational["accepted_memory_candidate_version"],
+                    operational["candidate_overlay_version"],
+                ),
+            ).fetchone()
+            stored_operational = _vault_operational_packet_record(
+                operational_row
+            )
+            if stored_operational["packet"] != operational:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The composite-group operational packet replay differs."
+                )
+
+            previous = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_promotion_events
+                WHERE brand_id = %s AND adoption_kind = 'operational_v2'
+                ORDER BY sequence DESC
+                LIMIT 1
+                """,
+                (brand_id,),
+            ).fetchone()
+            if previous is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "Composite-group reopen requires an operational parent event."
+                )
+            sequence = int(previous["sequence"]) + 1
+            previous_event_id = str(previous["id"])
+            idempotency_key_hash = canonical_fingerprint(
+                "evidence-vault-composite-group-reopen-adoption-v1",
+                {
+                    "brand_identity": domain,
+                    "old_group_id": artifact["group_id"],
+                    "trigger_fingerprint": artifact["trigger"][
+                        "trigger_fingerprint"
+                    ],
+                    "parent_canonical_memory_version": current_version,
+                },
+            )
+            adoption_event_id = _stable_uuid(
+                brand_id,
+                "evidence-vault-operational-adoption",
+                idempotency_key_hash,
+            )
+            adoption = build_operational_adoption_event(
+                operational,
+                event_id=str(adoption_event_id),
+                sequence=sequence,
+                previous_event_id=previous_event_id,
+                adopted_by="policy",
+                actor_id=COMPOSITE_GROUP_REOPEN_POLICY_ACTOR,
+                policy_fingerprint=artifact["artifact_fingerprint"],
+                created_at=timestamp,
+                idempotency_key_hash=idempotency_key_hash,
+                expected_current_canonical_memory_version=current_version,
+            )
+            _validate_operational_adoption_attribution(
+                operational,
+                current_memory=current,
+                adopted_by="policy",
+                policy_fingerprint=artifact["artifact_fingerprint"],
+            )
+            adoption_row = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_vault_canonical_memory_promotion_events (
+                    id, brand_id, event_type, sequence, previous_event_id,
+                    brand_identity, candidate_packet_fingerprint,
+                    reference_resolution_fingerprint,
+                    promotion_policy_fingerprint,
+                    parent_canonical_memory_version,
+                    promoted_canonical_memory_version, decision,
+                    reviewer_id, reviewed_at, rationale, schema_version,
+                    idempotency_key_hash, request_fingerprint, authority,
+                    authority_scope, production_runtime_effect,
+                    scanner_runtime_effect, adoption_kind, adopted_by,
+                    actor_id, event_payload
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, 'promote', %s, %s, %s, %s, %s, %s, true,
+                    'b3s-vault', false, false, 'operational_v2', %s, %s, %s
+                )
+                RETURNING *
+                """,
+                (
+                    adoption["event_id"],
+                    brand_id,
+                    adoption["event_type"],
+                    adoption["sequence"],
+                    adoption["previous_event_id"],
+                    adoption["brand_identity"],
+                    adoption["candidate_packet_fingerprint"],
+                    operational_row["reference_resolution_fingerprint"],
+                    adoption["policy_fingerprint"],
+                    adoption["parent_canonical_memory_version"],
+                    adoption["promoted_canonical_memory_version"],
+                    adoption["actor_id"],
+                    adoption["created_at"],
+                    "Whole C7 all-of group reopened after durable material change.",
+                    adoption["schema_version"],
+                    adoption["idempotency_key_hash"],
+                    adoption["request_fingerprint"],
+                    adoption["adopted_by"],
+                    adoption["actor_id"],
+                    _jsonb(adoption),
+                ),
+            ).fetchone()
+            _vault_operational_adoption_event_record(adoption_row)
+            return _composite_group_reopen_repository_result(
+                conn,
+                brand_id=brand_id,
+                source_row=source_row,
+                replayed=False,
+            )
+
     def register_evidence_vault_coverage_supplement_source_packet(
         self,
         domain_or_url: str,
@@ -4127,14 +4649,19 @@ class PostgresHistoryRepository:
                 (brand_id, packet["source_candidate_packet_fingerprint"]),
             ).fetchone()
             source_packet = None
+            source_resolution = None
             if source_row is not None:
-                source_packet = (
-                    _vault_canonical_packet_record(source_row)["packet"]
-                    if str(source_row["packet_kind"]) == "canonical_v1"
-                    else _vault_operational_source_packet_record(source_row)[
+                if str(source_row["packet_kind"]) == "canonical_v1":
+                    source_packet = _vault_canonical_packet_record(source_row)[
                         "packet"
                     ]
-                )
+                else:
+                    source_record = _vault_operational_source_packet_record(
+                        source_row
+                    )
+                    source_packet = source_record["packet"]
+                    source_resolution = source_record["reference_resolution"]
+            resolved_group_source_record = None
             if (
                 source_row is not None
                 and str(source_row["packet_kind"]) == "operational_reviewed_v2"
@@ -4145,10 +4672,39 @@ class PostgresHistoryRepository:
                     source_row=source_row,
                     source_packet=source_packet,
                 )
+                original_source_fingerprint = str(
+                    (source_resolution or {}).get(
+                        "source_candidate_packet_fingerprint"
+                    )
+                    or ""
+                )
+                if original_source_fingerprint:
+                    original_source_row = conn.execute(
+                        f"""
+                        SELECT *
+                        FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                        WHERE brand_id = %s
+                          AND packet_fingerprint = %s
+                          AND packet_kind = 'operational_source_v2'
+                          AND reference_resolution ->> 'source_kind' =
+                              'exact_relation_supplement'
+                        ORDER BY created_at, id
+                        LIMIT 1
+                        """,
+                        (brand_id, original_source_fingerprint),
+                    ).fetchone()
+                    if original_source_row is not None:
+                        resolved_group_source_record = (
+                            _vault_operational_source_packet_record(
+                                original_source_row
+                            )
+                        )
             _validate_operational_packet_lineage_for_storage(
                 packet,
                 current_memory=current_memory,
                 source_candidate_packet=source_packet,
+                source_reference_resolution=source_resolution,
+                resolved_group_source_record=resolved_group_source_record,
             )
             conn.execute(
                 "SELECT pg_advisory_xact_lock(%s)",
@@ -7683,6 +8239,278 @@ class PostgresHistoryRepository:
         )
 
 
+def _validate_composite_group_resolution(
+    *,
+    resolved_tile_ids: set[str],
+    pending_reassessments: Mapping[str, Mapping[str, Any]],
+    accepted_by_id: Mapping[str, Mapping[str, Any]],
+    reviewed_source_packet: Mapping[str, Any],
+    reviewed_source_resolution: Mapping[str, Any] | None,
+    exact_source_record: Mapping[str, Any] | None,
+    expected_parent: str | None,
+) -> None:
+    if (
+        not isinstance(reviewed_source_resolution, Mapping)
+        or reviewed_source_resolution.get("schema_version")
+        != "evidence-vault-operational-reviewed-resolution-v1"
+        or not isinstance(exact_source_record, Mapping)
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "Pending composite group requires an exact reviewed resolution."
+        )
+    exact_packet = dict(exact_source_record.get("packet") or {})
+    exact_resolution = dict(
+        exact_source_record.get("reference_resolution") or {}
+    )
+    artifact = exact_resolution.get("artifact")
+    try:
+        validate_candidate_packet(exact_packet)
+        if (
+            exact_resolution.get("source_kind")
+            != "exact_relation_supplement"
+            or exact_resolution.get("source_candidate_packet_fingerprint")
+            != exact_packet.get("candidate_packet_fingerprint")
+            or reviewed_source_resolution.get(
+                "source_candidate_packet_fingerprint"
+            )
+            != exact_packet.get("candidate_packet_fingerprint")
+            or not isinstance(artifact, Mapping)
+        ):
+            raise EvidenceVaultExactRelationSupplementError(
+                "exact resolution lineage mismatch"
+            )
+        validate_exact_relation_supplement_structure(artifact)
+    except (
+        EvidenceVaultCanonicalCoreError,
+        EvidenceVaultExactRelationSupplementError,
+    ) as exc:
+        raise EvidenceVaultOperationalAuthorityError(
+            "The replacement composite group source is invalid."
+        ) from exc
+    if artifact.get("parent_canonical_memory_version") != expected_parent:
+        raise EvidenceVaultOperationalAdoptionConflictError(
+            "The replacement composite group has a stale parent."
+        )
+    reviewed_manifest = reviewed_source_packet.get("manifest") or {}
+    if reviewed_manifest.get("parent_canonical_memory_version") != expected_parent:
+        raise EvidenceVaultOperationalAdoptionConflictError(
+            "The reviewed replacement group has a stale parent."
+        )
+    groups_by_tile = {
+        str(group.get("tile_id") or ""): group
+        for group in artifact.get("groups") or []
+        if isinstance(group, Mapping) and group.get("decision_rule") == "all_of"
+    }
+    reviewed_by_tile = {
+        str(row.get("tile_id") or ""): row
+        for row in reviewed_source_packet.get("candidate_tiles") or []
+        if isinstance(row, Mapping)
+    }
+    for tile_id in resolved_tile_ids:
+        pending = pending_reassessments[tile_id]
+        group = groups_by_tile.get(tile_id)
+        accepted = accepted_by_id.get(tile_id)
+        reviewed = reviewed_by_tile.get(tile_id)
+        if (
+            not isinstance(group, Mapping)
+            or not isinstance(accepted, Mapping)
+            or not isinstance(reviewed, Mapping)
+            or group.get("group_id") == pending.get("prior_group_id")
+            or group.get("group_contract", {}).get(
+                "member_change_requires_review"
+            )
+            is not True
+            or group.get("group_contract", {}).get(
+                "member_decisions_must_match"
+            )
+            is not True
+        ):
+            raise EvidenceVaultOperationalAuthorityError(
+                "Pending composite group was not replaced by a new all-of group."
+            )
+        member_relations = [
+            row
+            for row in group.get("relations") or []
+            if isinstance(row, Mapping)
+        ]
+        member_ids = {str(row["relation_id"]) for row in member_relations}
+        superseded_evidence = set(
+            pending.get("superseded_member_evidence_fingerprints") or []
+        )
+        if (
+            not superseded_evidence
+            or superseded_evidence
+            & {
+                str(row.get("evidence_fingerprint") or "")
+                for row in member_relations
+            }
+        ):
+            raise EvidenceVaultOperationalAuthorityError(
+                "Replacement all-of group reuses superseded member evidence."
+            )
+        accepted_members = [
+            row
+            for row in accepted.get("basis") or []
+            if isinstance(row, Mapping)
+            and row.get("claim_id") == group["group_id"]
+        ]
+        reviewed_members = [
+            row
+            for row in reviewed.get("basis") or []
+            if isinstance(row, Mapping)
+            and row.get("claim_id") == group["group_id"]
+        ]
+        if (
+            not member_ids
+            or {
+                str(row.get("relation_id") or "")
+                for row in accepted.get("basis") or []
+                if isinstance(row, Mapping)
+            }
+            != member_ids
+            or {str(row.get("relation_id") or "") for row in accepted_members}
+            != member_ids
+            or {str(row.get("relation_id") or "") for row in reviewed_members}
+            != member_ids
+            or any(
+                row.get("review_status") != "accepted"
+                or not str(row.get("decision_event_id") or "").strip()
+                for row in accepted_members
+            )
+        ):
+            raise EvidenceVaultOperationalAuthorityError(
+                "Replacement all-of group does not have complete reviewed authority."
+            )
+
+
+def _pending_reassessment_rows(
+    values: Any,
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(values, list):
+        raise EvidenceVaultOperationalAuthorityError(
+            "Pending reassessments must be an array."
+        )
+    rows: dict[str, dict[str, Any]] = {}
+    registry_ids = {
+        str(row["tile_id"]) for row in build_tile_contract_registry()["tiles"]
+    }
+    for raw in values:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "tile_id",
+            "lifecycle_state",
+            "reopen_policy_fingerprint",
+            "prior_group_id",
+            "trigger_fingerprint",
+            "superseded_member_evidence_fingerprints",
+        }:
+            raise EvidenceVaultOperationalAuthorityError(
+                "Pending reassessment fields mismatch."
+            )
+        tile_id = str(raw.get("tile_id") or "")
+        policy = str(raw.get("reopen_policy_fingerprint") or "")
+        prior_group_id = str(raw.get("prior_group_id") or "")
+        trigger_fingerprint = str(raw.get("trigger_fingerprint") or "")
+        superseded = raw.get("superseded_member_evidence_fingerprints")
+        if (
+            tile_id not in registry_ids
+            or tile_id in rows
+            or raw.get("lifecycle_state") != "pending_reassessment"
+            or not _is_sha256(policy)
+            or not _is_sha256(prior_group_id)
+            or not _is_sha256(trigger_fingerprint)
+            or not isinstance(superseded, list)
+            or not superseded
+            or superseded != sorted(set(superseded))
+            or any(not _is_sha256(value) for value in superseded)
+        ):
+            raise EvidenceVaultOperationalAuthorityError(
+                "Pending reassessment is invalid."
+            )
+        rows[tile_id] = {
+            "tile_id": tile_id,
+            "lifecycle_state": "pending_reassessment",
+            "reopen_policy_fingerprint": policy,
+            "prior_group_id": prior_group_id,
+            "trigger_fingerprint": trigger_fingerprint,
+            "superseded_member_evidence_fingerprints": superseded,
+        }
+    return rows
+
+
+def _composite_group_reopen_repository_result(
+    conn: Any,
+    *,
+    brand_id: Any,
+    source_row: Mapping[str, Any],
+    replayed: bool,
+) -> dict[str, Any]:
+    source_record = _vault_operational_source_packet_record(source_row)
+    try:
+        validate_composite_group_reopen_source_resolution(
+            source_record["reference_resolution"],
+            source_candidate_packet=source_record["packet"],
+        )
+    except EvidenceVaultCompositeGroupLifecycleError as exc:
+        raise EvidenceVaultOperationalAuthorityError(
+            "The stored composite-group reopen source is invalid."
+        ) from exc
+    operational_rows = conn.execute(
+        f"""
+        SELECT *
+        FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+        WHERE brand_id = %s
+          AND packet_kind = 'operational_v2'
+          AND packet_payload ->> 'source_candidate_packet_fingerprint' = %s
+        ORDER BY created_at, id
+        """,
+        (
+            brand_id,
+            source_record["packet"]["candidate_packet_fingerprint"],
+        ),
+    ).fetchall()
+    if len(operational_rows) != 1:
+        raise EvidenceVaultOperationalAuthorityError(
+            "The composite-group reopen has no unique operational packet."
+        )
+    operational_record = _vault_operational_packet_record(operational_rows[0])
+    adoption_rows = conn.execute(
+        f"""
+        SELECT *
+        FROM {_SCHEMA}.evidence_vault_canonical_memory_promotion_events
+        WHERE brand_id = %s
+          AND adoption_kind = 'operational_v2'
+          AND candidate_packet_fingerprint = %s
+        ORDER BY sequence, id
+        """,
+        (
+            brand_id,
+            operational_record["packet"]["candidate_packet_fingerprint"],
+        ),
+    ).fetchall()
+    if len(adoption_rows) != 1:
+        raise EvidenceVaultOperationalAuthorityError(
+            "The composite-group reopen has no unique adoption event."
+        )
+    adoption = _vault_operational_adoption_event_record(adoption_rows[0])
+    return {
+        "reopen_artifact": dict(
+            source_record["reference_resolution"]["artifact"]
+        ),
+        "source_packet": source_record,
+        "operational_packet": operational_record,
+        "adoption": adoption,
+        "memory": _project_vault_operational_memory(conn, brand_id),
+        "score": None,
+        "source_replayed": replayed,
+        "packet_replayed": replayed,
+        "adoption_replayed": replayed,
+        "authority": True,
+        "authority_scope": "b3s-vault",
+        "production_runtime_effect": False,
+        "scanner_runtime_effect": False,
+    }
+
+
 def _migration_files() -> list[tuple[str, str]]:
     root = resources.files("src.history").joinpath("migrations")
     return [
@@ -8729,6 +9557,23 @@ def _validate_operational_adoption_attribution(
         for row in accepted_rows
         if current_by_id.get(str(row["tile_id"])) != row
     ]
+    reopened_values = packet.get("reopened_tile_ids") or []
+    reopened_tile_ids = {
+        str(value or "").strip() for value in reopened_values
+    }
+    if reopened_tile_ids:
+        accepted_ids = {str(row["tile_id"]) for row in accepted_rows}
+        if (
+            adopted_by != "policy"
+            or changed
+            or reopened_tile_ids - set(current_by_id)
+            or reopened_tile_ids & accepted_ids
+            or packet.get("reopen_policy_fingerprint") != policy_fingerprint
+        ):
+            raise EvidenceVaultOperationalAuthorityError(
+                "Composite-group reopen adoption is not attributable to its policy."
+            )
+        return
     if adopted_by == "policy":
         if any(row.get("authority_source") != "policy" for row in changed):
             raise EvidenceVaultOperationalAuthorityError(
@@ -8772,6 +9617,8 @@ def _validate_operational_packet_lineage_for_storage(
     *,
     current_memory: Mapping[str, Any] | None,
     source_candidate_packet: Mapping[str, Any] | None,
+    source_reference_resolution: Mapping[str, Any] | None = None,
+    resolved_group_source_record: Mapping[str, Any] | None = None,
 ) -> None:
     """Bind one v2 packet to the durable parent and resolved v1 source packet."""
 
@@ -8822,6 +9669,14 @@ def _validate_operational_packet_lineage_for_storage(
         raise EvidenceVaultOperationalAuthorityError(
             "Operational accepted tiles must be arrays."
         )
+    current_pending_rows = (
+        current_content.get("pending_reassessments") or []
+        if isinstance(current_content, Mapping)
+        else []
+    )
+    accepted_pending_rows = accepted_content.get("pending_reassessments") or []
+    current_pending = _pending_reassessment_rows(current_pending_rows)
+    accepted_pending = _pending_reassessment_rows(accepted_pending_rows)
     current_by_id = {
         str(row.get("tile_id") or ""): dict(row)
         for row in current_rows
@@ -8836,23 +9691,81 @@ def _validate_operational_packet_lineage_for_storage(
         raise EvidenceVaultOperationalAuthorityError(
             "Operational accepted memory has duplicate or invalid tiles."
         )
-    if not set(current_by_id).issubset(accepted_by_id):
+    reopened_values = packet.get("reopened_tile_ids") or []
+    if not isinstance(reopened_values, list):
+        raise EvidenceVaultOperationalAuthorityError(
+            "Operational reopened tile ids must be an array."
+        )
+    reopened_tile_ids = {
+        str(value or "").strip() for value in reopened_values
+    }
+    if (
+        "" in reopened_tile_ids
+        or len(reopened_tile_ids) != len(reopened_values)
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "Operational reopened tile ids are invalid."
+        )
+    deleted_tile_ids = set(current_by_id) - set(accepted_by_id)
+    if deleted_tile_ids != reopened_tile_ids:
         raise EvidenceVaultOperationalAuthorityError(
             "An operational packet cannot silently delete an accepted tile."
+        )
+    resolved_pending_tile_ids = set(current_pending) - set(accepted_pending)
+    if resolved_pending_tile_ids & reopened_tile_ids:
+        raise EvidenceVaultOperationalAuthorityError(
+            "A tile cannot be reopened and resolved in one packet."
+        )
+    if any(tile_id not in accepted_by_id for tile_id in resolved_pending_tile_ids):
+        raise EvidenceVaultOperationalAuthorityError(
+            "Pending reassessment can only resolve into accepted tile authority."
+        )
+    expected_pending = {
+        tile_id: descriptor
+        for tile_id, descriptor in current_pending.items()
+        if tile_id not in resolved_pending_tile_ids
+    }
+    if reopened_tile_ids:
+        reopen_policy = str(packet.get("reopen_policy_fingerprint") or "")
+        for tile_id in reopened_tile_ids:
+            descriptor = accepted_pending.get(tile_id)
+            if (
+                descriptor is None
+                or descriptor["reopen_policy_fingerprint"] != reopen_policy
+            ):
+                raise EvidenceVaultOperationalAuthorityError(
+                    "Operational reopen is missing its pending group descriptor."
+                )
+            expected_pending[tile_id] = descriptor
+    if accepted_pending != expected_pending:
+        raise EvidenceVaultOperationalAuthorityError(
+            "Operational memory cannot drop or fabricate pending reassessment."
+        )
+    if set(packet.get("pending_reassessment_tile_ids") or []) != set(
+        accepted_pending
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "Operational pending reassessment projection is inconsistent."
         )
     changed = {
         tile_id: row
         for tile_id, row in accepted_by_id.items()
         if current_by_id.get(tile_id) != row
     }
+    if reopened_tile_ids and changed:
+        raise EvidenceVaultOperationalAuthorityError(
+            "A composite-group reopen cannot mix authority removal with other changes."
+        )
     expected_change = (
-        bool(accepted_rows) if current_memory is None else bool(changed)
+        bool(accepted_rows)
+        if current_memory is None
+        else bool(changed or reopened_tile_ids)
     )
     if packet.get("has_accepted_change") is not expected_change:
         raise EvidenceVaultOperationalAuthorityError(
             "Operational accepted-change flag does not match its parent."
         )
-    if not changed:
+    if not changed and not reopened_tile_ids:
         return
     if source_candidate_packet is None:
         raise EvidenceVaultOperationalAuthorityError(
@@ -8885,6 +9798,133 @@ def _validate_operational_packet_lineage_for_storage(
     source_fingerprint = str(
         source_candidate_packet.get("candidate_packet_fingerprint") or ""
     )
+    if resolved_pending_tile_ids:
+        _validate_composite_group_resolution(
+            resolved_tile_ids=resolved_pending_tile_ids,
+            pending_reassessments=current_pending,
+            accepted_by_id=accepted_by_id,
+            reviewed_source_packet=source_candidate_packet,
+            reviewed_source_resolution=source_reference_resolution,
+            exact_source_record=resolved_group_source_record,
+            expected_parent=expected_parent,
+        )
+    if reopened_tile_ids:
+        if not isinstance(source_reference_resolution, Mapping):
+            raise EvidenceVaultOperationalAuthorityError(
+                "A composite-group reopen requires its immutable source resolution."
+            )
+        try:
+            validate_composite_group_reopen_source_resolution(
+                source_reference_resolution,
+                source_candidate_packet=source_candidate_packet,
+            )
+        except EvidenceVaultCompositeGroupLifecycleError as exc:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The composite-group reopen source resolution is invalid."
+            ) from exc
+        artifact = source_reference_resolution["artifact"]
+        pending_descriptor = accepted_pending.get(str(artifact["tile_id"]))
+        if (
+            reopened_tile_ids != {str(artifact["tile_id"])}
+            or packet.get("reopen_policy_fingerprint")
+            != artifact["artifact_fingerprint"]
+            or not isinstance(pending_descriptor, Mapping)
+            or pending_descriptor.get("prior_group_id")
+            != artifact["group_id"]
+            or pending_descriptor.get("trigger_fingerprint")
+            != artifact["trigger"]["trigger_fingerprint"]
+            or pending_descriptor.get(
+                "superseded_member_evidence_fingerprints"
+            )
+            != sorted(
+                artifact["trigger"][
+                    "affected_member_evidence_fingerprints"
+                ]
+            )
+            or source_manifest.get("parent_canonical_memory_version")
+            != expected_parent
+        ):
+            raise EvidenceVaultOperationalAuthorityError(
+                "The composite-group reopen policy does not match its source."
+            )
+        previous_candidates = [
+            build_candidate_tile(
+                tile_id=str(contract["tile_id"]),
+                basis=(current_by_id.get(str(contract["tile_id"])) or {}).get(
+                    "basis"
+                )
+                or [],
+                coverage_refs=(
+                    current_by_id.get(str(contract["tile_id"])) or {}
+                ).get("coverage_refs")
+                or [],
+                unresolved_refs=(
+                    current_by_id.get(str(contract["tile_id"])) or {}
+                ).get("unresolved_refs")
+                or [],
+            )
+            for contract in build_tile_contract_registry()["tiles"]
+        ]
+        try:
+            validate_incremental_candidate_tiles(
+                previous_candidate_tiles=previous_candidates,
+                candidate_tiles=source_rows,
+            )
+        except EvidenceVaultCanonicalCoreError as exc:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The composite-group reopen does not evolve its exact parent."
+            ) from exc
+        tile_id = str(artifact["tile_id"])
+        source_tile = source_by_id.get(tile_id)
+        if source_tile is None or source_tile.get("delta_kind") != "verified_deprecation":
+            raise EvidenceVaultOperationalAuthorityError(
+                "The composite-group reopen tile is missing."
+            )
+        old_member_ids = {
+            str(row["relation_id"])
+            for row in artifact.get("member_bindings") or []
+            if isinstance(row, Mapping)
+        }
+        source_basis = [
+            row for row in source_tile.get("basis") or [] if isinstance(row, Mapping)
+        ]
+        source_relation_ids = {
+            str(row.get("relation_id") or "") for row in source_basis
+        }
+        invalidations = [
+            row
+            for row in source_basis
+            if row.get("polarity") == "invalidates_candidate"
+            and row.get("claim_id") == artifact["group_id"]
+            and row.get("decision_event_id") == artifact["reopen_event_id"]
+            and row.get("review_status") == "accepted"
+        ]
+        if (
+            not old_member_ids
+            or old_member_ids & source_relation_ids
+            or len(invalidations) != len(old_member_ids)
+        ):
+            raise EvidenceVaultOperationalAuthorityError(
+                "The composite-group reopen did not supersede the whole group."
+            )
+        overlay_rows = packet.get("candidate_overlay", {}).get("candidate_tiles")
+        overlay = next(
+            (
+                row
+                for row in overlay_rows or []
+                if isinstance(row, Mapping) and row.get("tile_id") == tile_id
+            ),
+            None,
+        )
+        if (
+            not isinstance(overlay, Mapping)
+            or overlay.get("authority_state") != "pending"
+            or overlay.get("review_state") not in {"required", "in_review"}
+            or overlay.get("delta_kind") != "verified_deprecation"
+        ):
+            raise EvidenceVaultOperationalAuthorityError(
+                "The composite-group reopen is not pending reassessment."
+            )
     for tile_id, accepted in changed.items():
         source = source_by_id.get(tile_id)
         if source is None:

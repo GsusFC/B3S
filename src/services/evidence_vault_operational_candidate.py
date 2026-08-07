@@ -112,6 +112,9 @@ def build_operational_packet_from_reviewed_candidate(
             if current.get("canonical_memory_version")
             else None
         ),
+        current_pending_reassessments=(
+            current.get("content", {}).get("pending_reassessments") or []
+        ),
     )
 
 

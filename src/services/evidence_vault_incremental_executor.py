@@ -685,6 +685,11 @@ def _build_candidate_result(
             else []
         ),
         parent_canonical_memory_version=plan["canonical_memory_version"],
+        current_pending_reassessments=(
+            current_memory["content"].get("pending_reassessments") or []
+            if current_memory is not None
+            else []
+        ),
     )
     if operational_packet["has_accepted_change"] is not False:
         raise EvidenceVaultIncrementalExecutorError(
@@ -786,7 +791,13 @@ def _source_candidate_packet(
                 [*prior["basis"], *relations],
                 key=lambda row: str(row["relation_id"]),
             )
-            probe = build_candidate_tile(tile_id=tile_id, basis=combined)
+            probe = build_candidate_tile(
+                tile_id=tile_id,
+                basis=combined,
+                unresolved_refs=[
+                    f"operation:{plan['operation_plan_fingerprint']}:{tile_id}"
+                ],
+            )
             previous_state = TileState(prior["candidate_state"])
             candidate_state = TileState(probe["candidate_state"])
             if candidate_state is TileState.CONTRADICTION:

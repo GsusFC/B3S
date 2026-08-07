@@ -291,9 +291,9 @@ def _validate_authority_coverage(value: Any) -> None:
         raise EvidenceVaultOperationalScoringError(
             "accepted authority counts are inconsistent"
         )
-    if value["pending_change_tile_count"] > accepted:
+    if value["pending_change_tile_count"] > unresolved:
         raise EvidenceVaultOperationalScoringError(
-            "pending changes exceed accepted authority"
+            "pending changes exceed unresolved authority"
         )
     if value["pending_initial_tile_count"] > unresolved:
         raise EvidenceVaultOperationalScoringError(
@@ -327,8 +327,15 @@ def _validate_authority_coverage(value: Any) -> None:
     expected_completeness = "complete" if accepted == 80 else "partial"
     if value["score_completeness"] != expected_completeness:
         raise EvidenceVaultOperationalScoringError("score completeness mismatch")
-    if value["canonical_score_status"] not in {"current", "pending_reassessment"}:
-        raise EvidenceVaultOperationalScoringError("canonical score status is invalid")
+    expected_status = (
+        "pending_reassessment"
+        if value["pending_change_tile_count"]
+        else "current"
+    )
+    if value["canonical_score_status"] != expected_status:
+        raise EvidenceVaultOperationalScoringError(
+            "canonical score status is invalid"
+        )
 
 
 def _validate_score_breakdown(evaluation: Mapping[str, Any]) -> None:
@@ -573,6 +580,59 @@ def _scoring_inputs(
         accepted_by_id[tile_id] = row
         state_counts[state] += 1
 
+    pending_rows = content.get("pending_reassessments") or []
+    if not isinstance(pending_rows, list):
+        raise EvidenceVaultOperationalScoringError(
+            "pending reassessments must be an array"
+        )
+    pending_reassessment_ids: set[str] = set()
+    for row in pending_rows:
+        if not isinstance(row, Mapping) or set(row) != {
+            "tile_id",
+            "lifecycle_state",
+            "reopen_policy_fingerprint",
+            "prior_group_id",
+            "trigger_fingerprint",
+            "superseded_member_evidence_fingerprints",
+        }:
+            raise EvidenceVaultOperationalScoringError(
+                "pending reassessment fields mismatch"
+            )
+        tile_id = str(row.get("tile_id") or "")
+        if (
+            tile_id not in registry_by_id
+            or tile_id in accepted_by_id
+            or tile_id in pending_reassessment_ids
+            or row.get("lifecycle_state") != "pending_reassessment"
+        ):
+            raise EvidenceVaultOperationalScoringError(
+                "pending reassessment tile is invalid"
+            )
+        for field in (
+            "reopen_policy_fingerprint",
+            "prior_group_id",
+            "trigger_fingerprint",
+        ):
+            _sha256(
+                row.get(field),
+                field=f"{tile_id}.{field}",
+            )
+        superseded = row.get("superseded_member_evidence_fingerprints")
+        if (
+            not isinstance(superseded, list)
+            or not superseded
+            or superseded != sorted(set(superseded))
+        ):
+            raise EvidenceVaultOperationalScoringError(
+                "pending reassessment superseded evidence is invalid"
+            )
+        for fingerprint in superseded:
+            _sha256(
+                fingerprint,
+                field=f"{tile_id}.superseded_member_evidence_fingerprint",
+            )
+        pending_reassessment_ids.add(tile_id)
+
     tile_states: list[dict[str, str]] = []
     for contract in registry_rows:
         tile_id = str(contract["tile_id"])
@@ -608,7 +668,7 @@ def _scoring_inputs(
         "accepted_sin_evidencia_count": state_counts[TileState.SIN_EVIDENCIA.value],
         "unresolved_tile_count": len(registry_rows) - accepted_count,
         "pending_initial_tile_count": 0,
-        "pending_change_tile_count": 0,
+        "pending_change_tile_count": len(pending_reassessment_ids),
         "contradiction_on_accepted_count": 0,
         "contradiction_on_unresolved_count": 0,
         "contradiction_count": 0,
@@ -620,7 +680,11 @@ def _scoring_inputs(
         "score_completeness": (
             "complete" if accepted_count == len(registry_rows) else "partial"
         ),
-        "canonical_score_status": "current",
+        "canonical_score_status": (
+            "pending_reassessment"
+            if pending_reassessment_ids
+            else "current"
+        ),
     }
     return tile_states, coverage, policies
 

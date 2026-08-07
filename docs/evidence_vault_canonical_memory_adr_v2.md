@@ -478,5 +478,9 @@ un solo tile.
 
 Una mutación futura de cualquiera de los dos miembros C7 debe invalidar o
 reabrir el grupo completo. El contrato congela
-`member_change_requires_review=true`, pero el workflow que detecta y materializa
-esa reapertura todavía no está implementado y bloquea el uso productivo de C7.
+`member_change_requires_review=true`. La rama apilada de lifecycle v1 implementa
+la detección contra deltas durables, la reapertura atómica, la supresión del
+score, la persistencia de `pending_reassessment` y la resolución mediante un
+grupo `all_of` nuevo; véase `evidence_vault_c7_group_lifecycle_v1.md`. Esto no
+habilita el scanner ni autoriza producción: feature flag, kill switch, allowlist,
+watermark/replay y presentación separada del score siguen bloqueando el cutover.

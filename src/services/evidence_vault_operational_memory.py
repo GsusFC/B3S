@@ -78,6 +78,10 @@ def build_operational_memory_packet(
     dispositions: Mapping[str, Mapping[str, Any]] | None = None,
     current_accepted_tiles: Iterable[Mapping[str, Any]] = (),
     parent_canonical_memory_version: str | None = None,
+    reopened_tile_ids: Iterable[str] = (),
+    reopen_policy_fingerprint: str | None = None,
+    reopened_group_contexts: Iterable[Mapping[str, Any]] = (),
+    current_pending_reassessments: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Build accepted memory, candidate overlay and a complete score projection.
 
@@ -101,6 +105,19 @@ def build_operational_memory_packet(
         tile_order=tile_order,
     )
     decisions = _normalize_dispositions(dispositions or {}, registry_by_id)
+    reopened = _normalize_reopened_tile_ids(reopened_tile_ids, registry_by_id)
+    reopen_contexts = _normalize_reopened_group_contexts(
+        reopened_group_contexts,
+        registry_by_id,
+    )
+    if set(reopen_contexts) != reopened:
+        raise EvidenceVaultOperationalMemoryError(
+            "reopened tile ids and group contexts must match"
+        )
+    pending_reassessments = _normalize_pending_reassessments(
+        current_pending_reassessments,
+        registry_by_id,
+    )
     parent_version = _optional_fingerprint(
         parent_canonical_memory_version,
         field="parent_canonical_memory_version",
@@ -113,8 +130,24 @@ def build_operational_memory_packet(
         raise EvidenceVaultOperationalMemoryError(
             "parent canonical memory and accepted parent tiles must be supplied together"
         )
+    if reopened and not parent_version:
+        raise EvidenceVaultOperationalMemoryError(
+            "reopening accepted tiles requires a canonical parent"
+        )
+    reopen_policy = _optional_fingerprint(
+        reopen_policy_fingerprint,
+        field="reopen_policy_fingerprint",
+    )
+    if bool(reopened) != bool(reopen_policy):
+        raise EvidenceVaultOperationalMemoryError(
+            "reopened tiles and reopen policy fingerprint must be supplied together"
+        )
 
     accepted_by_id = {row["tile_id"]: row for row in parents}
+    if set(pending_reassessments) & set(accepted_by_id):
+        raise EvidenceVaultOperationalMemoryError(
+            "pending reassessment cannot retain accepted tile authority"
+        )
     overlay: list[dict[str, Any]] = []
     projection: list[dict[str, Any]] = []
 
@@ -131,7 +164,43 @@ def build_operational_memory_packet(
             authority_state=authority_state,
             review_state=review_state,
         )
+        is_reopened = tile_id in reopened
+        is_pending_reassessment = (
+            is_reopened or tile_id in pending_reassessments
+        )
+        if is_reopened:
+            if previous is None:
+                raise EvidenceVaultOperationalMemoryError(
+                    f"reopened tile {tile_id} has no accepted parent"
+                )
+            if (
+                candidate.get("delta_kind") != "verified_deprecation"
+                or authority_state is not AuthorityState.PENDING
+                or review_state not in {ReviewState.REQUIRED, ReviewState.IN_REVIEW}
+            ):
+                raise EvidenceVaultOperationalMemoryError(
+                    f"reopened tile {tile_id} must be a pending verified deprecation"
+                )
+            accepted_by_id.pop(tile_id)
+            pending_reassessments[tile_id] = {
+                "tile_id": tile_id,
+                "lifecycle_state": "pending_reassessment",
+                "reopen_policy_fingerprint": reopen_policy,
+                "prior_group_id": reopen_contexts[tile_id]["prior_group_id"],
+                "trigger_fingerprint": reopen_contexts[tile_id][
+                    "trigger_fingerprint"
+                ],
+                "superseded_member_evidence_fingerprints": (
+                    reopen_contexts[tile_id][
+                        "superseded_member_evidence_fingerprints"
+                    ]
+                ),
+            }
         if authority_state is AuthorityState.ACCEPTED:
+            if is_reopened:
+                raise EvidenceVaultOperationalMemoryError(
+                    f"reopened tile {tile_id} cannot retain accepted authority"
+                )
             if disposition["authority_source"] not in {"policy", "human"}:
                 raise EvidenceVaultOperationalMemoryError(
                     f"accepted tile {tile_id} requires policy or human authority"
@@ -185,12 +254,15 @@ def build_operational_memory_packet(
                     source_candidate_packet_fingerprint=source_packet_fingerprint,
                 )
             accepted_by_id[tile_id] = accepted_candidate
+            pending_reassessments.pop(tile_id, None)
 
         material_change = previous is None or not _same_accepted_content(
             previous,
             candidate,
         )
-        if authority_state is not AuthorityState.ACCEPTED and material_change:
+        if authority_state is not AuthorityState.ACCEPTED and (
+            material_change or is_pending_reassessment
+        ):
             overlay.append(
                 _overlay_tile(
                     candidate,
@@ -229,14 +301,19 @@ def build_operational_memory_packet(
                 "candidate_preview_points": preview_points,
                 "authority_state": authority_state.value,
                 "review_state": review_state.value,
-                "lifecycle_state": LifecycleState.ACTIVE.value,
+                "lifecycle_state": (
+                    LifecycleState.SUPERSEDED.value
+                    if is_pending_reassessment
+                    else LifecycleState.ACTIVE.value
+                ),
                 "score_eligible": (
-                    effective is not None
+                    not is_pending_reassessment
+                    and effective is not None
                     and effective_state == TileState.OK.value
                 ),
                 "has_candidate_overlay": (
                     authority_state is not AuthorityState.ACCEPTED
-                    and material_change
+                    and (material_change or is_pending_reassessment)
                 ),
             }
         )
@@ -250,6 +327,7 @@ def build_operational_memory_packet(
         accepted_tiles=accepted_tiles,
         overlay=overlay,
         registry_by_id=registry_by_id,
+        reopened_tile_ids=set(pending_reassessments),
     )
     policies = {
         "tile_contract_registry_fingerprint": tile_contract_registry_fingerprint(),
@@ -266,6 +344,11 @@ def build_operational_memory_packet(
         **policies,
         "accepted_tiles": accepted_tiles,
     }
+    if pending_reassessments:
+        accepted_content["pending_reassessments"] = sorted(
+            pending_reassessments.values(),
+            key=lambda row: tile_order[row["tile_id"]],
+        )
     accepted_memory_candidate_version = canonical_fingerprint(
         EVIDENCE_VAULT_ACCEPTED_MEMORY_VERSION,
         accepted_content,
@@ -345,6 +428,13 @@ def build_operational_memory_packet(
         "candidate_overlay": overlay_content,
         "scoring_projection": scoring_projection,
     }
+    if pending_reassessments:
+        unsigned_packet["pending_reassessment_tile_ids"] = sorted(
+            pending_reassessments
+        )
+    if reopened:
+        unsigned_packet["reopened_tile_ids"] = sorted(reopened)
+        unsigned_packet["reopen_policy_fingerprint"] = reopen_policy
     return {
         **unsigned_packet,
         "candidate_packet_fingerprint": canonical_fingerprint(
@@ -480,6 +570,131 @@ def _normalize_accepted_tiles(
             }
         )
     return sorted(rows, key=lambda row: tile_order[row["tile_id"]])
+
+
+def _normalize_reopened_tile_ids(
+    values: Iterable[str],
+    registry_by_id: Mapping[str, Mapping[str, Any]],
+) -> set[str]:
+    reopened = {str(value or "").strip() for value in values}
+    if "" in reopened or not reopened.issubset(registry_by_id):
+        raise EvidenceVaultOperationalMemoryError(
+            "reopened tile ids contain an unknown tile"
+        )
+    return reopened
+
+
+def _normalize_reopened_group_contexts(
+    values: Iterable[Mapping[str, Any]],
+    registry_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    contexts: dict[str, dict[str, Any]] = {}
+    for raw in values:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "tile_id",
+            "prior_group_id",
+            "trigger_fingerprint",
+            "superseded_member_evidence_fingerprints",
+        }:
+            raise EvidenceVaultOperationalMemoryError(
+                "reopened group context fields mismatch"
+            )
+        tile_id = str(raw.get("tile_id") or "").strip()
+        if tile_id not in registry_by_id or tile_id in contexts:
+            raise EvidenceVaultOperationalMemoryError(
+                "reopened group context tile is invalid or duplicated"
+            )
+        superseded = sorted(
+            {
+                _fingerprint(
+                    value,
+                    field=f"{tile_id}.superseded_member_evidence_fingerprint",
+                )
+                for value in raw.get(
+                    "superseded_member_evidence_fingerprints"
+                )
+                or []
+            }
+        )
+        if not superseded:
+            raise EvidenceVaultOperationalMemoryError(
+                "reopened group context requires superseded member evidence"
+            )
+        contexts[tile_id] = {
+            "tile_id": tile_id,
+            "prior_group_id": _fingerprint(
+                raw.get("prior_group_id"),
+                field=f"{tile_id}.prior_group_id",
+            ),
+            "trigger_fingerprint": _fingerprint(
+                raw.get("trigger_fingerprint"),
+                field=f"{tile_id}.trigger_fingerprint",
+            ),
+            "superseded_member_evidence_fingerprints": superseded,
+        }
+    return contexts
+
+
+def _normalize_pending_reassessments(
+    values: Iterable[Mapping[str, Any]],
+    registry_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    pending: dict[str, dict[str, Any]] = {}
+    for raw in values:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "tile_id",
+            "lifecycle_state",
+            "reopen_policy_fingerprint",
+            "prior_group_id",
+            "trigger_fingerprint",
+            "superseded_member_evidence_fingerprints",
+        }:
+            raise EvidenceVaultOperationalMemoryError(
+                "pending reassessment fields mismatch"
+            )
+        tile_id = str(raw.get("tile_id") or "").strip()
+        if tile_id not in registry_by_id or tile_id in pending:
+            raise EvidenceVaultOperationalMemoryError(
+                "pending reassessment tile is invalid or duplicated"
+            )
+        if raw.get("lifecycle_state") != "pending_reassessment":
+            raise EvidenceVaultOperationalMemoryError(
+                "pending reassessment lifecycle state is invalid"
+            )
+        superseded = sorted(
+            {
+                _fingerprint(
+                    value,
+                    field=f"{tile_id}.superseded_member_evidence_fingerprint",
+                )
+                for value in raw.get(
+                    "superseded_member_evidence_fingerprints"
+                )
+                or []
+            }
+        )
+        if not superseded:
+            raise EvidenceVaultOperationalMemoryError(
+                "pending reassessment requires superseded member evidence"
+            )
+        pending[tile_id] = {
+            "tile_id": tile_id,
+            "lifecycle_state": "pending_reassessment",
+            "reopen_policy_fingerprint": _fingerprint(
+                raw.get("reopen_policy_fingerprint"),
+                field=f"{tile_id}.reopen_policy_fingerprint",
+            ),
+            "prior_group_id": _fingerprint(
+                raw.get("prior_group_id"),
+                field=f"{tile_id}.prior_group_id",
+            ),
+            "trigger_fingerprint": _fingerprint(
+                raw.get("trigger_fingerprint"),
+                field=f"{tile_id}.trigger_fingerprint",
+            ),
+            "superseded_member_evidence_fingerprints": superseded,
+        }
+    return pending
 
 
 def _normalize_dispositions(
@@ -714,8 +929,10 @@ def _coverage_metrics(
     accepted_tiles: list[dict[str, Any]],
     overlay: list[dict[str, Any]],
     registry_by_id: Mapping[str, Mapping[str, Any]],
+    reopened_tile_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     accepted_ids = {row["tile_id"] for row in accepted_tiles}
+    reopened_ids = set(reopened_tile_ids or ())
     accepted_count = len(accepted_ids)
     pending_initial = [
         row
@@ -723,13 +940,17 @@ def _coverage_metrics(
         if row["authority_state"] == AuthorityState.PENDING.value
         and row["delta_kind"] not in {"no_change", "coverage_loss"}
         and row["tile_id"] not in accepted_ids
+        and row["tile_id"] not in reopened_ids
     ]
     pending_change = [
         row
         for row in overlay
         if row["authority_state"] == AuthorityState.PENDING.value
         and row["delta_kind"] not in {"no_change", "coverage_loss"}
-        and row["tile_id"] in accepted_ids
+        and (
+            row["tile_id"] in accepted_ids
+            or row["tile_id"] in reopened_ids
+        )
     ]
     contradiction_on_accepted = [
         row
