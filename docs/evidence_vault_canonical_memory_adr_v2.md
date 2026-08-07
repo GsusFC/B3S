@@ -302,7 +302,7 @@ determinista actual puede entrar en N1. Un baseline provisional vacío puede
 evolucionar después mediante el método incremental y CAS sobre su parent.
 
 `prepare_vault_scan_after_capture()` produce y persiste planes reproducibles.
-La migración 015 y `execute_vault_operation_plan()` implementan ya un
+Las migraciones 015/016 y `execute_vault_operation_plan()` implementan ya un
 consumidor Vault-only con claim, lease, heartbeat, fencing por generación,
 resultado inmutable y finalización idempotente. El plan congela además el
 contexto de identidad owned de la captura completa mediante

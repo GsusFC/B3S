@@ -1,9 +1,9 @@
 {
   "artifacts": [
     {
-      "bytes": 19631,
+      "bytes": 21669,
       "file": "GO_NO_GO.md",
-      "sha256": "cf9447324a4f045dd121b6ea79446984f556729bfc93c6a55d83806d6c1ba273"
+      "sha256": "46221d3779fea2926d2e0bac567de70a4f5a45d618288b5ce99eaabe68156b59"
     },
     {
       "bytes": 2659,
@@ -91,9 +91,9 @@
       "sha256": "8a33faa95bf413c03ce163af8e69d9dbd2b588950897b1cb26d4269b3236df41"
     },
     {
-      "bytes": 104422,
+      "bytes": 105042,
       "file": "implementation-tree.json",
-      "sha256": "77a657aa04aadf7956c97a7ada7e0b63c2c42f399db18c137dbe9a6c85f179f9"
+      "sha256": "4ab5fcd543777399c4533ecd707a05909e6587c12a527f040700a617f60c6083"
     },
     {
       "bytes": 7043,
@@ -267,23 +267,24 @@
       "score_evaluation_identity": "fa73610bd6e66beec5d2f7fb6c51e8e4f6860c16db10817db5c7bda07c113d47"
     }
   },
+  "external_artifact_root": "phase0 recovery archive (supply with --external-root; not Git-distributed)",
   "external_artifacts": [
     {
       "bytes": 405101,
       "classification": "disposable_postgresql_checkpoint",
-      "path": "/private/tmp/b3s-vault-field-human-adoption-v1.dump",
+      "path": "postgres-dumps/b3s-vault-field-human-adoption-v1.dump",
       "sha256": "5693289167777668cbadb19b597caebea4dd31f993135645785ae8dfca894467"
     },
     {
       "bytes": 431072,
       "classification": "disposable_postgresql_coverage_adoption_checkpoint",
-      "path": "/private/tmp/b3s-vault-causa-supplement-human-adoption-v1.dump",
+      "path": "postgres-dumps/b3s-vault-causa-supplement-human-adoption-v1.dump",
       "sha256": "422f5918b7d2b39250922e1c74717559e9f475c9b72e10813d08bd3fd9c4618b"
     },
     {
       "bytes": 459248,
       "classification": "disposable_postgresql_exact_relation_adoption_checkpoint",
-      "path": "/private/tmp/b3s-vault-causa-exact-relation-human-adoption-v1.dump",
+      "path": "postgres-dumps/b3s-vault-causa-exact-relation-human-adoption-v1.dump",
       "sha256": "231c3e7f86f1221670e57c1503af9a432765b7f6cfb816b9a86043a11e5a7f56"
     }
   ],
@@ -301,9 +302,9 @@
     "scores_are_sparse_isolated_baselines": true,
     "soccersolver_score": 6
   },
-  "implementation_fingerprint": "afecbb6930a145aa70058b0c7862c69ea7e2965c1c82f94502020ba2bec421de",
+  "implementation_fingerprint": "cd9bc6d26d70e91b62ffe8d7b86d80def63ad8a5073fecb8edc605cf354e547b",
   "implementation_state": "committed_landing_branch",
-  "implementation_tree_sha256": "77a657aa04aadf7956c97a7ada7e0b63c2c42f399db18c137dbe9a6c85f179f9",
+  "implementation_tree_sha256": "4ab5fcd543777399c4533ecd707a05909e6587c12a527f040700a617f60c6083",
   "legacy_lineage": {
     "cutover_authorized": false,
     "later_normalized_source_packs_missing": 3,
@@ -335,7 +336,10 @@
     "The exact MG1/MG3/MG5 relations and C7 all-of group are reviewed and adopted only in a disposable Vault; production and scanner effects remain false.",
     "C7 initial all-of adoption is fail-closed, but future invalidation and group reopening when an accepted member changes is not yet implemented.",
     "MG7 and MG8 remain legacy-only context and are not accepted Vault v2 Magnetism tiles.",
-    "The clean landing tree removes the incidental untracked uv.lock, adds Git whitespace metadata for immutable CRLF review CSVs, normalizes persisted review timestamps to UTC, and completes migration-release assertions. The semantic provider field execution was not repeated; its exact source state remains preserved at recovery commit f9d22c747793447ef18a6855e96f8747f05b2b77."
+    "The clean landing tree removes the incidental untracked uv.lock, adds Git whitespace metadata for immutable CRLF review CSVs, normalizes persisted review timestamps to UTC, and completes migration-release assertions. The semantic provider field execution was not repeated; its exact source state remains preserved at recovery commit f9d22c747793447ef18a6855e96f8747f05b2b77.",
+    "The three PostgreSQL checkpoints are separately preserved local recovery artifacts, not Git-distributed fixtures. Their hashes are verifiable with the field-audit verifier on this workstation, but a fresh clone cannot restore them without the recovery archive.",
+    "The normalized real-brand corpus intentionally preserves audited public-source text and acquisition metadata, including two workstation-local source paths. Raw source envelopes are absent, so their source_report_sha256 values are historical provenance attestations rather than independently reconstructible inputs.",
+    "Pre-landing review hardening added migration 016, database-wide migration serialization, exact multi-operation source bindings, crash-safe implicit review timestamps, expired-lease recovery, legacy scanner isolation, complete semantic-label coverage, deterministic identity exclusion, and bounded literal quotes. The original provider field execution was not repeated."
   ],
   "runtime_effect": false,
   "schema_version": "evidence-vault-field-validation-audit-v1",
@@ -351,16 +355,19 @@
     "model": "gemini-3.1-flash-lite",
     "provider_generated_outputs_observed": true
   },
-  "updated_at": "2026-08-07T13:45:09.304103+00:00",
+  "updated_at": "2026-08-07T14:23:20.757128+00:00",
   "validation": {
+    "audit_manifest_verifier": "passed with all 3 external checkpoints required",
     "coverage_lineage_focused": "25 passed",
     "diff_check": "passed",
     "exact_dump_restore": "passed",
     "final_dump_restore": "passed",
-    "full_suite": "2640 passed, 19 skipped",
+    "full_suite": "2648 passed, 22 skipped",
     "original_field_full_suite": "2639 passed, 19 skipped",
     "postgres_focused": "12 passed",
-    "postgresql_16_full_suite": "2658 passed, 1 skipped",
+    "postgresql_16_full_suite": "2669 passed, 1 skipped",
+    "preserved_exact_checkpoint_forward_migration_016": "passed",
+    "preserved_precoverage_all_reject_gate": "passed: 0 accepted, 4 rejected, no adoption, score 4, authority false",
     "ruff": "passed"
   },
   "worktree_branch": "feat/vault-incremental-memory-v2-landing"

@@ -30,7 +30,17 @@ the validated implementation, excludes the incidental untracked lockfile, and
 regenerates the content-addressed implementation map against the committed
 landing tree. The field artifacts and disposable database checkpoints remain
 bound to the preserved recovery snapshot rather than being presented as a new
-field execution.
+field execution. Their durable paths are local preservation references, not
+Git-distributed fixtures; a fresh clone can verify the tracked audit bundle but
+cannot independently restore the exact field databases without the separately
+preserved checkpoints.
+
+The normalized real-brand fixtures intentionally retain the exact audited
+public-source text and acquisition metadata, including two workstation-local
+source paths. The absent raw source envelopes and their SHA-256 references are
+historical provenance attestations, not independently reconstructible inputs.
+This corpus therefore remains a private validation artifact and is not a
+cutover or redistribution authorization.
 
 ## Offline deterministic gate
 
@@ -314,16 +324,37 @@ The initial field execution exposed issues that hermetic fixtures had not:
     serialization of durable review timestamps. Repository projections now
     normalize them to UTC while preserving the exact reviewed instant.
 12. The release migration integration assertions ended at migration 013. They
-    now require migrations 014 and 015, verify both operational tables, and
-    enforce the complete 15-migration release path.
+    now require migrations 014–016, verify both operational tables, and
+    enforce the complete 16-migration release path.
+13. Incomplete semantic-label responses, deterministic identity mismatches, and
+    non-evidentiary one-character quotes are now rejected or excluded at the
+    bounded executor trust boundary instead of being neutral-filled or passed
+    to relation review.
+14. Expired `claimed`/`running` leases are now exposed as reclaimable work while
+    active leases remain busy. The legacy scanner keeps its historical
+    last-duplicate representative behavior; deterministic representative
+    selection is isolated to the Vault helper.
+15. Release migration execution is serialized by a database advisory lock.
+    Migration 016 permits identical immutable source content to bind distinct
+    operation results, and implicit human-review timestamps are recovered from
+    durable review rows after a post-commit retry.
+16. A committed audit verifier now enforces the selected implementation scope,
+    every tracked audit artifact hash, the implementation fingerprint, the
+    fixture binding, external checkpoint hashes when locally available, and the
+    no-authority/no-cutover boundary.
 
 ## Validation evidence
 
 - Original field worktree suite: **2639 passed, 19 skipped**.
-- Clean landing hermetic suite: **2640 passed, 19 skipped**.
-- Clean landing PostgreSQL 16 suite: **2658 passed, 1 skipped**.
+- Clean landing hermetic suite: **2648 passed, 22 skipped**.
+- Clean landing PostgreSQL 16 suite: **2669 passed, 1 skipped**.
 - Coverage/exact-review/lineage focused suite: **25 passed**.
 - Original disposable PostgreSQL focused suite: **12 passed**.
+- Preserved exact-relation checkpoint forward migration to 016: passed.
+- Preserved pre-coverage checkpoint all-reject review gate: passed with zero
+  adoption, unchanged score 4, and `authority=false`.
+- Audit manifest verifier with all three local external checkpoints required:
+  passed.
 - Ruff: passed.
 - `git diff --check`: passed.
 - Runtime wiring: `web/scan_runner.py` remains unchanged.
