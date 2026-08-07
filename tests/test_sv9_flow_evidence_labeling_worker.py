@@ -277,6 +277,35 @@ def test_label_cache_does_not_store_neutral_artifacts_after_provider_failure() -
     assert "relevant_blocks" not in pack.evidence[0].metadata
 
 
+def test_label_evidence_pack_fails_closed_when_provider_omits_a_record() -> None:
+    pack = BrandEvidencePack(
+        "Acme",
+        "https://acme.example",
+        [
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="web",
+                evidence_type="raw_input",
+                content="Acme helps teams close faster.",
+                url="https://acme.example",
+                metadata={
+                    "source_class": "owned_copy",
+                    "identity_match": "domain",
+                },
+            )
+        ],
+    )
+
+    debug = label_evidence_pack(pack, llm=StubLabelingLLM([]))
+
+    assert debug["status"] == "failed"
+    assert debug["reason"].startswith(
+        "evidence_labeling_provider_incomplete:"
+    )
+    assert debug["records_labeled"] == 0
+    assert "semantic_labeling_version" not in pack.evidence[0].metadata
+
+
 def test_label_evidence_pack_filters_workset_but_keeps_full_identity_context() -> None:
     pack = BrandEvidencePack(
         brand_name="Acme",

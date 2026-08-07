@@ -215,6 +215,10 @@ class PostgresHistoryRepository:
 
         applied: list[str] = []
         with self._connect() as conn:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_advisory_lock_key(_SCHEMA, "schema-migrations-v1"),),
+            )
             conn.execute(f"CREATE SCHEMA IF NOT EXISTS {_SCHEMA}")
             conn.execute(
                 f"""
@@ -1006,15 +1010,31 @@ class PostgresHistoryRepository:
                     )
                     or ""
                 )
+                expected_source_resolution = {
+                    "schema_version": "evidence-vault-operational-source-resolution-v1",
+                    "operation_plan_fingerprint": plan_fingerprint,
+                    "observation_hash": str(row["observation_hash"]),
+                    "result_fingerprint": expected_result,
+                    "source_candidate_packet_fingerprint": source_fingerprint,
+                }
+                source_resolution_fingerprint = canonical_fingerprint(
+                    "evidence-vault-operational-source-resolution-v1",
+                    expected_source_resolution,
+                )
                 source_row = conn.execute(
                     f"""
                     SELECT *
                     FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
                     WHERE brand_id = %s
                       AND packet_fingerprint = %s
+                      AND reference_resolution_fingerprint = %s
                       AND packet_kind = 'operational_source_v2'
                     """,
-                    (row["brand_id"], source_fingerprint),
+                    (
+                        row["brand_id"],
+                        source_fingerprint,
+                        source_resolution_fingerprint,
+                    ),
                 ).fetchone()
                 if source_row is None:
                     raise CaptureConflictError(
@@ -1023,27 +1043,41 @@ class PostgresHistoryRepository:
                 source_record = _vault_operational_source_packet_record(
                     source_row
                 )
-                source_resolution = source_record["reference_resolution"]
                 if (
                     source_record["packet"]
                     != result_payload.get("source_candidate_packet")
-                    or source_resolution.get("operation_plan_fingerprint")
-                    != plan_fingerprint
-                    or source_resolution.get("result_fingerprint")
-                    != expected_result
+                    or source_record["reference_resolution"]
+                    != expected_source_resolution
                 ):
                     raise CaptureConflictError(
                         "executor source packet is not bound to its immutable result"
                     )
+                operational_candidate = result_payload.get(
+                    "operational_candidate_packet"
+                )
+                if not isinstance(operational_candidate, Mapping):
+                    raise CaptureConflictError(
+                        "stored executor candidate packet is missing"
+                    )
+                operational_resolution = _operational_storage_resolution(
+                    dict(operational_candidate)
+                )
                 packet_row = conn.execute(
                     f"""
                     SELECT *
                     FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
                     WHERE brand_id = %s
                       AND packet_fingerprint = %s
+                      AND reference_resolution_fingerprint = %s
                       AND packet_kind = 'operational_v2'
                     """,
-                    (row["brand_id"], candidate_fingerprint),
+                    (
+                        row["brand_id"],
+                        candidate_fingerprint,
+                        operational_resolution[
+                            "reference_resolution_fingerprint"
+                        ],
+                    ),
                 ).fetchone()
                 if packet_row is None:
                     raise CaptureConflictError(
@@ -2094,7 +2128,10 @@ class PostgresHistoryRepository:
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     'pending_review', false, false, false
                 )
-                ON CONFLICT (brand_id, packet_fingerprint) DO NOTHING
+                ON CONFLICT (
+                    brand_id, packet_fingerprint,
+                    reference_resolution_fingerprint
+                ) DO NOTHING
                 RETURNING *
                 """,
                 (
@@ -2119,9 +2156,14 @@ class PostgresHistoryRepository:
                     FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
                     WHERE brand_id = %s
                       AND packet_fingerprint = %s
+                      AND reference_resolution_fingerprint = %s
                       AND packet_kind = 'canonical_v1'
                     """,
-                    (brand_id, packet["candidate_packet_fingerprint"]),
+                    (
+                        brand_id,
+                        packet["candidate_packet_fingerprint"],
+                        resolution["reference_resolution_fingerprint"],
+                    ),
                 ).fetchone()
             if row is None:
                 raise EvidenceVaultCanonicalPacketNotFoundError(
@@ -3101,6 +3143,7 @@ class PostgresHistoryRepository:
                 brand_id,
                 "evidence-vault-exact-relation-supplement-source-packet",
                 source["candidate_packet_fingerprint"],
+                resolution_fingerprint,
             )
             inserted = conn.execute(
                 f"""
@@ -3116,7 +3159,10 @@ class PostgresHistoryRepository:
                     'pending_review', false, false, false,
                     'operational_source_v2', %s
                 )
-                ON CONFLICT (brand_id, packet_fingerprint) DO NOTHING
+                ON CONFLICT (
+                    brand_id, packet_fingerprint,
+                    reference_resolution_fingerprint
+                ) DO NOTHING
                 RETURNING *
                 """,
                 (
@@ -3140,9 +3186,14 @@ class PostgresHistoryRepository:
                 FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
                 WHERE brand_id = %s
                   AND packet_fingerprint = %s
+                  AND reference_resolution_fingerprint = %s
                   AND packet_kind = 'operational_source_v2'
                 """,
-                (brand_id, source["candidate_packet_fingerprint"]),
+                (
+                    brand_id,
+                    source["candidate_packet_fingerprint"],
+                    resolution_fingerprint,
+                ),
             ).fetchone()
             if row is None:
                 raise EvidenceVaultOperationalAuthorityError(
@@ -3285,6 +3336,7 @@ class PostgresHistoryRepository:
                 brand_id,
                 "evidence-vault-coverage-supplement-source-packet",
                 source["candidate_packet_fingerprint"],
+                resolution_fingerprint,
             )
             inserted = conn.execute(
                 f"""
@@ -3300,7 +3352,10 @@ class PostgresHistoryRepository:
                     'pending_review', false, false, false,
                     'operational_source_v2', %s
                 )
-                ON CONFLICT (brand_id, packet_fingerprint) DO NOTHING
+                ON CONFLICT (
+                    brand_id, packet_fingerprint,
+                    reference_resolution_fingerprint
+                ) DO NOTHING
                 RETURNING *
                 """,
                 (
@@ -3326,9 +3381,14 @@ class PostgresHistoryRepository:
                 FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
                 WHERE brand_id = %s
                   AND packet_fingerprint = %s
+                  AND reference_resolution_fingerprint = %s
                   AND packet_kind = 'operational_source_v2'
                 """,
-                (brand_id, source["candidate_packet_fingerprint"]),
+                (
+                    brand_id,
+                    source["candidate_packet_fingerprint"],
+                    resolution_fingerprint,
+                ),
             ).fetchone()
             if row is None:
                 raise EvidenceVaultOperationalAuthorityError(
@@ -3410,6 +3470,19 @@ class PostgresHistoryRepository:
                     "The source packet brand is not bound to the capture operation."
                 )
             brand_id = operation["brand_id"]
+            resolution = {
+                "schema_version": "evidence-vault-operational-source-resolution-v1",
+                "operation_plan_fingerprint": plan_fingerprint,
+                "observation_hash": str(operation["observation_hash"]),
+                "result_fingerprint": str(operation["result_fingerprint"]),
+                "source_candidate_packet_fingerprint": candidate[
+                    "candidate_packet_fingerprint"
+                ],
+            }
+            resolution_fingerprint = canonical_fingerprint(
+                "evidence-vault-operational-source-resolution-v1",
+                resolution,
+            )
             if str(operation["status"]) == "completed":
                 replay_row = conn.execute(
                     f"""
@@ -3417,9 +3490,14 @@ class PostgresHistoryRepository:
                     FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
                     WHERE brand_id = %s
                       AND packet_fingerprint = %s
+                      AND reference_resolution_fingerprint = %s
                       AND packet_kind = 'operational_source_v2'
                     """,
-                    (brand_id, candidate["candidate_packet_fingerprint"]),
+                    (
+                        brand_id,
+                        candidate["candidate_packet_fingerprint"],
+                        resolution_fingerprint,
+                    ),
                 ).fetchone()
                 if replay_row is None:
                     raise EvidenceVaultOperationalAuthorityError(
@@ -3452,23 +3530,11 @@ class PostgresHistoryRepository:
                 operation=operation,
                 current_memory=current,
             )
-            resolution = {
-                "schema_version": "evidence-vault-operational-source-resolution-v1",
-                "operation_plan_fingerprint": plan_fingerprint,
-                "observation_hash": str(operation["observation_hash"]),
-                "result_fingerprint": str(operation["result_fingerprint"]),
-                "source_candidate_packet_fingerprint": candidate[
-                    "candidate_packet_fingerprint"
-                ],
-            }
-            resolution_fingerprint = canonical_fingerprint(
-                "evidence-vault-operational-source-resolution-v1",
-                resolution,
-            )
             packet_id = _stable_uuid(
                 brand_id,
                 "evidence-vault-operational-source-packet",
                 candidate["candidate_packet_fingerprint"],
+                resolution_fingerprint,
             )
             inserted = conn.execute(
                 f"""
@@ -3484,7 +3550,10 @@ class PostgresHistoryRepository:
                     'pending_review', false, false, false,
                     'operational_source_v2', %s
                 )
-                ON CONFLICT (brand_id, packet_fingerprint) DO NOTHING
+                ON CONFLICT (
+                    brand_id, packet_fingerprint,
+                    reference_resolution_fingerprint
+                ) DO NOTHING
                 RETURNING *
                 """,
                 (
@@ -3508,9 +3577,14 @@ class PostgresHistoryRepository:
                 FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
                 WHERE brand_id = %s
                   AND packet_fingerprint = %s
+                  AND reference_resolution_fingerprint = %s
                   AND packet_kind = 'operational_source_v2'
                 """,
-                (brand_id, candidate["candidate_packet_fingerprint"]),
+                (
+                    brand_id,
+                    candidate["candidate_packet_fingerprint"],
+                    resolution_fingerprint,
+                ),
             ).fetchone()
             if row is None:
                 raise EvidenceVaultOperationalAuthorityError(
@@ -3554,6 +3628,7 @@ class PostgresHistoryRepository:
             field="reviewer_id",
             maximum=200,
         )
+        timestamp_was_explicit = reviewed_at is not None or created_at is not None
         reviewed_timestamp = _normalized_event_timestamp(
             reviewed_at or created_at or datetime.now(timezone.utc).isoformat(),
             field="reviewed_at",
@@ -3594,15 +3669,6 @@ class PostgresHistoryRepository:
             raise EvidenceVaultOperationalAuthorityError(
                 "Operational relation review is incomplete."
             )
-        request_fingerprint = canonical_fingerprint(
-            "evidence-vault-operational-relation-review-request-v1",
-            {
-                "source_candidate_packet_fingerprint": source_fingerprint,
-                "reviewer_id": reviewer,
-                "reviewed_at": reviewed_timestamp,
-                "decisions": normalized,
-            },
-        )
         self._ensure_migrated()
         with self._connect() as conn:
             brand = conn.execute(
@@ -3632,6 +3698,8 @@ class PostgresHistoryRepository:
                 WHERE brand_id = %s
                   AND packet_fingerprint = %s
                   AND packet_kind = 'operational_source_v2'
+                ORDER BY created_at, id
+                LIMIT 1
                 FOR UPDATE
                 """,
                 (brand_id, source_fingerprint),
@@ -3678,6 +3746,25 @@ class PostgresHistoryRepository:
                 raise EvidenceVaultOperationalAuthorityError(
                     "The source has a partial conflicting review set."
                 )
+            if existing_rows and not timestamp_was_explicit:
+                existing_timestamps = {
+                    row["created_at"].astimezone(timezone.utc).isoformat()
+                    for row in existing_rows
+                }
+                if len(existing_timestamps) != 1:
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "The source review set has inconsistent timestamps."
+                    )
+                reviewed_timestamp = next(iter(existing_timestamps))
+            request_fingerprint = canonical_fingerprint(
+                "evidence-vault-operational-relation-review-request-v1",
+                {
+                    "source_candidate_packet_fingerprint": source_fingerprint,
+                    "reviewer_id": reviewer,
+                    "reviewed_at": reviewed_timestamp,
+                    "decisions": normalized,
+                },
+            )
             review_events: list[dict[str, Any]] = []
             for relation_id, decision in sorted(normalized.items()):
                 event_id = _stable_uuid(
@@ -3847,7 +3934,10 @@ class PostgresHistoryRepository:
                     'pending_review', false, false, false,
                     'operational_reviewed_v2', %s
                 )
-                ON CONFLICT (brand_id, packet_fingerprint) DO NOTHING
+                ON CONFLICT (
+                    brand_id, packet_fingerprint,
+                    reference_resolution_fingerprint
+                ) DO NOTHING
                 RETURNING *
                 """,
                 (
@@ -3872,9 +3962,14 @@ class PostgresHistoryRepository:
                 FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
                 WHERE brand_id = %s
                   AND packet_fingerprint = %s
+                  AND reference_resolution_fingerprint = %s
                   AND packet_kind = 'operational_reviewed_v2'
                 """,
-                (brand_id, reviewed_source["candidate_packet_fingerprint"]),
+                (
+                    brand_id,
+                    reviewed_source["candidate_packet_fingerprint"],
+                    resolution_fingerprint,
+                ),
             ).fetchone()
             if stored_row is None:
                 raise EvidenceVaultOperationalAuthorityError(
@@ -4087,7 +4182,10 @@ class PostgresHistoryRepository:
                     'pending_review', false, false, false,
                     'operational_v2', %s, %s, %s
                 )
-                ON CONFLICT (brand_id, packet_fingerprint) DO NOTHING
+                ON CONFLICT (
+                    brand_id, packet_fingerprint,
+                    reference_resolution_fingerprint
+                ) DO NOTHING
                 RETURNING *
                 """,
                 (
@@ -4113,9 +4211,14 @@ class PostgresHistoryRepository:
                 FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
                 WHERE brand_id = %s
                   AND packet_fingerprint = %s
+                  AND reference_resolution_fingerprint = %s
                   AND packet_kind = 'operational_v2'
                 """,
-                (brand_id, packet["candidate_packet_fingerprint"]),
+                (
+                    brand_id,
+                    packet["candidate_packet_fingerprint"],
+                    resolution["reference_resolution_fingerprint"],
+                ),
             ).fetchone()
             if row is None:
                 raise EvidenceVaultOperationalAuthorityError(
@@ -7844,13 +7947,21 @@ def _vault_operation_plan_record(row: Mapping[str, Any]) -> dict[str, Any]:
             raise CaptureConflictError("stored operation result fingerprint mismatch")
     elif result_fingerprint is not None:
         raise CaptureConflictError("stored operation result payload is missing")
+    status = str(row["status"])
+    lease_expires_at = row.get("lease_expires_at")
+    db_now = row.get("db_now") or datetime.now(timezone.utc)
+    lease_active = bool(
+        status in {"claimed", "running"}
+        and lease_expires_at is not None
+        and lease_expires_at > db_now
+    )
     return {
         "operation_plan_id": str(row["id"]),
         "operation_plan_fingerprint": str(row["operation_plan_fingerprint"]),
         "observation_hash": observation_hash,
         "canonical_memory_version": row.get("canonical_memory_version"),
         "mode": str(row["mode"]),
-        "status": str(row["status"]),
+        "status": status,
         "plan": plan,
         "attempt_count": int(row["attempt_count"]),
         "lease_owner": (
@@ -7861,10 +7972,11 @@ def _vault_operation_plan_record(row: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "lease_generation": int(row["lease_generation"]),
         "lease_expires_at": (
-            row["lease_expires_at"].astimezone(timezone.utc).isoformat()
-            if row.get("lease_expires_at") is not None
+            lease_expires_at.astimezone(timezone.utc).isoformat()
+            if lease_expires_at is not None
             else None
         ),
+        "lease_active": lease_active,
         "result_fingerprint": result_fingerprint,
         "result_payload": result_payload,
         "candidate_packet_fingerprint": (
@@ -7913,7 +8025,7 @@ def _validate_vault_operation_result_for_plan(
 ) -> None:
     from src.services.evidence_vault_incremental_executor import (
         EvidenceVaultIncrementalExecutorError,
-        _tile_shortlists,
+        derive_vault_tile_shortlists,
         validate_vault_operation_result,
     )
 
@@ -8012,6 +8124,14 @@ def _validate_vault_operation_result_for_plan(
         if identity is None:
             expected_dispositions[fingerprint] = "non_material_identity"
             continue
+        deterministic_identity_match = str(
+            record.metadata.get("identity_match") or ""
+        ).strip().lower()
+        if deterministic_identity_match == "none":
+            expected_dispositions[fingerprint] = (
+                "deterministic_identity_mismatch"
+            )
+            continue
         expected_dispositions[fingerprint] = "semantic_candidate"
         identities[fingerprint] = identity
     if result.get("evidence_work_dispositions") != expected_dispositions:
@@ -8034,7 +8154,7 @@ def _validate_vault_operation_result_for_plan(
     }
     if not isinstance(shortlists, Mapping) or set(shortlists) != semantic_fingerprints:
         raise CaptureConflictError("executor result shortlist workset is invalid")
-    derived_shortlists, derived_truncations = _tile_shortlists(
+    derived_shortlists, derived_truncations = derive_vault_tile_shortlists(
         [
             {
                 "evidence_fingerprint": fingerprint,

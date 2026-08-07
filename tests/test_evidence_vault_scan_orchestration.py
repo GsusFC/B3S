@@ -448,3 +448,64 @@ def test_retry_uses_first_class_operation_lookup_for_result_recovery() -> None:
     assert resumed["resume"]["semantic_work_required"] is False
     assert resumed["resume"]["materialization_required"] is True
     assert resumed["resume"]["work_required"] is True
+
+
+def test_retry_reclaims_expired_lease_but_leaves_active_lease_busy() -> None:
+    initial = _Repository(memory=None, history=[])
+    first = prepare_vault_scan_after_capture(
+        repository=initial,
+        snapshot=_snapshot("Evidence"),
+        scan_id="scan-lease-retry",
+        url="https://example.com",
+        brand_name="Example",
+        environment="vault",
+        incremental_enabled=True,
+        observed_at="2026-08-06T11:00:00Z",
+    )
+    raw = initial.persisted[0]
+    plan = first["operation_plan"]
+
+    class LeaseRepository(_Repository):
+        def __init__(self, *, lease_active: bool):
+            super().__init__(memory=None, history=[])
+            self.lease_active = lease_active
+
+        def get_capture_operation_plan(self, source_scan_id, **_kwargs):
+            return {
+                "status": "running",
+                "lease_active": self.lease_active,
+                "raw_observation": raw,
+                "plan": plan,
+                "result_fingerprint": None,
+            }
+
+        def list_capture_observations_for_domain(self, *_args, **_kwargs):
+            raise AssertionError("lease retry must use first-class operation lookup")
+
+    expired = prepare_vault_scan_after_capture(
+        repository=LeaseRepository(lease_active=False),
+        snapshot=_snapshot("Evidence"),
+        scan_id="scan-lease-retry",
+        url="https://example.com",
+        brand_name="Example",
+        environment="vault",
+        incremental_enabled=True,
+        observed_at="2026-08-06T11:00:00Z",
+    )
+    active = prepare_vault_scan_after_capture(
+        repository=LeaseRepository(lease_active=True),
+        snapshot=_snapshot("Evidence"),
+        scan_id="scan-lease-retry",
+        url="https://example.com",
+        brand_name="Example",
+        environment="vault",
+        incremental_enabled=True,
+        observed_at="2026-08-06T11:00:00Z",
+    )
+
+    assert expired["operation_plan"] == plan
+    assert expired["resume"]["execution_required"] is True
+    assert expired["resume"]["work_required"] is True
+    assert active["operation_plan"] is None
+    assert active["resume"]["execution_required"] is False
+    assert active["resume"]["work_required"] is False

@@ -171,10 +171,19 @@ def _labels_with_artifact_cache(
             record = evidence_record_for_ref(label.get("ref") or "", evidence_pack)
             if record is not None:
                 returned_by_id[canonical_evidence_ref(record)] = label
+        missing_refs = [
+            canonical_evidence_ref(record)
+            for record in missing
+            if canonical_evidence_ref(record) not in returned_by_id
+        ]
+        if missing_refs:
+            raise RuntimeError(
+                "evidence_labeling_provider_incomplete:"
+                + ",".join(sorted(missing_refs))
+            )
         for record in missing:
             canonical_ref = canonical_evidence_ref(record)
-            label = returned_by_id.get(canonical_ref) or _neutral_label(canonical_ref)
-            normalized = _normalize_label(label)
+            normalized = _normalize_label(returned_by_id[canonical_ref])
             _artifact_cache_save(
                 llm,
                 _record_label_cache_key(evidence_pack=evidence_pack, record=record, llm=llm),
@@ -288,16 +297,6 @@ def _normalize_label(item: dict[str, Any]) -> dict[str, Any]:
         "stance": _valid_enum(item.get("stance"), _STANCES, default="neutral"),
         "identity_match": _valid_enum(item.get("identity_match"), _IDENTITY_MATCHES, default="unverified"),
         "specificity": _valid_enum(item.get("specificity"), _SPECIFICITIES, default="incidental"),
-    }
-
-
-def _neutral_label(ref: str) -> dict[str, Any]:
-    return {
-        "ref": ref,
-        "relevant_blocks": [],
-        "stance": "neutral",
-        "identity_match": "unverified",
-        "specificity": "incidental",
     }
 
 

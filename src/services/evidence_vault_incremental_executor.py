@@ -381,6 +381,7 @@ def validate_vault_operation_result(result: Mapping[str, Any]) -> None:
                 "semantic_candidate",
                 "ineligible_label_type",
                 "non_material_identity",
+                "deterministic_identity_mismatch",
             }
         )
     ):
@@ -617,6 +618,12 @@ def _build_candidate_result(
         if identity is None:
             dispositions[fingerprint] = "non_material_identity"
             continue
+        deterministic_identity_match = str(
+            record.metadata.get("identity_match") or ""
+        ).strip().lower()
+        if deterministic_identity_match == "none":
+            dispositions[fingerprint] = "deterministic_identity_mismatch"
+            continue
         dispositions[fingerprint] = "semantic_candidate"
         identities[fingerprint] = identity
         enriched.append(
@@ -643,7 +650,7 @@ def _build_candidate_result(
                 },
             }
         )
-    shortlists, shortlist_truncations = _tile_shortlists(
+    shortlists, shortlist_truncations = derive_vault_tile_shortlists(
         enriched,
         forced_tile_ids=plan["operations"]["reevaluate_tile_ids"],
     )
@@ -991,7 +998,7 @@ def _relation_chunk_count(
     return len(_relation_chunk_fingerprints(tile_shortlists))
 
 
-def _tile_shortlists(
+def derive_vault_tile_shortlists(
     evidence_rows: list[Mapping[str, Any]],
     *,
     forced_tile_ids: list[str],

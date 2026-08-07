@@ -66,6 +66,7 @@ def test_relation_worker_returns_only_literal_scoped_proposals() -> None:
     ("field", "value", "message"),
     [
         ("literal_quote", "invented quote", "quote_not_literal"),
+        ("literal_quote", ".", "quote_not_literal"),
         ("tile_id", "M2", "tile_outside_shortlist"),
         ("polarity", "demonstrates_absence", "polarity_invalid"),
         ("literal_quote", 1, "field_type_invalid"),

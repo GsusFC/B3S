@@ -503,15 +503,26 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
         .joinpath("migrations/015_evidence_vault_operation_plan_execution.sql")
         .read_text(encoding="utf-8")
     )
+    source_binding_sql = (
+        resources.files("src.history")
+        .joinpath("migrations/016_evidence_vault_source_packet_bindings.sql")
+        .read_text(encoding="utf-8")
+    )
 
     assert filenames[13:] == [
         "014_evidence_vault_operational_memory_v2.sql",
         "015_evidence_vault_operation_plan_execution.sql",
+        "016_evidence_vault_source_packet_bindings.sql",
     ]
     assert "packet_kind" in operational_memory_sql
     assert "operational_source_v2" in operational_memory_sql
     assert "operational_reviewed_v2" in operational_memory_sql
     assert "operational_v2" in operational_memory_sql
+    assert (
+        "DROP CONSTRAINT IF EXISTS "
+        "evidence_vault_canonical_memory_brand_id_packet_fingerprint_key"
+        in source_binding_sql
+    )
     assert "production_runtime_effect" in operation_execution_sql
     assert "scanner_runtime_effect" in operation_execution_sql
     assert "CHECK (authority = false)" in operation_execution_sql
@@ -725,6 +736,60 @@ def test_scoring_recovery_review_repository_is_idempotent_and_optimistic() -> No
     not os.environ.get("B3S_TEST_DATABASE_URL"),
     reason="B3S_TEST_DATABASE_URL is required for PostgreSQL integration",
 )
+def test_concurrent_release_migration_is_database_serialized() -> None:
+    import psycopg
+    from threading import Barrier
+
+    from src.history.repository import PostgresHistoryRepository
+
+    _require_schema_drop_opt_in()
+    dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+    barrier = Barrier(2)
+
+    def migrate_concurrently() -> list[str]:
+        repository = PostgresHistoryRepository(dsn)
+        barrier.wait()
+        return repository.migrate()
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _index: migrate_concurrently(), range(2)))
+        assert sorted(len(result) for result in results) == [0, 16]
+        assert sorted({filename for result in results for filename in result}) == [
+            f"{index:03d}_" + name
+            for index, name in enumerate(
+                [
+                    "history_v1.sql",
+                    "evidence_stability.sql",
+                    "evidence_ledger_shadow.sql",
+                    "evidence_memory_adjudications.sql",
+                    "evidence_claim_reconciliations.sql",
+                    "evidence_claim_tile_ledger.sql",
+                    "evidence_scoring_recovery_reviews.sql",
+                    "evidence_claim_tile_reviews.sql",
+                    "evidence_claim_tile_review_packet_fingerprint.sql",
+                    "evidence_claim_tile_review_packets.sql",
+                    "evidence_vault_canonical_memory.sql",
+                    "evidence_vault_canonical_scoring.sql",
+                    "evidence_scoring_recovery_supplements.sql",
+                    "evidence_vault_operational_memory_v2.sql",
+                    "evidence_vault_operation_plan_execution.sql",
+                    "evidence_vault_source_packet_bindings.sql",
+                ],
+                start=1,
+            )
+        ]
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL"),
+    reason="B3S_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
 def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
     monkeypatch,
 ) -> None:
@@ -760,6 +825,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "013_evidence_scoring_recovery_supplements.sql",
             "014_evidence_vault_operational_memory_v2.sql",
             "015_evidence_vault_operation_plan_execution.sql",
+            "016_evidence_vault_source_packet_bindings.sql",
         ]
         assert repository.migrate() == []
 
@@ -1681,6 +1747,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "013_evidence_scoring_recovery_supplements.sql",
             "014_evidence_vault_operational_memory_v2.sql",
             "015_evidence_vault_operation_plan_execution.sql",
+            "016_evidence_vault_source_packet_bindings.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0
@@ -1749,7 +1816,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
         assert stored[8] == (
             "b3s_history.evidence_vault_operational_relation_reviews"
         )
-        assert stored[9] == 15
+        assert stored[9] == 16
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")

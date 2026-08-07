@@ -234,7 +234,12 @@ def _validated_relation(
     if polarity not in _ALLOWED_POLARITIES:
         raise _DiscardRelation("polarity_invalid")
     quote = str(raw.get("literal_quote") or "").strip()
-    if not quote or quote not in str(evidence["content"]):
+    quote_candidates = _literal_quote_candidates(str(evidence["content"]))
+    if (
+        len(quote) < 8
+        or len(quote) > 320
+        or not any(quote in candidate for candidate in quote_candidates)
+    ):
         raise _DiscardRelation("quote_not_literal")
     rationale = str(raw.get("rationale") or "").strip()
     if not rationale or len(rationale) > 1000:

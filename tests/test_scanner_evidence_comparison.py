@@ -5,6 +5,7 @@ from copy import deepcopy
 from src.services.scanner_evidence_comparison import (
     annotate_report_history,
     build_evidence_snapshot,
+    canonical_evidence_records,
     classify_report_history,
     compare_reports,
     render_history_dry_run,
@@ -33,6 +34,34 @@ def test_evidence_fingerprint_ignores_record_order_and_unstable_refs() -> None:
 
     assert first_snapshot.fingerprint == second_snapshot.fingerprint
     assert first_snapshot.semantic_fingerprint == second_snapshot.semantic_fingerprint
+
+
+def test_legacy_scanner_duplicate_representative_remains_last_row() -> None:
+    report = _report(
+        "legacy-duplicate",
+        "2026-07-25T00:00:00Z",
+        evidence=[
+            _evidence(
+                "proof.alpha",
+                "alpha",
+                "external_proof",
+                "https://proof.test/story",
+                "The same independent proof.",
+            ),
+            _evidence(
+                "proof.zeta",
+                "zeta",
+                "external_proof",
+                "https://proof.test/story",
+                "The same independent proof.",
+            ),
+        ],
+    )
+
+    records = canonical_evidence_records(report)
+
+    assert len(records) == 1
+    assert records[0].source == "zeta"
 
 
 def test_comparator_flags_evaluation_drift_for_equivalent_evidence() -> None:

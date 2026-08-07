@@ -130,6 +130,16 @@ def main() -> int:
         }
         for row in relation_rows
     ]
+    accepted_ids = {
+        row["relation_id"]
+        for row in relation_rows
+        if row["human_decision"] == "accept"
+    }
+    rejected_ids = {
+        row["relation_id"]
+        for row in relation_rows
+        if row["human_decision"] == "reject"
+    }
     review = repository.review_and_adopt_evidence_vault_operational_source(
         brand,
         source_candidate_packet_fingerprint=source["packet"][
@@ -145,19 +155,11 @@ def main() -> int:
             brand
         )
     )
-    if review["memory"] is None or review["adoption"] is None or score is None:
-        raise RuntimeError("coverage review did not create memory and score")
+    if review["memory"] is None or score is None:
+        raise RuntimeError("coverage review did not resolve memory and score")
+    if bool(accepted_ids) != (review["adoption"] is not None):
+        raise RuntimeError("coverage adoption event does not match accepted delta")
     memory = review["memory"]
-    accepted_ids = {
-        row["relation_id"]
-        for row in relation_rows
-        if row["human_decision"] == "accept"
-    }
-    rejected_ids = {
-        row["relation_id"]
-        for row in relation_rows
-        if row["human_decision"] == "reject"
-    }
     memory_relations = {
         basis["relation_id"]
         for tile in memory["content"]["accepted_tiles"]
@@ -166,11 +168,16 @@ def main() -> int:
     final_tile_ids = {
         tile["tile_id"] for tile in memory["content"]["accepted_tiles"]
     }
+    accepted_tile_ids = {
+        row["tile_id"]
+        for row in relation_rows
+        if row["human_decision"] == "accept"
+    }
     if initial_application:
         if (
             memory_relations - before_relations != accepted_ids
             or memory_relations & rejected_ids
-            or before_tile_ids | {"MG10"} != final_tile_ids
+            or before_tile_ids | accepted_tile_ids != final_tile_ids
         ):
             raise RuntimeError(
                 "coverage accepted-memory delta differs from worksheet"
@@ -178,40 +185,44 @@ def main() -> int:
     elif (
         not accepted_ids.issubset(memory_relations)
         or memory_relations & rejected_ids
-        or final_tile_ids != {"P1", "P3", "P5", "PR3", "MG10"}
-        or len(memory_relations) != 11
     ):
         raise RuntimeError("coverage replay differs from the adopted field result")
     if score["canonical_memory_version"] != memory["canonical_memory_version"]:
         raise RuntimeError("coverage score is not bound to accepted memory")
-    if (
-        before_score["score"] != (4 if initial_application else 6)
-        or score["score"] != 6
-        or score["authority_coverage"]["accepted_tile_count"] != 5
-        or score["authority_coverage"]["unresolved_tile_count"] != 75
-        or score["authority_coverage"][
-            "tile_authority_coverage_ratio"
-        ]
-        != 0.0625
-        or score["authority_coverage"][
-            "score_weight_authority_coverage_ratio"
-        ]
-        != 0.06
-    ):
-        raise RuntimeError("coverage adoption produced an unexpected sparse score")
-    magnetism = next(
-        row
-        for row in score["component_breakdown"]
-        if row["component_key"] == "magnetism"
-    )
-    if (
-        magnetism["ok_count"] != 1
-        or magnetism["raw_score"] != 1
-        or magnetism["multiplier"] != 2
-        or magnetism["points"] != 2
-        or magnetism["effective_score"] != 1
-    ):
-        raise RuntimeError("MG10 did not produce the expected magnetism weight")
+    if not accepted_ids:
+        if memory != before_memory or score != before_score:
+            raise RuntimeError("rejected coverage review changed memory or score")
+    else:
+        if (
+            before_score["score"] != (4 if initial_application else 6)
+            or score["score"] != 6
+            or score["authority_coverage"]["accepted_tile_count"] != 5
+            or score["authority_coverage"]["unresolved_tile_count"] != 75
+            or score["authority_coverage"][
+                "tile_authority_coverage_ratio"
+            ]
+            != 0.0625
+            or score["authority_coverage"][
+                "score_weight_authority_coverage_ratio"
+            ]
+            != 0.06
+        ):
+            raise RuntimeError(
+                "coverage adoption produced an unexpected sparse score"
+            )
+        magnetism = next(
+            row
+            for row in score["component_breakdown"]
+            if row["component_key"] == "magnetism"
+        )
+        if (
+            magnetism["ok_count"] != 1
+            or magnetism["raw_score"] != 1
+            or magnetism["multiplier"] != 2
+            or magnetism["points"] != 2
+            or magnetism["effective_score"] != 1
+        ):
+            raise RuntimeError("MG10 did not produce the expected magnetism weight")
 
     source_replay, source_replayed_again = (
         repository.register_evidence_vault_coverage_supplement_source_packet(
@@ -301,9 +312,17 @@ def main() -> int:
             "parent_canonical_memory_version"
         ],
         "canonical_memory_version": memory["canonical_memory_version"],
-        "adoption_event_id": review["adoption"]["event_id"],
-        "adoption_sequence": review["adoption"]["sequence"],
-        "previous_event_id": review["adoption"]["previous_event_id"],
+        "adoption_event_id": (
+            review["adoption"]["event_id"] if review["adoption"] else None
+        ),
+        "adoption_sequence": (
+            review["adoption"]["sequence"] if review["adoption"] else None
+        ),
+        "previous_event_id": (
+            review["adoption"]["previous_event_id"]
+            if review["adoption"]
+            else None
+        ),
         "accepted_tile_ids": sorted(
             tile["tile_id"] for tile in memory["content"]["accepted_tiles"]
         ),
@@ -313,7 +332,7 @@ def main() -> int:
         "authority_coverage": score["authority_coverage"],
         "score_replayed_on_creation_call": score_replayed,
         "score_replayed_on_second_call": score_replayed_again,
-        "authority": True,
+        "authority": review["adoption"] is not None,
         "authority_scope": "b3s-vault",
         "production_runtime_effect": False,
         "scanner_runtime_effect": False,

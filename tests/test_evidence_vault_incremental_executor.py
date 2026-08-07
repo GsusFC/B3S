@@ -248,6 +248,35 @@ def test_result_persisted_retry_uses_zero_llm_calls() -> None:
     assert retry.source_packets and retry.operational_packets
 
 
+def test_deterministic_identity_mismatch_cannot_be_overridden_by_llm() -> None:
+    row = _row("External same-name company evidence.")
+    row["source"] = "exa"
+    row["url"] = "https://other.example"
+    row["metadata"] = {
+        "source_class": "external_proof",
+        "identity_match": "none",
+    }
+    repository = MemoryRepository(plan=_baseline_plan([row]), rows=[row])
+    llm = ExecutorLLM()
+
+    execution = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="scan-1",
+        worker_id="worker-a",
+        llm=llm,
+    )
+
+    assert execution["execution_status"] == "completed"
+    result = repository.operation["result_payload"]
+    fingerprint = result["selected_evidence_fingerprints"][0]
+    assert result["evidence_work_dispositions"][fingerprint] == (
+        "deterministic_identity_mismatch"
+    )
+    assert result["tile_shortlists"] == {}
+    assert result["basis_relations"] == []
+    assert llm.calls == ["sv9_flow_evidence_labeling"]
+
+
 def test_acquisition_metadata_is_persisted_as_deterministically_ineligible() -> None:
     rows = [{
         "ref": "acquisition.0",

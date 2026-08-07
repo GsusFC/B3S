@@ -332,11 +332,15 @@ def _resume_first_class_operation(
         dict(raw),
         workspace_slug=workspace_slug,
     )
+    lease_reclaimable = bool(
+        status in {"claimed", "running"}
+        and operation.get("lease_active") is False
+    )
     execution_required = status in {
         "pending",
         "not_required",
         "failed_retryable",
-    }
+    } or lease_reclaimable
     semantic_work_required = bool(
         execution_required
         and dict(plan.get("operations") or {}).get("llm_required")

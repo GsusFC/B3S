@@ -607,3 +607,112 @@ def test_non_semantic_capture_rows_complete_without_llm_or_poisoned_retry() -> N
     assert result["selected_evidence_fingerprints"] == []
     assert result["evidence_work_dispositions"] == {}
     assert result["basis_relations"] == []
+
+
+def test_identical_source_packet_can_bind_two_distinct_operations() -> None:
+    import psycopg
+
+    repository = _reset_repository()
+    _persist_baseline(repository, "source-binding-a")
+    _persist_baseline(repository, "source-binding-b")
+
+    first = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="source-binding-a",
+        worker_id="worker-a",
+        llm=ExecutorLLM(),
+    )
+    second = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="source-binding-b",
+        worker_id="worker-b",
+        llm=ExecutorLLM(),
+    )
+
+    assert first["execution_status"] == "completed"
+    assert second["execution_status"] == "completed"
+    first_result = repository.get_capture_operation_plan(
+        "source-binding-a"
+    )["result_payload"]
+    second_result = repository.get_capture_operation_plan(
+        "source-binding-b"
+    )["result_payload"]
+    assert first_result["source_candidate_packet_fingerprint"] == (
+        second_result["source_candidate_packet_fingerprint"]
+    )
+    with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"]) as conn:
+        stored = conn.execute(
+            """
+            SELECT count(*) AS row_count,
+                   count(DISTINCT reference_resolution_fingerprint) AS binding_count
+            FROM b3s_history.evidence_vault_canonical_memory_packets
+            WHERE packet_kind = 'operational_source_v2'
+              AND packet_fingerprint = %s
+            """,
+            (first_result["source_candidate_packet_fingerprint"],),
+        ).fetchone()
+    assert stored[0] == 2
+    assert stored[1] == 2
+
+
+def test_review_retry_recovers_implicit_timestamp_after_post_commit_failure() -> None:
+    repository = _reset_repository()
+    _persist_baseline(repository, "review-retry")
+    execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="review-retry",
+        worker_id="worker-a",
+        llm=ExecutorLLM(),
+    )
+    result = repository.get_capture_operation_plan(
+        "review-retry"
+    )["result_payload"]
+    decisions = [{
+        "relation_id": result["basis_relations"][0]["relation_id"],
+        "decision": "accept",
+        "rationale": "The literal statement directly supports M1.",
+    }]
+    register = repository.register_evidence_vault_operational_memory_packet
+
+    def fail_after_review_commit(*_args, **_kwargs):
+        raise RuntimeError("post-review materialization failed")
+
+    repository.register_evidence_vault_operational_memory_packet = (
+        fail_after_review_commit
+    )
+    with pytest.raises(RuntimeError, match="post-review materialization failed"):
+        repository.review_and_adopt_evidence_vault_operational_source(
+            "example.com",
+            source_candidate_packet_fingerprint=result[
+                "source_candidate_packet_fingerprint"
+            ],
+            decisions=decisions,
+            reviewer_id="human-reviewer",
+        )
+    repository.register_evidence_vault_operational_memory_packet = register
+
+    recovered = repository.review_and_adopt_evidence_vault_operational_source(
+        "example.com",
+        source_candidate_packet_fingerprint=result[
+            "source_candidate_packet_fingerprint"
+        ],
+        decisions=decisions,
+        reviewer_id="human-reviewer",
+    )
+
+    assert recovered["packet_replayed"] is False
+    assert recovered["adoption"] is not None
+    assert recovered["memory"] is not None
+    replay = repository.review_and_adopt_evidence_vault_operational_source(
+        "example.com",
+        source_candidate_packet_fingerprint=result[
+            "source_candidate_packet_fingerprint"
+        ],
+        decisions=decisions,
+        reviewer_id="human-reviewer",
+    )
+    assert replay["review_request_fingerprint"] == recovered[
+        "review_request_fingerprint"
+    ]
+    assert replay["packet_replayed"] is True
+    assert replay["adoption_replayed"] is True

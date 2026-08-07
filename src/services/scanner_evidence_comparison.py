@@ -607,10 +607,11 @@ def canonical_evidence_records(
     pack = candidate.get("evidence_pack") if isinstance(candidate.get("evidence_pack"), dict) else {}
     rows = pack.get("evidence") if isinstance(pack.get("evidence"), list) else []
     quarantined_refs = _identity_quarantined_refs(flow)
-    return canonical_evidence_rows(
+    return _canonical_evidence_rows(
         rows,
         subject_url=str(report.get("url") or ""),
         quarantined_refs=quarantined_refs,
+        deterministic_representatives=False,
     )
 
 
@@ -620,13 +621,28 @@ def canonical_evidence_rows(
     subject_url: str,
     quarantined_refs: Iterable[str] = (),
 ) -> tuple[CanonicalEvidenceRecord, ...]:
-    """Canonicalize capture-only evidence with the report comparison rules.
+    """Canonicalize capture-only evidence with deterministic representatives.
 
     Incremental Vault refreshes persist acquisition before a strategic report
-    exists.  Exposing the row normalizer avoids fabricating a report merely to
-    obtain the same evidence identities used by historical comparisons.
+    exists.  This helper deliberately stabilizes exact-duplicate selection
+    without changing the legacy scanner report-comparison projection.
     """
 
+    return _canonical_evidence_rows(
+        rows,
+        subject_url=subject_url,
+        quarantined_refs=quarantined_refs,
+        deterministic_representatives=True,
+    )
+
+
+def _canonical_evidence_rows(
+    rows: Iterable[dict[str, Any]],
+    *,
+    subject_url: str,
+    quarantined_refs: Iterable[str],
+    deterministic_representatives: bool,
+) -> tuple[CanonicalEvidenceRecord, ...]:
     quarantined = {
         str(ref).strip() for ref in quarantined_refs if str(ref).strip()
     }
@@ -678,7 +694,9 @@ def canonical_evidence_rows(
             ).strip().lower(),
         )
         existing = records.get(fingerprint)
-        if existing is None or (
+        if not deterministic_representatives:
+            records[fingerprint] = record
+        elif existing is None or (
             record.source,
             record.identity_match,
         ) < (
