@@ -8381,7 +8381,7 @@ def _vault_operational_relation_review(row: Mapping[str, Any]) -> dict[str, Any]
             row["production_runtime_effect"]
         ),
         "scanner_runtime_effect": bool(row["scanner_runtime_effect"]),
-        "created_at": row["created_at"].isoformat(),
+        "created_at": row["created_at"].astimezone(timezone.utc).isoformat(),
     }
 
 

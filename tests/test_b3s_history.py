@@ -489,6 +489,35 @@ def test_recovery_supplement_migration_is_immutable_and_non_authoritative() -> N
     assert "scanner_runtime_effect = false" in sql
 
 
+def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
+    from src.history.repository import _migration_files
+
+    filenames = [filename for filename, _sql in _migration_files()]
+    operational_memory_sql = (
+        resources.files("src.history")
+        .joinpath("migrations/014_evidence_vault_operational_memory_v2.sql")
+        .read_text(encoding="utf-8")
+    )
+    operation_execution_sql = (
+        resources.files("src.history")
+        .joinpath("migrations/015_evidence_vault_operation_plan_execution.sql")
+        .read_text(encoding="utf-8")
+    )
+
+    assert filenames[13:] == [
+        "014_evidence_vault_operational_memory_v2.sql",
+        "015_evidence_vault_operation_plan_execution.sql",
+    ]
+    assert "packet_kind" in operational_memory_sql
+    assert "operational_source_v2" in operational_memory_sql
+    assert "operational_reviewed_v2" in operational_memory_sql
+    assert "operational_v2" in operational_memory_sql
+    assert "production_runtime_effect" in operation_execution_sql
+    assert "scanner_runtime_effect" in operation_execution_sql
+    assert "CHECK (authority = false)" in operation_execution_sql
+    assert "BEFORE UPDATE OR DELETE" in operation_execution_sql
+
+
 def test_claim_tile_review_requires_packet_fingerprint() -> None:
     from dataclasses import replace
 
@@ -722,14 +751,16 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "004_evidence_memory_adjudications.sql",
             "005_evidence_claim_reconciliations.sql",
             "006_evidence_claim_tile_ledger.sql",
-                "007_evidence_scoring_recovery_reviews.sql",
-                "008_evidence_claim_tile_reviews.sql",
-                "009_evidence_claim_tile_review_packet_fingerprint.sql",
-                "010_evidence_claim_tile_review_packets.sql",
-                "011_evidence_vault_canonical_memory.sql",
-                "012_evidence_vault_canonical_scoring.sql",
-                "013_evidence_scoring_recovery_supplements.sql",
-            ]
+            "007_evidence_scoring_recovery_reviews.sql",
+            "008_evidence_claim_tile_reviews.sql",
+            "009_evidence_claim_tile_review_packet_fingerprint.sql",
+            "010_evidence_claim_tile_review_packets.sql",
+            "011_evidence_vault_canonical_memory.sql",
+            "012_evidence_vault_canonical_scoring.sql",
+            "013_evidence_scoring_recovery_supplements.sql",
+            "014_evidence_vault_operational_memory_v2.sql",
+            "015_evidence_vault_operation_plan_execution.sql",
+        ]
         assert repository.migrate() == []
 
         older = _report("scan-older", "2026-07-01T08:00:00Z", score=61)
@@ -1648,6 +1679,8 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "011_evidence_vault_canonical_memory.sql",
             "012_evidence_vault_canonical_scoring.sql",
             "013_evidence_scoring_recovery_supplements.sql",
+            "014_evidence_vault_operational_memory_v2.sql",
+            "015_evidence_vault_operation_plan_execution.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0
@@ -1679,6 +1712,12 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
                 to_regclass(
                     'b3s_history.evidence_scoring_recovery_supplement_packets'
                 )::text AS recovery_supplement_packet_table,
+                to_regclass(
+                    'b3s_history.evidence_vault_operation_plans'
+                )::text AS vault_operation_plan_table,
+                to_regclass(
+                    'b3s_history.evidence_vault_operational_relation_reviews'
+                )::text AS vault_operational_review_table,
                 (
                     SELECT count(*)
                     FROM b3s_history.schema_migrations
@@ -1706,7 +1745,11 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
         assert stored[6] == (
             "b3s_history.evidence_scoring_recovery_supplement_packets"
         )
-        assert stored[7] == 13
+        assert stored[7] == "b3s_history.evidence_vault_operation_plans"
+        assert stored[8] == (
+            "b3s_history.evidence_vault_operational_relation_reviews"
+        )
+        assert stored[9] == 15
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")

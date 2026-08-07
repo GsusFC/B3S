@@ -307,7 +307,7 @@ def test_result_survives_crash_and_retry_performs_zero_second_llm_calls() -> Non
     assert review["adoption"] is not None
     assert {
         event["created_at"] for event in review["review_events"]
-    } == {"2026-08-07T13:00:00+02:00"}
+    } == {"2026-08-07T11:00:00+00:00"}
     assert review["memory"]["content"]["accepted_tiles"][0][
         "authority_source"
     ] == "human"
