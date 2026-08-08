@@ -68,10 +68,18 @@ def build_reviewed_operational_source(
         if row.get("review_status") == "unreviewed"
     }
     coverage = manifest.get("coverage_summary") or {}
+    pending_c7_by_id = {
+        str(row["relation_id"]): dict(row)
+        for tile in source["candidate_tiles"]
+        if tile.get("tile_id") == "C7"
+        for row in tile.get("basis") or []
+        if row.get("review_status") == "unreviewed"
+    }
     if (
         coverage.get("source") != "exact_relation_supplement"
         and any(
             normalized[relation_id]["decision"] == "accept"
+            and pending_c7_by_id[relation_id].get("polarity") == "supports"
             for relation_id in pending_c7_relation_ids
         )
     ):
@@ -110,7 +118,21 @@ def build_reviewed_operational_source(
         )
 
     if accepted_events_by_tile.get("C7"):
-        _validate_accepted_c7_basis(reviewed_by_tile.get("C7") or [])
+        accepted_new_c7 = [
+            pending_c7_by_id[relation_id]
+            for relation_id in pending_c7_relation_ids
+            if normalized[relation_id]["decision"] == "accept"
+        ]
+        if all(row.get("polarity") == "supports" for row in accepted_new_c7):
+            _validate_accepted_c7_basis(reviewed_by_tile.get("C7") or [])
+        elif any(
+            row.get("polarity")
+            not in {"contradicts", "invalidates_candidate"}
+            for row in accepted_new_c7
+        ):
+            raise EvidenceVaultOperationalReviewError(
+                "non-supporting C7 review polarity is invalid"
+            )
 
     registry = build_tile_contract_registry()["tiles"]
     if parent is None:

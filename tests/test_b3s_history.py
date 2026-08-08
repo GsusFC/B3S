@@ -513,12 +513,20 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
         .joinpath("migrations/017_evidence_vault_capture_lineage.sql")
         .read_text(encoding="utf-8")
     )
+    capture_lineage_hardening_sql = (
+        resources.files("src.history")
+        .joinpath(
+            "migrations/018_evidence_vault_capture_lineage_hardening.sql"
+        )
+        .read_text(encoding="utf-8")
+    )
 
     assert filenames[13:] == [
         "014_evidence_vault_operational_memory_v2.sql",
         "015_evidence_vault_operation_plan_execution.sql",
         "016_evidence_vault_source_packet_bindings.sql",
         "017_evidence_vault_capture_lineage.sql",
+        "018_evidence_vault_capture_lineage_hardening.sql",
     ]
     assert "packet_kind" in operational_memory_sql
     assert "operational_source_v2" in operational_memory_sql
@@ -550,6 +558,15 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
     assert "lineage checkpoints must be contiguous" in capture_lineage_sql
     assert capture_lineage_sql.count("BEFORE UPDATE OR DELETE") == 3
     assert capture_lineage_sql.count("CHECK (authority = false)") == 3
+    assert "evidence_vault_brand_lock_key" in capture_lineage_hardening_sql
+    assert "evidence_vault_canonical_fingerprint" in (
+        capture_lineage_hardening_sql
+    )
+    assert "DEFERRABLE INITIALLY DEFERRED" in capture_lineage_hardening_sql
+    assert "BEFORE TRUNCATE" in capture_lineage_hardening_sql
+    assert "watermarked scan identity and observation" in (
+        capture_lineage_hardening_sql
+    )
 
 
 def test_claim_tile_review_requires_packet_fingerprint() -> None:
@@ -779,7 +796,7 @@ def test_concurrent_release_migration_is_database_serialized() -> None:
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(lambda _index: migrate_concurrently(), range(2)))
-        assert sorted(len(result) for result in results) == [0, 17]
+        assert sorted(len(result) for result in results) == [0, 18]
         assert sorted({filename for result in results for filename in result}) == [
             f"{index:03d}_" + name
             for index, name in enumerate(
@@ -801,6 +818,7 @@ def test_concurrent_release_migration_is_database_serialized() -> None:
                     "evidence_vault_operation_plan_execution.sql",
                     "evidence_vault_source_packet_bindings.sql",
                     "evidence_vault_capture_lineage.sql",
+                    "evidence_vault_capture_lineage_hardening.sql",
                 ],
                 start=1,
             )
@@ -851,6 +869,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "015_evidence_vault_operation_plan_execution.sql",
             "016_evidence_vault_source_packet_bindings.sql",
             "017_evidence_vault_capture_lineage.sql",
+            "018_evidence_vault_capture_lineage_hardening.sql",
         ]
         assert repository.migrate() == []
 
@@ -1780,6 +1799,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "015_evidence_vault_operation_plan_execution.sql",
             "016_evidence_vault_source_packet_bindings.sql",
             "017_evidence_vault_capture_lineage.sql",
+            "018_evidence_vault_capture_lineage_hardening.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0
@@ -1848,7 +1868,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
         assert stored[8] == (
             "b3s_history.evidence_vault_operational_relation_reviews"
         )
-        assert stored[9] == 17
+        assert stored[9] == 18
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")

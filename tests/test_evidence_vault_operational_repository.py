@@ -1477,7 +1477,7 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
     }
     replacement_c7_projection = next(
         row
-        for row in replacement_memory["content"]["scoring_projection"]["tiles"]
+        for row in replacement_memory["scoring_projection"]["tiles"]
         if row["tile_id"] == "C7"
     )
     assert replacement_c7_projection["lifecycle_state"] == "active"

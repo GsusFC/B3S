@@ -197,6 +197,36 @@ BEGIN
         b3s_history.evidence_vault_brand_lock_key(workspace_id, NEW.brand_id)
     );
 
+    IF EXISTS (
+        SELECT 1
+        FROM b3s_history.evidence_vault_operational_source_capture_lineage_bindings
+             AS existing
+        WHERE existing.id = NEW.id
+          AND existing.brand_id = NEW.brand_id
+          AND existing.operational_source_packet_id =
+                NEW.operational_source_packet_id
+          AND existing.watermark_event_id = NEW.watermark_event_id
+          AND existing.capture_id = NEW.capture_id
+          AND existing.capture_sequence = NEW.capture_sequence
+          AND existing.provenance = NEW.provenance
+          AND existing.lineage_artifact_schema_version =
+                NEW.lineage_artifact_schema_version
+          AND existing.lineage_artifact_fingerprint =
+                NEW.lineage_artifact_fingerprint
+          AND existing.lineage_export_identity = NEW.lineage_export_identity
+          AND existing.lineage_export_fingerprint =
+                NEW.lineage_export_fingerprint
+          AND existing.replay_origin_sequence = NEW.replay_origin_sequence
+          AND existing.member_set_fingerprint = NEW.member_set_fingerprint
+          AND existing.binding_fingerprint = NEW.binding_fingerprint
+          AND existing.authority = NEW.authority
+          AND existing.production_runtime_effect =
+                NEW.production_runtime_effect
+          AND existing.scanner_runtime_effect = NEW.scanner_runtime_effect
+    ) THEN
+        RETURN NEW;
+    END IF;
+
     SELECT max(events.capture_sequence)
     INTO current_capture_sequence
     FROM b3s_history.evidence_vault_capture_watermark_events AS events
@@ -689,8 +719,6 @@ BEGIN
         OLD.workspace_id IS DISTINCT FROM NEW.workspace_id
         OR OLD.brand_id IS DISTINCT FROM NEW.brand_id
         OR OLD.source_scan_id IS DISTINCT FROM NEW.source_scan_id
-        OR OLD.source_run_id IS DISTINCT FROM NEW.source_run_id
-        OR OLD.pipeline_version IS DISTINCT FROM NEW.pipeline_version
         OR OLD.request_payload IS DISTINCT FROM NEW.request_payload
         OR OLD.metadata ->> 'observation_hash'
             IS DISTINCT FROM NEW.metadata ->> 'observation_hash'
