@@ -4637,7 +4637,7 @@ class PostgresHistoryRepository:
                 "SELECT pg_advisory_xact_lock(%s)",
                 (_advisory_lock_key(brand_id, "evidence-vault-canonical-promotion"),),
             )
-            source_row = conn.execute(
+            source_rows = conn.execute(
                 f"""
                 SELECT *
                 FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
@@ -4645,15 +4645,19 @@ class PostgresHistoryRepository:
                   AND packet_fingerprint = %s
                   AND packet_kind = 'operational_source_v2'
                 ORDER BY created_at, id
-                LIMIT 1
                 FOR UPDATE
                 """,
                 (brand_id, source_fingerprint),
-            ).fetchone()
-            if source_row is None:
+            ).fetchall()
+            if not source_rows:
                 raise EvidenceVaultOperationalAuthorityError(
                     "The pending operational source packet does not exist."
                 )
+            if len(source_rows) != 1:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The pending operational source packet identity is ambiguous."
+                )
+            source_row = source_rows[0]
             source_packet = _vault_operational_source_packet_record(source_row)[
                 "packet"
             ]
