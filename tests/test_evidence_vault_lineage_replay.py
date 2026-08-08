@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 import hashlib
+import subprocess
+import sys
 
 import pytest
 
@@ -287,6 +289,27 @@ def _inputs() -> dict:
         "normalized_evidence_pack": normalized,
         "exact_relation_supplement": _exact_c7_source(normalized),
     }
+
+
+def test_lineage_replay_import_does_not_eagerly_import_history_repository() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "from src.services.evidence_vault_lineage_replay "
+                "import build_lineage_seed_export_v2; "
+                "assert build_lineage_seed_export_v2 is not None; "
+                "assert 'src.history.repository' not in sys.modules"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_report_replay_is_strict_truthful_and_deterministic() -> None:
