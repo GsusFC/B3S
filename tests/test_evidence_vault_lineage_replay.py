@@ -543,6 +543,25 @@ def test_postgres_lineage_binding_validates_exact_members_and_hashes() -> None:
 
     repository = PostgresHistoryRepository(dsn)
     repository.migrate()
+    collation_probe = {
+        "reviewed_memory_candidate_version": "a" * 64,
+        "review_packet_set_fingerprint": "b" * 64,
+        "underscore_key": {"z": 1, "a": 2},
+    }
+    with psycopg.connect(dsn) as conn:
+        sql_fingerprint = conn.execute(
+            """
+            SELECT b3s_history.evidence_vault_canonical_fingerprint(
+                'collation-probe-v1',
+                %s::jsonb
+            )
+            """,
+            (Jsonb(collation_probe),),
+        ).fetchone()[0]
+    assert sql_fingerprint == canonical_fingerprint(
+        "collation-probe-v1",
+        collation_probe,
+    )
     inputs = _inputs()
     repository.persist_capture_observation(inputs["capture_observation"])
     exact_artifact = inputs["exact_relation_supplement"]

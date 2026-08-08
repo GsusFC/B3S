@@ -18,7 +18,7 @@ BEGIN
             string_agg(
                 to_jsonb(entry.key)::text || ':' ||
                     b3s_history.evidence_vault_canonical_json(entry.value),
-                ',' ORDER BY entry.key
+                ',' ORDER BY entry.key COLLATE "C"
             ),
             ''
         ) || '}'
