@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from copy import deepcopy
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -13,21 +14,28 @@ from src.services.evidence_vault_canonical_core import canonical_fingerprint, ca
 from src.services.evidence_vault_raw_provenance import (
     C7_LIVE_FRESHNESS_POLICY_VERSION,
     ED25519_SIGNATURE_VERSION,
+    EXTERNAL_IDENTITY_ASSOCIATION_POLICY_VERSION,
+    EXTERNAL_IDENTITY_PROVENANCE_VERSION,
     PRE_RECEIPT_SNAPSHOT_VERSION,
     PUBLIC_KEY_REGISTRY_VERSION,
     RAW_ACQUISITION_RECEIPT_VERSION,
     RECEIPT_SET_FINGERPRINT_VERSION,
+    SOURCE_IDENTITY_SCHEMA_VERSION,
     EvidenceVaultRawProvenanceError,
+    ExternalIdentityProvenance,
     PreReceiptSnapshot,
     PublicKeyRegistry,
     RawAcquisitionReceipt,
     RawAcquisitionReceiptClaims,
     build_signed_raw_acquisition_payload,
+    evidence_memory_source_identity_id,
+    external_identity_provenance_fingerprint,
     pre_receipt_snapshot_sha256,
     raw_acquisition_receipt_fingerprint,
     receipt_set_fingerprint,
     sign_raw_acquisition_receipt,
     validate_c7_receipt_time_policy,
+    validate_external_identity_provenance,
     verify_raw_acquisition_receipt,
 )
 
@@ -147,7 +155,7 @@ def _external_claims(*, fetched_at: str = "2026-06-01T12:02:00Z") -> dict:
                 "acquisition_mode": "provider_api",
                 "provider_request_fingerprint": HASH_C,
                 "result_ordinal": 0,
-                "reported_source_url": "https://www.linkedin.com/company/example/",
+                "reported_source_url": "https://www.linkedin.com/company/example",
                 "redirect_chain": [],
             },
             "selected_headers": {"content-type": "application/json"},
@@ -169,6 +177,88 @@ def _sign(claims: dict, key: Ed25519PrivateKey) -> RawAcquisitionReceipt:
         private_key=key,
         public_key_registry=_registry(key),
     )
+
+
+def _raw_sha(value: object) -> str:
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _raw_payload_snapshot_sha(raw_payload: dict) -> str:
+    snapshot = _snapshot()
+    snapshot["canonical_brand_url"] = "https://example.com"
+    snapshot["raw_payload"] = raw_payload
+    return pre_receipt_snapshot_sha256(snapshot)
+
+
+def _association_bundle(
+    key: Ed25519PrivateKey,
+    *,
+    method: str = "owned_raw_links_external_profile",
+) -> tuple[dict, RawAcquisitionReceipt, RawAcquisitionReceipt, dict]:
+    owned_url = "https://example.com"
+    external_url = "https://www.linkedin.com/company/example"
+    raw_payload = {
+        "owned": {
+            "html": "<main>Example</main>",
+            "identity": {"linkedin_company_url": external_url},
+        },
+        "external": {
+            "profile": {
+                "company_name": "Example",
+                "website": owned_url,
+            }
+        },
+    }
+    snapshot = _snapshot()
+    snapshot["canonical_brand_url"] = owned_url
+    snapshot["raw_payload"] = raw_payload
+    snapshot_sha256 = pre_receipt_snapshot_sha256(snapshot)
+
+    owned_claims = _owned_claims()
+    owned_claims["pre_receipt_snapshot_sha256"] = snapshot_sha256
+    owned_claims["raw_fragment_json_pointer"] = "/owned"
+    owned_claims["raw_fragment_sha256"] = _raw_sha(raw_payload["owned"])
+    owned_receipt = _sign(owned_claims, key)
+
+    if method == "owned_raw_links_external_profile":
+        role = "owned_web"
+        fact_pointer = "/owned/identity/linkedin_company_url"
+        fact = external_url
+    else:
+        role = "external_social_profile"
+        fact_pointer = "/external/profile/website"
+        fact = owned_url
+    provenance = {
+        "schema_version": EXTERNAL_IDENTITY_PROVENANCE_VERSION,
+        "policy_version": EXTERNAL_IDENTITY_ASSOCIATION_POLICY_VERSION,
+        "association_method": method,
+        "canonical_brand_domain": "example.com",
+        "owned_source_url": owned_url,
+        "external_source_url": external_url,
+        "proof_receipt_fingerprint": owned_receipt.receipt_fingerprint,
+        "raw_fact_role": role,
+        "raw_fact_json_pointer": fact_pointer,
+        "raw_fact_sha256": _raw_sha(fact),
+        "source_identity_schema_version": SOURCE_IDENTITY_SCHEMA_VERSION,
+        "owned_source_identity_id": evidence_memory_source_identity_id(
+            source_url=owned_url,
+            raw_fact_role="owned_web",
+        ),
+        "external_source_identity_id": evidence_memory_source_identity_id(
+            source_url=external_url,
+            raw_fact_role="external_social_profile",
+        ),
+    }
+
+    external_claims = _external_claims()
+    external_claims["pre_receipt_snapshot_sha256"] = snapshot_sha256
+    external_claims["raw_fragment_json_pointer"] = "/external"
+    external_claims["raw_fragment_sha256"] = _raw_sha(raw_payload["external"])
+    external_claims["external_identity_provenance_fingerprint"] = (
+        external_identity_provenance_fingerprint(provenance)
+    )
+    external_receipt = _sign(external_claims, key)
+    return provenance, owned_receipt, external_receipt, raw_payload
 
 
 def test_pre_receipt_snapshot_is_exact_and_uses_existing_canonical_json() -> None:
@@ -383,6 +473,7 @@ def test_redirect_chain_must_be_complete_bounded_and_brand_exact() -> None:
         "https://www.linkedin.com:443/company/example/",
         "https://user@www.linkedin.com/company/example/",
         "https://www.linkedin.com/in/example/",
+        "https://www.linkedin.com/company/example/",
         "https://www.linkedin.com/company/",
         "https://www.linkedin.com/company/example/jobs",
         "https://www.linkedin.com/company/Example/",
@@ -412,6 +503,377 @@ def test_role_provider_mode_and_external_identity_are_exact() -> None:
         mutate(claims)
         with pytest.raises(ValidationError):
             RawAcquisitionReceiptClaims.model_validate(claims)
+
+
+@pytest.mark.parametrize(
+    ("method", "role"),
+    [
+        ("owned_raw_links_external_profile", "owned_web"),
+        ("external_raw_declares_owned_domain", "external_social_profile"),
+    ],
+)
+def test_external_identity_association_is_exact_raw_and_reproducible(
+    key_one: Ed25519PrivateKey,
+    method: str,
+    role: str,
+) -> None:
+    provenance, owned, external, snapshot = _association_bundle(
+        key_one,
+        method=method,
+    )
+
+    validated = validate_external_identity_provenance(
+        provenance,
+        owned_receipt=owned,
+        external_receipt=external,
+        durable_raw_capture_payload=snapshot,
+        public_key_registry=_registry(key_one),
+    )
+
+    assert validated.raw_fact_role == role
+    exact = validated.model_dump(mode="json")
+    assert set(exact) == {
+        "schema_version",
+        "policy_version",
+        "association_method",
+        "canonical_brand_domain",
+        "owned_source_url",
+        "external_source_url",
+        "proof_receipt_fingerprint",
+        "raw_fact_role",
+        "raw_fact_json_pointer",
+        "raw_fact_sha256",
+        "source_identity_schema_version",
+        "owned_source_identity_id",
+        "external_source_identity_id",
+    }
+    assert external_identity_provenance_fingerprint(validated) == canonical_fingerprint(
+        EXTERNAL_IDENTITY_PROVENANCE_VERSION,
+        exact,
+    )
+    assert not any(
+        field in exact
+        for field in (
+            "fingerprint",
+            "provenance_fingerprint",
+            "external_receipt_fingerprint",
+            "matched_alias",
+            "brand_name",
+        )
+    )
+    durable_with_reserved_provenance = deepcopy(snapshot)
+    durable_with_reserved_provenance["evidence_vault_raw_provenance"] = {
+        "association": exact,
+        "association_fingerprint": external_identity_provenance_fingerprint(
+            validated
+        ),
+        "receipt_fingerprints": [
+            owned.receipt_fingerprint,
+            external.receipt_fingerprint,
+        ],
+    }
+    assert validate_external_identity_provenance(
+        provenance,
+        owned_receipt=owned,
+        external_receipt=external,
+        durable_raw_capture_payload=durable_with_reserved_provenance,
+    ) == validated
+
+
+def test_external_identity_signature_verification_is_explicitly_opt_in(
+    key_one: Ed25519PrivateKey,
+) -> None:
+    provenance, owned, external, snapshot = _association_bundle(key_one)
+    changed = external.model_dump(mode="json")
+    signature = bytearray(base64.b64decode(changed["signature"]))
+    signature[0] ^= 1
+    changed["signature"] = base64.b64encode(signature).decode("ascii")
+
+    assert validate_external_identity_provenance(
+        provenance,
+        owned_receipt=owned,
+        external_receipt=changed,
+        durable_raw_capture_payload=snapshot,
+    ) == ExternalIdentityProvenance.model_validate(provenance)
+    with pytest.raises(EvidenceVaultRawProvenanceError, match="signature is invalid"):
+        validate_external_identity_provenance(
+            provenance,
+            owned_receipt=owned,
+            external_receipt=changed,
+            durable_raw_capture_payload=snapshot,
+            public_key_registry=_registry(key_one),
+        )
+
+
+def test_external_identity_source_ids_have_evidence_memory_v2_parity() -> None:
+    from src.services.evidence_memory_identity_v2 import (
+        project_evidence_memory_row_identity,
+    )
+
+    cases = [
+        (
+            "owned_web",
+            "owned_copy",
+            "web",
+            "raw_input",
+            "https://example.com",
+        ),
+        (
+            "external_social_profile",
+            "external_proof",
+            "exa",
+            "external_proof.company_profile",
+            "https://www.linkedin.com/company/example",
+        ),
+    ]
+    for role, source_class, source, evidence_type, url in cases:
+        projection = project_evidence_memory_row_identity(
+            {
+                "source": source,
+                "evidence_type": evidence_type,
+                "url": url,
+                "content": "identity parity material",
+                "metadata": {"source_class": source_class},
+            },
+            brand_domain="example.com",
+        )
+        assert projection is not None
+        assert evidence_memory_source_identity_id(
+            source_url=url,
+            raw_fact_role=role,
+        ) == projection["document_id"]
+
+
+def test_external_identity_dag_has_no_external_receipt_or_self_hash_cycle(
+    key_one: Ed25519PrivateKey,
+) -> None:
+    provenance, owned, external, snapshot = _association_bundle(key_one)
+    association_fingerprint = external_identity_provenance_fingerprint(provenance)
+    assert provenance["proof_receipt_fingerprint"] == owned.receipt_fingerprint
+    assert external.claims.external_identity_provenance_fingerprint == association_fingerprint
+    assert association_fingerprint not in canonical_json(provenance)
+    assert external.receipt_fingerprint not in canonical_json(provenance)
+
+    changed_claims = external.claims.model_dump(mode="json")
+    changed_claims["fetched_at"] = "2026-06-01T12:03:00Z"
+    changed_external = _sign(changed_claims, key_one)
+    assert changed_external.receipt_fingerprint != external.receipt_fingerprint
+    assert validate_external_identity_provenance(
+        provenance,
+        owned_receipt=owned,
+        external_receipt=changed_external,
+        durable_raw_capture_payload=snapshot,
+    ) == ExternalIdentityProvenance.model_validate(provenance)
+
+
+def test_external_identity_rejects_legacy_alias_and_name_only_shapes() -> None:
+    legacy = {
+        "schema_version": EXTERNAL_IDENTITY_PROVENANCE_VERSION,
+        "policy_version": "external-identity-policy-v1",
+        "provider": "exa",
+        "subject_domain": "example.com",
+        "source_domain": "linkedin.com",
+        "matched_alias": "Example",
+        "match_method": "alias_in_title",
+        "match_score": 1.0,
+        "collector_source_class": "external",
+        "collector_relation": "external",
+        "requires_human_review": False,
+        "candidate_strength": "strong",
+    }
+    with pytest.raises(ValidationError):
+        ExternalIdentityProvenance.model_validate(legacy)
+    with pytest.raises(ValidationError):
+        external_identity_provenance_fingerprint(legacy)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("canonical_brand_domain", "Example.com"),
+        ("owned_source_url", "http://example.com"),
+        ("owned_source_url", "https://www.example.com"),
+        ("owned_source_url", "https://example.com/"),
+        ("owned_source_url", "https://example.com/about"),
+        ("owned_source_url", "https://example.com?ref=profile"),
+        ("external_source_url", "https://www.linkedin.com/company/example/"),
+        ("external_source_url", "https://www.linkedin.com/company/Example"),
+        ("external_source_url", "https://linkedin.com/company/example"),
+        ("external_source_url", "https://www.linkedin.com/company/example?trk=x"),
+        ("source_identity_schema_version", "evidence-memory-document-v1"),
+        ("owned_source_identity_id", HASH_A),
+        ("external_source_identity_id", HASH_B),
+    ],
+)
+def test_external_identity_urls_domains_and_source_ids_are_strict(
+    key_one: Ed25519PrivateKey,
+    field: str,
+    value: object,
+) -> None:
+    provenance, _, _, _ = _association_bundle(key_one)
+    provenance[field] = value
+    with pytest.raises(ValidationError):
+        ExternalIdentityProvenance.model_validate(provenance)
+
+
+def test_external_identity_rejects_pointer_hash_predicate_and_receipt_tampering(
+    key_one: Ed25519PrivateKey,
+) -> None:
+    provenance, owned, external, snapshot = _association_bundle(key_one)
+
+    outside = deepcopy(provenance)
+    outside["raw_fact_json_pointer"] = "/external/profile/website"
+    outside["raw_fact_sha256"] = _raw_sha("https://example.com")
+    outside_claims = external.claims.model_dump(mode="json")
+    outside_claims["external_identity_provenance_fingerprint"] = (
+        external_identity_provenance_fingerprint(outside)
+    )
+    outside_external = _sign(outside_claims, key_one)
+    with pytest.raises(EvidenceVaultRawProvenanceError, match="outside"):
+        validate_external_identity_provenance(
+            outside,
+            owned_receipt=owned,
+            external_receipt=outside_external,
+            durable_raw_capture_payload=snapshot,
+        )
+
+    wrong_fact_snapshot = deepcopy(snapshot)
+    wrong_fact = "https://www.linkedin.com/company/different"
+    wrong_fact_snapshot["owned"]["identity"][
+        "linkedin_company_url"
+    ] = wrong_fact
+    wrong_fact_snapshot_sha256 = _raw_payload_snapshot_sha(wrong_fact_snapshot)
+    wrong_fact_owned_claims = owned.claims.model_dump(mode="json")
+    wrong_fact_owned_claims["pre_receipt_snapshot_sha256"] = (
+        wrong_fact_snapshot_sha256
+    )
+    wrong_fact_owned_claims["raw_fragment_sha256"] = _raw_sha(
+        wrong_fact_snapshot["owned"]
+    )
+    wrong_fact_owned = _sign(wrong_fact_owned_claims, key_one)
+    wrong_fact_provenance = deepcopy(provenance)
+    wrong_fact_provenance["proof_receipt_fingerprint"] = (
+        wrong_fact_owned.receipt_fingerprint
+    )
+    wrong_fact_provenance["raw_fact_sha256"] = _raw_sha(wrong_fact)
+    wrong_fact_external_claims = external.claims.model_dump(mode="json")
+    wrong_fact_external_claims["pre_receipt_snapshot_sha256"] = (
+        wrong_fact_snapshot_sha256
+    )
+    wrong_fact_external_claims["external_identity_provenance_fingerprint"] = (
+        external_identity_provenance_fingerprint(wrong_fact_provenance)
+    )
+    wrong_fact_external = _sign(wrong_fact_external_claims, key_one)
+    with pytest.raises(EvidenceVaultRawProvenanceError, match="association_method"):
+        validate_external_identity_provenance(
+            wrong_fact_provenance,
+            owned_receipt=wrong_fact_owned,
+            external_receipt=wrong_fact_external,
+            durable_raw_capture_payload=wrong_fact_snapshot,
+        )
+
+    wrong_hash = deepcopy(provenance)
+    wrong_hash["raw_fact_sha256"] = HASH_A
+    wrong_hash_claims = external.claims.model_dump(mode="json")
+    wrong_hash_claims["external_identity_provenance_fingerprint"] = (
+        external_identity_provenance_fingerprint(wrong_hash)
+    )
+    wrong_hash_external = _sign(wrong_hash_claims, key_one)
+    with pytest.raises(EvidenceVaultRawProvenanceError, match="raw_fact_sha256"):
+        validate_external_identity_provenance(
+            wrong_hash,
+            owned_receipt=owned,
+            external_receipt=wrong_hash_external,
+            durable_raw_capture_payload=snapshot,
+        )
+
+    wrong_proof = deepcopy(provenance)
+    wrong_proof["proof_receipt_fingerprint"] = HASH_D
+    wrong_proof_claims = external.claims.model_dump(mode="json")
+    wrong_proof_claims["external_identity_provenance_fingerprint"] = (
+        external_identity_provenance_fingerprint(wrong_proof)
+    )
+    wrong_proof_external = _sign(wrong_proof_claims, key_one)
+    with pytest.raises(EvidenceVaultRawProvenanceError, match="owned receipt"):
+        validate_external_identity_provenance(
+            wrong_proof,
+            owned_receipt=owned,
+            external_receipt=wrong_proof_external,
+            durable_raw_capture_payload=snapshot,
+        )
+
+    wrong_association_claims = external.claims.model_dump(mode="json")
+    wrong_association_claims["external_identity_provenance_fingerprint"] = HASH_C
+    wrong_association_external = _sign(wrong_association_claims, key_one)
+    with pytest.raises(EvidenceVaultRawProvenanceError, match="exact association"):
+        validate_external_identity_provenance(
+            provenance,
+            owned_receipt=owned,
+            external_receipt=wrong_association_external,
+            durable_raw_capture_payload=snapshot,
+        )
+
+    arbitrary_snapshot_owned_claims = owned.claims.model_dump(mode="json")
+    arbitrary_snapshot_owned_claims["pre_receipt_snapshot_sha256"] = HASH_D
+    arbitrary_snapshot_owned = _sign(arbitrary_snapshot_owned_claims, key_one)
+    arbitrary_snapshot_provenance = deepcopy(provenance)
+    arbitrary_snapshot_provenance["proof_receipt_fingerprint"] = (
+        arbitrary_snapshot_owned.receipt_fingerprint
+    )
+    arbitrary_snapshot_external_claims = external.claims.model_dump(mode="json")
+    arbitrary_snapshot_external_claims["pre_receipt_snapshot_sha256"] = HASH_D
+    arbitrary_snapshot_external_claims[
+        "external_identity_provenance_fingerprint"
+    ] = external_identity_provenance_fingerprint(arbitrary_snapshot_provenance)
+    arbitrary_snapshot_external = _sign(
+        arbitrary_snapshot_external_claims,
+        key_one,
+    )
+    with pytest.raises(EvidenceVaultRawProvenanceError, match="pre_receipt_snapshot_sha256"):
+        validate_external_identity_provenance(
+            arbitrary_snapshot_provenance,
+            owned_receipt=arbitrary_snapshot_owned,
+            external_receipt=arbitrary_snapshot_external,
+            durable_raw_capture_payload=snapshot,
+        )
+
+    changed_payload = deepcopy(snapshot)
+    changed_payload["owned"]["html"] = "<main>Transplanted</main>"
+    with pytest.raises(EvidenceVaultRawProvenanceError, match="pre_receipt_snapshot_sha256"):
+        validate_external_identity_provenance(
+            provenance,
+            owned_receipt=owned,
+            external_receipt=external,
+            durable_raw_capture_payload=changed_payload,
+        )
+
+
+def test_external_identity_rejects_method_role_and_cross_receipt_identity_tampering(
+    key_one: Ed25519PrivateKey,
+) -> None:
+    provenance, owned, external, snapshot = _association_bundle(key_one)
+    wrong_role = deepcopy(provenance)
+    wrong_role["raw_fact_role"] = "external_social_profile"
+    with pytest.raises(ValidationError, match="raw_fact_role"):
+        ExternalIdentityProvenance.model_validate(wrong_role)
+
+    for field, value in (
+        ("workspace_slug", "other"),
+        ("source_scan_id", "scan-71"),
+        ("acquisition_session_id", "62345678-1234-4234-8234-123456789abc"),
+        ("canonical_brand_domain", "other.test"),
+        ("pre_receipt_snapshot_sha256", HASH_D),
+    ):
+        external_claims = external.claims.model_dump(mode="json")
+        external_claims[field] = value
+        mixed_external = _sign(external_claims, key_one)
+        with pytest.raises(EvidenceVaultRawProvenanceError, match=f"mixed {field}"):
+            validate_external_identity_provenance(
+                provenance,
+                owned_receipt=owned,
+                external_receipt=mixed_external,
+                durable_raw_capture_payload=snapshot,
+            )
 
 
 def test_json_pointer_headers_timestamps_and_ids_are_strict() -> None:

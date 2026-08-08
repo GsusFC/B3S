@@ -32,6 +32,7 @@ from pydantic import (
     model_validator,
 )
 
+from src.evidence_identity import normalize_evidence_url, stable_artifact_digest
 from src.services.evidence_vault_canonical_core import (
     canonical_fingerprint,
     canonical_json,
@@ -45,6 +46,11 @@ PUBLIC_KEY_REGISTRY_VERSION = "evidence-vault-ed25519-public-key-registry-v1"
 C7_LIVE_FRESHNESS_POLICY_VERSION = "evidence-vault-c7-live-freshness-policy-v1"
 RECEIPT_SET_FINGERPRINT_VERSION = "evidence-vault-raw-acquisition-receipt-set-v1"
 EXTERNAL_IDENTITY_PROVENANCE_VERSION = "external-identity-provenance-v1"
+EXTERNAL_IDENTITY_ASSOCIATION_POLICY_VERSION = (
+    "evidence-vault-external-identity-association-policy-v1"
+)
+SOURCE_IDENTITY_SCHEMA_VERSION = "evidence-memory-document-v2"
+RAW_PROVENANCE_CAPTURE_KEY = "evidence_vault_raw_provenance"
 
 MAX_FUTURE_SKEW = timedelta(minutes=5)
 MAX_RECEIPT_DELAY = timedelta(minutes=15)
@@ -62,7 +68,7 @@ _WORKSPACE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 _DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _HEADER_NAME_RE = re.compile(r"^[a-z0-9!#$%&'*+.^_`|~-]+$")
 _MEDIA_TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$")
-_LINKEDIN_COMPANY_PATH_RE = re.compile(r"^/company/[a-z0-9](?:[a-z0-9-]{0,99}[a-z0-9])?/?$")
+_LINKEDIN_COMPANY_PATH_RE = re.compile(r"^/company/[a-z0-9](?:[a-z0-9-]{0,99}[a-z0-9])?$")
 _JSON_POINTER_TOKEN_RE = re.compile(r"(?:[^~]|~[01])*")
 _CANONICAL_UTC_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$"
@@ -420,6 +426,71 @@ class ReceiptSetIdentity(StrictContractModel):
         return self
 
 
+class ExternalIdentityProvenance(StrictContractModel):
+    """One exact, non-circular raw fact associating the external profile."""
+
+    schema_version: Literal[EXTERNAL_IDENTITY_PROVENANCE_VERSION]
+    policy_version: Literal[EXTERNAL_IDENTITY_ASSOCIATION_POLICY_VERSION]
+    association_method: Literal[
+        "owned_raw_links_external_profile",
+        "external_raw_declares_owned_domain",
+    ]
+    canonical_brand_domain: str = Field(min_length=3, max_length=253)
+    owned_source_url: str = Field(min_length=8, max_length=2048)
+    external_source_url: str = Field(min_length=8, max_length=2048)
+    proof_receipt_fingerprint: Sha256
+    raw_fact_role: Literal["owned_web", "external_social_profile"]
+    raw_fact_json_pointer: str = Field(min_length=1, max_length=2048)
+    raw_fact_sha256: Sha256
+    source_identity_schema_version: Literal[SOURCE_IDENTITY_SCHEMA_VERSION]
+    owned_source_identity_id: Sha256
+    external_source_identity_id: Sha256
+
+    @field_validator("canonical_brand_domain")
+    @classmethod
+    def _brand_domain_is_canonical(cls, value: str) -> str:
+        return _canonical_brand_domain(value)
+
+    @field_validator("external_source_url")
+    @classmethod
+    def _external_url_is_canonical(cls, value: str) -> str:
+        _strict_linkedin_company_url(value, field="external_source_url")
+        return value
+
+    @field_validator("raw_fact_json_pointer")
+    @classmethod
+    def _raw_fact_pointer_is_strict(cls, value: str) -> str:
+        return _strict_json_pointer(value, field="raw_fact_json_pointer")
+
+    @model_validator(mode="after")
+    def _association_is_exact(self) -> "ExternalIdentityProvenance":
+        _strict_owned_origin_url(
+            self.owned_source_url,
+            brand_domain=self.canonical_brand_domain,
+            field="owned_source_url",
+        )
+        expected_role = (
+            "owned_web"
+            if self.association_method == "owned_raw_links_external_profile"
+            else "external_social_profile"
+        )
+        if self.raw_fact_role != expected_role:
+            raise ValueError("raw_fact_role does not match association_method")
+        expected_owned_id = evidence_memory_source_identity_id(
+            source_url=self.owned_source_url,
+            raw_fact_role="owned_web",
+        )
+        expected_external_id = evidence_memory_source_identity_id(
+            source_url=self.external_source_url,
+            raw_fact_role="external_social_profile",
+        )
+        if not hmac.compare_digest(self.owned_source_identity_id, expected_owned_id):
+            raise ValueError("owned_source_identity_id does not match the evidence identity algorithm")
+        if not hmac.compare_digest(self.external_source_identity_id, expected_external_id):
+            raise ValueError("external_source_identity_id does not match the evidence identity algorithm")
+        return self
+
+
 def pre_receipt_snapshot_sha256(snapshot: PreReceiptSnapshot | Mapping[str, Any]) -> str:
     """Return the untagged canonical SHA-256 stored in each receipt claim."""
 
@@ -438,6 +509,178 @@ def raw_acquisition_receipt_fingerprint(
         RAW_ACQUISITION_RECEIPT_VERSION,
         model.model_dump(mode="json"),
     )
+
+
+def evidence_memory_source_identity_id(
+    *,
+    source_url: str,
+    raw_fact_role: Literal["owned_web", "external_social_profile"],
+) -> str:
+    """Reproduce the evidence-memory-v2 URL document identity exactly."""
+
+    if raw_fact_role == "owned_web":
+        source_class = "owned_copy"
+    elif raw_fact_role == "external_social_profile":
+        source_class = "external_proof"
+    else:
+        raise EvidenceVaultRawProvenanceError("raw_fact_role is not eligible for source identity")
+    if not isinstance(source_url, str) or not source_url:
+        raise EvidenceVaultRawProvenanceError("source_url must be canonical non-empty text")
+    return stable_artifact_digest(
+        SOURCE_IDENTITY_SCHEMA_VERSION,
+        {
+            "kind": "url",
+            "source_class": source_class,
+            "url": normalize_evidence_url(source_url),
+        },
+    )
+
+
+def external_identity_provenance_fingerprint(
+    provenance: ExternalIdentityProvenance | Mapping[str, Any],
+) -> str:
+    """Fingerprint the exact association object, never either external receipt."""
+
+    model = _model_from(provenance, ExternalIdentityProvenance)
+    return canonical_fingerprint(
+        EXTERNAL_IDENTITY_PROVENANCE_VERSION,
+        model.model_dump(mode="json"),
+    )
+
+
+def validate_external_identity_provenance(
+    provenance: ExternalIdentityProvenance | Mapping[str, Any],
+    *,
+    owned_receipt: RawAcquisitionReceipt | Mapping[str, Any],
+    external_receipt: RawAcquisitionReceipt | Mapping[str, Any],
+    durable_raw_capture_payload: Mapping[str, Any],
+    public_key_registry: PublicKeyRegistry | Mapping[str, Any] | None = None,
+) -> ExternalIdentityProvenance:
+    """Validate one strict raw association without doing I/O or granting authority.
+
+    Receipt signatures are intentionally checked only when ``public_key_registry``
+    is supplied. Receipt parsing and content-fingerprint validation always occur.
+    """
+
+    model = _model_from(provenance, ExternalIdentityProvenance)
+    if public_key_registry is None:
+        owned = _model_from(owned_receipt, RawAcquisitionReceipt)
+        external = _model_from(external_receipt, RawAcquisitionReceipt)
+    else:
+        owned = verify_raw_acquisition_receipt(
+            owned_receipt,
+            public_key_registry=public_key_registry,
+        )
+        external = verify_raw_acquisition_receipt(
+            external_receipt,
+            public_key_registry=public_key_registry,
+        )
+
+    if owned.claims.channel_role != "owned_web":
+        raise EvidenceVaultRawProvenanceError("owned_receipt must have the owned_web role")
+    if external.claims.channel_role != "external_social_profile":
+        raise EvidenceVaultRawProvenanceError(
+            "external_receipt must have the external_social_profile role"
+        )
+    for field in (
+        "workspace_slug",
+        "source_scan_id",
+        "acquisition_session_id",
+        "canonical_brand_domain",
+        "pre_receipt_snapshot_sha256",
+    ):
+        if getattr(owned.claims, field) != getattr(external.claims, field):
+            raise EvidenceVaultRawProvenanceError(
+                f"external identity receipts have mixed {field}"
+            )
+    if model.canonical_brand_domain != owned.claims.canonical_brand_domain:
+        raise EvidenceVaultRawProvenanceError(
+            "association canonical_brand_domain does not match its receipts"
+        )
+    if not isinstance(external.claims.acquisition, ProviderApiAcquisition):
+        raise EvidenceVaultRawProvenanceError(
+            "external receipt does not expose provider API source identity"
+        )
+    if model.external_source_url != external.claims.acquisition.reported_source_url:
+        raise EvidenceVaultRawProvenanceError(
+            "external_source_url does not match the external receipt"
+        )
+    if owned.claims.external_identity_provenance_fingerprint is not None:
+        raise EvidenceVaultRawProvenanceError(
+            "owned receipt must not depend on external identity provenance"
+        )
+    if not hmac.compare_digest(
+        model.proof_receipt_fingerprint,
+        owned.receipt_fingerprint,
+    ):
+        raise EvidenceVaultRawProvenanceError(
+            "proof_receipt_fingerprint does not name the owned receipt"
+        )
+    association_fingerprint = external_identity_provenance_fingerprint(model)
+    external_claimed_fingerprint = (
+        external.claims.external_identity_provenance_fingerprint
+    )
+    if external_claimed_fingerprint is None or not hmac.compare_digest(
+        external_claimed_fingerprint,
+        association_fingerprint,
+    ):
+        raise EvidenceVaultRawProvenanceError(
+            "external receipt does not claim the exact association fingerprint"
+        )
+
+    if not isinstance(durable_raw_capture_payload, Mapping):
+        raise EvidenceVaultRawProvenanceError(
+            "durable_raw_capture_payload must be an object"
+        )
+    payload = dict(durable_raw_capture_payload)
+    payload.pop(RAW_PROVENANCE_CAPTURE_KEY, None)
+    reconstructed_snapshot = PreReceiptSnapshot(
+        schema_version=PRE_RECEIPT_SNAPSHOT_VERSION,
+        workspace_slug=owned.claims.workspace_slug,
+        source_scan_id=owned.claims.source_scan_id,
+        acquisition_session_id=owned.claims.acquisition_session_id,
+        canonical_brand_domain=owned.claims.canonical_brand_domain,
+        canonical_brand_url=model.owned_source_url,
+        raw_payload=payload,
+    )
+    reconstructed_snapshot_sha256 = pre_receipt_snapshot_sha256(
+        reconstructed_snapshot
+    )
+    if not hmac.compare_digest(
+        owned.claims.pre_receipt_snapshot_sha256,
+        reconstructed_snapshot_sha256,
+    ):
+        raise EvidenceVaultRawProvenanceError(
+            "pre_receipt_snapshot_sha256 does not match the durable raw capture payload"
+        )
+    fact_receipt = owned if model.raw_fact_role == "owned_web" else external
+    fragment_pointer = fact_receipt.claims.raw_fragment_json_pointer
+    if not _json_pointer_contains(fragment_pointer, model.raw_fact_json_pointer):
+        raise EvidenceVaultRawProvenanceError(
+            "raw_fact_json_pointer lies outside its receipt raw fragment"
+        )
+    _resolve_json_pointer(payload, fragment_pointer)
+    raw_fact = _resolve_json_pointer(payload, model.raw_fact_json_pointer)
+    if isinstance(raw_fact, (Mapping, list)) or raw_fact is None:
+        raise EvidenceVaultRawProvenanceError("raw association fact must be a JSON scalar")
+    raw_fact_sha256 = hashlib.sha256(
+        canonical_json(raw_fact).encode("utf-8")
+    ).hexdigest()
+    if not hmac.compare_digest(model.raw_fact_sha256, raw_fact_sha256):
+        raise EvidenceVaultRawProvenanceError(
+            "raw_fact_sha256 does not match the resolved scalar"
+        )
+
+    expected_fact = (
+        model.external_source_url
+        if model.association_method == "owned_raw_links_external_profile"
+        else model.owned_source_url
+    )
+    if not isinstance(raw_fact, str) or raw_fact != expected_fact:
+        raise EvidenceVaultRawProvenanceError(
+            "resolved raw fact does not satisfy association_method"
+        )
+    return model
 
 
 def build_signed_raw_acquisition_payload(
@@ -723,26 +966,89 @@ def _require_owned_host(parsed: Any, brand_domain: str, *, field: str) -> None:
         raise ValueError(f"{field} does not match the exact canonical brand domain")
 
 
-def _strict_linkedin_company_url(value: str) -> None:
-    parsed = _strict_web_url(value, field="reported_source_url")
+def _strict_owned_origin_url(value: str, *, brand_domain: str, field: str) -> None:
+    parsed = _strict_web_url(value, field=field)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != brand_domain
+        or parsed.query
+        or parsed.path
+        or value != f"https://{brand_domain}"
+    ):
+        raise ValueError(f"{field} must be the exact HTTPS canonical brand origin")
+
+
+def _strict_linkedin_company_url(
+    value: str,
+    *,
+    field: str = "reported_source_url",
+) -> None:
+    parsed = _strict_web_url(value, field=field)
     if (
         parsed.scheme != "https"
         or parsed.hostname != "www.linkedin.com"
         or parsed.query
         or not _LINKEDIN_COMPANY_PATH_RE.fullmatch(parsed.path)
+        or value != f"https://www.linkedin.com{parsed.path}"
     ):
-        raise ValueError("reported_source_url must be a strict LinkedIn company URL")
+        raise ValueError(f"{field} must be a strict canonical LinkedIn company URL")
 
 
-def _strict_json_pointer(value: str) -> str:
+def _strict_json_pointer(
+    value: str,
+    *,
+    field: str = "raw_fragment_json_pointer",
+) -> str:
     if not isinstance(value, str) or not value.startswith("/") or value.endswith("/"):
-        raise ValueError("raw_fragment_json_pointer must select a non-root JSON value")
+        raise ValueError(f"{field} must select a non-root JSON value")
     if len(value) > 2048 or "\x00" in value:
-        raise ValueError("raw_fragment_json_pointer is invalid")
+        raise ValueError(f"{field} is invalid")
     tokens = value[1:].split("/")
     if any(token == "" or not _JSON_POINTER_TOKEN_RE.fullmatch(token) for token in tokens):
-        raise ValueError("raw_fragment_json_pointer is not a strict RFC 6901 pointer")
+        raise ValueError(f"{field} is not a strict RFC 6901 pointer")
     return value
+
+
+def _json_pointer_tokens(value: str) -> tuple[str, ...]:
+    pointer = _strict_json_pointer(value)
+    return tuple(
+        token.replace("~1", "/").replace("~0", "~")
+        for token in pointer[1:].split("/")
+    )
+
+
+def _json_pointer_contains(fragment_pointer: str, fact_pointer: str) -> bool:
+    fragment_tokens = _json_pointer_tokens(fragment_pointer)
+    fact_tokens = _json_pointer_tokens(fact_pointer)
+    return fact_tokens[: len(fragment_tokens)] == fragment_tokens
+
+
+def _resolve_json_pointer(value: Any, pointer: str) -> JsonValue:
+    current: Any = value
+    for token in _json_pointer_tokens(pointer):
+        if isinstance(current, Mapping):
+            if token not in current:
+                raise EvidenceVaultRawProvenanceError(
+                    f"JSON pointer does not resolve at object member {token!r}"
+                )
+            current = current[token]
+            continue
+        if isinstance(current, list):
+            if not re.fullmatch(r"0|[1-9][0-9]*", token):
+                raise EvidenceVaultRawProvenanceError(
+                    "JSON pointer array token is not a canonical index"
+                )
+            index = int(token)
+            if index >= len(current):
+                raise EvidenceVaultRawProvenanceError(
+                    "JSON pointer array index is out of bounds"
+                )
+            current = current[index]
+            continue
+        raise EvidenceVaultRawProvenanceError(
+            "JSON pointer traverses through a scalar"
+        )
+    return current
 
 
 def _parse_canonical_utc(value: str, *, field: str) -> datetime:
@@ -767,6 +1073,7 @@ def _aware_utc(value: datetime, *, field: str) -> datetime:
 __all__ = [
     "C7_LIVE_FRESHNESS_POLICY_VERSION",
     "ED25519_SIGNATURE_VERSION",
+    "EXTERNAL_IDENTITY_ASSOCIATION_POLICY_VERSION",
     "EXTERNAL_IDENTITY_PROVENANCE_VERSION",
     "EvidenceVaultRawProvenanceError",
     "LIVE_ELIGIBILITY_TTL",
@@ -777,7 +1084,9 @@ __all__ = [
     "PUBLIC_KEY_REGISTRY_VERSION",
     "RAW_ACQUISITION_RECEIPT_VERSION",
     "RECEIPT_SET_FINGERPRINT_VERSION",
+    "SOURCE_IDENTITY_SCHEMA_VERSION",
     "DirectAcquisition",
+    "ExternalIdentityProvenance",
     "PreReceiptSnapshot",
     "ProviderApiAcquisition",
     "PublicKeyRecord",
@@ -788,10 +1097,13 @@ __all__ = [
     "RedirectHop",
     "SignedRawAcquisitionPayload",
     "build_signed_raw_acquisition_payload",
+    "evidence_memory_source_identity_id",
+    "external_identity_provenance_fingerprint",
     "pre_receipt_snapshot_sha256",
     "raw_acquisition_receipt_fingerprint",
     "receipt_set_fingerprint",
     "sign_raw_acquisition_receipt",
     "validate_c7_receipt_time_policy",
+    "validate_external_identity_provenance",
     "verify_raw_acquisition_receipt",
 ]
