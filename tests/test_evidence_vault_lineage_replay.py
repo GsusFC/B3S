@@ -359,6 +359,12 @@ def test_report_replay_is_strict_truthful_and_deterministic() -> None:
             lambda report: report["raw"]["flow"]["candidate"].update(api_key="secret"),
             "credential-shaped key",
         ),
+        (
+            lambda report: report["raw"]["flow"]["candidate"].update(
+                url="https://other-brand.example"
+            ),
+            "candidate URL contradicts the report identity",
+        ),
     ],
 )
 def test_report_replay_rejects_missing_or_unsafe_embedded_source(mutation, message: str) -> None:

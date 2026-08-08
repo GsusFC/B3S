@@ -228,6 +228,17 @@ def build_historical_report_capture_observation(
         )
     if len(rows) > _MAX_EVIDENCE_ROWS:
         raise EvidenceVaultLineageReplayError("evidence row limit exceeded")
+    candidate_url = candidate.get("url")
+    if (
+        candidate_url not in (None, "")
+        and (
+            not isinstance(candidate_url, str)
+            or normalize_domain(candidate_url) != parsed.canonical_domain
+        )
+    ):
+        raise EvidenceVaultLineageReplayError(
+            "historical report candidate URL contradicts the report identity"
+        )
     _bounded_json(
         candidate,
         field="historical_report_embedded_candidate",
