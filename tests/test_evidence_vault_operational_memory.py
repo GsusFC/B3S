@@ -216,6 +216,43 @@ def test_coverage_loss_remains_in_candidate_overlay() -> None:
 
 
 
+def test_accepted_replacement_clears_pending_lifecycle_projection() -> None:
+    candidates = _candidate_tiles({"M1"})
+    packet = build_operational_memory_packet(
+        brand_identity="example.com",
+        source_candidate_packet_fingerprint=_digest("replacement-packet"),
+        aggregation_policy_fingerprint=_digest("aggregation-policy"),
+        candidate_tiles=candidates,
+        dispositions={
+            "M1": {
+                "authority_state": "accepted",
+                "review_state": "none",
+                "authority_profile_id": "human-reviewed-test-v1",
+                "authority_source": "human",
+                "decision_event_id": "replacement-review-M1",
+            }
+        },
+        current_pending_reassessments=[
+            {
+                "tile_id": "M1",
+                "lifecycle_state": "pending_reassessment",
+                "reopen_policy_fingerprint": _digest("reopen-policy"),
+                "prior_group_id": _digest("prior-group"),
+                "trigger_fingerprint": _digest("trigger"),
+                "superseded_member_evidence_fingerprints": [
+                    _digest("superseded-evidence")
+                ],
+            }
+        ],
+    )
+
+    projection = _projection_tile(packet, "M1")
+    assert packet["accepted_memory"].get("pending_reassessments") is None
+    assert projection["lifecycle_state"] == "active"
+    assert projection["score_eligible"] is True
+    assert projection["canonical_effective_points"] > 0
+
+
 def test_candidate_projection_must_have_exactly_eighty_unique_tiles() -> None:
     with pytest.raises(EvidenceVaultOperationalMemoryError, match="all 80"):
         _packet(_candidate_tiles(set())[:-1])

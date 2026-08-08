@@ -1461,6 +1461,14 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
     assert {row["claim_id"] for row in replacement_memory_c7["basis"]} == {
         replacement_c7["group_id"]
     }
+    replacement_c7_projection = next(
+        row
+        for row in replacement_memory["content"]["scoring_projection"]["tiles"]
+        if row["tile_id"] == "C7"
+    )
+    assert replacement_c7_projection["lifecycle_state"] == "active"
+    assert replacement_c7_projection["score_eligible"] is True
+    assert replacement_c7_projection["canonical_effective_points"] == 2
     replacement_attestation = (
         repository.get_evidence_vault_active_c7_group_attestation(brand)
     )

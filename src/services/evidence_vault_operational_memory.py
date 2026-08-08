@@ -256,6 +256,7 @@ def build_operational_memory_packet(
             accepted_by_id[tile_id] = accepted_candidate
             pending_reassessments.pop(tile_id, None)
 
+        is_pending_reassessment = tile_id in pending_reassessments
         material_change = previous is None or not _same_accepted_content(
             previous,
             candidate,
