@@ -220,6 +220,40 @@ def test_no_delta_executor_performs_zero_llm_and_creates_no_packet() -> None:
     assert repository.operational_packets == []
 
 
+def test_material_unlabelable_delta_is_not_reported_as_no_delta() -> None:
+    previous = _row("Old acquisition marker")
+    current = _row("Changed acquisition marker")
+    for row in (previous, current):
+        row["evidence_type"] = "acquisition.metadata"
+        row["metadata"]["source_class"] = "acquisition_metadata"
+    plan = build_vault_scan_plan(
+        brand_identity="example.com",
+        subject_url="https://example.com",
+        mode="incremental_refresh",
+        current_evidence_records=[current],
+        previous_capture_evidence_records=[previous],
+        known_evidence_records=[previous],
+        canonical_memory_version="a" * 64,
+    )
+    assert plan["delta"]["requires_incremental_analysis"] is True
+    assert plan["operations"]["llm_required"] is False
+    repository = MemoryRepository(plan=plan, rows=[current], status="not_required")
+
+    execution = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="scan-1",
+        worker_id="worker-a",
+        llm=NoCallLLM(),
+    )
+
+    assert execution["execution_status"] == "completed"
+    assert repository.operation["result_payload"]["output_kind"] == (
+        "material_delta_only"
+    )
+    assert repository.source_packets == []
+    assert repository.operational_packets == []
+
+
 def test_result_persisted_retry_uses_zero_llm_calls() -> None:
     rows = [_row()]
     first = MemoryRepository(plan=_baseline_plan(rows), rows=rows)

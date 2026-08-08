@@ -1153,9 +1153,11 @@ class PostgresHistoryRepository:
                     raise CaptureConflictError(
                         "executor candidate packet crosses the authority boundary"
                     )
-            elif output_kind == "no_delta":
+            elif output_kind in {"no_delta", "material_delta_only"}:
                 if candidate_fingerprint is not None:
-                    raise CaptureConflictError("no-delta result cannot reference a packet")
+                    raise CaptureConflictError(
+                        f"{output_kind} result cannot reference a packet"
+                    )
                 operations = record["plan"]["operations"]
                 if (
                     operations["llm_required"]
@@ -1163,7 +1165,7 @@ class PostgresHistoryRepository:
                     or operations["create_diagnostic_report"]
                 ):
                     raise CaptureConflictError(
-                        "no-delta result conflicts with the stored work contract"
+                        f"{output_kind} result conflicts with the stored work contract"
                     )
             else:
                 raise CaptureConflictError(
@@ -3721,6 +3723,14 @@ class PostgresHistoryRepository:
                 if operation["status"] != "completed":
                     raise EvidenceVaultOperationalAuthorityError(
                         "The material-change operation is not complete."
+                    )
+                operation_result = operation.get("result_payload") or {}
+                if operation_result.get("output_kind") not in {
+                    "candidate_overlay",
+                    "material_delta_only",
+                }:
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "The completed operation has no material-change result."
                     )
             conn.execute(
                 "SELECT pg_advisory_xact_lock(%s)",
@@ -9998,7 +10008,12 @@ def _validate_vault_operation_result_for_plan(
     expected_kind = (
         "candidate_overlay"
         if operations.get("create_candidate_packet") is True
-        else "no_delta"
+        else (
+            "material_delta_only"
+            if dict(plan.get("delta") or {}).get("requires_incremental_analysis")
+            is True
+            else "no_delta"
+        )
     )
     if plan.get("mode") == "diagnostic_full":
         raise CaptureConflictError(
@@ -10008,14 +10023,14 @@ def _validate_vault_operation_result_for_plan(
         raise CaptureConflictError(
             "operation result kind does not match its frozen plan"
         )
-    if expected_kind == "no_delta":
+    if expected_kind in {"no_delta", "material_delta_only"}:
         delta = dict(plan.get("delta") or {})
         if (
             result.get("delta_fingerprint") != delta.get("delta_fingerprint")
             or result.get("delta_summary") != dict(delta.get("summary") or {})
         ):
             raise CaptureConflictError(
-                "no-delta result differs from the frozen delta"
+                f"{expected_kind} result differs from the frozen delta"
             )
         return
 

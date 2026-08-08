@@ -228,7 +228,11 @@ def execute_vault_operation_plan(
                 "diagnostic_full remains owned by the explicit full scanner"
             )
         if _is_no_delta_plan(plan):
-            result = _no_delta_result(context)
+            result = (
+                _material_delta_only_result(context)
+                if plan["delta"].get("requires_incremental_analysis") is True
+                else _no_delta_result(context)
+            )
         else:
             if llm is None and plan["operations"]["llm_required"]:
                 raise EvidenceVaultIncrementalExecutorError(
@@ -326,10 +330,12 @@ def validate_vault_operation_result(result: Mapping[str, Any]) -> None:
     if result.get("canonical_memory_version") is not None:
         _sha256(result["canonical_memory_version"], field="canonical_memory_version")
     output_kind = result.get("output_kind")
-    if output_kind == "no_delta":
+    if output_kind in {"no_delta", "material_delta_only"}:
         expected = common | {"delta_fingerprint", "delta_summary"}
         if set(result) != expected:
-            raise EvidenceVaultIncrementalExecutorError("no-delta result fields mismatch")
+            raise EvidenceVaultIncrementalExecutorError(
+                f"{output_kind} result fields mismatch"
+            )
         if result.get("delta_fingerprint") is not None:
             _sha256(result["delta_fingerprint"], field="delta_fingerprint")
         if not isinstance(result.get("delta_summary"), Mapping):
@@ -1123,11 +1129,23 @@ def _evidence_pack(
 
 
 def _no_delta_result(context: Mapping[str, Any]) -> dict[str, Any]:
+    return _delta_only_result(context, output_kind="no_delta")
+
+
+def _material_delta_only_result(context: Mapping[str, Any]) -> dict[str, Any]:
+    return _delta_only_result(context, output_kind="material_delta_only")
+
+
+def _delta_only_result(
+    context: Mapping[str, Any],
+    *,
+    output_kind: str,
+) -> dict[str, Any]:
     plan = context["plan"]
     delta = plan["delta"]
     return {
         "schema_version": EVIDENCE_VAULT_OPERATION_RESULT_VERSION,
-        "output_kind": "no_delta",
+        "output_kind": output_kind,
         "operation_plan_fingerprint": plan["operation_plan_fingerprint"],
         "observation_hash": context["observation_hash"],
         "canonical_memory_version": plan["canonical_memory_version"],
