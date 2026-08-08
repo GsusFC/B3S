@@ -29,7 +29,7 @@ CREATE TABLE b3s_history.evidence_vault_capture_watermark_events (
     ),
     append_origin text NOT NULL CHECK (
         append_origin IN (
-            'live_capture_observation',
+            'capture_observation_commit',
             'report_derived_candidate_capture_replay'
         )
     ),
@@ -79,7 +79,7 @@ CREATE TABLE b3s_history.evidence_vault_capture_watermark_events (
             AND previous_event_fingerprint IS NOT NULL)
     ),
     CHECK (
-        (append_origin = 'live_capture_observation'
+        (append_origin = 'capture_observation_commit'
             AND lineage_export_identity IS NULL
             AND lineage_export_fingerprint IS NULL
             AND lineage_export_ordinal IS NULL)
@@ -104,11 +104,7 @@ CREATE TABLE b3s_history.evidence_vault_operational_source_capture_lineage_bindi
     capture_id uuid NOT NULL,
     capture_sequence bigint NOT NULL CHECK (capture_sequence > 0),
     provenance text NOT NULL CHECK (
-        provenance IN (
-            'report_derived_candidate_capture',
-            'live_capture_observation',
-            'verified_raw_acquisition_replay'
-        )
+        provenance = 'report_derived_candidate_capture'
     ),
     lineage_artifact_schema_version text NOT NULL CHECK (
         lineage_artifact_schema_version =
@@ -219,6 +215,122 @@ CREATE TABLE b3s_history.evidence_vault_operational_source_capture_lineage_membe
         REFERENCES b3s_history.evidence_records (capture_id, id)
         ON DELETE RESTRICT
 );
+
+CREATE FUNCTION b3s_history.validate_evidence_vault_capture_watermark_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    predecessor_sequence bigint;
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM b3s_history.evidence_vault_capture_watermark_events AS existing
+        WHERE existing.brand_id = NEW.brand_id
+          AND existing.id = NEW.id
+          AND existing.capture_id = NEW.capture_id
+          AND existing.capture_sequence = NEW.capture_sequence
+          AND existing.event_fingerprint = NEW.event_fingerprint
+    ) THEN
+        RETURN NEW;
+    END IF;
+
+    IF NEW.capture_sequence = 1 THEN
+        IF EXISTS (
+            SELECT 1
+            FROM b3s_history.evidence_vault_capture_watermark_events AS existing
+            WHERE existing.brand_id = NEW.brand_id
+        ) THEN
+            RAISE EXCEPTION
+                'capture watermark sequence 1 requires an empty brand journal';
+        END IF;
+    ELSE
+        SELECT previous.capture_sequence
+        INTO predecessor_sequence
+        FROM b3s_history.evidence_vault_capture_watermark_events AS previous
+        WHERE previous.brand_id = NEW.brand_id
+          AND previous.id = NEW.previous_event_id
+          AND previous.event_fingerprint = NEW.previous_event_fingerprint;
+        IF predecessor_sequence IS NULL
+           OR predecessor_sequence <> NEW.capture_sequence - 1 THEN
+            RAISE EXCEPTION
+                'capture watermark predecessor must be sequence N-1';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION b3s_history.validate_evidence_vault_lineage_binding_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    current_capture_sequence bigint;
+    prior_capture_sequence bigint;
+    prior_origin_sequence bigint;
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM b3s_history.evidence_vault_operational_source_capture_lineage_bindings
+             AS existing
+        WHERE existing.brand_id = NEW.brand_id
+          AND existing.operational_source_packet_id =
+              NEW.operational_source_packet_id
+          AND existing.capture_sequence = NEW.capture_sequence
+          AND existing.capture_id = NEW.capture_id
+          AND existing.binding_fingerprint = NEW.binding_fingerprint
+          AND existing.lineage_artifact_fingerprint =
+              NEW.lineage_artifact_fingerprint
+    ) THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT max(events.capture_sequence)
+    INTO current_capture_sequence
+    FROM b3s_history.evidence_vault_capture_watermark_events AS events
+    WHERE events.brand_id = NEW.brand_id;
+    IF current_capture_sequence IS NULL
+       OR NEW.capture_sequence <> current_capture_sequence THEN
+        RAISE EXCEPTION
+            'a new lineage checkpoint must bind the current capture watermark';
+    END IF;
+
+    SELECT previous.capture_sequence, previous.replay_origin_sequence
+    INTO prior_capture_sequence, prior_origin_sequence
+    FROM b3s_history.evidence_vault_operational_source_capture_lineage_bindings
+         AS previous
+    WHERE previous.brand_id = NEW.brand_id
+      AND previous.operational_source_packet_id =
+          NEW.operational_source_packet_id
+    ORDER BY previous.capture_sequence DESC
+    LIMIT 1;
+
+    IF prior_capture_sequence IS NULL THEN
+        IF NEW.replay_origin_sequence <> NEW.capture_sequence THEN
+            RAISE EXCEPTION
+                'first lineage checkpoint origin must equal its capture sequence';
+        END IF;
+    ELSIF NEW.capture_sequence <> prior_capture_sequence + 1
+          OR NEW.replay_origin_sequence <> prior_origin_sequence THEN
+        RAISE EXCEPTION
+            'lineage checkpoints must be contiguous with a stable origin';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER evidence_vault_capture_watermark_events_validate_insert
+BEFORE INSERT
+ON b3s_history.evidence_vault_capture_watermark_events
+FOR EACH ROW
+EXECUTE FUNCTION b3s_history.validate_evidence_vault_capture_watermark_insert();
+
+CREATE TRIGGER evidence_vault_source_capture_lineage_bindings_validate_insert
+BEFORE INSERT
+ON b3s_history.evidence_vault_operational_source_capture_lineage_bindings
+FOR EACH ROW
+EXECUTE FUNCTION b3s_history.validate_evidence_vault_lineage_binding_insert();
 
 CREATE FUNCTION b3s_history.reject_evidence_vault_capture_lineage_mutation()
 RETURNS trigger

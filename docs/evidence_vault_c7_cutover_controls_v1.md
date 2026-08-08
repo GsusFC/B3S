@@ -45,12 +45,16 @@ ambiguous.
   is explicitly blocked without a legacy fallback or another persistence write.
 - **Lineage:** an accepted C7 row is insufficient. The repository walks exact
   immutable source packets and rederives exactly one C7 `all_of` group with
-  exactly two frozen members (`owned_web` and `external_social_profile`), exact review events
-  and current memory version. Missing or ambiguous lineage denies presentation.
+  exactly two frozen members (`owned_web` and `external_social_profile`), exact
+  review events and current memory version. Present-time readiness additionally
+  requires trusted live or verified-raw capture provenance. This Draft supports
+  only report-derived audit bindings, so its readiness API always denies
+  presentation.
 - **Scoring/read:** denied requests perform no operational-memory read and no
   operational-score get-or-create. Allowed requests recheck controls before the
-  score-write boundary and again before presentation, then bind the envelope to
-  the memory version, evaluation identity and score-input fingerprint.
+  score-write boundary and again before presentation, recheck capture readiness
+  after scoring, then bind the envelope to the memory version, evaluation
+  identity and score-input fingerprint.
 - **API:** `GET /api/v1/brands/{domain}/operational-c7` is authenticated,
   `no-store`, and returns a typed, brand-current projection. Denied, unavailable
   and non-allowlisted cases share the same 404 shape so the allowlist is not
@@ -77,9 +81,13 @@ are added to the production Fly configuration.
 
 ## Remaining NO-GO conditions
 
-The control plane does not solve raw acquisition replay, seed/export v2 of
-legacy lineage, the latest-capture watermark, runtime score separation, or the
-offline adapter extraction. A brand must not enter the allowlist until its exact
-accepted group has replayable capture lineage and those separate gates are
-closed. Enabling flags, deploying Vault, marking a PR ready, merging, or touching
-production require separate explicit authorization, backup and rollback plans.
+The capture watermark and report-derived logical seed are implemented in the
+stacked Draft lineage change described in
+`evidence_vault_capture_lineage_replay_v1.md`. They do not recover the original
+raw acquisition envelopes, solve legacy parentless genesis, create one
+transactional readiness snapshot across memory/score/presentation, separate the
+offline adapters, or wire production scanning. A brand must not enter the
+allowlist until its exact accepted group has verified current raw lineage and
+those separate gates are closed. Enabling flags, deploying Vault, marking a PR
+ready, merging, or touching production require separate explicit authorization,
+backup and rollback plans.

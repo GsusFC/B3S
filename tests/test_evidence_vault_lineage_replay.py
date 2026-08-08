@@ -20,7 +20,7 @@ from src.services.evidence_vault_exact_relation_supplement import (
     validate_exact_relation_supplement_structure,
 )
 from src.services.evidence_vault_lineage_replay import (
-    EVIDENCE_VAULT_REVIEWED_LINEAGE_SEED_EXPORT_VERSION,
+    EVIDENCE_VAULT_LINEAGE_SEED_EXPORT_VERSION,
     EvidenceVaultLineageReplayError,
     build_historical_report_capture_observation,
     build_lineage_seed_export_v2,
@@ -362,7 +362,7 @@ def test_seed_export_binds_exact_c7_source_to_exact_report_capture() -> None:
     inputs = _inputs()
     artifact = build_lineage_seed_export_v2(**inputs)
 
-    assert artifact["schema_version"] == EVIDENCE_VAULT_REVIEWED_LINEAGE_SEED_EXPORT_VERSION
+    assert artifact["schema_version"] == EVIDENCE_VAULT_LINEAGE_SEED_EXPORT_VERSION
     assert artifact["lineage_kind"] == "report_derived_candidate_capture"
     assert artifact["source_historical_report"] == inputs["source_historical_report"]
     assert artifact["capture_sequence"] == artifact["lineage_export_ordinal"] == 1
@@ -424,6 +424,23 @@ def test_seed_export_validator_rejects_unknown_fields_and_recomputed_top_hashes(
     with pytest.raises(EvidenceVaultLineageReplayError, match="fields are invalid"):
         validate_lineage_seed_export_v2(artifact)
 
+    forged = build_lineage_seed_export_v2(**_inputs())
+    forged["source_historical_report"]["limitations"].append(
+        "nested mutation with recomputed top-level hashes"
+    )
+    forged.pop("lineage_export_fingerprint")
+    forged.pop("artifact_fingerprint")
+    forged["lineage_export_fingerprint"] = canonical_fingerprint(
+        f"{EVIDENCE_VAULT_LINEAGE_SEED_EXPORT_VERSION}-manifest",
+        forged,
+    )
+    forged["artifact_fingerprint"] = canonical_fingerprint(
+        EVIDENCE_VAULT_LINEAGE_SEED_EXPORT_VERSION,
+        forged,
+    )
+    with pytest.raises(EvidenceVaultLineageReplayError):
+        validate_lineage_seed_export_v2(forged)
+
 
 def test_later_seed_requires_exact_predecessor_event_fingerprint() -> None:
     inputs = _inputs()
@@ -435,5 +452,6 @@ def test_later_seed_requires_exact_predecessor_event_fingerprint() -> None:
     inputs["expected_predecessor_event_fingerprint"] = "6" * 64
     artifact = build_lineage_seed_export_v2(**inputs)
     assert artifact["capture_sequence"] == 2
+    assert artifact["replay_origin_sequence"] == 2
     assert artifact["expected_predecessor_event_fingerprint"] == "6" * 64
     validate_lineage_seed_export_v2(artifact)

@@ -51,11 +51,6 @@ EVIDENCE_PACK_NORMALIZATION_POLICY_VERSION = (
 EVIDENCE_VAULT_LINEAGE_SEED_EXPORT_VERSION = (
     "evidence-vault-lineage-seed-export-v2"
 )
-# Backward-readable name for callers that describe this non-authoritative
-# transport as a reviewed seed. Both names intentionally identify one schema.
-EVIDENCE_VAULT_REVIEWED_LINEAGE_SEED_EXPORT_VERSION = (
-    EVIDENCE_VAULT_LINEAGE_SEED_EXPORT_VERSION
-)
 LINEAGE_REPLAY_PROVENANCE = "report_derived_candidate_capture"
 REPORT_DERIVED_ACQUISITION_CLASSIFICATION = "report_derived_candidate_capture"
 RAW_HASH_VERIFICATION_CLASSIFICATION = (
@@ -508,13 +503,13 @@ def build_lineage_seed_export_v2(
         )
 
     payload = {
-        "schema_version": EVIDENCE_VAULT_REVIEWED_LINEAGE_SEED_EXPORT_VERSION,
+        "schema_version": EVIDENCE_VAULT_LINEAGE_SEED_EXPORT_VERSION,
         "workspace_slug": workspace,
         "seed_id": seed,
         "lineage_export_identity": export_identity,
         "lineage_export_ordinal": ordinal,
         "capture_sequence": ordinal,
-        "replay_origin_sequence": 1,
+        "replay_origin_sequence": ordinal,
         "expected_predecessor_event_fingerprint": predecessor,
         "lineage_kind": LINEAGE_REPLAY_PROVENANCE,
         "acquisition_classification": (
@@ -534,7 +529,7 @@ def build_lineage_seed_export_v2(
                 EVIDENCE_VAULT_EXACT_RELATION_SOURCE_RESOLUTION_VERSION
             ),
             "lineage_binding": (
-                EVIDENCE_VAULT_REVIEWED_LINEAGE_SEED_EXPORT_VERSION
+                EVIDENCE_VAULT_LINEAGE_SEED_EXPORT_VERSION
             ),
         },
         "brand_identity": parsed_capture.canonical_domain,
@@ -566,7 +561,7 @@ def build_lineage_seed_export_v2(
         "cutover_authorized": False,
     }
     lineage_export_fingerprint = canonical_fingerprint(
-        f"{EVIDENCE_VAULT_REVIEWED_LINEAGE_SEED_EXPORT_VERSION}-manifest",
+        f"{EVIDENCE_VAULT_LINEAGE_SEED_EXPORT_VERSION}-manifest",
         payload,
     )
     unsigned = {
@@ -576,7 +571,7 @@ def build_lineage_seed_export_v2(
     artifact = {
         **unsigned,
         "artifact_fingerprint": canonical_fingerprint(
-            EVIDENCE_VAULT_REVIEWED_LINEAGE_SEED_EXPORT_VERSION,
+            EVIDENCE_VAULT_LINEAGE_SEED_EXPORT_VERSION,
             unsigned,
         ),
     }
@@ -637,7 +632,7 @@ def validate_lineage_seed_export_v2(artifact: Mapping[str, Any]) -> None:
             "lineage seed/export fields are invalid"
         )
     if artifact.get("schema_version") != (
-        EVIDENCE_VAULT_REVIEWED_LINEAGE_SEED_EXPORT_VERSION
+        EVIDENCE_VAULT_LINEAGE_SEED_EXPORT_VERSION
     ):
         raise EvidenceVaultLineageReplayError(
             "lineage seed/export schema is unsupported"
@@ -1181,7 +1176,6 @@ def _predecessor_fingerprint(value: Any, *, ordinal: int) -> str | None:
 __all__ = [
     "EVIDENCE_PACK_NORMALIZATION_POLICY_VERSION",
     "EVIDENCE_VAULT_LINEAGE_SEED_EXPORT_VERSION",
-    "EVIDENCE_VAULT_REVIEWED_LINEAGE_SEED_EXPORT_VERSION",
     "EvidenceVaultLineageReplayError",
     "HISTORICAL_REPORT_ACQUISITION_REPLAY_POLICY_VERSION",
     "LINEAGE_REPLAY_PROVENANCE",

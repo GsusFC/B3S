@@ -52,6 +52,11 @@ from src.services.evidence_vault_incremental_executor import (
 from src.services.evidence_vault_incremental_refresh import (
     build_vault_scan_plan,
 )
+from src.services.evidence_vault_lineage_replay import (
+    EVIDENCE_VAULT_LINEAGE_SEED_EXPORT_VERSION,
+    build_historical_report_capture_observation,
+    build_lineage_seed_export_v2,
+)
 from src.services.evidence_vault_operational_authority import (
     EvidenceVaultOperationalAuthorityError,
     adoption_request_fingerprint,
@@ -94,7 +99,7 @@ def test_capture_watermark_is_commit_ordered_idempotent_and_append_only() -> Non
     assert head["capture_sequence"] == 2
     assert head["capture_id"] == older_result.capture_id
     assert head["capture_id"] != first_result.capture_id
-    assert head["append_origin"] == "live_capture_observation"
+    assert head["append_origin"] == "capture_observation_commit"
 
     repeated = repository.persist_capture_observation(older)
     assert repeated.status == "unchanged"
@@ -127,6 +132,32 @@ def test_capture_watermark_is_commit_ordered_idempotent_and_append_only() -> Non
     assert [int(row[0]) for row in events] == [1, 2, 3, 4, 5]
     assert {str(row[1]) for row in events[-3:]} == set(capture_ids)
 
+    with psycopg.connect(dsn) as conn:
+        with pytest.raises(psycopg.Error, match="predecessor"):
+            conn.execute(
+                """
+                INSERT INTO b3s_history.evidence_vault_capture_watermark_events (
+                    id, brand_id, capture_id, capture_sequence,
+                    previous_event_id, previous_event_fingerprint,
+                    capture_content_hash, capture_observation_hash,
+                    append_origin, lineage_export_identity,
+                    lineage_export_fingerprint, lineage_export_ordinal,
+                    event_fingerprint, authority,
+                    production_runtime_effect, scanner_runtime_effect
+                )
+                SELECT %s, brand_id, capture_id, capture_sequence + 2,
+                       id, event_fingerprint, capture_content_hash,
+                       capture_observation_hash, 'capture_observation_commit',
+                       NULL, NULL, NULL, %s, false, false, false
+                FROM b3s_history.evidence_vault_capture_watermark_events
+                ORDER BY capture_sequence DESC
+                LIMIT 1
+                """,
+                (
+                    "00000000-0000-0000-0000-000000000067",
+                    "c" * 64,
+                ),
+            )
     with psycopg.connect(dsn) as conn:
         with pytest.raises(psycopg.Error, match="append-only"):
             conn.execute(
@@ -745,6 +776,258 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
     # runtime presentation fails closed without changing memory or score.
     exact_runtime_c7 = load_c7_runtime_projection(repository, brand)
     assert exact_runtime_c7 is None
+
+    historical_report = {
+        "id": "causa-lineage-report-derived",
+        "url": "https://causaprima.ai",
+        "brand_name": "Causa Prima",
+        "created_at": "2026-07-08T09:17:20.190398Z",
+        "components": [{"key": "coherencia", "score": 1}],
+        "limitations": ["report_derived_candidate_capture"],
+        "attempts": [],
+        "acquisition_artifacts": [],
+        "acquisition_gate": {"state": "complete"},
+        "raw": {
+            "schema_version": "historical-report-lineage-fixture-v1",
+            "flow": {"candidate": {"evidence_pack": deepcopy(pack)}},
+        },
+    }
+    source_bytes_sha = hashlib.sha256(
+        canonical_json(historical_report).encode("utf-8")
+    ).hexdigest()
+    report_observation = build_historical_report_capture_observation(
+        historical_report=historical_report,
+        source_raw_bytes_sha256=source_bytes_sha,
+        source_artifact_name="causa-lineage-report-derived.json",
+    )
+    previous_head = repository.get_evidence_vault_current_capture_watermark(brand)
+    assert previous_head is not None
+    report_export = build_lineage_seed_export_v2(
+        workspace_slug="b3s",
+        seed_id="causa-lineage-report-derived",
+        lineage_export_identity="causa-lineage-report-derived",
+        lineage_export_ordinal=previous_head["capture_sequence"] + 1,
+        expected_predecessor_event_fingerprint=previous_head[
+            "watermark_fingerprint"
+        ],
+        source_historical_report=historical_report,
+        source_raw_bytes_sha256=source_bytes_sha,
+        source_artifact_name="causa-lineage-report-derived.json",
+        capture_observation=report_observation,
+        normalized_evidence_pack=pack,
+        exact_relation_supplement=exact_artifact,
+    )
+    repository.persist_capture_observation(report_observation)
+    report_head = repository.get_evidence_vault_current_capture_watermark(brand)
+    assert report_head is not None
+    assert report_head["append_origin"] == (
+        "report_derived_candidate_capture_replay"
+    )
+    with psycopg.connect(dsn) as conn:
+        with pytest.raises(psycopg.Error, match="origin must equal"):
+            conn.execute(
+                """
+                INSERT INTO b3s_history.evidence_vault_operational_source_capture_lineage_bindings (
+                    id, brand_id, operational_source_packet_id,
+                    watermark_event_id, capture_id, capture_sequence,
+                    provenance, lineage_artifact_schema_version,
+                    lineage_artifact_fingerprint, lineage_export_identity,
+                    lineage_export_fingerprint, replay_origin_sequence,
+                    member_set_fingerprint, binding_fingerprint,
+                    authority, production_runtime_effect, scanner_runtime_effect
+                )
+                SELECT %s, source.brand_id, source.id, current_event.id,
+                       current_event.capture_id, current_event.capture_sequence,
+                       'report_derived_candidate_capture',
+                       'evidence-vault-lineage-seed-export-v2', %s,
+                       'direct-wrong-origin-attempt', %s, 1, %s, %s,
+                       false, false, false
+                FROM b3s_history.evidence_vault_canonical_memory_packets AS source
+                JOIN b3s_history.evidence_vault_capture_watermark_events
+                     AS current_event
+                  ON current_event.brand_id = source.brand_id
+                WHERE source.packet_fingerprint = %s
+                ORDER BY current_event.capture_sequence DESC
+                LIMIT 1
+                """,
+                (
+                    "00000000-0000-0000-0000-000000000066",
+                    "a" * 64,
+                    "b" * 64,
+                    "c" * 64,
+                    "d" * 64,
+                    exact_source["packet"]["candidate_packet_fingerprint"],
+                ),
+            )
+    report_binding, report_binding_replayed = (
+        repository.bind_evidence_vault_exact_source_capture_lineage(
+            brand,
+            report_export,
+        )
+    )
+    assert report_binding_replayed is False
+    assert report_binding["member_count"] == 2
+    assert report_binding["provenance"] == "report_derived_candidate_capture"
+    assert repository.bind_evidence_vault_exact_source_capture_lineage(
+        brand,
+        report_export,
+    ) == (report_binding, True)
+    assert (
+        repository.get_evidence_vault_runtime_ready_c7_group_attestation(brand)
+        is None
+    )
+    assert repository.get_evidence_vault_active_c7_group_attestation(
+        brand
+    ) == exact_attestation
+    assert load_c7_runtime_projection(repository, brand) is None
+
+    relabeled_observation = deepcopy(report_observation)
+    relabeled_observation["source_scan_id"] = "causa-relabeled-c7-capture"
+    relabeled_observation["metadata"]["provenance"] = (
+        "live_capture_observation"
+    )
+    relabeled_observation["metadata"]["acquisition_classification"] = (
+        "live_capture_observation"
+    )
+    relabeled_outcome = repository.persist_capture_observation(
+        relabeled_observation
+    )
+    relabeled_head = repository.get_evidence_vault_current_capture_watermark(
+        brand
+    )
+    assert relabeled_head is not None
+    assert relabeled_head["capture_id"] == relabeled_outcome.capture_id
+    assert relabeled_head["append_origin"] == "capture_observation_commit"
+
+    relabeled_export = deepcopy(report_export)
+    relabeled_export.update(
+        {
+            "seed_id": "causa-relabeled-c7-capture",
+            "lineage_export_identity": "causa-relabeled-c7-capture",
+            "lineage_export_ordinal": relabeled_head["capture_sequence"],
+            "capture_sequence": relabeled_head["capture_sequence"],
+            "replay_origin_sequence": report_binding["replay_origin_sequence"],
+            "expected_predecessor_event_fingerprint": relabeled_head[
+                "previous_event_fingerprint"
+            ],
+            "lineage_kind": "live_capture_observation",
+            "acquisition_classification": "live_capture_observation",
+            "capture_observation": relabeled_observation,
+            "capture_observation_hash": relabeled_outcome.observation_hash,
+        }
+    )
+    relabeled_export.pop("lineage_export_fingerprint", None)
+    relabeled_export.pop("artifact_fingerprint", None)
+    relabeled_export["lineage_export_fingerprint"] = canonical_fingerprint(
+        f"{EVIDENCE_VAULT_LINEAGE_SEED_EXPORT_VERSION}-manifest",
+        relabeled_export,
+    )
+    relabeled_export["artifact_fingerprint"] = canonical_fingerprint(
+        EVIDENCE_VAULT_LINEAGE_SEED_EXPORT_VERSION,
+        relabeled_export,
+    )
+    with pytest.raises(
+        EvidenceVaultOperationalAuthorityError,
+        match="Only report-derived lineage replay is supported",
+    ):
+        repository.bind_evidence_vault_exact_source_capture_lineage(
+            brand,
+            relabeled_export,
+        )
+    assert (
+        repository.get_evidence_vault_runtime_ready_c7_group_attestation(brand)
+        is None
+    )
+
+    coverage_loss_observation = deepcopy(report_observation)
+    coverage_loss_observation["source_scan_id"] = "causa-c7-linkedin-not-reacquired"
+    coverage_loss_observation["evidence_records"] = [
+        row
+        for row in coverage_loss_observation["evidence_records"]
+        if "linkedin.com" not in canonical_json(row).lower()
+    ]
+    assert len(coverage_loss_observation["evidence_records"]) == (
+        len(report_observation["evidence_records"]) - 1
+    )
+    repository.persist_capture_observation(coverage_loss_observation)
+    coverage_loss_head = (
+        repository.get_evidence_vault_current_capture_watermark(brand)
+    )
+    assert coverage_loss_head is not None
+    assert coverage_loss_head["append_origin"] == (
+        "report_derived_candidate_capture_replay"
+    )
+    assert (
+        repository.get_evidence_vault_runtime_ready_c7_group_attestation(brand)
+        is None
+    )
+    assert repository.get_evidence_vault_active_c7_group_attestation(
+        brand
+    ) == exact_attestation
+    assert load_c7_runtime_projection(repository, brand) is None
+
+    with psycopg.connect(dsn) as conn:
+        with pytest.raises(psycopg.Error, match="append-only"):
+            conn.execute(
+                """
+                UPDATE b3s_history.evidence_vault_operational_source_capture_lineage_bindings
+                SET binding_fingerprint = %s
+                WHERE id = %s
+                """,
+                ("f" * 64, report_binding["binding_id"]),
+            )
+    with psycopg.connect(dsn) as conn:
+        with pytest.raises(psycopg.Error, match="append-only"):
+            conn.execute(
+                """
+                DELETE FROM b3s_history.evidence_vault_operational_source_capture_lineage_members
+                WHERE binding_id = %s
+                """,
+                (report_binding["binding_id"],),
+            )
+    with psycopg.connect(dsn) as conn:
+        with pytest.raises(psycopg.Error, match="contiguous"):
+            conn.execute(
+                """
+                INSERT INTO b3s_history.evidence_vault_operational_source_capture_lineage_bindings (
+                    id, brand_id, operational_source_packet_id,
+                    watermark_event_id, capture_id, capture_sequence,
+                    provenance, lineage_artifact_schema_version,
+                    lineage_artifact_fingerprint, lineage_export_identity,
+                    lineage_export_fingerprint, replay_origin_sequence,
+                    member_set_fingerprint, binding_fingerprint,
+                    authority, production_runtime_effect, scanner_runtime_effect
+                )
+                SELECT %s, previous.brand_id,
+                       previous.operational_source_packet_id,
+                       current_event.id, current_event.capture_id,
+                       current_event.capture_sequence, previous.provenance,
+                       previous.lineage_artifact_schema_version,
+                       previous.lineage_artifact_fingerprint,
+                       'direct-gap-attempt', %s,
+                       previous.replay_origin_sequence,
+                       previous.member_set_fingerprint, %s,
+                       false, false, false
+                FROM b3s_history.evidence_vault_operational_source_capture_lineage_bindings
+                     AS previous
+                JOIN b3s_history.evidence_vault_capture_watermark_events
+                     AS current_event
+                  ON current_event.brand_id = previous.brand_id
+                WHERE previous.id = %s
+                ORDER BY current_event.capture_sequence DESC
+                LIMIT 1
+                """,
+                (
+                    "00000000-0000-0000-0000-000000000068",
+                    "e" * 64,
+                    "d" * 64,
+                    report_binding["binding_id"],
+                ),
+            )
+    assert repository.bind_evidence_vault_exact_source_capture_lineage(
+        brand,
+        report_export,
+    ) == (report_binding, True)
 
     exact_review_replay = (
         repository.review_and_adopt_evidence_vault_operational_source(

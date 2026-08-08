@@ -233,6 +233,66 @@ def test_enabled_runtime_projection_stops_when_memory_is_unavailable(
     assert result is None
     assert repository.calls == ["memory"]
 
+def test_enabled_runtime_projection_stops_before_score_when_lineage_is_stale(
+    monkeypatch,
+) -> None:
+    for key, value in _environment().items():
+        monkeypatch.setenv(key, value)
+
+    class MissingLineage(_Repository):
+        def get_evidence_vault_operational_memory(self, *_args, **_kwargs):
+            self.calls.append("memory")
+            return {"brand_identity": "example.com"}
+
+    repository = MissingLineage()
+    result = load_c7_runtime_projection(repository, "example.com")
+
+    assert result is None
+    assert repository.calls == ["memory", "attestation"]
+    assert "score" not in repository.calls
+
+
+def test_capture_head_change_after_score_denies_presentation(
+    monkeypatch,
+) -> None:
+    for key, value in _environment().items():
+        monkeypatch.setenv(key, value)
+
+    class HeadChangesAfterScore(_Repository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attestation_reads = 0
+
+        def get_evidence_vault_operational_memory(self, *_args, **_kwargs):
+            self.calls.append("memory")
+            return {"brand_identity": "example.com"}
+
+        def get_evidence_vault_runtime_ready_c7_group_attestation(
+            self,
+            *_args,
+            **_kwargs,
+        ):
+            self.calls.append("attestation")
+            self.attestation_reads += 1
+            if self.attestation_reads == 1:
+                return {"attestation_fingerprint": "b" * 64}
+            return None
+
+        def get_or_create_evidence_vault_operational_score_evaluation(
+            self,
+            *_args,
+            **_kwargs,
+        ):
+            self.calls.append("score")
+            return {"evaluation_identity": "a" * 64}, False
+
+    repository = HeadChangesAfterScore()
+    result = load_c7_runtime_projection(repository, "example.com")
+
+    assert result is None
+    assert repository.calls == ["memory", "attestation", "score", "attestation"]
+
+
 def test_emergency_switch_flip_before_score_prevents_score_write(
     monkeypatch,
 ) -> None:

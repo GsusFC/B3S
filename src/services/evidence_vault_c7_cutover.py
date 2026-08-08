@@ -424,11 +424,22 @@ def load_c7_runtime_projection(
     before_present = decision_now()
     if not before_present.enabled or before_present != first:
         return None
+    current_attestation = (
+        repository.get_evidence_vault_runtime_ready_c7_group_attestation(
+            first.canonical_brand,
+            workspace_slug=workspace_slug,
+        )
+    )
+    if current_attestation != attestation:
+        return None
+    final = decision_now()
+    if not final.enabled or final != first:
+        return None
     return build_c7_runtime_projection(
-        decision=before_present,
+        decision=final,
         canonical_memory=memory,
         score_evaluation=evaluation,
-        active_group_attestation=attestation,
+        active_group_attestation=current_attestation,
     )
 
 
