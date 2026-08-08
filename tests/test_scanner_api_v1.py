@@ -121,7 +121,13 @@ def _operational_c7_projection() -> dict:
         "score_eligible": True,
         "group_identity": {
             "group_id": "d" * 64,
-            "attestation_fingerprint": "e" * 64,
+            "group_contract_fingerprint": "e" * 64,
+            "member_relation_ids": ["2" * 64, "3" * 64],
+            "member_channel_roles": [
+                "external_social_profile",
+                "owned_web",
+            ],
+            "attestation_fingerprint": "4" * 64,
         },
         "authority": True,
         "authority_scope": "b3s-vault",
@@ -149,6 +155,7 @@ def test_operational_c7_api_uses_uniform_not_available_shape(monkeypatch) -> Non
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "operational_c7_not_available"
     assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["pragma"] == "no-cache"
     assert response.headers["vary"] == "Authorization"
     assert "allowlist" not in response.text
 
@@ -168,11 +175,51 @@ def test_operational_c7_api_is_typed_separate_and_never_cached(monkeypatch) -> N
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["vary"] == "Authorization"
     assert response.json() == {
         "object": "operational_c7_runtime",
         "api_version": "v1",
         "projection": projection,
     }
+
+
+def test_operational_c7_api_rejects_malformed_projection_uniformly(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    malformed = _operational_c7_projection()
+    malformed["score_eligible"] = "true"
+    malformed["group_identity"]["unexpected"] = "field"
+    monkeypatch.setattr(
+        "web.api_v1.router.operational_c7_runtime_projection_for_domain",
+        lambda _domain: malformed,
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/operational-c7",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "operational_c7_not_available"
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["vary"] == "Authorization"
+    assert "unexpected" not in response.text
+
+
+def test_operational_c7_api_auth_failure_is_never_cached(monkeypatch) -> None:
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/operational-c7"
+    )
+
+    assert response.status_code == 401
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["vary"] == "Authorization"
 
 
 def test_api_health_is_public(monkeypatch):

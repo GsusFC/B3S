@@ -8,6 +8,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Header, Query, Request, Response, status
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import ValidationError
 
 from src.build_info import current_build_sha
 from src.services.scanner_evidence_comparison import annotate_report_history
@@ -49,6 +50,7 @@ from .models import (
     EvidenceScoringRecoveryReviewCreateRequest,
     EvidenceScoringRecoveryReviewCreateResponse,
     EvidenceScoringRecoveryReviewJournalResponse,
+    OperationalC7Projection,
     OperationalC7RuntimeResponse,
     ScanCreateRequest,
     ScanEvidenceResponse,
@@ -348,23 +350,30 @@ def brand_operational_c7(
     _principal: ReadPrincipal,
 ) -> dict[str, Any]:
     projection = operational_c7_runtime_projection_for_domain(domain)
-    if projection is None:
+    try:
+        validated = (
+            OperationalC7Projection.model_validate(projection).model_dump(
+                mode="json"
+            )
+            if projection is not None
+            else None
+        )
+    except ValidationError:
+        validated = None
+    if validated is None:
         # A uniform shape prevents allowlist and persisted-authority enumeration.
         raise ApiError(
             404,
             "operational_c7_not_available",
             "Operational C7 is not available for this brand.",
-            headers={
-                "Cache-Control": "private, no-store",
-                "Vary": "Authorization",
-            },
         )
     response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Pragma"] = "no-cache"
     response.headers["Vary"] = "Authorization"
     return {
         "object": "operational_c7_runtime",
         "api_version": "v1",
-        "projection": projection,
+        "projection": validated,
     }
 
 
