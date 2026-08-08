@@ -8,6 +8,7 @@ import os
 import pytest
 
 from src.history.models import CaptureConflictError
+from src.services.evidence_vault_canonical_core import canonical_fingerprint
 from src.services.evidence_vault_incremental_executor import execute_vault_operation_plan
 from src.services.evidence_vault_incremental_refresh import build_vault_scan_plan
 
@@ -70,6 +71,17 @@ class CrashOnceAfterResult:
         )
 
 
+class CrashBeforeFinalize:
+    def __init__(self, repository):
+        self.repository = repository
+
+    def __getattr__(self, name):
+        return getattr(self.repository, name)
+
+    def finalize_capture_operation_plan(self, *args, **kwargs):
+        raise RuntimeError("crash before finalize")
+
+
 class TamperSemanticShortlistResult:
     def __init__(self, repository):
         self.repository = repository
@@ -111,9 +123,9 @@ def _row():
     }
 
 
-def _persist_baseline(repository, scan_id, rows=None):
+def _persist_baseline(repository, scan_id, rows=None, plan=None):
     rows = rows or [_row()]
-    plan = build_vault_scan_plan(
+    plan = plan or build_vault_scan_plan(
         brand_identity="example.com",
         subject_url="https://example.com",
         mode="baseline",
@@ -141,7 +153,18 @@ def _persist_baseline(repository, scan_id, rows=None):
         "artifacts": [],
         "metadata": {
             "mode": "baseline",
-            "analysis_status": "pending",
+            "analysis_status": (
+                "pending"
+                if any(
+                    plan["operations"][field]
+                    for field in (
+                        "llm_required",
+                        "create_candidate_packet",
+                        "create_diagnostic_report",
+                    )
+                )
+                else "not_required"
+            ),
             "operation_plan": plan,
             "operation_plan_fingerprint": plan["operation_plan_fingerprint"],
         },
@@ -416,6 +439,81 @@ def test_parent_advance_after_result_persistence_terminalizes_as_superseded() ->
     assert repository.get_capture_operation_plan("stale-result-scan")[
         "status"
     ] == "superseded"
+
+
+def test_material_delta_only_persists_and_completes_without_packet() -> None:
+    repository = _reset_repository()
+    current = _row()
+    current["content"] = "Changed acquisition marker"
+    current["evidence_type"] = "acquisition.metadata"
+    current["metadata"]["source_class"] = "acquisition_metadata"
+    plan = build_vault_scan_plan(
+        brand_identity="example.com",
+        subject_url="https://example.com",
+        mode="baseline",
+        current_evidence_records=[current],
+    )
+    plan["operations"]["create_candidate_packet"] = False
+    delta_unsigned = {
+        key: value
+        for key, value in plan["delta"].items()
+        if key != "delta_fingerprint"
+    }
+    delta_unsigned["requires_incremental_analysis"] = True
+    plan["delta"] = {
+        **delta_unsigned,
+        "delta_fingerprint": canonical_fingerprint(
+            plan["delta"]["schema_version"],
+            delta_unsigned,
+        ),
+    }
+    plan_unsigned = {
+        key: value
+        for key, value in plan.items()
+        if key != "operation_plan_fingerprint"
+    }
+    plan["operation_plan_fingerprint"] = canonical_fingerprint(
+        plan["schema_version"],
+        plan_unsigned,
+    )
+    _persist_baseline(
+        repository,
+        "material-delta-scan",
+        rows=[current],
+        plan=plan,
+    )
+
+    with pytest.raises(RuntimeError, match="crash before finalize"):
+        execute_vault_operation_plan(
+            repository=CrashBeforeFinalize(repository),
+            source_scan_id="material-delta-scan",
+            worker_id="material-worker",
+            llm=NoCallLLM(),
+        )
+
+    persisted = repository.get_capture_operation_plan("material-delta-scan")
+    assert persisted["status"] == "result_persisted"
+    assert persisted["result_payload"]["output_kind"] == "material_delta_only"
+    assert persisted["candidate_packet_fingerprint"] is None
+
+    import psycopg
+
+    with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"]) as conn:
+        conn.execute(
+            """
+            UPDATE b3s_history.evidence_vault_operation_plans
+            SET status = 'completed', completed_at = now()
+            WHERE scan_run_id = (
+                SELECT id
+                FROM b3s_history.scan_runs
+                WHERE source_scan_id = %s
+            )
+            """,
+            ("material-delta-scan",),
+        )
+    completed = repository.get_capture_operation_plan("material-delta-scan")
+    assert completed["status"] == "completed"
+    assert completed["candidate_packet_fingerprint"] is None
 
 
 def test_no_delta_result_must_equal_frozen_delta_and_output_stays_null() -> None:

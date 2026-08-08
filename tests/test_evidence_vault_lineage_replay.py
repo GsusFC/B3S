@@ -652,6 +652,74 @@ def test_postgres_lineage_binding_validates_exact_members_and_hashes() -> None:
             with pytest.raises(psycopg.Error, match=message):
                 conn.execute(statement, parameters)
 
+    with psycopg.connect(dsn) as conn:
+        watermarked_capture_id = conn.execute(
+            """
+            SELECT capture_id
+            FROM b3s_history.evidence_vault_capture_watermark_events
+            ORDER BY capture_sequence DESC
+            LIMIT 1
+            """
+        ).fetchone()[0]
+        unwatermarked_scan_id = uuid4()
+        unwatermarked_capture_id = uuid4()
+        movable_evidence_id = uuid4()
+        conn.execute(
+            """
+            INSERT INTO b3s_history.scan_runs (
+                id, workspace_id, brand_id, source_scan_id, status,
+                pipeline_version, requested_at, request_payload, metadata
+            )
+            SELECT %s, workspace_id, id, %s, 'completed', 'test-v1',
+                   now(), '{}'::jsonb, '{}'::jsonb
+            FROM b3s_history.brands
+            WHERE id = %s
+            """,
+            (
+                unwatermarked_scan_id,
+                f"unwatermarked-{unwatermarked_scan_id}",
+                brand_id,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO b3s_history.captures (
+                id, scan_run_id, brand_id, observed_at, recorded_at,
+                source_url, content_hash
+            ) VALUES (%s, %s, %s, now(), now(), %s, %s)
+            """,
+            (
+                unwatermarked_capture_id,
+                unwatermarked_scan_id,
+                brand_id,
+                SUBJECT,
+                "5" * 64,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO b3s_history.evidence_records (
+                id, capture_id, evidence_ref, source, evidence_type,
+                content, content_hash
+            ) VALUES (%s, %s, 'movable.1', 'test', 'test', 'movable', %s)
+            """,
+            (
+                movable_evidence_id,
+                unwatermarked_capture_id,
+                hashlib.sha256(b"movable").hexdigest(),
+            ),
+        )
+        with pytest.raises(psycopg.Error, match="cannot change its capture"):
+            conn.execute(
+                """
+                UPDATE b3s_history.evidence_records
+                SET capture_id = %s
+                WHERE id = %s
+                """,
+                (watermarked_capture_id, movable_evidence_id),
+            )
+        conn.rollback()
+
     duplicate_manifest = {"variant": "duplicate"}
     duplicate_packet_fingerprint = canonical_fingerprint(
         "evidence-vault-candidate-packet-fingerprint-v1",

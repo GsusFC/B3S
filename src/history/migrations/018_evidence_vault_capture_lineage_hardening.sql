@@ -68,6 +68,72 @@ AS $$
     );
 $$;
 
+DO $$
+DECLARE
+    constraint_row record;
+    definition text;
+BEGIN
+    FOR constraint_row IN
+        SELECT constraints.conname,
+               pg_get_constraintdef(constraints.oid) AS definition
+        FROM pg_constraint AS constraints
+        WHERE constraints.conrelid =
+            'b3s_history.evidence_vault_operation_plans'::regclass
+          AND constraints.contype = 'c'
+    LOOP
+        definition := constraint_row.definition;
+        IF position('output_kind' IN definition) > 0
+           AND position('no_delta' IN definition) > 0
+           AND (
+               position('completed_at' IN definition) > 0
+               OR position('candidate_overlay' IN definition) > 0
+           ) THEN
+            EXECUTE format(
+                'ALTER TABLE b3s_history.evidence_vault_operation_plans '
+                'DROP CONSTRAINT %I',
+                constraint_row.conname
+            );
+        END IF;
+    END LOOP;
+END;
+$$;
+
+ALTER TABLE b3s_history.evidence_vault_operation_plans
+    ADD CONSTRAINT evidence_vault_operation_completed_output_check CHECK (
+        status <> 'completed'
+        OR (
+            completed_at IS NOT NULL
+            AND (
+                candidate_packet_fingerprint IS NOT NULL
+                OR result_payload ->> 'output_kind' IN (
+                    'no_delta',
+                    'material_delta_only'
+                )
+            )
+        )
+    ),
+    ADD CONSTRAINT evidence_vault_operation_output_binding_check CHECK (
+        (
+            result_payload IS NULL
+            AND candidate_packet_fingerprint IS NULL
+        )
+        OR (
+            result_payload ->> 'output_kind' IN (
+                'no_delta',
+                'material_delta_only'
+            )
+            AND candidate_packet_fingerprint IS NULL
+        )
+        OR (
+            result_payload ->> 'output_kind' = 'candidate_overlay'
+            AND (
+                candidate_packet_fingerprint IS NULL
+                OR candidate_packet_fingerprint =
+                    result_payload ->> 'candidate_packet_fingerprint'
+            )
+        )
+    );
+
 CREATE FUNCTION b3s_history.evidence_vault_brand_lock_key(
     workspace_id uuid,
     brand_id uuid
@@ -885,7 +951,21 @@ CREATE FUNCTION b3s_history.protect_evidence_vault_capture_parent()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    parent_workspace_id uuid;
 BEGIN
+    SELECT brands.workspace_id
+    INTO parent_workspace_id
+    FROM b3s_history.brands
+    WHERE brands.id = OLD.brand_id;
+    IF parent_workspace_id IS NOT NULL THEN
+        PERFORM pg_advisory_xact_lock(
+            b3s_history.evidence_vault_brand_lock_key(
+                parent_workspace_id,
+                OLD.brand_id
+            )
+        );
+    END IF;
     IF OLD IS DISTINCT FROM NEW AND EXISTS (
         SELECT 1
         FROM b3s_history.evidence_vault_capture_watermark_events AS events
@@ -909,6 +989,12 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    PERFORM pg_advisory_xact_lock(
+        b3s_history.evidence_vault_brand_lock_key(
+            OLD.workspace_id,
+            OLD.brand_id
+        )
+    );
     IF EXISTS (
         SELECT 1
         FROM b3s_history.captures
@@ -942,11 +1028,30 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     target_capture_id uuid;
+    parent_brand_id uuid;
+    parent_workspace_id uuid;
 BEGIN
+    IF TG_OP = 'UPDATE'
+       AND OLD.capture_id IS DISTINCT FROM NEW.capture_id THEN
+        RAISE EXCEPTION 'capture evidence cannot change its capture parent';
+    END IF;
     target_capture_id := CASE
         WHEN TG_OP = 'INSERT' THEN NEW.capture_id
         ELSE OLD.capture_id
     END;
+    SELECT captures.brand_id, brands.workspace_id
+    INTO parent_brand_id, parent_workspace_id
+    FROM b3s_history.captures
+    JOIN b3s_history.brands ON brands.id = captures.brand_id
+    WHERE captures.id = target_capture_id;
+    IF parent_workspace_id IS NOT NULL THEN
+        PERFORM pg_advisory_xact_lock(
+            b3s_history.evidence_vault_brand_lock_key(
+                parent_workspace_id,
+                parent_brand_id
+            )
+        );
+    END IF;
     IF EXISTS (
         SELECT 1
         FROM b3s_history.evidence_vault_capture_watermark_events AS events
@@ -970,6 +1075,12 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    PERFORM pg_advisory_xact_lock(
+        b3s_history.evidence_vault_brand_lock_key(
+            OLD.workspace_id,
+            OLD.id
+        )
+    );
     IF EXISTS (
         SELECT 1
         FROM b3s_history.evidence_vault_capture_watermark_events AS events
