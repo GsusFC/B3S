@@ -20,12 +20,19 @@ from src.services.evidence_vault_canonical_core import (
 )
 from src.services.evidence_vault_composite_group_lifecycle import (
     EvidenceVaultCompositeGroupLifecycleError,
+    attest_active_composite_group,
     build_composite_group_reopen_artifact,
     build_composite_group_reopen_operational_packet,
     build_composite_group_reopen_source_candidate,
     build_composite_group_reopen_source_resolution,
     validate_composite_group_reopen_artifact,
     validate_composite_group_reopen_source_resolution,
+)
+from src.services.evidence_vault_c7_cutover import (
+    EvidenceVaultC7CutoverConfig,
+    EvidenceVaultC7CutoverError,
+    build_c7_runtime_projection,
+    decide_c7_cutover,
 )
 from src.services.evidence_vault_exact_relation_supplement import (
     build_exact_relation_source_candidate,
@@ -55,6 +62,172 @@ _ROOT = Path(__file__).parents[1]
 _AUDIT = _ROOT / "audits/evidence_vault_field_validation_v1"
 _FIXTURE = _ROOT / "fixtures/evidence_vault_field_validation_v1"
 _REOPEN_EVENT_ID = "c8e1a183-1da7-59e8-abda-8837d8031232"
+
+
+def test_active_c7_group_attestation_rederives_exact_all_of_authority() -> None:
+    current, exact_record, group, _pack = _accepted_c7_state()
+
+    attestation = attest_active_composite_group(
+        current_operational_memory=current,
+        exact_source_record=exact_record,
+    )
+
+    assert attestation["brand_identity"] == current["brand_identity"]
+    assert attestation["canonical_memory_version"] == current[
+        "canonical_memory_version"
+    ]
+    assert attestation["group_id"] == group["group_id"]
+    assert attestation["decision_rule"] == "all_of"
+    assert attestation["member_channel_roles"] == [
+        "external_social_profile",
+        "owned_web",
+    ]
+    assert attestation["member_relation_ids"] == sorted(
+        row["relation_id"] for row in group["relations"]
+    )
+
+
+def test_runtime_projection_is_separate_and_bound_to_exact_c7_authority() -> None:
+    current, exact_record, _group, _pack = _accepted_c7_state()
+    attestation = attest_active_composite_group(
+        current_operational_memory=current,
+        exact_source_record=exact_record,
+    )
+    evaluation = build_operational_score_evaluation(
+        current,
+        created_at="2026-08-07T13:59:00+00:00",
+    )
+    controls = EvidenceVaultC7CutoverConfig.from_environ(
+        {
+            "BRAND3_VAULT_C7_CUTOVER_ENABLED": "true",
+            "BRAND3_VAULT_C7_EMERGENCY_DENY": "false",
+            "BRAND3_VAULT_C7_ALLOWLIST": current["brand_identity"],
+        }
+    )
+    decision = decide_c7_cutover(
+        current["brand_identity"],
+        environment="vault",
+        config=controls,
+    )
+
+    projection = build_c7_runtime_projection(
+        decision=decision,
+        canonical_memory=current,
+        score_evaluation=evaluation,
+        active_group_attestation=attestation,
+    )
+
+    assert projection["status"] == "accepted"
+    assert projection["semantic_state"] == "ok"
+    assert projection["effective_points"] == 2
+    assert projection["score_eligible"] is True
+    assert projection["operational_c7_effect"] is True
+    assert projection["legacy_c7_unchanged"] is True
+    assert projection["production_runtime_effect"] is False
+    assert projection["canonical_memory_version"] == current[
+        "canonical_memory_version"
+    ]
+    assert projection["evaluation_identity"] == evaluation[
+        "evaluation_identity"
+    ]
+
+
+def test_runtime_projection_makes_reopened_c7_pending_and_zero_points() -> None:
+    current, exact_record, group, pack = _accepted_c7_state()
+    artifact = build_composite_group_reopen_artifact(
+        current_operational_memory=current,
+        exact_source_record=exact_record,
+        reopen_event_id=_REOPEN_EVENT_ID,
+        evidence_delta=_member_change_delta(group, pack, member_index=0),
+    )
+    source = build_composite_group_reopen_source_candidate(
+        artifact,
+        current_operational_memory=current,
+    )
+    packet = build_composite_group_reopen_operational_packet(
+        artifact,
+        source_candidate_packet=source,
+        current_operational_memory=current,
+    )
+    event = build_operational_adoption_event(
+        packet,
+        event_id="55ad9724-e936-59bf-a4ba-b6b69f8f70ef",
+        sequence=current["adoption_sequence"] + 1,
+        previous_event_id=current["adoption_event_id"],
+        adopted_by="policy",
+        actor_id="composite-group-reopen-policy-v1",
+        policy_fingerprint=artifact["artifact_fingerprint"],
+        created_at="2026-08-07T14:00:00+00:00",
+        idempotency_key_hash=_digest("pending-runtime-c7"),
+        expected_current_canonical_memory_version=current[
+            "canonical_memory_version"
+        ],
+    )
+    pending = project_adopted_operational_memory(packet, event)
+    evaluation = build_operational_score_evaluation(
+        pending,
+        created_at="2026-08-07T14:00:00+00:00",
+    )
+    controls = EvidenceVaultC7CutoverConfig.from_environ(
+        {
+            "BRAND3_VAULT_C7_CUTOVER_ENABLED": "true",
+            "BRAND3_VAULT_C7_EMERGENCY_DENY": "false",
+            "BRAND3_VAULT_C7_ALLOWLIST": pending["brand_identity"],
+        }
+    )
+
+    projection = build_c7_runtime_projection(
+        decision=decide_c7_cutover(
+            pending["brand_identity"],
+            environment="vault",
+            config=controls,
+        ),
+        canonical_memory=pending,
+        score_evaluation=evaluation,
+        active_group_attestation=None,
+    )
+
+    assert projection["status"] == "pending_reassessment"
+    assert projection["semantic_state"] == "sin_evidencia"
+    assert projection["effective_points"] == 0
+    assert projection["score_eligible"] is False
+    assert projection["authority"] is False
+    assert projection["group_identity"]["group_id"] == group["group_id"]
+
+
+def test_runtime_projection_rejects_forged_group_attestation() -> None:
+    current, exact_record, _group, _pack = _accepted_c7_state()
+    attestation = attest_active_composite_group(
+        current_operational_memory=current,
+        exact_source_record=exact_record,
+    )
+    attestation["group_id"] = "f" * 64
+    evaluation = build_operational_score_evaluation(
+        current,
+        created_at="2026-08-07T13:59:00+00:00",
+    )
+    controls = EvidenceVaultC7CutoverConfig.from_environ(
+        {
+            "BRAND3_VAULT_C7_CUTOVER_ENABLED": "true",
+            "BRAND3_VAULT_C7_EMERGENCY_DENY": "false",
+            "BRAND3_VAULT_C7_ALLOWLIST": current["brand_identity"],
+        }
+    )
+
+    with pytest.raises(
+        EvidenceVaultC7CutoverError,
+        match="active_c7_group_attestation_mismatch",
+    ):
+        build_c7_runtime_projection(
+            decision=decide_c7_cutover(
+                current["brand_identity"],
+                environment="vault",
+                config=controls,
+            ),
+            canonical_memory=current,
+            score_evaluation=evaluation,
+            active_group_attestation=attestation,
+        )
 
 
 @pytest.mark.parametrize("member_index", [0, 1])

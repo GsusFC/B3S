@@ -48,6 +48,9 @@ EVIDENCE_VAULT_COMPOSITE_GROUP_REOPEN_SOURCE_RESOLUTION_VERSION = (
 EVIDENCE_VAULT_COMPOSITE_GROUP_REOPEN_SOURCE_VERSION = (
     "evidence-vault-composite-group-reopen-source-v1"
 )
+EVIDENCE_VAULT_COMPOSITE_GROUP_ATTESTATION_VERSION = (
+    "evidence-vault-c7-group-attestation-v1"
+)
 COMPOSITE_GROUP_REOPEN_POLICY_ACTOR = "composite-group-reopen-policy-v1"
 
 
@@ -603,6 +606,63 @@ def validate_composite_group_reopen_source_resolution(
         )
 
 
+def attest_active_composite_group(
+    *,
+    current_operational_memory: Mapping[str, Any],
+    exact_source_record: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Rederive one active C7 ``all_of`` authority from exact source lineage."""
+
+    current, source, _resolution, group, accepted_members = _resolved_active_group(
+        current_operational_memory=current_operational_memory,
+        exact_source_record=exact_source_record,
+    )
+    if (
+        len(group["relations"]) != 2
+        or len(accepted_members) != 2
+        or sorted(str(row["channel_role"]) for row in group["relations"])
+        != ["external_social_profile", "owned_web"]
+    ):
+        raise EvidenceVaultCompositeGroupLifecycleError(
+            "C7 runtime attestation requires exactly two frozen channel members"
+        )
+    body = {
+        "schema_version": EVIDENCE_VAULT_COMPOSITE_GROUP_ATTESTATION_VERSION,
+        "brand_identity": current["brand_identity"],
+        "canonical_memory_version": current["canonical_memory_version"],
+        "exact_source_candidate_packet_fingerprint": source[
+            "candidate_packet_fingerprint"
+        ],
+        "tile_id": "C7",
+        "group_id": group["group_id"],
+        "decision_rule": "all_of",
+        "group_contract_fingerprint": canonical_fingerprint(
+            "evidence-vault-c7-group-contract-v1",
+            group["group_contract"],
+        ),
+        "member_relation_ids": sorted(
+            str(row["relation_id"]) for row in accepted_members
+        ),
+        "member_evidence_fingerprints": sorted(
+            str(row["evidence_fingerprint"]) for row in group["relations"]
+        ),
+        "member_channel_roles": sorted(
+            str(row["channel_role"]) for row in group["relations"]
+        ),
+        "authority": True,
+        "authority_scope": "b3s-vault",
+        "production_runtime_effect": False,
+        "scanner_runtime_effect": False,
+    }
+    return {
+        **body,
+        "attestation_fingerprint": canonical_fingerprint(
+            EVIDENCE_VAULT_COMPOSITE_GROUP_ATTESTATION_VERSION,
+            body,
+        ),
+    }
+
+
 def _resolved_active_group(
     *,
     current_operational_memory: Mapping[str, Any],
@@ -1087,10 +1147,12 @@ def _sha256(value: Any, *, field: str) -> str:
 
 __all__ = [
     "COMPOSITE_GROUP_REOPEN_POLICY_ACTOR",
+    "EVIDENCE_VAULT_COMPOSITE_GROUP_ATTESTATION_VERSION",
     "EVIDENCE_VAULT_COMPOSITE_GROUP_REOPEN_SOURCE_RESOLUTION_VERSION",
     "EVIDENCE_VAULT_COMPOSITE_GROUP_REOPEN_SOURCE_VERSION",
     "EVIDENCE_VAULT_COMPOSITE_GROUP_REOPEN_VERSION",
     "EvidenceVaultCompositeGroupLifecycleError",
+    "attest_active_composite_group",
     "build_composite_group_reopen_artifact",
     "build_composite_group_reopen_operational_packet",
     "build_composite_group_reopen_source_candidate",

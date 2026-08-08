@@ -50,6 +50,10 @@ from src.services.evidence_ledger_shadow import (
 from src.services.evidence_memory_identity_v2 import (
     build_evidence_memory_identity_v2,
 )
+from src.services.evidence_vault_c7_cutover import (
+    current_c7_cutover_decision,
+    load_c7_runtime_projection,
+)
 from src.services.evidence_scoring_recovery_review import (
     EvidenceScoringRecoveryJournalError,
     EvidenceScoringRecoveryReviewCommand,
@@ -93,6 +97,26 @@ def _postgres_repository_for_url(database_url: str):
     from src.history.repository import PostgresHistoryRepository
 
     return PostgresHistoryRepository(database_url)
+
+
+def operational_c7_runtime_projection_for_domain(
+    domain_or_url: str,
+) -> dict[str, Any] | None:
+    """Return the effective Vault-only C7 envelope, never raw allowlist state."""
+
+    if not current_c7_cutover_decision(domain_or_url).enabled:
+        return None
+    repository = _postgres_repository()
+    if repository is None:
+        return None
+    try:
+        return load_c7_runtime_projection(repository, domain_or_url)
+    except Exception:
+        _LOG.exception(
+            "failed to load operational C7 runtime projection",
+            extra={"domain": domain_key(domain_or_url)},
+        )
+        return None
 
 
 def new_scan_id() -> str:

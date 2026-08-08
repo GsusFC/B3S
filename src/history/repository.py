@@ -144,6 +144,7 @@ from src.services.evidence_vault_canonical_scoring import (
 from src.services.evidence_vault_composite_group_lifecycle import (
     COMPOSITE_GROUP_REOPEN_POLICY_ACTOR,
     EvidenceVaultCompositeGroupLifecycleError,
+    attest_active_composite_group,
     build_composite_group_reopen_artifact,
     build_composite_group_reopen_operational_packet,
     build_composite_group_reopen_source_candidate,
@@ -5024,6 +5025,201 @@ class PostgresHistoryRepository:
             if brand is None:
                 return None
             return _project_vault_operational_memory(conn, brand["id"])
+
+    def get_evidence_vault_active_c7_group_attestation(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        """Rederive current C7 authority from its exact immutable source.
+
+        The accepted tile points at a reviewed packet.  Its immutable resolution
+        points at the original exact-relation source.  Both links are validated
+        before the group attestation is built; no caller-provided fingerprint is
+        trusted and no unbounded packet scan is required.
+        """
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            return None
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                return None
+            brand_id = brand["id"]
+            current = _project_vault_operational_memory(conn, brand_id)
+            if current is None:
+                return None
+            accepted_c7 = [
+                dict(row)
+                for row in current["content"].get("accepted_tiles") or []
+                if isinstance(row, Mapping) and row.get("tile_id") == "C7"
+            ]
+            if len(accepted_c7) != 1:
+                return None
+            reviewed_fingerprint = str(
+                accepted_c7[0].get("source_candidate_packet_fingerprint") or ""
+            )
+            reviewed_rows = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                  AND packet_kind = 'operational_reviewed_v2'
+                ORDER BY created_at, id
+                """,
+                (brand_id, reviewed_fingerprint),
+            ).fetchall()
+            if len(reviewed_rows) != 1:
+                return None
+            reviewed_record = _vault_operational_source_packet_record(
+                reviewed_rows[0]
+            )
+            reviewed_resolution = reviewed_record["reference_resolution"]
+            current_basis = {
+                str(row.get("relation_id") or ""): dict(row)
+                for row in accepted_c7[0].get("basis") or []
+                if isinstance(row, Mapping)
+            }
+            reviewed_c7 = [
+                dict(row)
+                for row in reviewed_record["packet"].get("candidate_tiles") or []
+                if isinstance(row, Mapping) and row.get("tile_id") == "C7"
+            ]
+            reviewed_basis = (
+                {
+                    str(row.get("relation_id") or ""): dict(row)
+                    for row in reviewed_c7[0].get("basis") or []
+                    if isinstance(row, Mapping)
+                }
+                if len(reviewed_c7) == 1
+                else {}
+            )
+            accepted_decision_ids = sorted(
+                str(row.get("decision_event_id") or "")
+                for row in current_basis.values()
+            )
+            resolution_decision_ids = reviewed_resolution.get(
+                "decision_event_ids"
+            )
+            if (
+                reviewed_resolution.get("schema_version")
+                != "evidence-vault-operational-reviewed-resolution-v1"
+                or set(current_basis) != set(reviewed_basis)
+                or any(
+                    reviewed_basis[relation_id] != current_row
+                    for relation_id, current_row in current_basis.items()
+                )
+                or not isinstance(resolution_decision_ids, list)
+                or resolution_decision_ids
+                != sorted(set(str(value) for value in resolution_decision_ids))
+                or not set(accepted_decision_ids).issubset(
+                    set(resolution_decision_ids)
+                )
+            ):
+                return None
+            exact_fingerprint = str(
+                reviewed_resolution.get("source_candidate_packet_fingerprint")
+                or ""
+            )
+            exact_rows = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                  AND packet_kind = 'operational_source_v2'
+                  AND reference_resolution ->> 'source_kind' =
+                      'exact_relation_supplement'
+                ORDER BY created_at, id
+                """,
+                (brand_id, exact_fingerprint),
+            ).fetchall()
+            if len(exact_rows) != 1:
+                return None
+            try:
+                accepted_review_ids = [
+                    UUID(value) for value in accepted_decision_ids
+                ]
+            except (TypeError, ValueError, AttributeError):
+                return None
+            review_rows = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_operational_relation_reviews
+                WHERE brand_id = %s
+                  AND source_packet_id = %s
+                  AND id = ANY(%s)
+                ORDER BY id
+                """,
+                (brand_id, exact_rows[0]["id"], accepted_review_ids),
+            ).fetchall()
+            reviews_by_event = {
+                str(row["decision_event_id"]): row
+                for row in (
+                    _vault_operational_relation_review(value)
+                    for value in review_rows
+                )
+            }
+            if (
+                set(reviews_by_event) != set(accepted_decision_ids)
+                or any(
+                    reviews_by_event[current_row["decision_event_id"]][
+                        "relation_id"
+                    ]
+                    != relation_id
+                    or reviews_by_event[current_row["decision_event_id"]][
+                        "decision"
+                    ]
+                    != "accept"
+                    or reviews_by_event[current_row["decision_event_id"]][
+                        "source_candidate_packet_fingerprint"
+                    ]
+                    != exact_fingerprint
+                    or reviews_by_event[current_row["decision_event_id"]][
+                        "review_request_fingerprint"
+                    ]
+                    != reviewed_resolution.get("review_request_fingerprint")
+                    or reviews_by_event[current_row["decision_event_id"]][
+                        "authority"
+                    ]
+                    is not True
+                    or reviews_by_event[current_row["decision_event_id"]][
+                        "authority_scope"
+                    ]
+                    != "relation_review"
+                    or reviews_by_event[current_row["decision_event_id"]][
+                        "production_runtime_effect"
+                    ]
+                    is not False
+                    or reviews_by_event[current_row["decision_event_id"]][
+                        "scanner_runtime_effect"
+                    ]
+                    is not False
+                    for relation_id, current_row in current_basis.items()
+                )
+            ):
+                return None
+            try:
+                return attest_active_composite_group(
+                    current_operational_memory=current,
+                    exact_source_record=(
+                        _vault_operational_source_packet_record(exact_rows[0])
+                    ),
+                )
+            except EvidenceVaultCompositeGroupLifecycleError:
+                return None
 
     def get_or_create_evidence_vault_operational_score_evaluation(
         self,

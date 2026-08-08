@@ -146,3 +146,10 @@ and validates at least:
 - separated operational versus legacy score presentation;
 - removal of offline field adapters from the runtime repository boundary; and
 - an authorized deployment/replay plan.
+
+## Runtime cutover boundary
+
+The group lifecycle remains an offline Vault authority. Present-time operational
+C7 effect is governed separately by
+[`evidence_vault_c7_cutover_controls_v1.md`](evidence_vault_c7_cutover_controls_v1.md);
+the default is deny and legacy SV9 C7 is unchanged.

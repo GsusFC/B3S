@@ -20,6 +20,7 @@ from web.report_store import (
     evidence_memory_identity_v2_for_domain,
     evidence_scoring_memory_preview_for_domain,
     list_reports_for_domain,
+    operational_c7_runtime_projection_for_domain,
 )
 from web.scan_runner import approve_degraded_scan, cancel_scan
 
@@ -48,6 +49,7 @@ from .models import (
     EvidenceScoringRecoveryReviewCreateRequest,
     EvidenceScoringRecoveryReviewCreateResponse,
     EvidenceScoringRecoveryReviewJournalResponse,
+    OperationalC7RuntimeResponse,
     ScanCreateRequest,
     ScanEvidenceResponse,
     ScanResultResponse,
@@ -331,6 +333,38 @@ def brand_scan_history(
             "count": len(items),
             "has_more": offset + len(items) < len(reports),
         },
+    }
+
+
+@router.get(
+    "/brands/{domain}/operational-c7",
+    response_model=OperationalC7RuntimeResponse,
+    operation_id="getBrandOperationalC7",
+    responses=_ERRORS,
+)
+def brand_operational_c7(
+    domain: str,
+    response: Response,
+    _principal: ReadPrincipal,
+) -> dict[str, Any]:
+    projection = operational_c7_runtime_projection_for_domain(domain)
+    if projection is None:
+        # A uniform shape prevents allowlist and persisted-authority enumeration.
+        raise ApiError(
+            404,
+            "operational_c7_not_available",
+            "Operational C7 is not available for this brand.",
+            headers={
+                "Cache-Control": "private, no-store",
+                "Vary": "Authorization",
+            },
+        )
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = "Authorization"
+    return {
+        "object": "operational_c7_runtime",
+        "api_version": "v1",
+        "projection": projection,
     }
 
 

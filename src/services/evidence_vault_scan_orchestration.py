@@ -16,6 +16,7 @@ from src.history.capture_observation import (
     parse_capture_observation,
 )
 from src.history.report_parser import canonical_json_hash, normalize_domain
+from src.services.evidence_vault_c7_cutover import current_c7_cutover_decision
 from src.services.evidence_vault_incremental_refresh import (
     build_vault_scan_plan,
     resolve_vault_scan_mode,
@@ -100,6 +101,11 @@ def prepare_vault_scan_after_capture(
             "capture_persisted": False,
             "operation_plan": None,
         }
+    relation_rows = [
+        dict(row)
+        for row in accepted_evidence_tile_relations
+        if isinstance(row, Mapping)
+    ]
     current_memory = repository.get_evidence_vault_operational_memory(
         url,
         workspace_slug=workspace_slug,
@@ -133,6 +139,7 @@ def prepare_vault_scan_after_capture(
             resolved=resolved,
             current_memory=current_memory,
             workspace_slug=workspace_slug,
+            brand_or_url=url,
         )
     history = repository.list_capture_observations_for_domain(
         url,
@@ -180,6 +187,15 @@ def prepare_vault_scan_after_capture(
         if not isinstance(stored_plan, Mapping):
             raise EvidenceVaultScanOrchestrationError(
                 "persisted scan has no resumable operation plan"
+            )
+        if _operational_c7_plan_blocked(stored_plan, url):
+            return _blocked_operational_c7_resume(
+                resolved=resolved,
+                plan=stored_plan,
+                analysis_status=str(stored_metadata.get("analysis_status") or ""),
+                analysis_result_fingerprint=stored_metadata.get(
+                    "analysis_result_fingerprint"
+                ),
             )
         outcome = repository.persist_capture_observation(
             raw_observation,
@@ -250,13 +266,39 @@ def prepare_vault_scan_after_capture(
             current_evidence_records=observation["evidence_records"],
             previous_capture_evidence_records=previous_rows,
             known_evidence_records=known_rows,
-            accepted_evidence_tile_relations=accepted_evidence_tile_relations,
+            accepted_evidence_tile_relations=_effective_c7_relations(
+                relation_rows,
+                url,
+            ),
             canonical_memory_version=(
                 str(current_memory["canonical_memory_version"])
                 if current_memory is not None
                 else None
             ),
         )
+        if _operational_c7_plan_blocked(plan, url):
+            # The emergency control changed while inputs were being read. Rebuild
+            # from the same frozen evidence without operational C7 relations.
+            plan = build_vault_scan_plan(
+                brand_identity=(
+                    str(current_memory["brand_identity"])
+                    if current_memory is not None
+                    else normalize_domain(str(observation["url"]))
+                ),
+                subject_url=str(observation["url"]),
+                mode=str(resolved["mode"]),
+                current_evidence_records=observation["evidence_records"],
+                previous_capture_evidence_records=previous_rows,
+                known_evidence_records=known_rows,
+                accepted_evidence_tile_relations=_without_operational_c7(
+                    relation_rows
+                ),
+                canonical_memory_version=(
+                    str(current_memory["canonical_memory_version"])
+                    if current_memory is not None
+                    else None
+                ),
+            )
         work_required = bool(
             plan["operations"]["llm_required"]
             or plan["operations"]["create_candidate_packet"]
@@ -273,9 +315,29 @@ def prepare_vault_scan_after_capture(
                 "analysis_status": "pending" if work_required else "not_required",
             },
         }
+        if _operational_c7_plan_blocked(plan, url):
+            return _blocked_operational_c7_resume(
+                resolved=resolved,
+                plan=plan,
+                analysis_status="operational_c7_cutover_blocked",
+                analysis_result_fingerprint=None,
+                capture_persisted=False,
+            )
         outcome = repository.persist_capture_observation(
             observation,
             workspace_slug=workspace_slug,
+        )
+    if _operational_c7_plan_blocked(plan, url):
+        return _blocked_operational_c7_resume(
+            resolved=resolved,
+            plan=plan,
+            analysis_status="operational_c7_cutover_blocked",
+            analysis_result_fingerprint=None,
+            capture_import=(
+                outcome.to_dict()
+                if hasattr(outcome, "to_dict")
+                else dict(outcome)
+            ),
         )
     return {
         **resolved,
@@ -287,6 +349,71 @@ def prepare_vault_scan_after_capture(
     }
 
 
+def _without_operational_c7(
+    relations: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in relations
+        if isinstance(row, Mapping) and str(row.get("tile_id") or "") != "C7"
+    ]
+
+
+def _effective_c7_relations(
+    relations: Iterable[Mapping[str, Any]],
+    brand_or_url: str,
+) -> list[dict[str, Any]]:
+    rows = [dict(row) for row in relations if isinstance(row, Mapping)]
+    if current_c7_cutover_decision(brand_or_url).enabled:
+        return rows
+    return _without_operational_c7(rows)
+
+
+def _operational_c7_plan_blocked(
+    plan: Mapping[str, Any],
+    brand_or_url: str,
+) -> bool:
+    delta = plan.get("delta")
+    affected = (
+        set(str(value) for value in delta.get("affected_tile_ids") or [])
+        if isinstance(delta, Mapping)
+        else set()
+    )
+    return "C7" in affected and not current_c7_cutover_decision(
+        brand_or_url
+    ).enabled
+
+
+def _blocked_operational_c7_resume(
+    *,
+    resolved: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    analysis_status: str,
+    analysis_result_fingerprint: Any,
+    capture_import: Mapping[str, Any] | None = None,
+    capture_persisted: bool = True,
+) -> dict[str, Any]:
+    result = {
+        **dict(resolved),
+        "mode": plan["mode"],
+        "capture_persisted": capture_persisted,
+        "operation_plan": None,
+        "resume": {
+            "analysis_status": analysis_status,
+            "operation_plan_fingerprint": plan["operation_plan_fingerprint"],
+            "analysis_result_fingerprint": analysis_result_fingerprint,
+            "execution_required": False,
+            "semantic_work_required": False,
+            "materialization_required": False,
+            "operational_c7_cutover_blocked": True,
+            "work_required": False,
+        },
+    }
+    if capture_import is not None:
+        result["capture_import"] = dict(capture_import)
+    return result
+
+
 def _resume_first_class_operation(
     *,
     repository: VaultCaptureRepository,
@@ -295,6 +422,7 @@ def _resume_first_class_operation(
     resolved: Mapping[str, Any],
     current_memory: Mapping[str, Any] | None,
     workspace_slug: str,
+    brand_or_url: str,
 ) -> dict[str, Any]:
     raw = operation.get("raw_observation")
     plan = operation.get("plan")
@@ -328,10 +456,29 @@ def _resume_first_class_operation(
         raise EvidenceVaultScanOrchestrationError(
             "persisted operation plan has a superseded canonical parent"
         )
+    if _operational_c7_plan_blocked(plan, brand_or_url):
+        return _blocked_operational_c7_resume(
+            resolved=resolved,
+            plan=plan,
+            analysis_status=status,
+            analysis_result_fingerprint=operation.get("result_fingerprint"),
+        )
     outcome = repository.persist_capture_observation(
         dict(raw),
         workspace_slug=workspace_slug,
     )
+    if _operational_c7_plan_blocked(plan, brand_or_url):
+        return _blocked_operational_c7_resume(
+            resolved=resolved,
+            plan=plan,
+            analysis_status=status,
+            analysis_result_fingerprint=operation.get("result_fingerprint"),
+            capture_import=(
+                outcome.to_dict()
+                if hasattr(outcome, "to_dict")
+                else dict(outcome)
+            ),
+        )
     lease_reclaimable = bool(
         status in {"claimed", "running"}
         and operation.get("lease_active") is False

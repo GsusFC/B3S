@@ -163,6 +163,36 @@ class ScanResultResponse(StrictModel):
     links: ScanLinks
 
 
+class OperationalC7Projection(StrictModel):
+    schema_version: Literal["evidence-vault-c7-runtime-projection-v1"]
+    brand_identity: str
+    canonical_memory_version: str
+    adoption_event_id: str
+    evaluation_identity: str
+    score_input_fingerprint: str
+    tile_id: Literal["C7"]
+    component_key: Literal["coherencia"]
+    status: Literal["accepted", "pending_reassessment", "unresolved"]
+    semantic_state: Literal["ok", "no", "sin_evidencia"]
+    effective_points: int = Field(ge=0, le=2)
+    score_eligible: bool
+    group_identity: dict[str, Any] | None
+    authority: bool
+    authority_scope: Literal["b3s-vault"]
+    vault_runtime_effect: Literal[True]
+    operational_c7_effect: Literal[True]
+    legacy_c7_unchanged: Literal[True]
+    production_runtime_effect: Literal[False]
+    scanner_runtime_effect: Literal[False]
+    projection_fingerprint: str
+
+
+class OperationalC7RuntimeResponse(StrictModel):
+    object: Literal["operational_c7_runtime"] = "operational_c7_runtime"
+    api_version: Literal["v1"] = "v1"
+    projection: OperationalC7Projection
+
+
 class ScanEvidenceResponse(StrictModel):
     object: Literal["scan_evidence"] = "scan_evidence"
     api_version: Literal["v1"] = "v1"

@@ -22,6 +22,7 @@ from src.services.evidence_vault_canonical_authority import (
     CanonicalMemoryPromotionCommand,
     promotion_request_fingerprint,
 )
+from src.services.evidence_vault_c7_cutover import load_c7_runtime_projection
 from src.services.evidence_vault_candidate_resolver import (
     canonical_aggregation_policy_fingerprint,
 )
@@ -288,7 +289,9 @@ class _C7MaterialChangeLLM:
         }
 
 
-def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one() -> None:
+def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
+    monkeypatch,
+) -> None:
     import psycopg
 
     from src.history.repository import (
@@ -639,6 +642,14 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one() -> None:
     )
     assert len(c7_memory["basis"]) == 2
     assert {row["claim_id"] for row in c7_memory["basis"]} == {c7["group_id"]}
+    exact_attestation = (
+        repository.get_evidence_vault_active_c7_group_attestation(brand)
+    )
+    assert exact_attestation is not None
+    assert exact_attestation["group_id"] == c7["group_id"]
+    assert exact_attestation[
+        "exact_source_candidate_packet_fingerprint"
+    ] == exact_source["packet"]["candidate_packet_fingerprint"]
     exact_score, _ = (
         repository.get_or_create_evidence_vault_operational_score_evaluation(
             brand
@@ -647,6 +658,17 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one() -> None:
     assert exact_score is not None
     assert exact_score["score"] == 11
     assert exact_score["authority_coverage"]["accepted_tile_count"] == 6
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_C7_CUTOVER_ENABLED", "true")
+    monkeypatch.setenv("BRAND3_VAULT_C7_EMERGENCY_DENY", "false")
+    monkeypatch.setenv("BRAND3_VAULT_C7_ALLOWLIST", brand)
+    exact_runtime_c7 = load_c7_runtime_projection(repository, brand)
+    assert exact_runtime_c7 is not None
+    assert exact_runtime_c7["status"] == "accepted"
+    assert exact_runtime_c7["effective_points"] == 2
+    assert exact_runtime_c7["canonical_memory_version"] == exact_memory[
+        "canonical_memory_version"
+    ]
 
     exact_review_replay = (
         repository.review_and_adopt_evidence_vault_operational_source(
@@ -831,6 +853,16 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one() -> None:
     assert reopened_score["authority_coverage"]["canonical_score_status"] == (
         "pending_reassessment"
     )
+    assert (
+        repository.get_evidence_vault_active_c7_group_attestation(brand) is None
+    )
+    pending_runtime_c7 = load_c7_runtime_projection(repository, brand)
+    assert pending_runtime_c7 is not None
+    assert pending_runtime_c7["status"] == "pending_reassessment"
+    assert pending_runtime_c7["effective_points"] == 0
+    assert pending_runtime_c7["canonical_memory_version"] == reopen["memory"][
+        "canonical_memory_version"
+    ]
 
     reopen_replay = repository.reopen_evidence_vault_composite_group(
         brand,
@@ -1008,6 +1040,14 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one() -> None:
     assert {row["claim_id"] for row in replacement_memory_c7["basis"]} == {
         replacement_c7["group_id"]
     }
+    replacement_attestation = (
+        repository.get_evidence_vault_active_c7_group_attestation(brand)
+    )
+    assert replacement_attestation is not None
+    assert replacement_attestation["group_id"] == replacement_c7["group_id"]
+    assert replacement_attestation[
+        "exact_source_candidate_packet_fingerprint"
+    ] == replacement_source["packet"]["candidate_packet_fingerprint"]
     replacement_score, replacement_score_replayed = (
         repository.get_or_create_evidence_vault_operational_score_evaluation(
             brand
@@ -1022,6 +1062,13 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one() -> None:
     assert replacement_score["authority_coverage"][
         "canonical_score_status"
     ] == "current"
+    replacement_runtime_c7 = load_c7_runtime_projection(repository, brand)
+    assert replacement_runtime_c7 is not None
+    assert replacement_runtime_c7["status"] == "accepted"
+    assert replacement_runtime_c7["effective_points"] == 2
+    assert replacement_runtime_c7["group_identity"]["group_id"] == (
+        replacement_c7["group_id"]
+    )
     replacement_review_replay = (
         repository.review_and_adopt_evidence_vault_operational_source(
             brand,

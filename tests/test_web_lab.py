@@ -1383,6 +1383,67 @@ def test_brand_view_prefers_structured_web_capture_for_visual_module(monkeypatch
     assert "visual-assets-v2" in response.text
 
 
+def test_operational_c7_report_adapter_does_not_open_repository_when_denied(
+    monkeypatch,
+) -> None:
+    from web import report_store
+
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_C7_CUTOVER_ENABLED", "false")
+    monkeypatch.setenv("BRAND3_VAULT_C7_EMERGENCY_DENY", "false")
+    monkeypatch.setenv("BRAND3_VAULT_C7_ALLOWLIST", "example.com")
+    monkeypatch.setattr(
+        report_store,
+        "_postgres_repository",
+        lambda: pytest.fail("denied C7 must not open the repository"),
+    )
+
+    assert (
+        report_store.operational_c7_runtime_projection_for_domain("example.com")
+        is None
+    )
+
+
+def test_brand_view_hides_operational_c7_when_runtime_guard_denies(monkeypatch):
+    from web.app import app
+
+    monkeypatch.setattr("web.app.list_reports_for_domain", lambda domain: [])
+    monkeypatch.setattr(
+        "web.app.operational_c7_runtime_projection_for_domain",
+        lambda _domain: None,
+    )
+
+    response = TestClient(app).get("/brand/example.com?lang=es")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
+    assert "c7_operacional" not in response.text
+
+
+def test_brand_view_labels_operational_c7_separately_from_legacy(monkeypatch):
+    from web.app import app
+
+    monkeypatch.setattr("web.app.list_reports_for_domain", lambda domain: [])
+    monkeypatch.setattr(
+        "web.app.operational_c7_runtime_projection_for_domain",
+        lambda _domain: {
+            "status": "accepted",
+            "semantic_state": "ok",
+            "effective_points": 2,
+            "canonical_memory_version": "a" * 64,
+            "evaluation_identity": "b" * 64,
+        },
+    )
+
+    response = TestClient(app).get("/brand/example.com?lang=es")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
+    assert "c7_operacional" in response.text
+    assert "Proyección separada del C7 histórico" in response.text
+    assert "producción=false" in response.text
+
+
 def test_brand_view_handles_missing_scan(monkeypatch):
     from web.app import app
 
