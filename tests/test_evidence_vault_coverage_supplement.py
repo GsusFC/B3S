@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+from pathlib import Path
 
 import pytest
 
+from src.history.repository import PostgresHistoryRepository
 from src.services.evidence_vault_canonical_core import canonical_fingerprint
+from src.services.evidence_vault_operational_authority import (
+    EvidenceVaultOperationalAuthorityError,
+)
 from src.services.evidence_vault_coverage_supplement import (
     EVIDENCE_VAULT_COVERAGE_SUPPLEMENT_RESULT_VERSION,
     EvidenceVaultCoverageSupplementError,
@@ -79,6 +84,35 @@ def test_coverage_supplement_is_bounded_pending_and_reproducible() -> None:
     assert result["basis_relations"][0]["decision_event_id"] is None
     assert len(result["basis_relations"][0]["relation_id"]) == 64
     validate_coverage_supplement_result(result, request=request)
+
+
+def test_persisted_relation_replay_is_audit_only_at_registration() -> None:
+    root = Path(__file__).parents[1]
+    artifact = json.loads(
+        (
+            root
+            / "audits/evidence_vault_field_validation_v1"
+            / "causa-prima-coverage-supplement-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    pack = json.loads(
+        (
+            root
+            / "fixtures/evidence_vault_field_validation_v1"
+            / "causa_prima-a8ba05137817-normalized-evidence-pack.json"
+        ).read_text(encoding="utf-8")
+    )
+    repository = PostgresHistoryRepository("postgresql://unused")
+
+    with pytest.raises(
+        EvidenceVaultOperationalAuthorityError,
+        match="audit-only",
+    ):
+        repository.register_evidence_vault_coverage_supplement_source_packet(
+            "causaprima.ai",
+            artifact,
+            evidence_pack=pack,
+        )
 
 
 def test_coverage_supplement_rejects_cross_brand_owned_evidence() -> None:

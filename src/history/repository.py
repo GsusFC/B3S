@@ -4210,6 +4210,10 @@ class PostgresHistoryRepository:
             raise EvidenceVaultOperationalAuthorityError(
                 "The coverage supplement artifact is invalid."
             ) from exc
+        if artifact.get("execution_mode") != "live_provider":
+            raise EvidenceVaultOperationalAuthorityError(
+                "Persisted relation replay is audit-only and cannot enter durable review."
+            )
         request = artifact["request"]
         result = artifact["result"]
         if str(request["brand_identity"]) != domain:
