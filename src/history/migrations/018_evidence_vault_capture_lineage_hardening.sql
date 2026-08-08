@@ -752,7 +752,7 @@ BEGIN
         RAISE EXCEPTION 'lineage exact source must contain one C7 group';
     END IF;
     exact_group := exact_groups -> 0;
-    IF exact_group ->> 'decision_rule' <> 'all_of'
+    IF exact_group ->> 'decision_rule' IS DISTINCT FROM 'all_of'
        OR jsonb_array_length(COALESCE(exact_group -> 'relations', '[]'::jsonb)) <> 2
        OR exact_group ->> 'group_id' IS NULL THEN
         RAISE EXCEPTION 'lineage C7 group contract is incomplete';
