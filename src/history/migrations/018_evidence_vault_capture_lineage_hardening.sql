@@ -94,6 +94,206 @@ AS $$
     )::bit(64)::bigint;
 $$;
 
+CREATE FUNCTION b3s_history.validate_evidence_vault_packet_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    expected_fingerprint text;
+    expected_resolution_fingerprint text;
+    exact_artifact jsonb;
+BEGIN
+    IF NEW.packet_kind IN (
+        'canonical_v1',
+        'operational_source_v2',
+        'operational_reviewed_v2'
+    ) THEN
+        expected_fingerprint :=
+            b3s_history.evidence_vault_canonical_fingerprint(
+                'evidence-vault-candidate-packet-fingerprint-v1',
+                jsonb_build_object(
+                    'manifest', NEW.manifest,
+                    'candidate_tiles', NEW.candidate_tiles
+                )
+            );
+        IF NEW.packet_fingerprint <> expected_fingerprint THEN
+            RAISE EXCEPTION
+                'evidence Vault candidate packet fingerprint is invalid';
+        END IF;
+        IF NEW.packet_kind IN (
+            'operational_source_v2',
+            'operational_reviewed_v2'
+        ) AND NEW.packet_payload IS DISTINCT FROM jsonb_build_object(
+            'manifest', NEW.manifest,
+            'candidate_tiles', NEW.candidate_tiles,
+            'candidate_packet_fingerprint', NEW.packet_fingerprint
+        ) THEN
+            RAISE EXCEPTION
+                'evidence Vault source packet columns differ from its payload';
+        END IF;
+    ELSIF NEW.packet_kind = 'operational_v2' THEN
+        IF NEW.packet_payload IS NULL THEN
+            RAISE EXCEPTION 'evidence Vault operational packet payload is missing';
+        END IF;
+        expected_fingerprint :=
+            b3s_history.evidence_vault_canonical_fingerprint(
+                NEW.packet_payload ->> 'schema_version',
+                NEW.packet_payload - 'candidate_packet_fingerprint'
+            );
+        IF NEW.packet_fingerprint <> expected_fingerprint
+           OR NEW.packet_payload ->> 'candidate_packet_fingerprint'
+                <> NEW.packet_fingerprint THEN
+            RAISE EXCEPTION
+                'evidence Vault operational packet fingerprint is invalid';
+        END IF;
+    END IF;
+
+    IF NEW.packet_kind = 'operational_source_v2' THEN
+        expected_resolution_fingerprint :=
+            b3s_history.evidence_vault_canonical_fingerprint(
+                'evidence-vault-operational-source-resolution-v1',
+                NEW.reference_resolution
+            );
+    ELSIF NEW.packet_kind = 'operational_reviewed_v2' THEN
+        expected_resolution_fingerprint :=
+            b3s_history.evidence_vault_canonical_fingerprint(
+                'evidence-vault-operational-reviewed-resolution-v1',
+                NEW.reference_resolution
+            );
+    ELSIF NEW.packet_kind = 'operational_v2' THEN
+        expected_resolution_fingerprint :=
+            b3s_history.evidence_vault_canonical_fingerprint(
+                NEW.reference_resolution ->> 'schema_version',
+                NEW.reference_resolution - 'reference_resolution_fingerprint'
+            );
+        IF NEW.reference_resolution ->> 'reference_resolution_fingerprint'
+            IS DISTINCT FROM NEW.reference_resolution_fingerprint THEN
+            RAISE EXCEPTION
+                'evidence Vault storage resolution identity is invalid';
+        END IF;
+    END IF;
+    IF expected_resolution_fingerprint IS NOT NULL
+       AND NEW.reference_resolution_fingerprint <>
+            expected_resolution_fingerprint THEN
+        RAISE EXCEPTION
+            'evidence Vault packet resolution fingerprint is invalid';
+    END IF;
+
+    IF NEW.packet_kind = 'operational_source_v2'
+       AND NEW.reference_resolution ->> 'source_kind' =
+            'exact_relation_supplement' THEN
+        exact_artifact := NEW.reference_resolution -> 'artifact';
+        IF exact_artifact IS NULL
+           OR exact_artifact ->> 'artifact_fingerprint' IS NULL
+           OR exact_artifact ->> 'artifact_fingerprint' <>
+                NEW.reference_resolution ->> 'artifact_fingerprint'
+           OR exact_artifact ->> 'artifact_fingerprint' <>
+                b3s_history.evidence_vault_canonical_fingerprint(
+                    exact_artifact ->> 'schema_version',
+                    exact_artifact - 'artifact_fingerprint'
+                ) THEN
+            RAISE EXCEPTION
+                'evidence Vault exact source artifact fingerprint is invalid';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER evidence_vault_packets_validate_insert
+BEFORE INSERT
+ON b3s_history.evidence_vault_canonical_memory_packets
+FOR EACH ROW
+EXECUTE FUNCTION b3s_history.validate_evidence_vault_packet_insert();
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM b3s_history.evidence_vault_canonical_memory_packets AS packets
+        WHERE (
+            packets.packet_kind IN (
+                'canonical_v1',
+                'operational_source_v2',
+                'operational_reviewed_v2'
+            )
+            AND packets.packet_fingerprint <>
+                b3s_history.evidence_vault_canonical_fingerprint(
+                    'evidence-vault-candidate-packet-fingerprint-v1',
+                    jsonb_build_object(
+                        'manifest', packets.manifest,
+                        'candidate_tiles', packets.candidate_tiles
+                    )
+                )
+        ) OR (
+            packets.packet_kind IN (
+                'operational_source_v2',
+                'operational_reviewed_v2'
+            )
+            AND (
+                packets.packet_payload IS DISTINCT FROM jsonb_build_object(
+                    'manifest', packets.manifest,
+                    'candidate_tiles', packets.candidate_tiles,
+                    'candidate_packet_fingerprint', packets.packet_fingerprint
+                )
+                OR packets.reference_resolution_fingerprint <>
+                    b3s_history.evidence_vault_canonical_fingerprint(
+                        CASE packets.packet_kind
+                            WHEN 'operational_source_v2' THEN
+                                'evidence-vault-operational-source-resolution-v1'
+                            ELSE
+                                'evidence-vault-operational-reviewed-resolution-v1'
+                        END,
+                        packets.reference_resolution
+                    )
+            )
+        ) OR (
+            packets.packet_kind = 'operational_v2'
+            AND (
+                packets.packet_payload IS NULL
+                OR packets.packet_payload ->> 'candidate_packet_fingerprint'
+                    <> packets.packet_fingerprint
+                OR packets.packet_fingerprint <>
+                    b3s_history.evidence_vault_canonical_fingerprint(
+                        packets.packet_payload ->> 'schema_version',
+                        packets.packet_payload - 'candidate_packet_fingerprint'
+                    )
+                OR packets.reference_resolution ->>
+                    'reference_resolution_fingerprint' IS DISTINCT FROM
+                    packets.reference_resolution_fingerprint
+                OR packets.reference_resolution_fingerprint <>
+                    b3s_history.evidence_vault_canonical_fingerprint(
+                        packets.reference_resolution ->> 'schema_version',
+                        packets.reference_resolution -
+                            'reference_resolution_fingerprint'
+                    )
+            )
+        ) OR (
+            packets.packet_kind = 'operational_source_v2'
+            AND packets.reference_resolution ->> 'source_kind' =
+                'exact_relation_supplement'
+            AND (
+                packets.reference_resolution -> 'artifact' IS NULL
+                OR packets.reference_resolution #>>
+                    '{artifact,artifact_fingerprint}' IS DISTINCT FROM
+                    packets.reference_resolution ->> 'artifact_fingerprint'
+                OR packets.reference_resolution #>>
+                    '{artifact,artifact_fingerprint}' IS DISTINCT FROM
+                    b3s_history.evidence_vault_canonical_fingerprint(
+                        packets.reference_resolution #>>
+                            '{artifact,schema_version}',
+                        (packets.reference_resolution -> 'artifact') -
+                            'artifact_fingerprint'
+                    )
+            )
+        )
+    ) THEN
+        RAISE EXCEPTION
+            'existing Evidence Vault packet journal failed hardening validation';
+    END IF;
+END;
+$$;
+
 CREATE UNIQUE INDEX uq_b3s_vault_exact_source_artifact_per_brand
     ON b3s_history.evidence_vault_canonical_memory_packets (
         brand_id,
@@ -777,7 +977,6 @@ BEGIN
     ) AND (
         OLD.workspace_id IS DISTINCT FROM NEW.workspace_id
         OR OLD.canonical_domain IS DISTINCT FROM NEW.canonical_domain
-        OR OLD.canonical_url IS DISTINCT FROM NEW.canonical_url
     ) THEN
         RAISE EXCEPTION
             'a watermarked brand identity is immutable';

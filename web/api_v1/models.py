@@ -244,6 +244,8 @@ class OperationalC7Projection(OperationalC7StrictModel):
                 OperationalC7AcceptedGroupIdentity,
             ) or self.authority is not True:
                 raise ValueError("accepted C7 requires exact group authority")
+            if self.semantic_state not in {"ok", "no"}:
+                raise ValueError("accepted C7 semantic state is invalid")
             expected_eligible = self.semantic_state == "ok"
             expected_points = 2 if expected_eligible else 0
             if (

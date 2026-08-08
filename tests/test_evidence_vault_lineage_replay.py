@@ -547,6 +547,27 @@ def test_postgres_lineage_binding_validates_exact_members_and_hashes() -> None:
     repository.persist_capture_observation(inputs["capture_observation"])
     exact_artifact = inputs["exact_relation_supplement"]
     source_packet_id = uuid4()
+    source_manifest: dict[str, object] = {}
+    source_tiles = [{} for _ in range(80)]
+    source_packet_fingerprint = canonical_fingerprint(
+        "evidence-vault-candidate-packet-fingerprint-v1",
+        {"manifest": source_manifest, "candidate_tiles": source_tiles},
+    )
+    source_resolution = {
+        "schema_version": "evidence-vault-operational-source-resolution-v1",
+        "source_kind": "exact_relation_supplement",
+        "artifact_fingerprint": exact_artifact["artifact_fingerprint"],
+        "artifact": exact_artifact,
+    }
+    source_resolution_fingerprint = canonical_fingerprint(
+        "evidence-vault-operational-source-resolution-v1",
+        source_resolution,
+    )
+    source_payload = {
+        "manifest": source_manifest,
+        "candidate_tiles": source_tiles,
+        "candidate_packet_fingerprint": source_packet_fingerprint,
+    }
     with psycopg.connect(dsn) as conn:
         brand_id = conn.execute(
             """
@@ -565,27 +586,20 @@ def test_postgres_lineage_binding_validates_exact_members_and_hashes() -> None:
                 packet_kind, packet_payload
             ) VALUES (
                 %s, %s, %s, 'candidate-memory-v1', 'causaprima.ai', %s,
-                %s, %s, '{}'::jsonb, %s, 'pending_review', false,
-                false, false, 'operational_source_v2', '{}'::jsonb
+                %s, %s, %s, %s, 'pending_review', false,
+                false, false, 'operational_source_v2', %s
             )
             """,
             (
                 source_packet_id,
                 brand_id,
-                "8" * 64,
+                source_packet_fingerprint,
                 exact_artifact["parent_canonical_memory_version"],
-                "9" * 64,
-                Jsonb({
-                    "schema_version": (
-                        "evidence-vault-operational-source-resolution-v1"
-                    ),
-                    "source_kind": "exact_relation_supplement",
-                    "artifact_fingerprint": exact_artifact[
-                        "artifact_fingerprint"
-                    ],
-                    "artifact": exact_artifact,
-                }),
-                Jsonb([{} for _ in range(80)]),
+                source_resolution_fingerprint,
+                Jsonb(source_resolution),
+                Jsonb(source_manifest),
+                Jsonb(source_tiles),
+                Jsonb(source_payload),
             ),
         )
 
@@ -638,6 +652,16 @@ def test_postgres_lineage_binding_validates_exact_members_and_hashes() -> None:
             with pytest.raises(psycopg.Error, match=message):
                 conn.execute(statement, parameters)
 
+    duplicate_manifest = {"variant": "duplicate"}
+    duplicate_packet_fingerprint = canonical_fingerprint(
+        "evidence-vault-candidate-packet-fingerprint-v1",
+        {"manifest": duplicate_manifest, "candidate_tiles": source_tiles},
+    )
+    duplicate_payload = {
+        "manifest": duplicate_manifest,
+        "candidate_tiles": source_tiles,
+        "candidate_packet_fingerprint": duplicate_packet_fingerprint,
+    }
     with psycopg.connect(dsn) as conn:
         with pytest.raises(psycopg.Error, match="exact_source_artifact"):
             conn.execute(
@@ -651,14 +675,21 @@ def test_postgres_lineage_binding_validates_exact_members_and_hashes() -> None:
                     packet_kind, packet_payload
                 )
                 SELECT %s, brand_id, %s, schema_version, brand_identity,
-                       parent_canonical_memory_version, %s,
-                       reference_resolution, manifest, candidate_tiles,
+                       parent_canonical_memory_version,
+                       reference_resolution_fingerprint,
+                       reference_resolution, %s, candidate_tiles,
                        authority_state, authority, production_runtime_effect,
-                       scanner_runtime_effect, packet_kind, packet_payload
+                       scanner_runtime_effect, packet_kind, %s
                 FROM b3s_history.evidence_vault_canonical_memory_packets
                 WHERE id = %s
                 """,
-                (uuid4(), "7" * 64, "6" * 64, source_packet_id),
+                (
+                    uuid4(),
+                    duplicate_packet_fingerprint,
+                    Jsonb(duplicate_manifest),
+                    Jsonb(duplicate_payload),
+                    source_packet_id,
+                ),
             )
 
     for keep_count in (0, 1):
