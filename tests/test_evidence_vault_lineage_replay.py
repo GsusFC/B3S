@@ -455,3 +455,13 @@ def test_later_seed_requires_exact_predecessor_event_fingerprint() -> None:
     assert artifact["replay_origin_sequence"] == 2
     assert artifact["expected_predecessor_event_fingerprint"] == "6" * 64
     validate_lineage_seed_export_v2(artifact)
+
+    inputs["replay_origin_sequence"] = 1
+    chained = build_lineage_seed_export_v2(**inputs)
+    assert chained["capture_sequence"] == 2
+    assert chained["replay_origin_sequence"] == 1
+    validate_lineage_seed_export_v2(chained)
+
+    inputs["replay_origin_sequence"] = 3
+    with pytest.raises(EvidenceVaultLineageReplayError, match="cannot exceed"):
+        build_lineage_seed_export_v2(**inputs)

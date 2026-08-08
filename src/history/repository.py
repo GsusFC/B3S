@@ -591,7 +591,6 @@ class PostgresHistoryRepository:
                 capture_id=capture_id,
                 capture_content_hash=parsed.capture_hash,
                 capture_observation_hash=parsed.observation_hash,
-                capture_metadata=parsed.metadata,
             )
             return CaptureImportOutcome(
                 source_scan_id=parsed.source_scan_id,
@@ -3416,16 +3415,12 @@ class PostgresHistoryRepository:
                     "The lineage export capture has no durable watermark event."
                 )
             capture_sequence = int(watermark["capture_sequence"])
-            expected_event_origin = (
-                "report_derived_candidate_capture_replay"
-                if prepared["provenance"] == "report_derived_candidate_capture"
-                else "capture_observation_commit"
-            )
             if (
                 prepared["capture_sequence"] != capture_sequence
                 or prepared["expected_predecessor_event_fingerprint"]
                 != watermark.get("previous_event_fingerprint")
-                or str(watermark["append_origin"]) != expected_event_origin
+                or str(watermark["append_origin"])
+                != "capture_observation_commit"
             ):
                 raise EvidenceVaultOperationalAdoptionConflictError(
                     "The lineage export capture event identity changed."
@@ -9187,9 +9182,6 @@ def _evidence_vault_capture_watermark_record(row: Mapping[str, Any]) -> dict[str
         "capture_content_hash": str(row["capture_content_hash"]),
         "capture_observation_hash": str(row["capture_observation_hash"]),
         "append_origin": str(row["append_origin"]),
-        "lineage_export_identity": row.get("lineage_export_identity"),
-        "lineage_export_fingerprint": row.get("lineage_export_fingerprint"),
-        "lineage_export_ordinal": row.get("lineage_export_ordinal"),
         "watermark_fingerprint": str(row["event_fingerprint"]),
         "authority": False,
         "production_runtime_effect": False,
@@ -9204,9 +9196,8 @@ def _append_evidence_vault_capture_watermark_event(
     capture_id: UUID,
     capture_content_hash: str,
     capture_observation_hash: str,
-    capture_metadata: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Append one live commit-order event under the existing brand lock."""
+    """Append one neutral commit-order event under the existing brand lock."""
 
     brand = conn.execute(
         f"SELECT workspace_id, canonical_domain FROM {_SCHEMA}.brands WHERE id = %s",
@@ -9214,28 +9205,7 @@ def _append_evidence_vault_capture_watermark_event(
     ).fetchone()
     if brand is None:
         raise CaptureConflictError("capture watermark brand does not exist")
-    metadata = dict(capture_metadata or {})
-    if metadata.get("acquisition_classification") == (
-        "report_derived_candidate_capture"
-    ) and metadata.get("provenance") in {
-        "report_derived_candidate_capture",
-        "historical_report_embedded_acquisition",
-    }:
-        append_origin = "report_derived_candidate_capture_replay"
-        lineage_export_identity = _bounded_text(
-            metadata.get("source_report_id")
-            or metadata.get("source_artifact_name"),
-            field="source_report_id",
-            maximum=300,
-        )
-        lineage_export_fingerprint = _require_sha256_text(
-            metadata.get("source_report_canonical_sha256"),
-            field="source_report_canonical_sha256",
-        )
-    else:
-        append_origin = "capture_observation_commit"
-        lineage_export_identity = None
-        lineage_export_fingerprint = None
+    append_origin = "capture_observation_commit"
     # Reacquiring a transaction advisory lock is harmless and prevents future
     # call sites from accidentally appending outside the canonical brand lock.
     conn.execute(
@@ -9257,10 +9227,6 @@ def _append_evidence_vault_capture_watermark_event(
             or str(existing["capture_observation_hash"])
             != capture_observation_hash
             or str(existing["append_origin"]) != append_origin
-            or existing.get("lineage_export_identity")
-            != lineage_export_identity
-            or existing.get("lineage_export_fingerprint")
-            != lineage_export_fingerprint
         ):
             raise CaptureConflictError(
                 "capture watermark replay differs from its immutable event"
@@ -9297,13 +9263,6 @@ def _append_evidence_vault_capture_watermark_event(
             field="capture_observation_hash",
         ),
         "append_origin": append_origin,
-        "lineage_export_identity": lineage_export_identity,
-        "lineage_export_fingerprint": lineage_export_fingerprint,
-        "lineage_export_ordinal": (
-            sequence
-            if append_origin == "report_derived_candidate_capture_replay"
-            else None
-        ),
     }
     event_fingerprint = canonical_fingerprint(
         "evidence-vault-capture-watermark-event-v1",
@@ -9320,12 +9279,11 @@ def _append_evidence_vault_capture_watermark_event(
             id, brand_id, capture_id, capture_sequence,
             previous_event_id, previous_event_fingerprint,
             capture_content_hash, capture_observation_hash, append_origin,
-            lineage_export_identity, lineage_export_fingerprint,
-            lineage_export_ordinal, event_fingerprint, authority,
+            event_fingerprint, authority,
             production_runtime_effect, scanner_runtime_effect
         ) VALUES (
             %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, false, false, false
+            %s, %s, false, false, false
         )
         RETURNING *, %s::text AS canonical_domain
         """,
@@ -9339,9 +9297,6 @@ def _append_evidence_vault_capture_watermark_event(
             event_content["capture_content_hash"],
             event_content["capture_observation_hash"],
             event_content["append_origin"],
-            event_content["lineage_export_identity"],
-            event_content["lineage_export_fingerprint"],
-            event_content["lineage_export_ordinal"],
             event_fingerprint,
             str(brand["canonical_domain"]),
         ),

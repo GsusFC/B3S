@@ -535,7 +535,8 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
     assert "BEFORE UPDATE OR DELETE" in operation_execution_sql
     assert "evidence_vault_capture_watermark_events" in capture_lineage_sql
     assert "capture_sequence" in capture_lineage_sql
-    assert "report_derived_candidate_capture_replay" in capture_lineage_sql
+    assert "append_origin = 'capture_observation_commit'" in capture_lineage_sql
+    assert "report_derived_candidate_capture_replay" not in capture_lineage_sql
     assert "UNIQUE (brand_id, capture_sequence)" in capture_lineage_sql
     assert "evidence_vault_operational_source_capture_lineage_bindings" in (
         capture_lineage_sql

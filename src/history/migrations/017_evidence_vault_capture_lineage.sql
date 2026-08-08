@@ -28,18 +28,7 @@ CREATE TABLE b3s_history.evidence_vault_capture_watermark_events (
         capture_observation_hash ~ '^[0-9a-f]{64}$'
     ),
     append_origin text NOT NULL CHECK (
-        append_origin IN (
-            'capture_observation_commit',
-            'report_derived_candidate_capture_replay'
-        )
-    ),
-    lineage_export_identity text,
-    lineage_export_fingerprint text CHECK (
-        lineage_export_fingerprint IS NULL
-        OR lineage_export_fingerprint ~ '^[0-9a-f]{64}$'
-    ),
-    lineage_export_ordinal bigint CHECK (
-        lineage_export_ordinal IS NULL OR lineage_export_ordinal > 0
+        append_origin = 'capture_observation_commit'
     ),
     event_schema_version text NOT NULL DEFAULT
         'evidence-vault-capture-watermark-event-v1' CHECK (
@@ -77,16 +66,6 @@ CREATE TABLE b3s_history.evidence_vault_capture_watermark_events (
         OR (capture_sequence > 1
             AND previous_event_id IS NOT NULL
             AND previous_event_fingerprint IS NOT NULL)
-    ),
-    CHECK (
-        (append_origin = 'capture_observation_commit'
-            AND lineage_export_identity IS NULL
-            AND lineage_export_fingerprint IS NULL
-            AND lineage_export_ordinal IS NULL)
-        OR (append_origin = 'report_derived_candidate_capture_replay'
-            AND length(lineage_export_identity) BETWEEN 1 AND 300
-            AND lineage_export_fingerprint IS NOT NULL
-            AND lineage_export_ordinal = capture_sequence)
     )
 );
 

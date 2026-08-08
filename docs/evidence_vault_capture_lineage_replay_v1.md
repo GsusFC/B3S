@@ -7,10 +7,10 @@ deployment or cutover authorization.
 ## Truth boundary
 
 A full historical report is not the original acquisition envelope. Its
-`raw.flow.candidate` is a post-flow candidate snapshot. Replay therefore labels
-it `report_derived_candidate_capture` and records its append origin as
-`report_derived_candidate_capture_replay`. That provenance can never satisfy
-runtime raw-lineage readiness.
+`raw.flow.candidate` is a post-flow candidate snapshot. Strictly validated audit bindings therefore label it
+`report_derived_candidate_capture`. The generic capture journal remains neutral
+and carries no export identity or provenance claim. Report-derived binding
+provenance can never satisfy runtime raw-lineage readiness.
 
 The pure replay adapter accepts a caller-supplied report dictionary plus its
 raw-file SHA-256. Because it does not receive the source bytes, that digest is

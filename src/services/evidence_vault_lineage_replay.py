@@ -385,6 +385,7 @@ def build_lineage_seed_export_v2(
     lineage_export_identity: str,
     lineage_export_ordinal: int,
     expected_predecessor_event_fingerprint: str | None,
+    replay_origin_sequence: int | None = None,
     source_historical_report: dict[str, Any],
     source_raw_bytes_sha256: str,
     source_artifact_name: str,
@@ -395,9 +396,10 @@ def build_lineage_seed_export_v2(
     """Build one chainable, reviewed lineage seed/export v2 artifact.
 
     The export binds a complete exact-relation supplement to one exact
-    report-derived capture.  Later captures can be appended by incrementing
-    ``lineage_export_ordinal`` and naming the expected predecessor event
-    fingerprint.  Ordering is commit/event ordering, never observation time.
+    report-derived capture. Later checkpoints increment
+    ``lineage_export_ordinal``, name the predecessor event, and carry the first
+    checkpoint's ``replay_origin_sequence``. Ordering is commit/event ordering,
+    never observation time.
     """
 
     workspace = _workspace_slug(workspace_slug)
@@ -410,6 +412,18 @@ def build_lineage_seed_export_v2(
         lineage_export_ordinal,
         field="lineage_export_ordinal",
     )
+    origin = (
+        ordinal
+        if replay_origin_sequence is None
+        else _positive_int(
+            replay_origin_sequence,
+            field="replay_origin_sequence",
+        )
+    )
+    if origin > ordinal:
+        raise EvidenceVaultLineageReplayError(
+            "replay_origin_sequence cannot exceed lineage_export_ordinal"
+        )
     predecessor = _predecessor_fingerprint(
         expected_predecessor_event_fingerprint,
         ordinal=ordinal,
@@ -509,7 +523,7 @@ def build_lineage_seed_export_v2(
         "lineage_export_identity": export_identity,
         "lineage_export_ordinal": ordinal,
         "capture_sequence": ordinal,
-        "replay_origin_sequence": ordinal,
+        "replay_origin_sequence": origin,
         "expected_predecessor_event_fingerprint": predecessor,
         "lineage_kind": LINEAGE_REPLAY_PROVENANCE,
         "acquisition_classification": (
@@ -674,6 +688,7 @@ def validate_lineage_seed_export_v2(artifact: Mapping[str, Any]) -> None:
         expected_predecessor_event_fingerprint=artifact.get(
             "expected_predecessor_event_fingerprint"
         ),
+        replay_origin_sequence=artifact.get("replay_origin_sequence"),
         source_historical_report=source_report,
         source_raw_bytes_sha256=artifact.get("source_raw_bytes_sha256"),
         source_artifact_name=artifact.get("source_artifact_name"),

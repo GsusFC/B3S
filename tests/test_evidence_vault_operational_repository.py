@@ -140,15 +140,13 @@ def test_capture_watermark_is_commit_ordered_idempotent_and_append_only() -> Non
                     id, brand_id, capture_id, capture_sequence,
                     previous_event_id, previous_event_fingerprint,
                     capture_content_hash, capture_observation_hash,
-                    append_origin, lineage_export_identity,
-                    lineage_export_fingerprint, lineage_export_ordinal,
-                    event_fingerprint, authority,
+                    append_origin, event_fingerprint, authority,
                     production_runtime_effect, scanner_runtime_effect
                 )
                 SELECT %s, brand_id, capture_id, capture_sequence + 2,
                        id, event_fingerprint, capture_content_hash,
                        capture_observation_hash, 'capture_observation_commit',
-                       NULL, NULL, NULL, %s, false, false, false
+                       %s, false, false, false
                 FROM b3s_history.evidence_vault_capture_watermark_events
                 ORDER BY capture_sequence DESC
                 LIMIT 1
@@ -820,9 +818,7 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
     repository.persist_capture_observation(report_observation)
     report_head = repository.get_evidence_vault_current_capture_watermark(brand)
     assert report_head is not None
-    assert report_head["append_origin"] == (
-        "report_derived_candidate_capture_replay"
-    )
+    assert report_head["append_origin"] == "capture_observation_commit"
     with psycopg.connect(dsn) as conn:
         with pytest.raises(psycopg.Error, match="origin must equal"):
             conn.execute(
@@ -872,6 +868,56 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
         brand,
         report_export,
     ) == (report_binding, True)
+
+    second_historical_report = deepcopy(historical_report)
+    second_historical_report["id"] = "causa-lineage-report-derived-2"
+    second_historical_report["created_at"] = "2026-07-08T10:17:20.190398Z"
+    second_source_bytes_sha = hashlib.sha256(
+        canonical_json(second_historical_report).encode("utf-8")
+    ).hexdigest()
+    second_report_observation = build_historical_report_capture_observation(
+        historical_report=second_historical_report,
+        source_raw_bytes_sha256=second_source_bytes_sha,
+        source_artifact_name="causa-lineage-report-derived-2.json",
+    )
+    second_previous_head = (
+        repository.get_evidence_vault_current_capture_watermark(brand)
+    )
+    assert second_previous_head is not None
+    second_report_export = build_lineage_seed_export_v2(
+        workspace_slug="b3s",
+        seed_id="causa-lineage-report-derived-2",
+        lineage_export_identity="causa-lineage-report-derived-2",
+        lineage_export_ordinal=second_previous_head["capture_sequence"] + 1,
+        expected_predecessor_event_fingerprint=second_previous_head[
+            "watermark_fingerprint"
+        ],
+        replay_origin_sequence=report_binding["replay_origin_sequence"],
+        source_historical_report=second_historical_report,
+        source_raw_bytes_sha256=second_source_bytes_sha,
+        source_artifact_name="causa-lineage-report-derived-2.json",
+        capture_observation=second_report_observation,
+        normalized_evidence_pack=pack,
+        exact_relation_supplement=exact_artifact,
+    )
+    repository.persist_capture_observation(second_report_observation)
+    second_report_binding, second_binding_replayed = (
+        repository.bind_evidence_vault_exact_source_capture_lineage(
+            brand,
+            second_report_export,
+        )
+    )
+    assert second_binding_replayed is False
+    assert second_report_binding["capture_sequence"] == (
+        report_binding["capture_sequence"] + 1
+    )
+    assert second_report_binding["replay_origin_sequence"] == report_binding[
+        "replay_origin_sequence"
+    ]
+    assert repository.bind_evidence_vault_exact_source_capture_lineage(
+        brand,
+        second_report_export,
+    ) == (second_report_binding, True)
     assert (
         repository.get_evidence_vault_runtime_ready_c7_group_attestation(brand)
         is None
@@ -939,24 +985,41 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
         is None
     )
 
-    coverage_loss_observation = deepcopy(report_observation)
-    coverage_loss_observation["source_scan_id"] = "causa-c7-linkedin-not-reacquired"
-    coverage_loss_observation["evidence_records"] = [
+    coverage_loss_report = deepcopy(second_historical_report)
+    coverage_loss_report["id"] = "causa-c7-linkedin-not-reacquired"
+    coverage_loss_report["created_at"] = "2026-08-02T07:08:58.014613Z"
+    coverage_evidence = coverage_loss_report["raw"]["flow"]["candidate"][
+        "evidence_pack"
+    ]["evidence"]
+    coverage_loss_report["raw"]["flow"]["candidate"]["evidence_pack"][
+        "evidence"
+    ] = [
         row
-        for row in coverage_loss_observation["evidence_records"]
+        for row in coverage_evidence
         if "linkedin.com" not in canonical_json(row).lower()
     ]
+    assert len(
+        coverage_loss_report["raw"]["flow"]["candidate"]["evidence_pack"][
+            "evidence"
+        ]
+    ) == len(coverage_evidence) - 1
+    coverage_loss_source_sha = hashlib.sha256(
+        canonical_json(coverage_loss_report).encode("utf-8")
+    ).hexdigest()
+    coverage_loss_observation = build_historical_report_capture_observation(
+        historical_report=coverage_loss_report,
+        source_raw_bytes_sha256=coverage_loss_source_sha,
+        source_artifact_name="causa-c7-linkedin-not-reacquired.json",
+    )
     assert len(coverage_loss_observation["evidence_records"]) == (
-        len(report_observation["evidence_records"]) - 1
+        len(second_report_observation["evidence_records"]) - 1
     )
     repository.persist_capture_observation(coverage_loss_observation)
     coverage_loss_head = (
         repository.get_evidence_vault_current_capture_watermark(brand)
     )
     assert coverage_loss_head is not None
-    assert coverage_loss_head["append_origin"] == (
-        "report_derived_candidate_capture_replay"
-    )
+    assert coverage_loss_head["append_origin"] == "capture_observation_commit"
     assert (
         repository.get_evidence_vault_runtime_ready_c7_group_attestation(brand)
         is None
@@ -1028,6 +1091,10 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
         brand,
         report_export,
     ) == (report_binding, True)
+    assert repository.bind_evidence_vault_exact_source_capture_lineage(
+        brand,
+        second_report_export,
+    ) == (second_report_binding, True)
 
     exact_review_replay = (
         repository.review_and_adopt_evidence_vault_operational_source(
