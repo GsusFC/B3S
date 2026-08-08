@@ -130,7 +130,7 @@ class C7RuntimeRepository(Protocol):
         workspace_slug: str = "b3s",
     ) -> dict[str, Any] | None: ...
 
-    def get_evidence_vault_active_c7_group_attestation(
+    def get_evidence_vault_runtime_ready_c7_group_attestation(
         self,
         domain_or_url: str,
         *,
@@ -404,10 +404,12 @@ def load_c7_runtime_projection(
     before_attestation = decision_now()
     if not before_attestation.enabled or before_attestation != first:
         return None
-    attestation = repository.get_evidence_vault_active_c7_group_attestation(
+    attestation = repository.get_evidence_vault_runtime_ready_c7_group_attestation(
         first.canonical_brand,
         workspace_slug=workspace_slug,
     )
+    if attestation is None:
+        return None
     before_score = decision_now()
     if not before_score.enabled or before_score != first:
         return None

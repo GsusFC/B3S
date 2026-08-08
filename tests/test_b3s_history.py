@@ -508,11 +508,17 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
         .joinpath("migrations/016_evidence_vault_source_packet_bindings.sql")
         .read_text(encoding="utf-8")
     )
+    capture_lineage_sql = (
+        resources.files("src.history")
+        .joinpath("migrations/017_evidence_vault_capture_lineage.sql")
+        .read_text(encoding="utf-8")
+    )
 
     assert filenames[13:] == [
         "014_evidence_vault_operational_memory_v2.sql",
         "015_evidence_vault_operation_plan_execution.sql",
         "016_evidence_vault_source_packet_bindings.sql",
+        "017_evidence_vault_capture_lineage.sql",
     ]
     assert "packet_kind" in operational_memory_sql
     assert "operational_source_v2" in operational_memory_sql
@@ -527,6 +533,18 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
     assert "scanner_runtime_effect" in operation_execution_sql
     assert "CHECK (authority = false)" in operation_execution_sql
     assert "BEFORE UPDATE OR DELETE" in operation_execution_sql
+    assert "evidence_vault_capture_watermark_events" in capture_lineage_sql
+    assert "capture_sequence" in capture_lineage_sql
+    assert "report_derived_candidate_capture_replay" in capture_lineage_sql
+    assert "UNIQUE (brand_id, capture_sequence)" in capture_lineage_sql
+    assert "evidence_vault_operational_source_capture_lineage_bindings" in (
+        capture_lineage_sql
+    )
+    assert "evidence_vault_operational_source_capture_lineage_members" in (
+        capture_lineage_sql
+    )
+    assert capture_lineage_sql.count("BEFORE UPDATE OR DELETE") == 3
+    assert capture_lineage_sql.count("CHECK (authority = false)") == 3
 
 
 def test_claim_tile_review_requires_packet_fingerprint() -> None:

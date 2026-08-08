@@ -7,6 +7,7 @@ import json
 from datetime import datetime, timezone
 from importlib import resources
 import logging
+import re
 from threading import Lock
 from typing import Any, Callable, Iterable, Mapping
 from uuid import UUID, uuid4, uuid5
@@ -580,6 +581,14 @@ class PostgresHistoryRepository:
             self._insert_evidence(conn, capture_id, parsed)
             self._insert_attempts(conn, capture_id, parsed)
             self._insert_artifacts(conn, capture_id, parsed)
+            _append_evidence_vault_capture_watermark_event(
+                conn,
+                brand_id=brand_id,
+                capture_id=capture_id,
+                capture_content_hash=parsed.capture_hash,
+                capture_observation_hash=parsed.observation_hash,
+                capture_metadata=parsed.metadata,
+            )
             return CaptureImportOutcome(
                 source_scan_id=parsed.source_scan_id,
                 status="imported",
@@ -587,6 +596,46 @@ class PostgresHistoryRepository:
                 capture_id=str(capture_id),
                 observation_hash=parsed.observation_hash,
             )
+
+    def get_evidence_vault_current_capture_watermark(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        """Return the exact brand-serialized capture head, if one exists.
+
+        The head is commit ordered by the append-only database sequence.  Caller
+        supplied observation timestamps never participate in this selection and
+        captures written before migration 017 are deliberately not backfilled.
+        """
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT events.*, brands.canonical_domain
+                FROM {_SCHEMA}.evidence_vault_capture_watermark_events AS events
+                JOIN {_SCHEMA}.brands ON brands.id = events.brand_id
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                ORDER BY events.capture_sequence DESC
+                LIMIT 1
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            return _evidence_vault_capture_watermark_record(row) if row else None
+
+    # Kept as a narrow semantic alias while the lineage/cutover integration
+    # settles on its final public name.
+    get_current_exact_capture_watermark = (
+        get_evidence_vault_current_capture_watermark
+    )
 
     def get_capture_operation_plan(
         self,
@@ -3225,6 +3274,515 @@ class PostgresHistoryRepository:
                 )
             return stored, replayed
 
+    def bind_evidence_vault_exact_source_capture_lineage(
+        self,
+        domain_or_url: str,
+        lineage_seed_export: Mapping[str, Any],
+        *,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Bind an exact C7 source to the current persisted capture.
+
+        Integration contract: ``lineage_seed_export`` is the strict
+        ``evidence-vault-lineage-seed-export-v2`` object.  Its nested exact
+        supplement and capture observation are treated only as claims: this
+        method resolves the source packet by stored artifact fingerprint,
+        reparses the stored scan ``request_payload``, and rederives every C7
+        evidence identity from durable evidence rows before inserting anything.
+        The isolated parser below is the sole adapter point for the pure export
+        module.
+        """
+
+        domain = normalize_domain(domain_or_url)
+        prepared = _prepare_evidence_vault_lineage_seed_export(
+            lineage_seed_export,
+            expected_brand=domain,
+            workspace_slug=workspace_slug,
+        )
+        self._ensure_migrated()
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id, brands.workspace_id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The lineage binding brand does not exist in durable history."
+                )
+            brand_id = brand["id"]
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_advisory_lock_key(brand["workspace_id"], "brand", brand_id),),
+            )
+            source_rows = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_kind = 'operational_source_v2'
+                  AND reference_resolution ->> 'source_kind' =
+                      'exact_relation_supplement'
+                  AND reference_resolution ->> 'artifact_fingerprint' = %s
+                ORDER BY created_at, id
+                """,
+                (brand_id, prepared["source_relation_artifact_fingerprint"]),
+            ).fetchall()
+            if len(source_rows) != 1:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The lineage export does not resolve one exact source."
+                )
+            source_row = source_rows[0]
+            source_resolution = dict(source_row["reference_resolution"] or {})
+            if source_resolution.get("artifact") != prepared["exact_artifact"]:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The lineage export exact source differs from durable storage."
+                )
+            capture = conn.execute(
+                f"""
+                SELECT captures.id AS capture_id,
+                       captures.content_hash AS capture_content_hash,
+                       scan_runs.request_payload, scan_runs.metadata,
+                       scan_runs.source_scan_id
+                FROM {_SCHEMA}.scan_runs
+                JOIN {_SCHEMA}.captures ON captures.scan_run_id = scan_runs.id
+                WHERE scan_runs.brand_id = %s
+                  AND scan_runs.source_scan_id = %s
+                """,
+                (brand_id, prepared["capture"].source_scan_id),
+            ).fetchone()
+            if capture is None:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The lineage export capture does not exist."
+                )
+            try:
+                stored_capture = parse_capture_observation(
+                    dict(capture["request_payload"] or {})
+                )
+            except Exception as exc:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The stored capture is not an exact capture observation."
+                ) from exc
+            if (
+                stored_capture.raw_observation
+                != prepared["capture"].raw_observation
+                or stored_capture.observation_hash
+                != prepared["capture"].observation_hash
+                or stored_capture.capture_hash != prepared["capture"].capture_hash
+                or str(capture["capture_content_hash"])
+                != prepared["capture"].capture_hash
+            ):
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The lineage export capture differs from durable storage."
+                )
+            evidence_rows = conn.execute(
+                f"""
+                SELECT id, evidence_ref, source, source_class, evidence_type,
+                       url, content, content_raw, confidence, metadata
+                FROM {_SCHEMA}.evidence_records
+                WHERE capture_id = %s
+                ORDER BY evidence_ref, id
+                """,
+                (capture["capture_id"],),
+            ).fetchall()
+            members = _rederive_evidence_vault_c7_lineage_members(
+                evidence_rows,
+                brand_identity=domain,
+                subject_url=str(prepared["exact_artifact"]["subject_url"]),
+                exact_artifact=prepared["exact_artifact"],
+                declared_bindings=prepared["evidence_bindings"],
+            )
+            watermark = conn.execute(
+                f"""
+                SELECT events.*, brands.canonical_domain
+                FROM {_SCHEMA}.evidence_vault_capture_watermark_events AS events
+                JOIN {_SCHEMA}.brands ON brands.id = events.brand_id
+                WHERE events.brand_id = %s
+                ORDER BY events.capture_sequence DESC
+                LIMIT 1
+                """,
+                (brand_id,),
+            ).fetchone()
+            if watermark is None or str(watermark["capture_id"]) != str(
+                capture["capture_id"]
+            ):
+                raise EvidenceVaultOperationalAdoptionConflictError(
+                    "The lineage export is not bound to the current capture watermark."
+                )
+            capture_sequence = int(watermark["capture_sequence"])
+            expected_event_origin = (
+                "report_derived_candidate_capture_replay"
+                if prepared["provenance"] == "report_derived_candidate_capture"
+                else "live_capture_observation"
+            )
+            if (
+                prepared["capture_sequence"] != capture_sequence
+                or prepared["expected_predecessor_event_fingerprint"]
+                != watermark.get("previous_event_fingerprint")
+                or str(watermark["append_origin"]) != expected_event_origin
+            ):
+                raise EvidenceVaultOperationalAdoptionConflictError(
+                    "The lineage export capture sequence is not current."
+                )
+            member_set_fingerprint = canonical_fingerprint(
+                "evidence-vault-source-capture-lineage-member-set-v1",
+                [row["content"] for row in members],
+            )
+            binding_content = {
+                "schema_version": "evidence-vault-source-capture-lineage-binding-v1",
+                "brand_identity": domain,
+                "source_candidate_packet_fingerprint": str(
+                    source_row["packet_fingerprint"]
+                ),
+                "watermark_event_fingerprint": str(
+                    watermark["event_fingerprint"]
+                ),
+                "capture_id": str(capture["capture_id"]),
+                "capture_sequence": capture_sequence,
+                "provenance": prepared["provenance"],
+                "lineage_artifact_fingerprint": prepared["artifact_fingerprint"],
+                "lineage_export_identity": prepared["lineage_export_identity"],
+                "lineage_export_fingerprint": prepared[
+                    "lineage_export_fingerprint"
+                ],
+                "replay_origin_sequence": prepared["replay_origin_sequence"],
+                "member_set_fingerprint": member_set_fingerprint,
+            }
+            binding_fingerprint = canonical_fingerprint(
+                "evidence-vault-source-capture-lineage-binding-v1",
+                binding_content,
+            )
+            binding_id = _stable_uuid(
+                brand_id,
+                "evidence-vault-source-capture-lineage-binding-v1",
+                binding_fingerprint,
+            )
+            inserted = conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_vault_operational_source_capture_lineage_bindings (
+                    id, brand_id, operational_source_packet_id,
+                    watermark_event_id, capture_id, capture_sequence,
+                    provenance, lineage_artifact_schema_version,
+                    lineage_artifact_fingerprint, lineage_export_identity,
+                    lineage_export_fingerprint, replay_origin_sequence,
+                    member_set_fingerprint, binding_fingerprint,
+                    authority, production_runtime_effect, scanner_runtime_effect
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s,
+                    'evidence-vault-lineage-seed-export-v2',
+                    %s, %s, %s, %s, %s, %s, false, false, false
+                )
+                ON CONFLICT (
+                    brand_id, operational_source_packet_id, capture_sequence
+                ) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    binding_id,
+                    brand_id,
+                    source_row["id"],
+                    watermark["id"],
+                    capture["capture_id"],
+                    capture_sequence,
+                    prepared["provenance"],
+                    prepared["artifact_fingerprint"],
+                    prepared["lineage_export_identity"],
+                    prepared["lineage_export_fingerprint"],
+                    prepared["replay_origin_sequence"],
+                    member_set_fingerprint,
+                    binding_fingerprint,
+                ),
+            ).fetchone()
+            replayed = inserted is None
+            binding_row = inserted or conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_operational_source_capture_lineage_bindings
+                WHERE brand_id = %s
+                  AND operational_source_packet_id = %s
+                  AND capture_sequence = %s
+                """,
+                (brand_id, source_row["id"], capture_sequence),
+            ).fetchone()
+            if (
+                binding_row is None
+                or str(binding_row["binding_fingerprint"])
+                != binding_fingerprint
+                or str(binding_row["lineage_artifact_fingerprint"])
+                != prepared["artifact_fingerprint"]
+            ):
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The lineage checkpoint conflicts with immutable content."
+                )
+            if not replayed:
+                for member in members:
+                    content = member["content"]
+                    member_fingerprint = canonical_fingerprint(
+                        "evidence-vault-source-capture-lineage-member-v1",
+                        content,
+                    )
+                    member_id = _stable_uuid(
+                        binding_id,
+                        "evidence-vault-source-capture-lineage-member-v1",
+                        member_fingerprint,
+                    )
+                    conn.execute(
+                        f"""
+                        INSERT INTO {_SCHEMA}.evidence_vault_operational_source_capture_lineage_members (
+                            id, brand_id, binding_id,
+                            operational_source_packet_id, capture_id,
+                            evidence_record_id, composite_group_id, relation_id,
+                            evidence_id, source_identity_id,
+                            evidence_fingerprint, channel_role, evidence_ref,
+                            source_ref, evidence_quote, member_fingerprint,
+                            authority, production_runtime_effect,
+                            scanner_runtime_effect
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, false, false, false
+                        )
+                        """,
+                        (
+                            member_id,
+                            brand_id,
+                            binding_id,
+                            source_row["id"],
+                            capture["capture_id"],
+                            member["evidence_record_id"],
+                            content["group_id"],
+                            content["relation_id"],
+                            content["evidence_id"],
+                            content["source_identity_id"],
+                            content["evidence_fingerprint"],
+                            content["channel_role"],
+                            content["evidence_ref"],
+                            content["source_ref"],
+                            content["evidence_quote"],
+                            member_fingerprint,
+                        ),
+                    )
+            stored_members = conn.execute(
+                f"""
+                SELECT relation_id, evidence_id, source_identity_id,
+                       evidence_fingerprint, channel_role, evidence_ref,
+                       source_ref, evidence_quote, composite_group_id
+                FROM {_SCHEMA}.evidence_vault_operational_source_capture_lineage_members
+                WHERE binding_id = %s
+                ORDER BY relation_id
+                """,
+                (binding_row["id"],),
+            ).fetchall()
+            expected_member_content = sorted(
+                (row["content"] for row in members),
+                key=lambda row: row["relation_id"],
+            )
+            if [
+                {
+                    "group_id": str(row["composite_group_id"]),
+                    "relation_id": str(row["relation_id"]),
+                    "evidence_id": str(row["evidence_id"]),
+                    "source_identity_id": str(row["source_identity_id"]),
+                    "evidence_fingerprint": str(row["evidence_fingerprint"]),
+                    "channel_role": str(row["channel_role"]),
+                    "evidence_ref": str(row["evidence_ref"]),
+                    "source_ref": str(row["source_ref"]),
+                    "evidence_quote": str(row["evidence_quote"]),
+                }
+                for row in stored_members
+            ] != expected_member_content:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The lineage checkpoint members conflict with immutable content."
+                )
+            return {
+                **binding_content,
+                "binding_id": str(binding_row["id"]),
+                "binding_fingerprint": binding_fingerprint,
+                "member_count": 2,
+                "authority": False,
+                "production_runtime_effect": False,
+                "scanner_runtime_effect": False,
+            }, replayed
+
+    def bind_evidence_vault_exact_source_current_live_capture(
+        self,
+        domain_or_url: str,
+        *,
+        exact_source_candidate_packet_fingerprint: str,
+        source_scan_id: str,
+        workspace_slug: str = "b3s",
+    ) -> tuple[dict[str, Any], bool]:
+        """Checkpoint the current original/live capture without caller member IDs."""
+
+        domain = normalize_domain(domain_or_url)
+        source_fingerprint = _require_sha256_text(
+            exact_source_candidate_packet_fingerprint,
+            field="exact_source_candidate_packet_fingerprint",
+        )
+        scan_id = _bounded_text(
+            source_scan_id, field="source_scan_id", maximum=500
+        )
+        self._ensure_migrated()
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT packets.reference_resolution,
+                       scan_runs.request_payload, scan_runs.metadata,
+                       captures.id AS capture_id,
+                       events.capture_sequence,
+                       events.previous_event_fingerprint
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces ON workspaces.id = brands.workspace_id
+                JOIN {_SCHEMA}.evidence_vault_canonical_memory_packets AS packets
+                  ON packets.brand_id = brands.id
+                JOIN {_SCHEMA}.scan_runs ON scan_runs.brand_id = brands.id
+                JOIN {_SCHEMA}.captures ON captures.scan_run_id = scan_runs.id
+                JOIN {_SCHEMA}.evidence_vault_capture_watermark_events AS events
+                  ON events.brand_id = brands.id
+                 AND events.capture_id = captures.id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                  AND packets.packet_fingerprint = %s
+                  AND packets.packet_kind = 'operational_source_v2'
+                  AND packets.reference_resolution ->> 'source_kind' =
+                      'exact_relation_supplement'
+                  AND scan_runs.source_scan_id = %s
+                  AND events.append_origin = 'live_capture_observation'
+                  AND events.capture_sequence = (
+                      SELECT max(head.capture_sequence)
+                      FROM {_SCHEMA}.evidence_vault_capture_watermark_events AS head
+                      WHERE head.brand_id = brands.id
+                  )
+                """,
+                (workspace_slug, domain, source_fingerprint, scan_id),
+            ).fetchall()
+            if len(rows) != 1:
+                raise EvidenceVaultOperationalAdoptionConflictError(
+                    "The exact source and live capture do not resolve at the current head."
+                )
+            row = rows[0]
+            metadata = dict(row["metadata"] or {})
+            if metadata.get("acquisition_classification") == (
+                "report_derived_candidate_capture"
+            ):
+                raise EvidenceVaultOperationalAuthorityError(
+                    "A report-derived capture cannot be a live runtime checkpoint."
+                )
+            try:
+                capture = parse_capture_observation(
+                    dict(row["request_payload"] or {})
+                )
+            except Exception as exc:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The current live capture observation is invalid."
+                ) from exc
+            exact_artifact = dict(row["reference_resolution"] or {}).get(
+                "artifact"
+            )
+            if not isinstance(exact_artifact, Mapping):
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The exact source artifact is unavailable."
+                )
+            c7 = [
+                dict(group)
+                for group in exact_artifact.get("groups") or []
+                if isinstance(group, Mapping) and group.get("tile_id") == "C7"
+            ]
+            if len(c7) != 1 or len(c7[0].get("relations") or []) != 2:
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The exact source C7 group is invalid."
+                )
+            ref_indices = {
+                str(value.get("ref") or ""): index
+                for index, value in enumerate(capture.evidence_records)
+            }
+            bindings = [
+                {
+                    "group_id": c7[0]["group_id"],
+                    "relation_id": relation["relation_id"],
+                    "tile_id": "C7",
+                    "decision_rule": "all_of",
+                    "evidence_fingerprint": relation["evidence_fingerprint"],
+                    "evidence_id": relation["evidence_id"],
+                    "source_identity_id": relation["source_identity_id"],
+                    "source_ref": relation["ref"],
+                    "source_url": relation["url"],
+                    "source_class": relation["source_class"],
+                    "channel_role": relation["channel_role"],
+                    "evidence_quote": relation["literal_quote"],
+                    "capture_evidence_index": ref_indices.get(relation["ref"], -1),
+                }
+                for relation in c7[0]["relations"]
+            ]
+            filler_hash = canonical_fingerprint(
+                "evidence-vault-live-capture-lineage-filler-v1",
+                {
+                    "source_scan_id": scan_id,
+                    "observation_hash": capture.observation_hash,
+                },
+            )
+            payload = {
+                "schema_version": "evidence-vault-lineage-seed-export-v2",
+                "workspace_slug": workspace_slug,
+                "seed_id": f"live:{scan_id}",
+                "lineage_export_identity": f"live:{scan_id}",
+                "lineage_export_ordinal": int(row["capture_sequence"]),
+                "capture_sequence": int(row["capture_sequence"]),
+                "replay_origin_sequence": int(row["capture_sequence"]),
+                "expected_predecessor_event_fingerprint": row[
+                    "previous_event_fingerprint"
+                ],
+                "lineage_kind": "live_capture_observation",
+                "acquisition_classification": "live_capture_observation",
+                "provenance_policy_versions": {
+                    "lineage_binding": "evidence-vault-lineage-seed-export-v2"
+                },
+                "brand_identity": domain,
+                "subject_url": str(exact_artifact["subject_url"]),
+                "source_artifact_name": scan_id,
+                "source_raw_bytes_sha256": filler_hash,
+                "source_raw_hash_verification": "durable_capture_observation",
+                "source_report_canonical_sha256": filler_hash,
+                "source_relation_artifact_fingerprint": exact_artifact[
+                    "artifact_fingerprint"
+                ],
+                "capture_observation_hash": capture.observation_hash,
+                "capture_hash": capture.capture_hash,
+                "raw_evidence_pack_canonical_sha256": filler_hash,
+                "normalized_evidence_pack_canonical_sha256": exact_artifact[
+                    "source_evidence_pack_canonical_sha256"
+                ],
+                "normalization_policy": {},
+                "source_historical_report": {},
+                "source_normalized_evidence_pack": {},
+                "source_exact_relation_supplement": dict(exact_artifact),
+                "capture_observation": capture.raw_observation,
+                "evidence_bindings": bindings,
+                "group_count": 1,
+                "relation_count": 2,
+                "adoption_eligible": False,
+                "authority": False,
+                "runtime_effect": False,
+                "production_runtime_effect": False,
+                "scanner_runtime_effect": False,
+                "cutover_authorized": False,
+            }
+            payload["lineage_export_fingerprint"] = canonical_fingerprint(
+                "evidence-vault-live-capture-lineage-manifest-v1", payload
+            )
+            payload["artifact_fingerprint"] = canonical_fingerprint(
+                "evidence-vault-lineage-seed-export-v2", payload
+            )
+        return self.bind_evidence_vault_exact_source_capture_lineage(
+            domain,
+            payload,
+            workspace_slug=workspace_slug,
+        )
+
     def reopen_evidence_vault_composite_group(
         self,
         domain_or_url: str,
@@ -5220,6 +5778,168 @@ class PostgresHistoryRepository:
                 )
             except EvidenceVaultCompositeGroupLifecycleError:
                 return None
+
+    def get_evidence_vault_runtime_ready_c7_group_attestation(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        """Return accepted C7 authority only when current raw lineage is exact.
+
+        Report-derived candidate captures are useful replay evidence but cannot
+        satisfy this runtime freshness gate.  Coverage loss therefore fails this
+        method closed without mutating accepted memory or its score.
+        """
+
+        authority_attestation = self.get_evidence_vault_active_c7_group_attestation(
+            domain_or_url,
+            workspace_slug=workspace_slug,
+        )
+        if authority_attestation is None:
+            return None
+        domain = normalize_domain(domain_or_url)
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                return None
+            source_rows = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s
+                  AND packet_fingerprint = %s
+                  AND packet_kind = 'operational_source_v2'
+                  AND reference_resolution ->> 'source_kind' =
+                      'exact_relation_supplement'
+                ORDER BY created_at, id
+                """,
+                (
+                    brand["id"],
+                    authority_attestation[
+                        "exact_source_candidate_packet_fingerprint"
+                    ],
+                ),
+            ).fetchall()
+            if len(source_rows) != 1:
+                return None
+            rows = conn.execute(
+                f"""
+                SELECT bindings.*, events.event_fingerprint,
+                       events.capture_observation_hash
+                FROM {_SCHEMA}.evidence_vault_capture_watermark_events AS events
+                JOIN {_SCHEMA}.evidence_vault_operational_source_capture_lineage_bindings
+                     AS bindings
+                  ON bindings.brand_id = events.brand_id
+                 AND bindings.watermark_event_id = events.id
+                 AND bindings.capture_id = events.capture_id
+                 AND bindings.capture_sequence = events.capture_sequence
+                WHERE events.brand_id = %s
+                  AND bindings.operational_source_packet_id = %s
+                  AND bindings.provenance IN (
+                      'live_capture_observation',
+                      'verified_raw_acquisition_replay'
+                  )
+                  AND events.capture_sequence = (
+                      SELECT max(current_events.capture_sequence)
+                      FROM {_SCHEMA}.evidence_vault_capture_watermark_events
+                           AS current_events
+                      WHERE current_events.brand_id = events.brand_id
+                  )
+                """,
+                (brand["id"], source_rows[0]["id"]),
+            ).fetchall()
+            if len(rows) != 1:
+                return None
+            binding = rows[0]
+            member_rows = conn.execute(
+                f"""
+                SELECT members.*, evidence_records.evidence_ref AS durable_ref,
+                       evidence_records.source,
+                       evidence_records.source_class,
+                       evidence_records.evidence_type,
+                       evidence_records.url, evidence_records.content,
+                       evidence_records.content_raw, evidence_records.confidence,
+                       evidence_records.metadata
+                FROM {_SCHEMA}.evidence_vault_operational_source_capture_lineage_members
+                     AS members
+                JOIN {_SCHEMA}.evidence_records
+                  ON evidence_records.capture_id = members.capture_id
+                 AND evidence_records.id = members.evidence_record_id
+                WHERE members.binding_id = %s
+                ORDER BY members.relation_id
+                """,
+                (binding["id"],),
+            ).fetchall()
+            if len(member_rows) != 2:
+                return None
+            exact_artifact = dict(
+                source_rows[0]["reference_resolution"] or {}
+            ).get("artifact")
+            if not isinstance(exact_artifact, Mapping):
+                return None
+            c7_groups = [
+                dict(group)
+                for group in exact_artifact.get("groups") or []
+                if isinstance(group, Mapping) and group.get("tile_id") == "C7"
+            ]
+            if len(c7_groups) != 1:
+                return None
+            declared = [
+                {
+                    "group_id": c7_groups[0]["group_id"],
+                    "relation_id": relation["relation_id"],
+                    "tile_id": "C7",
+                    "decision_rule": "all_of",
+                    "evidence_fingerprint": relation["evidence_fingerprint"],
+                    "evidence_id": relation["evidence_id"],
+                    "source_identity_id": relation["source_identity_id"],
+                    "source_ref": relation["ref"],
+                    "source_url": relation["url"],
+                    "source_class": relation["source_class"],
+                    "channel_role": relation["channel_role"],
+                    "evidence_quote": relation["literal_quote"],
+                    "capture_evidence_index": index,
+                }
+                for index, relation in enumerate(c7_groups[0].get("relations") or [])
+            ]
+            try:
+                rederived = _rederive_evidence_vault_c7_lineage_members(
+                    member_rows,
+                    brand_identity=domain,
+                    subject_url=str(exact_artifact["subject_url"]),
+                    exact_artifact=exact_artifact,
+                    declared_bindings=declared,
+                )
+            except EvidenceVaultOperationalAuthorityError:
+                return None
+            stored = [
+                {
+                    "group_id": str(row["composite_group_id"]),
+                    "relation_id": str(row["relation_id"]),
+                    "evidence_id": str(row["evidence_id"]),
+                    "source_identity_id": str(row["source_identity_id"]),
+                    "evidence_fingerprint": str(row["evidence_fingerprint"]),
+                    "channel_role": str(row["channel_role"]),
+                    "evidence_ref": str(row["evidence_ref"]),
+                    "source_ref": str(row["source_ref"]),
+                    "evidence_quote": str(row["evidence_quote"]),
+                }
+                for row in member_rows
+            ]
+            expected = [row["content"] for row in rederived]
+            if stored != expected:
+                return None
+            return authority_attestation
 
     def get_or_create_evidence_vault_operational_score_evaluation(
         self,
@@ -8724,6 +9444,559 @@ def _stable_uuid(*parts: Any) -> UUID:
 def _advisory_lock_key(*parts: Any) -> int:
     digest = hashlib.sha256(":".join(str(part) for part in parts).encode("utf-8")).digest()
     return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _evidence_vault_capture_watermark_record(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": str(row["event_schema_version"]),
+        "brand_identity": str(row["canonical_domain"]),
+        "watermark_event_id": str(row["id"]),
+        "capture_id": str(row["capture_id"]),
+        "capture_sequence": int(row["capture_sequence"]),
+        "previous_event_id": (
+            str(row["previous_event_id"])
+            if row.get("previous_event_id") is not None
+            else None
+        ),
+        "previous_event_fingerprint": row.get("previous_event_fingerprint"),
+        "capture_content_hash": str(row["capture_content_hash"]),
+        "capture_observation_hash": str(row["capture_observation_hash"]),
+        "append_origin": str(row["append_origin"]),
+        "lineage_export_identity": row.get("lineage_export_identity"),
+        "lineage_export_fingerprint": row.get("lineage_export_fingerprint"),
+        "lineage_export_ordinal": row.get("lineage_export_ordinal"),
+        "watermark_fingerprint": str(row["event_fingerprint"]),
+        "authority": False,
+        "production_runtime_effect": False,
+        "scanner_runtime_effect": False,
+    }
+
+
+def _append_evidence_vault_capture_watermark_event(
+    conn: Any,
+    *,
+    brand_id: UUID,
+    capture_id: UUID,
+    capture_content_hash: str,
+    capture_observation_hash: str,
+    capture_metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Append one live commit-order event under the existing brand lock."""
+
+    brand = conn.execute(
+        f"SELECT workspace_id, canonical_domain FROM {_SCHEMA}.brands WHERE id = %s",
+        (brand_id,),
+    ).fetchone()
+    if brand is None:
+        raise CaptureConflictError("capture watermark brand does not exist")
+    metadata = dict(capture_metadata or {})
+    if metadata.get("acquisition_classification") == (
+        "report_derived_candidate_capture"
+    ) and metadata.get("provenance") in {
+        "report_derived_candidate_capture",
+        "historical_report_embedded_acquisition",
+    }:
+        append_origin = "report_derived_candidate_capture_replay"
+        lineage_export_identity = _bounded_text(
+            metadata.get("source_report_id")
+            or metadata.get("source_artifact_name"),
+            field="source_report_id",
+            maximum=300,
+        )
+        lineage_export_fingerprint = _require_sha256_text(
+            metadata.get("source_report_canonical_sha256"),
+            field="source_report_canonical_sha256",
+        )
+    else:
+        append_origin = "live_capture_observation"
+        lineage_export_identity = None
+        lineage_export_fingerprint = None
+    # Reacquiring a transaction advisory lock is harmless and prevents future
+    # call sites from accidentally appending outside the canonical brand lock.
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(%s)",
+        (_advisory_lock_key(brand["workspace_id"], "brand", brand_id),),
+    )
+    existing = conn.execute(
+        f"""
+        SELECT events.*, brands.canonical_domain
+        FROM {_SCHEMA}.evidence_vault_capture_watermark_events AS events
+        JOIN {_SCHEMA}.brands ON brands.id = events.brand_id
+        WHERE events.brand_id = %s AND events.capture_id = %s
+        """,
+        (brand_id, capture_id),
+    ).fetchone()
+    if existing is not None:
+        if (
+            str(existing["capture_content_hash"]) != capture_content_hash
+            or str(existing["capture_observation_hash"])
+            != capture_observation_hash
+            or str(existing["append_origin"]) != append_origin
+            or existing.get("lineage_export_identity")
+            != lineage_export_identity
+            or existing.get("lineage_export_fingerprint")
+            != lineage_export_fingerprint
+        ):
+            raise CaptureConflictError(
+                "capture watermark replay differs from its immutable event"
+            )
+        return _evidence_vault_capture_watermark_record(existing)
+    previous = conn.execute(
+        f"""
+        SELECT *
+        FROM {_SCHEMA}.evidence_vault_capture_watermark_events
+        WHERE brand_id = %s
+        ORDER BY capture_sequence DESC
+        LIMIT 1
+        """,
+        (brand_id,),
+    ).fetchone()
+    sequence = int(previous["capture_sequence"]) + 1 if previous else 1
+    previous_id = previous["id"] if previous else None
+    previous_fingerprint = (
+        str(previous["event_fingerprint"]) if previous else None
+    )
+    event_content = {
+        "schema_version": "evidence-vault-capture-watermark-event-v1",
+        "brand_id": str(brand_id),
+        "capture_id": str(capture_id),
+        "capture_sequence": sequence,
+        "previous_event_id": str(previous_id) if previous_id else None,
+        "previous_event_fingerprint": previous_fingerprint,
+        "capture_content_hash": _require_sha256_text(
+            capture_content_hash,
+            field="capture_content_hash",
+        ),
+        "capture_observation_hash": _require_sha256_text(
+            capture_observation_hash,
+            field="capture_observation_hash",
+        ),
+        "append_origin": append_origin,
+        "lineage_export_identity": lineage_export_identity,
+        "lineage_export_fingerprint": lineage_export_fingerprint,
+        "lineage_export_ordinal": (
+            sequence
+            if append_origin == "report_derived_candidate_capture_replay"
+            else None
+        ),
+    }
+    event_fingerprint = canonical_fingerprint(
+        "evidence-vault-capture-watermark-event-v1",
+        event_content,
+    )
+    event_id = _stable_uuid(
+        brand_id,
+        "evidence-vault-capture-watermark-event-v1",
+        event_fingerprint,
+    )
+    row = conn.execute(
+        f"""
+        INSERT INTO {_SCHEMA}.evidence_vault_capture_watermark_events (
+            id, brand_id, capture_id, capture_sequence,
+            previous_event_id, previous_event_fingerprint,
+            capture_content_hash, capture_observation_hash, append_origin,
+            lineage_export_identity, lineage_export_fingerprint,
+            lineage_export_ordinal, event_fingerprint, authority,
+            production_runtime_effect, scanner_runtime_effect
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, false, false, false
+        )
+        RETURNING *, %s::text AS canonical_domain
+        """,
+        (
+            event_id,
+            brand_id,
+            capture_id,
+            sequence,
+            previous_id,
+            previous_fingerprint,
+            event_content["capture_content_hash"],
+            event_content["capture_observation_hash"],
+            event_content["append_origin"],
+            event_content["lineage_export_identity"],
+            event_content["lineage_export_fingerprint"],
+            event_content["lineage_export_ordinal"],
+            event_fingerprint,
+            str(brand["canonical_domain"]),
+        ),
+    ).fetchone()
+    return _evidence_vault_capture_watermark_record(row)
+
+
+def _prepare_evidence_vault_lineage_seed_export(
+    value: Mapping[str, Any],
+    *,
+    expected_brand: str,
+    workspace_slug: str,
+) -> dict[str, Any]:
+    """Isolated adapter for ``evidence-vault-lineage-seed-export-v2``.
+
+    This intentionally names and validates only the integration surface consumed
+    by PostgreSQL.  The pure artifact module may add self-contained audit fields
+    without teaching the repository how to interpret them.
+    """
+
+    if not isinstance(value, Mapping):
+        raise EvidenceVaultOperationalAuthorityError(
+            "The lineage seed export must be an object."
+        )
+    try:
+        artifact = json.loads(canonical_json_bytes(dict(value)).decode("utf-8"))
+    except Exception as exc:
+        raise EvidenceVaultOperationalAuthorityError(
+            "The lineage seed export must be canonical JSON."
+        ) from exc
+    try:
+        from src.services.evidence_vault_lineage_replay import (
+            EvidenceVaultLineageReplayError,
+            validate_lineage_seed_export_v2,
+        )
+    except ImportError:
+        # Migration/repository workers are independently cherry-pickable.  The
+        # strict local checks below remain fail closed until the pure module is
+        # integrated, at which point its full self-contained rebuild runs here.
+        validate_lineage_seed_export_v2 = None
+        EvidenceVaultLineageReplayError = Exception
+    if (
+        validate_lineage_seed_export_v2 is not None
+        and artifact.get("acquisition_classification")
+        == "report_derived_candidate_capture"
+    ):
+        try:
+            validate_lineage_seed_export_v2(artifact)
+        except EvidenceVaultLineageReplayError as exc:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The lineage seed export failed exact replay validation."
+            ) from exc
+    required = {
+        "schema_version", "workspace_slug", "seed_id",
+        "lineage_export_identity", "lineage_export_ordinal",
+        "capture_sequence", "replay_origin_sequence",
+        "expected_predecessor_event_fingerprint", "lineage_kind",
+        "acquisition_classification", "provenance_policy_versions",
+        "brand_identity", "subject_url", "source_artifact_name",
+        "source_raw_bytes_sha256", "source_raw_hash_verification",
+        "source_report_canonical_sha256",
+        "source_relation_artifact_fingerprint",
+        "capture_observation_hash", "capture_hash",
+        "raw_evidence_pack_canonical_sha256",
+        "normalized_evidence_pack_canonical_sha256",
+        "normalization_policy", "source_historical_report",
+        "source_normalized_evidence_pack",
+        "source_exact_relation_supplement", "capture_observation",
+        "evidence_bindings", "group_count", "relation_count",
+        "adoption_eligible", "authority", "runtime_effect",
+        "production_runtime_effect", "scanner_runtime_effect",
+        "cutover_authorized", "lineage_export_fingerprint",
+        "artifact_fingerprint",
+    }
+    if (
+        set(artifact) != required
+        or artifact.get("schema_version")
+        != "evidence-vault-lineage-seed-export-v2"
+        or artifact.get("workspace_slug") != workspace_slug
+        or normalize_domain(str(artifact.get("brand_identity") or ""))
+        != expected_brand
+        or any(
+            artifact.get(field) is not False
+            for field in (
+                "adoption_eligible",
+                "authority",
+                "runtime_effect",
+                "production_runtime_effect",
+                "scanner_runtime_effect",
+                "cutover_authorized",
+            )
+        )
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "The lineage seed export contract is invalid."
+        )
+    exact_artifact = artifact.get("source_exact_relation_supplement")
+    try:
+        validate_exact_relation_supplement_structure(exact_artifact)
+    except Exception as exc:
+        raise EvidenceVaultOperationalAuthorityError(
+            "The lineage seed export exact source is invalid."
+        ) from exc
+    if (
+        exact_artifact.get("brand_identity") != expected_brand
+        or normalize_domain(str(exact_artifact.get("subject_url") or ""))
+        != expected_brand
+        or artifact.get("source_relation_artifact_fingerprint")
+        != exact_artifact.get("artifact_fingerprint")
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "The lineage seed export belongs to another exact source."
+        )
+    try:
+        capture = parse_capture_observation(artifact.get("capture_observation"))
+    except Exception as exc:
+        raise EvidenceVaultOperationalAuthorityError(
+            "The lineage seed export capture observation is invalid."
+        ) from exc
+    if (
+        capture.canonical_domain != expected_brand
+        or artifact.get("capture_observation_hash") != capture.observation_hash
+        or artifact.get("capture_hash") != capture.capture_hash
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "The lineage seed export capture identity changed."
+        )
+    sequence = artifact.get("capture_sequence")
+    ordinal = artifact.get("lineage_export_ordinal")
+    origin = artifact.get("replay_origin_sequence")
+    predecessor = artifact.get("expected_predecessor_event_fingerprint")
+    if (
+        not isinstance(sequence, int)
+        or isinstance(sequence, bool)
+        or sequence < 1
+        or ordinal != sequence
+        or not isinstance(origin, int)
+        or isinstance(origin, bool)
+        or origin < 1
+        or origin > sequence
+        or (sequence == 1 and predecessor is not None)
+        or (
+            sequence > 1
+            and (
+                not isinstance(predecessor, str)
+                or re.fullmatch(r"[0-9a-f]{64}", predecessor) is None
+            )
+        )
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "The lineage seed export sequence contract is invalid."
+        )
+    # The full artifact fingerprint is independently content addressed.  The
+    # export-manifest fingerprint is validated by the pure module and retained
+    # as an opaque but strictly formed cross-artifact identity here.
+    artifact_fingerprint = _require_sha256_text(
+        artifact.get("artifact_fingerprint"), field="artifact_fingerprint"
+    )
+    unsigned = dict(artifact)
+    unsigned.pop("artifact_fingerprint", None)
+    if artifact_fingerprint != canonical_fingerprint(
+        "evidence-vault-lineage-seed-export-v2", unsigned
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "The lineage seed export fingerprint is invalid."
+        )
+    export_identity = _bounded_text(
+        artifact.get("lineage_export_identity"),
+        field="lineage_export_identity",
+        maximum=300,
+    )
+    export_fingerprint = _require_sha256_text(
+        artifact.get("lineage_export_fingerprint"),
+        field="lineage_export_fingerprint",
+    )
+    bindings = artifact.get("evidence_bindings")
+    if (
+        not isinstance(bindings, list)
+        or len(bindings) != artifact.get("relation_count")
+        or any(not isinstance(row, Mapping) for row in bindings)
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "The lineage seed export relation bindings are incomplete."
+        )
+    c7_bindings = [
+        dict(row) for row in bindings if row.get("tile_id") == "C7"
+    ]
+    if len(c7_bindings) != 2:
+        raise EvidenceVaultOperationalAuthorityError(
+            "The lineage seed export must bind exactly two C7 members."
+        )
+    lineage_kind = str(artifact.get("lineage_kind") or "")
+    acquisition_classification = str(
+        artifact.get("acquisition_classification") or ""
+    )
+    observation_provenance = str(capture.metadata.get("provenance") or "")
+    observation_classification = str(
+        capture.metadata.get("acquisition_classification") or ""
+    )
+    if acquisition_classification == "report_derived_candidate_capture":
+        if (
+            observation_classification != "report_derived_candidate_capture"
+            or lineage_kind
+            not in {
+                "report_derived_candidate_capture",
+                "historical_report_embedded_acquisition",
+            }
+            or observation_provenance
+            not in {
+                "report_derived_candidate_capture",
+                "historical_report_embedded_acquisition",
+            }
+        ):
+            raise EvidenceVaultOperationalAuthorityError(
+                "Report-derived lineage provenance is inconsistent."
+            )
+        provenance = "report_derived_candidate_capture"
+    elif lineage_kind == "verified_raw_acquisition_replay":
+        if observation_provenance != "verified_raw_acquisition_replay":
+            raise EvidenceVaultOperationalAuthorityError(
+                "Verified raw replay provenance is inconsistent."
+            )
+        provenance = "verified_raw_acquisition_replay"
+    elif lineage_kind == "live_capture_observation":
+        if observation_provenance in {
+            "report_derived_candidate_capture",
+            "verified_raw_acquisition_replay",
+        }:
+            raise EvidenceVaultOperationalAuthorityError(
+                "Live capture lineage provenance is inconsistent."
+            )
+        provenance = "live_capture_observation"
+    else:
+        raise EvidenceVaultOperationalAuthorityError(
+            "The lineage seed export provenance is unsupported."
+        )
+    return {
+        "artifact": artifact,
+        "artifact_fingerprint": artifact_fingerprint,
+        "lineage_export_identity": export_identity,
+        "lineage_export_fingerprint": export_fingerprint,
+        "capture_sequence": sequence,
+        "replay_origin_sequence": origin,
+        "expected_predecessor_event_fingerprint": predecessor,
+        "source_relation_artifact_fingerprint": _require_sha256_text(
+            artifact.get("source_relation_artifact_fingerprint"),
+            field="source_relation_artifact_fingerprint",
+        ),
+        "exact_artifact": dict(exact_artifact),
+        "capture": capture,
+        "evidence_bindings": c7_bindings,
+        "provenance": provenance,
+    }
+
+
+def _rederive_evidence_vault_c7_lineage_members(
+    evidence_rows: Any,
+    *,
+    brand_identity: str,
+    subject_url: str,
+    exact_artifact: Mapping[str, Any],
+    declared_bindings: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    c7_groups = [
+        dict(group)
+        for group in exact_artifact.get("groups") or []
+        if isinstance(group, Mapping) and group.get("tile_id") == "C7"
+    ]
+    if (
+        len(c7_groups) != 1
+        or c7_groups[0].get("decision_rule") != "all_of"
+        or len(c7_groups[0].get("relations") or []) != 2
+    ):
+        raise EvidenceVaultOperationalAuthorityError(
+            "The exact source does not contain one two-member C7 group."
+        )
+    detached_rows = list(evidence_rows)
+    evidence = _capture_evidence_rows(detached_rows)
+    representatives = canonical_evidence_representatives(
+        evidence,
+        subject_url=subject_url,
+    )
+    durable_by_ref = {
+        str(row["evidence_ref"]): row for row in detached_rows
+    }
+    declared_by_relation = {
+        str(row.get("relation_id") or ""): dict(row)
+        for row in declared_bindings
+    }
+    relations = [dict(row) for row in c7_groups[0]["relations"]]
+    if set(declared_by_relation) != {
+        str(row.get("relation_id") or "") for row in relations
+    }:
+        raise EvidenceVaultOperationalAuthorityError(
+            "The lineage seed export relation set changed."
+        )
+    derived: list[dict[str, Any]] = []
+    for relation in relations:
+        fingerprint = str(relation.get("evidence_fingerprint") or "")
+        representative = representatives.get(fingerprint)
+        identity = (
+            project_evidence_memory_row_identity(
+                representative,
+                brand_domain=brand_identity,
+            )
+            if representative is not None
+            else None
+        )
+        reference = str(relation.get("ref") or "")
+        durable = durable_by_ref.get(reference)
+        if (
+            representative is None
+            or identity is None
+            or durable is None
+            or identity["evidence_id"] != relation.get("evidence_id")
+            or identity["document_id"] != relation.get("source_identity_id")
+            or representative.get("ref") != reference
+            or (representative.get("url") or "") != relation.get("url")
+            or (
+                representative.get("metadata", {}).get("source_class") or ""
+            )
+            != relation.get("source_class")
+            or relation.get("literal_quote")
+            not in str(representative.get("content") or "")
+        ):
+            raise EvidenceVaultOperationalAuthorityError(
+                "The exact C7 member cannot be rederived from this capture."
+            )
+        declared = declared_by_relation[str(relation["relation_id"])]
+        expected_declared = {
+            "group_id": c7_groups[0]["group_id"],
+            "relation_id": relation["relation_id"],
+            "tile_id": "C7",
+            "decision_rule": "all_of",
+            "evidence_fingerprint": fingerprint,
+            "evidence_id": identity["evidence_id"],
+            "source_identity_id": identity["document_id"],
+            "source_ref": reference,
+            "source_url": str(representative.get("url") or ""),
+            "source_class": str(
+                representative.get("metadata", {}).get("source_class") or ""
+            ),
+            "channel_role": relation["channel_role"],
+            "evidence_quote": relation["literal_quote"],
+        }
+        if any(declared.get(key) != expected for key, expected in expected_declared.items()):
+            raise EvidenceVaultOperationalAuthorityError(
+                "The lineage seed export member binding changed."
+            )
+        capture_index = declared.get("capture_evidence_index")
+        if (
+            not isinstance(capture_index, int)
+            or isinstance(capture_index, bool)
+            or capture_index < 0
+        ):
+            raise EvidenceVaultOperationalAuthorityError(
+                "The lineage seed export capture evidence index is invalid."
+            )
+        derived.append(
+            {
+                "evidence_record_id": durable["id"],
+                "content": {
+                    "group_id": str(c7_groups[0]["group_id"]),
+                    "relation_id": str(relation["relation_id"]),
+                    "evidence_id": str(identity["evidence_id"]),
+                    "source_identity_id": str(identity["document_id"]),
+                    "evidence_fingerprint": fingerprint,
+                    "channel_role": str(relation["channel_role"]),
+                    "evidence_ref": reference,
+                    "source_ref": reference,
+                    "evidence_quote": str(relation["literal_quote"]),
+                },
+            }
+        )
+    roles = {row["content"]["channel_role"] for row in derived}
+    if roles != {"owned_web", "external_social_profile"}:
+        raise EvidenceVaultOperationalAuthorityError(
+            "The exact C7 capture lacks independent channel roles."
+        )
+    return sorted(derived, key=lambda row: row["content"]["relation_id"])
 
 
 def _vault_canonical_packet_record(row: Any) -> dict[str, Any]:

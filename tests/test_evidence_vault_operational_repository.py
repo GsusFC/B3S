@@ -70,6 +70,84 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_capture_watermark_is_commit_ordered_idempotent_and_append_only() -> None:
+    import psycopg
+
+    from src.history.repository import PostgresHistoryRepository
+
+    if os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1":
+        pytest.fail("B3S_TEST_ALLOW_SCHEMA_DROP=1 is required")
+    dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+
+    repository = PostgresHistoryRepository(dsn)
+    repository.migrate()
+    first = _capture(source_scan_id="watermark-newer-observation")
+    first["observed_at"] = "2026-08-07T10:00:00Z"
+    older = _capture(source_scan_id="watermark-older-observation")
+    older["observed_at"] = "2025-01-01T00:00:00Z"
+    first_result = repository.persist_capture_observation(first)
+    older_result = repository.persist_capture_observation(older)
+    head = repository.get_evidence_vault_current_capture_watermark("example.com")
+    assert head is not None
+    assert head["capture_sequence"] == 2
+    assert head["capture_id"] == older_result.capture_id
+    assert head["capture_id"] != first_result.capture_id
+    assert head["append_origin"] == "live_capture_observation"
+
+    repeated = repository.persist_capture_observation(older)
+    assert repeated.status == "unchanged"
+    assert repository.get_evidence_vault_current_capture_watermark(
+        "example.com"
+    ) == head
+
+    def persist(index: int) -> str:
+        observation = _capture(source_scan_id=f"watermark-concurrent-{index}")
+        observation["observed_at"] = "2026-01-01T00:00:00Z"
+        return PostgresHistoryRepository(dsn).persist_capture_observation(
+            observation
+        ).capture_id
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        capture_ids = list(pool.map(persist, range(3)))
+    concurrent_head = repository.get_evidence_vault_current_capture_watermark(
+        "example.com"
+    )
+    assert concurrent_head is not None
+    assert concurrent_head["capture_sequence"] == 5
+    with psycopg.connect(dsn) as conn:
+        events = conn.execute(
+            """
+            SELECT capture_sequence, capture_id
+            FROM b3s_history.evidence_vault_capture_watermark_events
+            ORDER BY capture_sequence
+            """
+        ).fetchall()
+    assert [int(row[0]) for row in events] == [1, 2, 3, 4, 5]
+    assert {str(row[1]) for row in events[-3:]} == set(capture_ids)
+
+    with psycopg.connect(dsn) as conn:
+        with pytest.raises(psycopg.Error, match="append-only"):
+            conn.execute(
+                """
+                UPDATE b3s_history.evidence_vault_capture_watermark_events
+                SET event_fingerprint = %s
+                WHERE brand_id = (
+                    SELECT brand_id
+                    FROM b3s_history.evidence_vault_capture_watermark_events
+                    LIMIT 1
+                )
+                """,
+                ("f" * 64,),
+            )
+    with psycopg.connect(dsn) as conn:
+        with pytest.raises(psycopg.Error, match="append-only"):
+            conn.execute(
+                "DELETE FROM b3s_history.evidence_vault_capture_watermark_events"
+            )
+
+
 def test_operational_v2_reuses_existing_ledgers_and_survives_restart() -> None:
     import psycopg
 
@@ -662,13 +740,11 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
     monkeypatch.setenv("BRAND3_VAULT_C7_CUTOVER_ENABLED", "true")
     monkeypatch.setenv("BRAND3_VAULT_C7_EMERGENCY_DENY", "false")
     monkeypatch.setenv("BRAND3_VAULT_C7_ALLOWLIST", brand)
+    # Accepted group authority is independent of capture freshness.  The
+    # synthetic empty capture cannot prove the exact two-member raw lineage, so
+    # runtime presentation fails closed without changing memory or score.
     exact_runtime_c7 = load_c7_runtime_projection(repository, brand)
-    assert exact_runtime_c7 is not None
-    assert exact_runtime_c7["status"] == "accepted"
-    assert exact_runtime_c7["effective_points"] == 2
-    assert exact_runtime_c7["canonical_memory_version"] == exact_memory[
-        "canonical_memory_version"
-    ]
+    assert exact_runtime_c7 is None
 
     exact_review_replay = (
         repository.review_and_adopt_evidence_vault_operational_source(
@@ -857,12 +933,7 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
         repository.get_evidence_vault_active_c7_group_attestation(brand) is None
     )
     pending_runtime_c7 = load_c7_runtime_projection(repository, brand)
-    assert pending_runtime_c7 is not None
-    assert pending_runtime_c7["status"] == "pending_reassessment"
-    assert pending_runtime_c7["effective_points"] == 0
-    assert pending_runtime_c7["canonical_memory_version"] == reopen["memory"][
-        "canonical_memory_version"
-    ]
+    assert pending_runtime_c7 is None
 
     reopen_replay = repository.reopen_evidence_vault_composite_group(
         brand,
@@ -1063,12 +1134,7 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
         "canonical_score_status"
     ] == "current"
     replacement_runtime_c7 = load_c7_runtime_projection(repository, brand)
-    assert replacement_runtime_c7 is not None
-    assert replacement_runtime_c7["status"] == "accepted"
-    assert replacement_runtime_c7["effective_points"] == 2
-    assert replacement_runtime_c7["group_identity"]["group_id"] == (
-        replacement_c7["group_id"]
-    )
+    assert replacement_runtime_c7 is None
     replacement_review_replay = (
         repository.review_and_adopt_evidence_vault_operational_source(
             brand,

@@ -195,7 +195,7 @@ class _Repository:
         self.calls.append("memory")
         return None
 
-    def get_evidence_vault_active_c7_group_attestation(self, *_args, **_kwargs):
+    def get_evidence_vault_runtime_ready_c7_group_attestation(self, *_args, **_kwargs):
         self.calls.append("attestation")
         return None
 
@@ -267,6 +267,14 @@ def test_emergency_switch_flip_after_score_hides_persisted_projection(
         def get_evidence_vault_operational_memory(self, *_args, **_kwargs):
             self.calls.append("memory")
             return {"brand_identity": "example.com"}
+
+        def get_evidence_vault_runtime_ready_c7_group_attestation(
+            self,
+            *_args,
+            **_kwargs,
+        ):
+            self.calls.append("attestation")
+            return {"attestation_fingerprint": "b" * 64}
 
         def get_or_create_evidence_vault_operational_score_evaluation(
             self,
