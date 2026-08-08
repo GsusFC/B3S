@@ -1260,6 +1260,10 @@ def _materialize_and_finalize_result(
                     ]
                 ),
                 dict(result["operational_candidate_packet"]),
+                source_scan_id=source_scan_id,
+                operation_plan_fingerprint=result[
+                    "operation_plan_fingerprint"
+                ],
                 workspace_slug=workspace_slug,
             )
         except EvidenceVaultOperationalAdoptionConflictError:

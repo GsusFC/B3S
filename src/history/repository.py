@@ -5091,6 +5091,8 @@ class PostgresHistoryRepository:
         domain_or_url: str,
         packet: dict[str, Any],
         *,
+        source_scan_id: str | None = None,
+        operation_plan_fingerprint: str | None = None,
         workspace_slug: str = "b3s",
     ) -> tuple[dict[str, Any], bool]:
         """Store one immutable v2 packet in the existing canonical packet store."""
@@ -5106,6 +5108,19 @@ class PostgresHistoryRepository:
             raise EvidenceVaultOperationalAuthorityError(
                 "The operational packet belongs to a different brand."
             )
+        scan_id = str(source_scan_id or "").strip()
+        if bool(scan_id) != bool(operation_plan_fingerprint):
+            raise EvidenceVaultOperationalAuthorityError(
+                "Operational source scan and plan identity must be supplied together."
+            )
+        plan_fingerprint = (
+            _require_sha256_text(
+                operation_plan_fingerprint,
+                field="operation_plan_fingerprint",
+            )
+            if scan_id
+            else None
+        )
         resolution = _operational_storage_resolution(packet)
         manifest = {
             "schema_version": str(packet["schema_version"]),
@@ -5141,12 +5156,38 @@ class PostgresHistoryRepository:
                     "The brand does not exist in durable history."
                 )
             brand_id = brand["id"]
+            operation_context = None
+            if scan_id:
+                operation_context = _vault_operation_row(
+                    conn,
+                    workspace_slug=workspace_slug,
+                    source_scan_id=scan_id,
+                    for_update=True,
+                )
+                result_payload = (
+                    dict(operation_context.get("result_payload") or {})
+                    if operation_context is not None
+                    else {}
+                )
+                if (
+                    operation_context is None
+                    or operation_context["brand_id"] != brand_id
+                    or str(operation_context["operation_plan_fingerprint"])
+                    != plan_fingerprint
+                    or str(operation_context["status"])
+                    not in {"result_persisted", "completed"}
+                    or result_payload.get("source_candidate_packet_fingerprint")
+                    != packet["source_candidate_packet_fingerprint"]
+                ):
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "The operational packet has no exact durable operation."
+                    )
             conn.execute(
                 "SELECT pg_advisory_xact_lock(%s)",
                 (_advisory_lock_key(brand_id, "evidence-vault-canonical-promotion"),),
             )
             current_memory = _project_vault_operational_memory(conn, brand_id)
-            source_row = conn.execute(
+            source_rows = conn.execute(
                 f"""
                 SELECT *
                 FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
@@ -5159,7 +5200,28 @@ class PostgresHistoryRepository:
                   )
                 """,
                 (brand_id, packet["source_candidate_packet_fingerprint"]),
-            ).fetchone()
+            ).fetchall()
+            if operation_context is not None:
+                source_rows = [
+                    row
+                    for row in source_rows
+                    if isinstance(row.get("reference_resolution"), Mapping)
+                    and row["reference_resolution"].get(
+                        "operation_plan_fingerprint"
+                    )
+                    == plan_fingerprint
+                    and row["reference_resolution"].get("observation_hash")
+                    == str(operation_context["observation_hash"])
+                    and row["reference_resolution"].get("result_fingerprint")
+                    == str(operation_context["result_fingerprint"])
+                ]
+            if len(source_rows) > 1 or (
+                operation_context is not None and len(source_rows) != 1
+            ):
+                raise EvidenceVaultOperationalAuthorityError(
+                    "The operational packet source binding is not unique."
+                )
+            source_row = source_rows[0] if source_rows else None
             source_packet = None
             source_resolution = None
             if source_row is not None:
@@ -5178,20 +5240,30 @@ class PostgresHistoryRepository:
                 and source_resolution.get("schema_version")
                 == "evidence-vault-operational-source-resolution-v1"
             ):
-                operation_rows = conn.execute(
-                    f"""
-                    SELECT operations.*, brands.canonical_domain
-                    FROM {_SCHEMA}.evidence_vault_operation_plans AS operations
-                    JOIN {_SCHEMA}.brands ON brands.id = operations.brand_id
-                    WHERE operations.brand_id = %s
-                      AND operations.operation_plan_fingerprint = %s
-                    FOR UPDATE
-                    """,
-                    (
-                        brand_id,
-                        source_resolution.get("operation_plan_fingerprint"),
-                    ),
-                ).fetchall()
+                operation_rows = (
+                    [operation_context]
+                    if operation_context is not None
+                    else conn.execute(
+                        f"""
+                        SELECT operations.*, brands.canonical_domain
+                        FROM {_SCHEMA}.evidence_vault_operation_plans AS operations
+                        JOIN {_SCHEMA}.brands
+                          ON brands.id = operations.brand_id
+                        WHERE operations.brand_id = %s
+                          AND operations.operation_plan_fingerprint = %s
+                          AND operations.observation_hash = %s
+                          AND operations.result_fingerprint = %s
+                        """,
+                        (
+                            brand_id,
+                            source_resolution.get(
+                                "operation_plan_fingerprint"
+                            ),
+                            source_resolution.get("observation_hash"),
+                            source_resolution.get("result_fingerprint"),
+                        ),
+                    ).fetchall()
+                )
                 if len(operation_rows) != 1:
                     raise EvidenceVaultOperationalAuthorityError(
                         "The operational packet has no unique durable operation."
