@@ -1236,10 +1236,24 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
     assert reopen["reopen_artifact"]["current_group_lifecycle_state"] == (
         "pending_reassessment"
     )
+    expected_reopen_trigger_fingerprint = canonical_fingerprint(
+        "evidence-vault-operation-reopen-trigger-v1",
+        {
+            "operation_plan_id": first_change["operation_plan_id"],
+            "operation_plan_fingerprint": first_change[
+                "operation_plan_fingerprint"
+            ],
+            "observation_hash": first_change["observation_hash"],
+            "result_fingerprint": first_change["result_fingerprint"],
+            "delta_fingerprint": first_change["plan"]["delta"][
+                "delta_fingerprint"
+            ],
+        },
+    )
     assert reopen["source_packet"]["reference_resolution"]["durable_trigger"] == {
         "kind": "operation_plan",
         "id": first_change["operation_plan_id"],
-        "fingerprint": first_change["plan"]["delta"]["delta_fingerprint"],
+        "fingerprint": expected_reopen_trigger_fingerprint,
     }
     reopened_c7_source = next(
         row
@@ -1491,6 +1505,18 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
     assert replacement_score["authority_coverage"][
         "canonical_score_status"
     ] == "current"
+    historical_reopen_replay = repository.reopen_evidence_vault_composite_group(
+        brand,
+        exact_source_candidate_packet_fingerprint=exact_source["packet"][
+            "candidate_packet_fingerprint"
+        ],
+        source_scan_id="c7-material-change-a",
+        created_at="2026-08-07T13:05:00Z",
+    )
+    assert historical_reopen_replay["source_replayed"] is True
+    assert historical_reopen_replay["adoption"] == reopen["adoption"]
+    assert historical_reopen_replay["memory"] == reopen["memory"]
+    assert historical_reopen_replay["memory"] != replacement_memory
     replacement_runtime_c7 = load_c7_runtime_projection(repository, brand)
     assert replacement_runtime_c7 is None
     replacement_review_replay = (

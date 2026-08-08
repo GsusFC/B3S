@@ -3770,9 +3770,25 @@ class PostgresHistoryRepository:
                         "The material-change operation plan does not exist."
                     )
                 evidence_delta = dict(operation["plan"].get("delta") or {})
-                durable_fingerprint = _require_sha256_text(
+                delta_fingerprint = _require_sha256_text(
                     evidence_delta.get("delta_fingerprint"),
                     field="delta_fingerprint",
+                )
+                result_fingerprint = _require_sha256_text(
+                    operation.get("result_fingerprint"),
+                    field="result_fingerprint",
+                )
+                durable_fingerprint = canonical_fingerprint(
+                    "evidence-vault-operation-reopen-trigger-v1",
+                    {
+                        "operation_plan_id": operation["operation_plan_id"],
+                        "operation_plan_fingerprint": operation[
+                            "operation_plan_fingerprint"
+                        ],
+                        "observation_hash": operation["observation_hash"],
+                        "result_fingerprint": result_fingerprint,
+                        "delta_fingerprint": delta_fingerprint,
+                    },
                 )
                 durable_trigger = {
                     "kind": "operation_plan",
@@ -9149,7 +9165,10 @@ def _composite_group_reopen_repository_result(
         "source_packet": source_record,
         "operational_packet": operational_record,
         "adoption": adoption,
-        "memory": _project_vault_operational_memory(conn, brand_id),
+        "memory": project_adopted_operational_memory(
+            operational_record["packet"],
+            adoption,
+        ),
         "score": None,
         "source_replayed": replayed,
         "packet_replayed": replayed,
