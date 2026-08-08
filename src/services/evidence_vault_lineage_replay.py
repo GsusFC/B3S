@@ -954,7 +954,7 @@ def _validate_and_bind_groups(
             )
         if tile_id == "C7" and (
             decision_rule != "all_of"
-            or len(canonical_members) < 2
+            or len(canonical_members) != 2
             or channel_roles
             != {"owned_web", "external_social_profile"}
         ):

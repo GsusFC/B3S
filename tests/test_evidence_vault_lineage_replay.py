@@ -163,7 +163,7 @@ def _exact_c7_source(pack: dict) -> dict:
                 "url": row["url"],
                 "source_class": row["metadata"]["source_class"],
                 "channel_role": _channel_role(row),
-                "literal_quote": quote_by_ref[row["ref"]],
+                "literal_quote": quote_by_ref.get(row["ref"], row["content"]),
             }
         )
     members.sort(key=lambda row: (row["source_identity_id"], row["evidence_fingerprint"]))
@@ -219,8 +219,8 @@ def _exact_c7_source(pack: dict) -> dict:
         "decision_rule": "all_of",
         "group_contract": {
             "decision_rule": "all_of",
-            "minimum_member_count": 2,
-            "required_distinct_source_identity_count": 2,
+            "minimum_member_count": len(members),
+            "required_distinct_source_identity_count": len(members),
             "required_channel_roles": ["external_social_profile", "owned_web"],
             "member_decisions_must_match": True,
             "member_change_requires_review": True,
@@ -247,7 +247,7 @@ def _exact_c7_source(pack: dict) -> dict:
         "aggregation_policy_fingerprint": canonical_aggregation_policy_fingerprint(),
         "selected_tile_ids": ["C7"],
         "groups": [group],
-        "relation_count": 2,
+        "relation_count": len(relations),
         "adoption_eligible": False,
         "authority": False,
         "runtime_effect": False,
@@ -408,6 +408,47 @@ def test_seed_export_binds_exact_c7_source_to_exact_report_capture() -> None:
         assert artifact[field] is False
     validate_lineage_seed_export_v2(artifact)
     assert build_lineage_seed_export_v2(**deepcopy(inputs)) == artifact
+
+
+def test_seed_export_rejects_self_consistent_c7_group_with_extra_member() -> None:
+    inputs = _inputs()
+    report = deepcopy(inputs["source_historical_report"])
+    report["raw"]["flow"]["candidate"]["evidence_pack"]["evidence"].append(
+        {
+            "ref": "linkedin.2",
+            "source": "linkedin",
+            "evidence_type": "company_profile",
+            "url": "https://www.linkedin.com/company/causa-prima-community",
+            "content": "Causa Prima community profile for finance operations teams.",
+            "metadata": {
+                "source_class": "external_proof",
+                "identity_match_llm": "brand_name",
+                "stance": "support",
+            },
+        }
+    )
+    normalized = derive_normalized_evidence_pack(
+        report["raw"]["flow"]["candidate"]["evidence_pack"]
+    )
+    inputs.update(
+        {
+            "source_historical_report": report,
+            "capture_observation": build_historical_report_capture_observation(
+                historical_report=report,
+                source_raw_bytes_sha256=RAW_SHA,
+                source_artifact_name="historical-c7-1.json",
+            ),
+            "normalized_evidence_pack": normalized,
+            "exact_relation_supplement": _exact_c7_source(normalized),
+        }
+    )
+    assert len(inputs["exact_relation_supplement"]["groups"][0]["relations"]) == 3
+
+    with pytest.raises(
+        EvidenceVaultLineageReplayError,
+        match="C7 requires exact all_of owned-web/external-social semantics",
+    ):
+        build_lineage_seed_export_v2(**inputs)
 
 
 @pytest.mark.parametrize("target", ["quote", "identity", "capture", "normalized_pack"])
