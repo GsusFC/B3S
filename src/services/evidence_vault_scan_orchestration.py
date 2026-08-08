@@ -16,7 +16,10 @@ from src.history.capture_observation import (
     parse_capture_observation,
 )
 from src.history.report_parser import canonical_json_hash, normalize_domain
-from src.services.evidence_vault_c7_cutover import current_c7_cutover_decision
+from src.services.evidence_vault_c7_cutover import (
+    current_c7_cutover_decision,
+    operation_plan_affects_operational_c7,
+)
 from src.services.evidence_vault_incremental_refresh import (
     build_vault_scan_plan,
     resolve_vault_scan_mode,
@@ -373,15 +376,9 @@ def _operational_c7_plan_blocked(
     plan: Mapping[str, Any],
     brand_or_url: str,
 ) -> bool:
-    delta = plan.get("delta")
-    affected = (
-        set(str(value) for value in delta.get("affected_tile_ids") or [])
-        if isinstance(delta, Mapping)
-        else set()
-    )
-    return "C7" in affected and not current_c7_cutover_decision(
-        brand_or_url
-    ).enabled
+    return operation_plan_affects_operational_c7(
+        plan
+    ) and not current_c7_cutover_decision(brand_or_url).enabled
 
 
 def _blocked_operational_c7_resume(

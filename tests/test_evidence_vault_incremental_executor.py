@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
+
+import pytest
 
 from src.services.evidence_vault_canonical_core import canonical_fingerprint
 from src.services.evidence_vault_incremental_executor import (
+    EvidenceVaultIncrementalExecutorError,
     execute_vault_operation_plan,
     validate_vault_operation_result,
 )
@@ -192,6 +196,62 @@ def test_executor_builds_pending_overlay_without_authority_or_score() -> None:
     assert operational["has_accepted_change"] is False
     assert operational["accepted_memory"]["accepted_tiles"] == []
     assert repository.source_packets and repository.operational_packets
+
+
+def test_executor_denies_c7_plan_before_claim_or_llm(monkeypatch) -> None:
+    rows = [_row("Stable evidence")]
+    plan = build_vault_scan_plan(
+        brand_identity="example.com",
+        subject_url="https://example.com",
+        mode="incremental_refresh",
+        current_evidence_records=rows,
+        previous_capture_evidence_records=rows,
+        known_evidence_records=rows,
+        canonical_memory_version="a" * 64,
+    )
+    plan = deepcopy(plan)
+    delta_unsigned = {
+        key: value for key, value in plan["delta"].items()
+        if key != "delta_fingerprint"
+    }
+    delta_unsigned["affected_tile_ids"] = ["C7"]
+    delta_unsigned["summary"]["affected_tile_count"] = 1
+    plan["delta"] = {
+        **delta_unsigned,
+        "delta_fingerprint": canonical_fingerprint(
+            plan["delta"]["schema_version"],
+            delta_unsigned,
+        ),
+    }
+    plan["operations"]["reevaluate_tile_ids"] = ["C7"]
+    plan_unsigned = {
+        key: value for key, value in plan.items()
+        if key != "operation_plan_fingerprint"
+    }
+    plan["operation_plan_fingerprint"] = canonical_fingerprint(
+        plan["schema_version"],
+        plan_unsigned,
+    )
+    repository = MemoryRepository(plan=plan, rows=rows)
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_C7_CUTOVER_ENABLED", "true")
+    monkeypatch.setenv("BRAND3_VAULT_C7_EMERGENCY_DENY", "true")
+    monkeypatch.setenv("BRAND3_VAULT_C7_ALLOWLIST", "example.com")
+
+    with pytest.raises(
+        EvidenceVaultIncrementalExecutorError,
+        match="denied by current controls",
+    ):
+        execute_vault_operation_plan(
+            repository=repository,
+            source_scan_id="scan-1",
+            worker_id="worker-a",
+            llm=NoCallLLM(),
+        )
+
+    assert repository.operation["status"] == "pending"
+    assert repository.source_packets == []
+    assert repository.operational_packets == []
 
 
 def test_no_delta_executor_performs_zero_llm_and_creates_no_packet() -> None:

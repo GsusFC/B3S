@@ -257,6 +257,17 @@ def current_c7_cutover_decision(
     )
 
 
+def operation_plan_affects_operational_c7(plan: Mapping[str, Any]) -> bool:
+    """Return whether one validated incremental plan can affect C7 authority."""
+
+    delta = plan.get("delta")
+    return bool(
+        plan.get("mode") == "incremental_refresh"
+        and isinstance(delta, Mapping)
+        and "C7" in (delta.get("affected_tile_ids") or [])
+    )
+
+
 def build_c7_runtime_projection(
     *,
     decision: EvidenceVaultC7CutoverDecision,

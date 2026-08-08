@@ -25,6 +25,10 @@ from src.services.evidence_vault_canonical_core import (
     canonical_fingerprint,
     validate_candidate_packet,
 )
+from src.services.evidence_vault_c7_cutover import (
+    current_c7_cutover_decision,
+    operation_plan_affects_operational_c7,
+)
 from src.services.evidence_vault_incremental_refresh import (
     validate_vault_scan_plan,
 )
@@ -158,12 +162,25 @@ def execute_vault_operation_plan(
 ) -> dict[str, Any]:
     """Claim, execute, persist, materialize and finalize one exact plan."""
 
+    initial_context = repository.get_capture_operation_plan(
+        source_scan_id,
+        workspace_slug=workspace_slug,
+    )
+    if initial_context is None:
+        raise EvidenceVaultIncrementalExecutorError(
+            "capture operation plan does not exist"
+        )
+    initial_plan = dict(initial_context["plan"])
+    validate_vault_scan_plan(initial_plan)
+    _require_operational_c7_plan_allowed(initial_plan)
+
     claim = repository.claim_capture_operation_plan(
         source_scan_id,
         worker_id=worker_id,
         lease_seconds=lease_seconds,
         workspace_slug=workspace_slug,
     )
+    _require_operational_c7_plan_allowed(initial_plan)
     status = str(claim.get("status") or "")
     if status == "completed":
         return {"execution_status": "completed", "operation": claim, "work_performed": False}
@@ -217,6 +234,7 @@ def execute_vault_operation_plan(
             )
         plan = dict(context["plan"])
         validate_vault_scan_plan(plan)
+        _require_operational_c7_plan_allowed(plan)
         if plan["operation_plan_fingerprint"] != running[
             "operation_plan_fingerprint"
         ]:
@@ -255,6 +273,7 @@ def execute_vault_operation_plan(
                 llm=llm,
             )
         validate_vault_operation_result(result)
+        _require_operational_c7_plan_allowed(plan)
         lease_keeper.stop()
         lease_keeper.raise_if_failed()
         repository.heartbeat_capture_operation_plan(
@@ -1128,6 +1147,16 @@ def _evidence_pack(
     )
 
 
+def _require_operational_c7_plan_allowed(plan: Mapping[str, Any]) -> None:
+    if not operation_plan_affects_operational_c7(plan):
+        return
+    decision = current_c7_cutover_decision(str(plan.get("brand_identity") or ""))
+    if not decision.enabled:
+        raise EvidenceVaultIncrementalExecutorError(
+            f"operational C7 plan is denied by current controls: {decision.reason}"
+        )
+
+
 def _no_delta_result(context: Mapping[str, Any]) -> dict[str, Any]:
     return _delta_only_result(context, output_kind="no_delta")
 
@@ -1181,6 +1210,17 @@ def _materialize_and_finalize_result(
             "persisted operation has no reconstructable result"
         )
     validate_vault_operation_result(result)
+    latest_context = repository.get_capture_operation_plan(
+        source_scan_id,
+        workspace_slug=workspace_slug,
+    )
+    if latest_context is None:
+        raise EvidenceVaultIncrementalExecutorError(
+            "persisted operation context disappeared"
+        )
+    latest_plan = dict(latest_context["plan"])
+    validate_vault_scan_plan(latest_plan)
+    _require_operational_c7_plan_allowed(latest_plan)
     candidate_fingerprint: str | None = (
         str(result["candidate_packet_fingerprint"])
         if result["output_kind"] == "candidate_overlay"
@@ -1188,6 +1228,7 @@ def _materialize_and_finalize_result(
     )
     if result["output_kind"] == "candidate_overlay":
         try:
+            _require_operational_c7_plan_allowed(latest_plan)
             repository.register_evidence_vault_operational_source_packet(
                 str(
                     result["source_candidate_packet"]["manifest"][
@@ -1211,6 +1252,7 @@ def _materialize_and_finalize_result(
                     "operation": latest,
                     "work_performed": work_performed,
                 }
+            _require_operational_c7_plan_allowed(latest_plan)
             repository.register_evidence_vault_operational_memory_packet(
                 str(
                     result["source_candidate_packet"]["manifest"][
@@ -1221,6 +1263,7 @@ def _materialize_and_finalize_result(
                 workspace_slug=workspace_slug,
             )
         except EvidenceVaultOperationalAdoptionConflictError:
+            _require_operational_c7_plan_allowed(latest_plan)
             terminal = repository.finalize_capture_operation_plan(
                 source_scan_id,
                 operation_plan_fingerprint=result[
@@ -1237,6 +1280,7 @@ def _materialize_and_finalize_result(
                     "work_performed": work_performed,
                 }
             raise
+    _require_operational_c7_plan_allowed(latest_plan)
     finalized = repository.finalize_capture_operation_plan(
         source_scan_id,
         operation_plan_fingerprint=result["operation_plan_fingerprint"],

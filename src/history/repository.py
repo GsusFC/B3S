@@ -489,6 +489,18 @@ class PostgresHistoryRepository:
                 raise CaptureConflictError(
                     "capture analysis status does not match its operation plan"
                 )
+            if (
+                operation_plan.get("brand_identity") != parsed.canonical_domain
+                or normalize_domain(str(operation_plan.get("subject_url") or ""))
+                != parsed.canonical_domain
+            ):
+                raise CaptureConflictError(
+                    "capture operation plan belongs to another brand"
+                )
+            _require_operational_c7_plan_allowed(
+                operation_plan,
+                brand_identity=parsed.canonical_domain,
+            )
         self._ensure_migrated()
         with self._connect() as conn:
             workspace_id = self._ensure_workspace(
@@ -715,6 +727,10 @@ class PostgresHistoryRepository:
                 (_advisory_lock_key(row["brand_id"], "evidence-vault-canonical-promotion"),),
             )
             record = _vault_operation_plan_record(row)
+            _require_operational_c7_plan_allowed(
+                record["plan"],
+                brand_identity=str(row["canonical_domain"]),
+            )
             if record["status"] in {"completed", "result_persisted", "superseded"}:
                 return {**record, "claim_status": record["status"], "claimed": False}
             current = _project_vault_operational_memory(conn, row["brand_id"])
@@ -849,6 +865,10 @@ class PostgresHistoryRepository:
             )
             if row is None:
                 raise CaptureConflictError("capture operation plan does not exist")
+            _require_operational_c7_plan_allowed(
+                dict(row.get("plan_payload") or {}),
+                brand_identity=str(row["canonical_domain"]),
+            )
             allowed = {"claimed"} if start else {"claimed", "running"}
             if str(row["status"]) not in allowed or not _lease_matches(
                 row,
@@ -904,6 +924,10 @@ class PostgresHistoryRepository:
             )
             if row is None:
                 raise CaptureConflictError("capture operation plan does not exist")
+            _require_operational_c7_plan_allowed(
+                dict(row.get("plan_payload") or {}),
+                brand_identity=str(row["canonical_domain"]),
+            )
             _validate_vault_operation_result_for_plan(
                 conn,
                 detached,
@@ -1010,6 +1034,10 @@ class PostgresHistoryRepository:
             if row is None:
                 raise CaptureConflictError("capture operation plan does not exist")
             record = _vault_operation_plan_record(row)
+            _require_operational_c7_plan_allowed(
+                record["plan"],
+                brand_identity=str(row["canonical_domain"]),
+            )
             if record["operation_plan_fingerprint"] != plan_fingerprint:
                 raise CaptureConflictError("operation plan fingerprint mismatch")
             if record.get("result_fingerprint") != expected_result:
@@ -4438,6 +4466,11 @@ class PostgresHistoryRepository:
                     "The source operation has no exact persisted result."
                 )
             operation_plan = dict(operation.get("plan_payload") or {})
+            _require_operational_c7_plan_allowed(
+                operation_plan,
+                brand_identity=str(operation["canonical_domain"]),
+                error_type=EvidenceVaultOperationalAuthorityError,
+            )
             if (
                 domain != str(operation["canonical_domain"])
                 or domain != str(operation_plan.get("brand_identity") or "")
@@ -5119,6 +5152,35 @@ class PostgresHistoryRepository:
                     )
                     source_packet = source_record["packet"]
                     source_resolution = source_record["reference_resolution"]
+            if (
+                isinstance(source_resolution, Mapping)
+                and source_resolution.get("schema_version")
+                == "evidence-vault-operational-source-resolution-v1"
+            ):
+                operation_rows = conn.execute(
+                    f"""
+                    SELECT operations.*, brands.canonical_domain
+                    FROM {_SCHEMA}.evidence_vault_operation_plans AS operations
+                    JOIN {_SCHEMA}.brands ON brands.id = operations.brand_id
+                    WHERE operations.brand_id = %s
+                      AND operations.operation_plan_fingerprint = %s
+                    FOR UPDATE
+                    """,
+                    (
+                        brand_id,
+                        source_resolution.get("operation_plan_fingerprint"),
+                    ),
+                ).fetchall()
+                if len(operation_rows) != 1:
+                    raise EvidenceVaultOperationalAuthorityError(
+                        "The operational packet has no unique durable operation."
+                    )
+                operation_row = operation_rows[0]
+                _require_operational_c7_plan_allowed(
+                    dict(operation_row.get("plan_payload") or {}),
+                    brand_identity=str(operation_row["canonical_domain"]),
+                    error_type=EvidenceVaultOperationalAuthorityError,
+                )
             resolved_group_source_record = None
             if (
                 source_row is not None
@@ -9203,6 +9265,26 @@ def _migration_files() -> list[tuple[str, str]]:
         for item in sorted(root.iterdir(), key=lambda path: path.name)
         if item.name.endswith(".sql")
     ]
+
+
+def _require_operational_c7_plan_allowed(
+    plan: Mapping[str, Any],
+    *,
+    brand_identity: str,
+    error_type: type[Exception] = CaptureConflictError,
+) -> None:
+    from src.services.evidence_vault_c7_cutover import (
+        current_c7_cutover_decision,
+        operation_plan_affects_operational_c7,
+    )
+
+    if not operation_plan_affects_operational_c7(plan):
+        return
+    decision = current_c7_cutover_decision(brand_identity)
+    if not decision.enabled:
+        raise error_type(
+            f"Operational C7 plan is denied by current controls: {decision.reason}."
+        )
 
 
 def _stable_uuid(*parts: Any) -> UUID:

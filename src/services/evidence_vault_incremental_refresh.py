@@ -411,6 +411,12 @@ def validate_vault_scan_plan(plan: Mapping[str, Any]) -> None:
         raise EvidenceVaultOperationPlanError(
             "classification and relation worksets must match"
         )
+    if plan.get("mode") == "incremental_refresh" and operations[
+        "reevaluate_tile_ids"
+    ] != sorted(delta.get("affected_tile_ids") or []):
+        raise EvidenceVaultOperationPlanError(
+            "incremental tile workset differs from the frozen delta"
+        )
     if operations["recalculate_canonical_score"] is not False:
         raise EvidenceVaultOperationPlanError(
             "scan plan cannot recalculate canonical score"
