@@ -167,6 +167,7 @@ AS $$
 DECLARE
     expected_fingerprint text;
     expected_resolution_fingerprint text;
+    resolution_schema text;
     exact_artifact jsonb;
 BEGIN
     IF NEW.packet_kind IN (
@@ -174,6 +175,13 @@ BEGIN
         'operational_source_v2',
         'operational_reviewed_v2'
     ) THEN
+        IF NEW.schema_version IS DISTINCT FROM
+                'evidence-vault-candidate-packet-v1'
+           OR NEW.manifest ->> 'schema_version' IS DISTINCT FROM
+                'evidence-vault-candidate-packet-v1' THEN
+            RAISE EXCEPTION
+                'evidence Vault candidate packet schema is invalid';
+        END IF;
         expected_fingerprint :=
             b3s_history.evidence_vault_canonical_fingerprint(
                 'evidence-vault-candidate-packet-fingerprint-v1',
@@ -182,7 +190,7 @@ BEGIN
                     'candidate_tiles', NEW.candidate_tiles
                 )
             );
-        IF NEW.packet_fingerprint <> expected_fingerprint THEN
+        IF NEW.packet_fingerprint IS DISTINCT FROM expected_fingerprint THEN
             RAISE EXCEPTION
                 'evidence Vault candidate packet fingerprint is invalid';
         END IF;
@@ -198,38 +206,62 @@ BEGIN
                 'evidence Vault source packet columns differ from its payload';
         END IF;
     ELSIF NEW.packet_kind = 'operational_v2' THEN
-        IF NEW.packet_payload IS NULL THEN
-            RAISE EXCEPTION 'evidence Vault operational packet payload is missing';
+        IF NEW.schema_version IS DISTINCT FROM
+                'evidence-vault-operational-memory-packet-v2'
+           OR NEW.packet_payload ->> 'schema_version' IS DISTINCT FROM
+                'evidence-vault-operational-memory-packet-v2' THEN
+            RAISE EXCEPTION
+                'evidence Vault operational packet schema is invalid';
         END IF;
         expected_fingerprint :=
             b3s_history.evidence_vault_canonical_fingerprint(
-                NEW.packet_payload ->> 'schema_version',
+                'evidence-vault-operational-memory-packet-v2',
                 NEW.packet_payload - 'candidate_packet_fingerprint'
             );
-        IF NEW.packet_fingerprint <> expected_fingerprint
+        IF NEW.packet_fingerprint IS DISTINCT FROM expected_fingerprint
            OR NEW.packet_payload ->> 'candidate_packet_fingerprint'
-                <> NEW.packet_fingerprint THEN
+                IS DISTINCT FROM NEW.packet_fingerprint THEN
             RAISE EXCEPTION
                 'evidence Vault operational packet fingerprint is invalid';
         END IF;
     END IF;
 
+    resolution_schema := NEW.reference_resolution ->> 'schema_version';
     IF NEW.packet_kind = 'operational_source_v2' THEN
+        IF resolution_schema IS NULL OR resolution_schema NOT IN (
+            'evidence-vault-operational-source-resolution-v1',
+            'evidence-vault-exact-relation-source-resolution-v1',
+            'evidence-vault-coverage-supplement-source-resolution-v1',
+            'evidence-vault-composite-group-reopen-source-resolution-v1'
+        ) THEN
+            RAISE EXCEPTION
+                'evidence Vault source resolution schema is invalid';
+        END IF;
         expected_resolution_fingerprint :=
             b3s_history.evidence_vault_canonical_fingerprint(
                 'evidence-vault-operational-source-resolution-v1',
                 NEW.reference_resolution
             );
     ELSIF NEW.packet_kind = 'operational_reviewed_v2' THEN
+        IF resolution_schema IS DISTINCT FROM
+                'evidence-vault-operational-reviewed-resolution-v1' THEN
+            RAISE EXCEPTION
+                'evidence Vault reviewed resolution schema is invalid';
+        END IF;
         expected_resolution_fingerprint :=
             b3s_history.evidence_vault_canonical_fingerprint(
                 'evidence-vault-operational-reviewed-resolution-v1',
                 NEW.reference_resolution
             );
     ELSIF NEW.packet_kind = 'operational_v2' THEN
+        IF resolution_schema IS DISTINCT FROM
+                'evidence-vault-operational-storage-resolution-v1' THEN
+            RAISE EXCEPTION
+                'evidence Vault storage resolution schema is invalid';
+        END IF;
         expected_resolution_fingerprint :=
             b3s_history.evidence_vault_canonical_fingerprint(
-                NEW.reference_resolution ->> 'schema_version',
+                'evidence-vault-operational-storage-resolution-v1',
                 NEW.reference_resolution - 'reference_resolution_fingerprint'
             );
         IF NEW.reference_resolution ->> 'reference_resolution_fingerprint'
@@ -239,7 +271,7 @@ BEGIN
         END IF;
     END IF;
     IF expected_resolution_fingerprint IS NOT NULL
-       AND NEW.reference_resolution_fingerprint <>
+       AND NEW.reference_resolution_fingerprint IS DISTINCT FROM
             expected_resolution_fingerprint THEN
         RAISE EXCEPTION
             'evidence Vault packet resolution fingerprint is invalid';
@@ -249,13 +281,14 @@ BEGIN
        AND NEW.reference_resolution ->> 'source_kind' =
             'exact_relation_supplement' THEN
         exact_artifact := NEW.reference_resolution -> 'artifact';
-        IF exact_artifact IS NULL
+        IF exact_artifact ->> 'schema_version' IS DISTINCT FROM
+                'evidence-vault-exact-relation-supplement-v1'
            OR exact_artifact ->> 'artifact_fingerprint' IS NULL
-           OR exact_artifact ->> 'artifact_fingerprint' <>
+           OR exact_artifact ->> 'artifact_fingerprint' IS DISTINCT FROM
                 NEW.reference_resolution ->> 'artifact_fingerprint'
-           OR exact_artifact ->> 'artifact_fingerprint' <>
+           OR exact_artifact ->> 'artifact_fingerprint' IS DISTINCT FROM
                 b3s_history.evidence_vault_canonical_fingerprint(
-                    exact_artifact ->> 'schema_version',
+                    'evidence-vault-exact-relation-supplement-v1',
                     exact_artifact - 'artifact_fingerprint'
                 ) THEN
             RAISE EXCEPTION
@@ -283,14 +316,20 @@ BEGIN
                 'operational_source_v2',
                 'operational_reviewed_v2'
             )
-            AND packets.packet_fingerprint <>
-                b3s_history.evidence_vault_canonical_fingerprint(
-                    'evidence-vault-candidate-packet-fingerprint-v1',
-                    jsonb_build_object(
-                        'manifest', packets.manifest,
-                        'candidate_tiles', packets.candidate_tiles
+            AND (
+                packets.schema_version IS DISTINCT FROM
+                    'evidence-vault-candidate-packet-v1'
+                OR packets.manifest ->> 'schema_version' IS DISTINCT FROM
+                    'evidence-vault-candidate-packet-v1'
+                OR packets.packet_fingerprint IS DISTINCT FROM
+                    b3s_history.evidence_vault_canonical_fingerprint(
+                        'evidence-vault-candidate-packet-fingerprint-v1',
+                        jsonb_build_object(
+                            'manifest', packets.manifest,
+                            'candidate_tiles', packets.candidate_tiles
+                        )
                     )
-                )
+            )
         ) OR (
             packets.packet_kind IN (
                 'operational_source_v2',
@@ -302,7 +341,24 @@ BEGIN
                     'candidate_tiles', packets.candidate_tiles,
                     'candidate_packet_fingerprint', packets.packet_fingerprint
                 )
-                OR packets.reference_resolution_fingerprint <>
+                OR packets.reference_resolution ->> 'schema_version' IS NULL
+                OR (
+                    packets.packet_kind = 'operational_source_v2'
+                    AND packets.reference_resolution ->> 'schema_version'
+                        NOT IN (
+                            'evidence-vault-operational-source-resolution-v1',
+                            'evidence-vault-exact-relation-source-resolution-v1',
+                            'evidence-vault-coverage-supplement-source-resolution-v1',
+                            'evidence-vault-composite-group-reopen-source-resolution-v1'
+                        )
+                )
+                OR (
+                    packets.packet_kind = 'operational_reviewed_v2'
+                    AND packets.reference_resolution ->> 'schema_version'
+                        IS DISTINCT FROM
+                            'evidence-vault-operational-reviewed-resolution-v1'
+                )
+                OR packets.reference_resolution_fingerprint IS DISTINCT FROM
                     b3s_history.evidence_vault_canonical_fingerprint(
                         CASE packets.packet_kind
                             WHEN 'operational_source_v2' THEN
@@ -316,20 +372,27 @@ BEGIN
         ) OR (
             packets.packet_kind = 'operational_v2'
             AND (
-                packets.packet_payload IS NULL
+                packets.schema_version IS DISTINCT FROM
+                    'evidence-vault-operational-memory-packet-v2'
+                OR packets.packet_payload ->> 'schema_version'
+                    IS DISTINCT FROM
+                        'evidence-vault-operational-memory-packet-v2'
                 OR packets.packet_payload ->> 'candidate_packet_fingerprint'
-                    <> packets.packet_fingerprint
-                OR packets.packet_fingerprint <>
+                    IS DISTINCT FROM packets.packet_fingerprint
+                OR packets.packet_fingerprint IS DISTINCT FROM
                     b3s_history.evidence_vault_canonical_fingerprint(
-                        packets.packet_payload ->> 'schema_version',
+                        'evidence-vault-operational-memory-packet-v2',
                         packets.packet_payload - 'candidate_packet_fingerprint'
                     )
+                OR packets.reference_resolution ->> 'schema_version'
+                    IS DISTINCT FROM
+                        'evidence-vault-operational-storage-resolution-v1'
                 OR packets.reference_resolution ->>
                     'reference_resolution_fingerprint' IS DISTINCT FROM
                     packets.reference_resolution_fingerprint
-                OR packets.reference_resolution_fingerprint <>
+                OR packets.reference_resolution_fingerprint IS DISTINCT FROM
                     b3s_history.evidence_vault_canonical_fingerprint(
-                        packets.reference_resolution ->> 'schema_version',
+                        'evidence-vault-operational-storage-resolution-v1',
                         packets.reference_resolution -
                             'reference_resolution_fingerprint'
                     )
@@ -339,15 +402,18 @@ BEGIN
             AND packets.reference_resolution ->> 'source_kind' =
                 'exact_relation_supplement'
             AND (
-                packets.reference_resolution -> 'artifact' IS NULL
+                packets.reference_resolution #>> '{artifact,schema_version}'
+                    IS DISTINCT FROM
+                        'evidence-vault-exact-relation-supplement-v1'
+                OR packets.reference_resolution #>>
+                    '{artifact,artifact_fingerprint}' IS NULL
                 OR packets.reference_resolution #>>
                     '{artifact,artifact_fingerprint}' IS DISTINCT FROM
                     packets.reference_resolution ->> 'artifact_fingerprint'
                 OR packets.reference_resolution #>>
                     '{artifact,artifact_fingerprint}' IS DISTINCT FROM
                     b3s_history.evidence_vault_canonical_fingerprint(
-                        packets.reference_resolution #>>
-                            '{artifact,schema_version}',
+                        'evidence-vault-exact-relation-supplement-v1',
                         (packets.reference_resolution -> 'artifact') -
                             'artifact_fingerprint'
                     )
@@ -951,28 +1017,9 @@ CREATE FUNCTION b3s_history.protect_evidence_vault_capture_parent()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
-DECLARE
-    parent_workspace_id uuid;
 BEGIN
-    SELECT brands.workspace_id
-    INTO parent_workspace_id
-    FROM b3s_history.brands
-    WHERE brands.id = OLD.brand_id;
-    IF parent_workspace_id IS NOT NULL THEN
-        PERFORM pg_advisory_xact_lock(
-            b3s_history.evidence_vault_brand_lock_key(
-                parent_workspace_id,
-                OLD.brand_id
-            )
-        );
-    END IF;
-    IF OLD IS DISTINCT FROM NEW AND EXISTS (
-        SELECT 1
-        FROM b3s_history.evidence_vault_capture_watermark_events AS events
-        WHERE events.capture_id = OLD.id
-    ) THEN
-        RAISE EXCEPTION
-            'a watermarked capture is immutable lineage input';
+    IF OLD IS DISTINCT FROM NEW THEN
+        RAISE EXCEPTION 'capture is immutable lineage input';
     END IF;
     RETURN NEW;
 END;
@@ -989,28 +1036,14 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    PERFORM pg_advisory_xact_lock(
-        b3s_history.evidence_vault_brand_lock_key(
-            OLD.workspace_id,
-            OLD.brand_id
-        )
-    );
-    IF EXISTS (
-        SELECT 1
-        FROM b3s_history.captures
-        JOIN b3s_history.evidence_vault_capture_watermark_events AS events
-          ON events.capture_id = captures.id
-        WHERE captures.scan_run_id = OLD.id
-    ) AND (
-        OLD.workspace_id IS DISTINCT FROM NEW.workspace_id
-        OR OLD.brand_id IS DISTINCT FROM NEW.brand_id
-        OR OLD.source_scan_id IS DISTINCT FROM NEW.source_scan_id
-        OR OLD.request_payload IS DISTINCT FROM NEW.request_payload
-        OR OLD.metadata ->> 'observation_hash'
-            IS DISTINCT FROM NEW.metadata ->> 'observation_hash'
-    ) THEN
+    IF OLD.workspace_id IS DISTINCT FROM NEW.workspace_id
+       OR OLD.brand_id IS DISTINCT FROM NEW.brand_id
+       OR OLD.source_scan_id IS DISTINCT FROM NEW.source_scan_id
+       OR OLD.request_payload IS DISTINCT FROM NEW.request_payload
+       OR OLD.metadata ->> 'observation_hash'
+            IS DISTINCT FROM NEW.metadata ->> 'observation_hash' THEN
         RAISE EXCEPTION
-            'a watermarked scan identity and observation are immutable';
+            'scan identity, request, and observation hash are immutable';
     END IF;
     RETURN NEW;
 END;
@@ -1027,7 +1060,6 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    target_capture_id uuid;
     parent_brand_id uuid;
     parent_workspace_id uuid;
 BEGIN
@@ -1035,15 +1067,14 @@ BEGIN
        AND OLD.capture_id IS DISTINCT FROM NEW.capture_id THEN
         RAISE EXCEPTION 'capture evidence cannot change its capture parent';
     END IF;
-    target_capture_id := CASE
-        WHEN TG_OP = 'INSERT' THEN NEW.capture_id
-        ELSE OLD.capture_id
-    END;
+    IF TG_OP <> 'INSERT' THEN
+        RAISE EXCEPTION 'capture evidence is immutable';
+    END IF;
     SELECT captures.brand_id, brands.workspace_id
     INTO parent_brand_id, parent_workspace_id
     FROM b3s_history.captures
     JOIN b3s_history.brands ON brands.id = captures.brand_id
-    WHERE captures.id = target_capture_id;
+    WHERE captures.id = NEW.capture_id;
     IF parent_workspace_id IS NOT NULL THEN
         PERFORM pg_advisory_xact_lock(
             b3s_history.evidence_vault_brand_lock_key(
@@ -1055,12 +1086,12 @@ BEGIN
     IF EXISTS (
         SELECT 1
         FROM b3s_history.evidence_vault_capture_watermark_events AS events
-        WHERE events.capture_id = target_capture_id
+        WHERE events.capture_id = NEW.capture_id
     ) THEN
         RAISE EXCEPTION
             'watermarked capture evidence is immutable';
     END IF;
-    RETURN COALESCE(NEW, OLD);
+    RETURN NEW;
 END;
 $$;
 
@@ -1075,22 +1106,9 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    PERFORM pg_advisory_xact_lock(
-        b3s_history.evidence_vault_brand_lock_key(
-            OLD.workspace_id,
-            OLD.id
-        )
-    );
-    IF EXISTS (
-        SELECT 1
-        FROM b3s_history.evidence_vault_capture_watermark_events AS events
-        WHERE events.brand_id = OLD.id
-    ) AND (
-        OLD.workspace_id IS DISTINCT FROM NEW.workspace_id
-        OR OLD.canonical_domain IS DISTINCT FROM NEW.canonical_domain
-    ) THEN
-        RAISE EXCEPTION
-            'a watermarked brand identity is immutable';
+    IF OLD.workspace_id IS DISTINCT FROM NEW.workspace_id
+       OR OLD.canonical_domain IS DISTINCT FROM NEW.canonical_domain THEN
+        RAISE EXCEPTION 'brand workspace and canonical domain are immutable';
     END IF;
     RETURN NEW;
 END;

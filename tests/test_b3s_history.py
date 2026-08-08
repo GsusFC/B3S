@@ -564,7 +564,7 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
     )
     assert "DEFERRABLE INITIALLY DEFERRED" in capture_lineage_hardening_sql
     assert "BEFORE TRUNCATE" in capture_lineage_hardening_sql
-    assert "watermarked scan identity and observation" in (
+    assert "scan identity, request, and observation hash" in (
         capture_lineage_hardening_sql
     )
 

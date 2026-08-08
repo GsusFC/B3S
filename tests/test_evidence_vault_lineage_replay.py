@@ -547,7 +547,9 @@ def test_postgres_lineage_binding_validates_exact_members_and_hashes() -> None:
     repository.persist_capture_observation(inputs["capture_observation"])
     exact_artifact = inputs["exact_relation_supplement"]
     source_packet_id = uuid4()
-    source_manifest: dict[str, object] = {}
+    source_manifest: dict[str, object] = {
+        "schema_version": "evidence-vault-candidate-packet-v1"
+    }
     source_tiles = [{} for _ in range(80)]
     source_packet_fingerprint = canonical_fingerprint(
         "evidence-vault-candidate-packet-fingerprint-v1",
@@ -585,7 +587,7 @@ def test_postgres_lineage_binding_validates_exact_members_and_hashes() -> None:
                 production_runtime_effect, scanner_runtime_effect,
                 packet_kind, packet_payload
             ) VALUES (
-                %s, %s, %s, 'candidate-memory-v1', 'causaprima.ai', %s,
+                %s, %s, %s, 'evidence-vault-candidate-packet-v1', 'causaprima.ai', %s,
                 %s, %s, %s, %s, 'pending_review', false,
                 false, false, 'operational_source_v2', %s
             )
@@ -602,6 +604,163 @@ def test_postgres_lineage_binding_validates_exact_members_and_hashes() -> None:
                 Jsonb(source_payload),
             ),
         )
+
+    bad_operational_payload = {
+        "candidate_packet_fingerprint": "a" * 64,
+    }
+    bad_storage_resolution = {
+        "schema_version": "evidence-vault-operational-storage-resolution-v1",
+        "reference_resolution_fingerprint": "b" * 64,
+    }
+    with psycopg.connect(dsn) as conn:
+        with pytest.raises(
+            psycopg.Error,
+            match="operational packet schema is invalid",
+        ):
+            conn.execute(
+                """
+                INSERT INTO b3s_history.evidence_vault_canonical_memory_packets (
+                    id, brand_id, packet_fingerprint, schema_version,
+                    brand_identity, parent_canonical_memory_version,
+                    reference_resolution_fingerprint, reference_resolution,
+                    manifest, candidate_tiles, authority_state, authority,
+                    production_runtime_effect, scanner_runtime_effect,
+                    packet_kind, packet_payload,
+                    accepted_memory_candidate_version, candidate_overlay_version
+                ) VALUES (
+                    %s, %s, %s,
+                    'evidence-vault-operational-memory-packet-v2',
+                    'causaprima.ai', %s, %s, %s, '{}'::jsonb, '[]'::jsonb,
+                    'pending_review', false, false, false,
+                    'operational_v2', %s, %s, %s
+                )
+                """,
+                (
+                    uuid4(),
+                    brand_id,
+                    "a" * 64,
+                    exact_artifact["parent_canonical_memory_version"],
+                    "b" * 64,
+                    Jsonb(bad_storage_resolution),
+                    Jsonb(bad_operational_payload),
+                    "c" * 64,
+                    "d" * 64,
+                ),
+            )
+
+    missing_resolution_schema = dict(source_resolution)
+    missing_resolution_schema.pop("schema_version")
+    missing_resolution_manifest = {
+        "schema_version": "evidence-vault-candidate-packet-v1",
+        "variant": "missing-resolution-schema",
+    }
+    missing_resolution_fingerprint = canonical_fingerprint(
+        "evidence-vault-candidate-packet-fingerprint-v1",
+        {
+            "manifest": missing_resolution_manifest,
+            "candidate_tiles": source_tiles,
+        },
+    )
+    with psycopg.connect(dsn) as conn:
+        with pytest.raises(
+            psycopg.Error,
+            match="source resolution schema is invalid",
+        ):
+            conn.execute(
+                """
+                INSERT INTO b3s_history.evidence_vault_canonical_memory_packets (
+                    id, brand_id, packet_fingerprint, schema_version,
+                    brand_identity, parent_canonical_memory_version,
+                    reference_resolution_fingerprint, reference_resolution,
+                    manifest, candidate_tiles, authority_state, authority,
+                    production_runtime_effect, scanner_runtime_effect,
+                    packet_kind, packet_payload
+                ) VALUES (
+                    %s, %s, %s, 'evidence-vault-candidate-packet-v1',
+                    'causaprima.ai', %s, %s, %s, %s, %s,
+                    'pending_review', false, false, false,
+                    'operational_source_v2', %s
+                )
+                """,
+                (
+                    uuid4(),
+                    brand_id,
+                    missing_resolution_fingerprint,
+                    exact_artifact["parent_canonical_memory_version"],
+                    "e" * 64,
+                    Jsonb(missing_resolution_schema),
+                    Jsonb(missing_resolution_manifest),
+                    Jsonb(source_tiles),
+                    Jsonb(
+                        {
+                            "manifest": missing_resolution_manifest,
+                            "candidate_tiles": source_tiles,
+                            "candidate_packet_fingerprint": (
+                                missing_resolution_fingerprint
+                            ),
+                        }
+                    ),
+                ),
+            )
+
+    missing_artifact_schema = deepcopy(source_resolution)
+    missing_artifact_schema["artifact"].pop("schema_version")
+    missing_artifact_resolution_fingerprint = canonical_fingerprint(
+        "evidence-vault-operational-source-resolution-v1",
+        missing_artifact_schema,
+    )
+    missing_artifact_manifest = {
+        "schema_version": "evidence-vault-candidate-packet-v1",
+        "variant": "missing-artifact-schema",
+    }
+    missing_artifact_packet_fingerprint = canonical_fingerprint(
+        "evidence-vault-candidate-packet-fingerprint-v1",
+        {
+            "manifest": missing_artifact_manifest,
+            "candidate_tiles": source_tiles,
+        },
+    )
+    with psycopg.connect(dsn) as conn:
+        with pytest.raises(
+            psycopg.Error,
+            match="exact source artifact fingerprint is invalid",
+        ):
+            conn.execute(
+                """
+                INSERT INTO b3s_history.evidence_vault_canonical_memory_packets (
+                    id, brand_id, packet_fingerprint, schema_version,
+                    brand_identity, parent_canonical_memory_version,
+                    reference_resolution_fingerprint, reference_resolution,
+                    manifest, candidate_tiles, authority_state, authority,
+                    production_runtime_effect, scanner_runtime_effect,
+                    packet_kind, packet_payload
+                ) VALUES (
+                    %s, %s, %s, 'evidence-vault-candidate-packet-v1',
+                    'causaprima.ai', %s, %s, %s, %s, %s,
+                    'pending_review', false, false, false,
+                    'operational_source_v2', %s
+                )
+                """,
+                (
+                    uuid4(),
+                    brand_id,
+                    missing_artifact_packet_fingerprint,
+                    exact_artifact["parent_canonical_memory_version"],
+                    missing_artifact_resolution_fingerprint,
+                    Jsonb(missing_artifact_schema),
+                    Jsonb(missing_artifact_manifest),
+                    Jsonb(source_tiles),
+                    Jsonb(
+                        {
+                            "manifest": missing_artifact_manifest,
+                            "candidate_tiles": source_tiles,
+                            "candidate_packet_fingerprint": (
+                                missing_artifact_packet_fingerprint
+                            ),
+                        }
+                    ),
+                ),
+            )
 
     lineage_export = build_lineage_seed_export_v2(**inputs)
     stored, replayed = repository.bind_evidence_vault_exact_source_capture_lineage(
@@ -623,6 +782,40 @@ def test_postgres_lineage_binding_validates_exact_members_and_hashes() -> None:
             (inputs["capture_observation"]["source_scan_id"],),
         )
 
+    with psycopg.connect(dsn) as lock_conn:
+        lock_conn.execute(
+            """
+            SELECT pg_advisory_xact_lock(
+                b3s_history.evidence_vault_brand_lock_key(
+                    workspace_id,
+                    id
+                )
+            )
+            FROM b3s_history.brands
+            WHERE id = %s
+            """,
+            (brand_id,),
+        )
+        with psycopg.connect(dsn, autocommit=True) as concurrent_conn:
+            concurrent_conn.execute("SET statement_timeout = '1s'")
+            concurrent_conn.execute(
+                """
+                UPDATE b3s_history.scan_runs
+                SET status = status
+                WHERE source_scan_id = %s
+                """,
+                (inputs["capture_observation"]["source_scan_id"],),
+            )
+        lock_conn.execute("SET LOCAL statement_timeout = '1s'")
+        lock_conn.execute(
+            """
+            UPDATE b3s_history.scan_runs
+            SET status = status
+            WHERE source_scan_id = %s
+            """,
+            (inputs["capture_observation"]["source_scan_id"],),
+        )
+
     for statement, parameters, message in (
         (
             "UPDATE b3s_history.captures SET content_hash = %s",
@@ -632,7 +825,7 @@ def test_postgres_lineage_binding_validates_exact_members_and_hashes() -> None:
         (
             "UPDATE b3s_history.scan_runs SET request_payload = '{}'::jsonb",
             (),
-            "identity and observation are immutable",
+            "identity, request, and observation hash are immutable",
         ),
         (
             """
@@ -640,7 +833,7 @@ def test_postgres_lineage_binding_validates_exact_members_and_hashes() -> None:
             SET metadata = jsonb_set(metadata, '{observation_hash}', to_jsonb(%s::text))
             """,
             ("0" * 64,),
-            "identity and observation are immutable",
+            "identity, request, and observation hash are immutable",
         ),
         (
             "UPDATE b3s_history.evidence_records SET content = 'forged'",
@@ -720,7 +913,10 @@ def test_postgres_lineage_binding_validates_exact_members_and_hashes() -> None:
             )
         conn.rollback()
 
-    duplicate_manifest = {"variant": "duplicate"}
+    duplicate_manifest = {
+        "schema_version": "evidence-vault-candidate-packet-v1",
+        "variant": "duplicate",
+    }
     duplicate_packet_fingerprint = canonical_fingerprint(
         "evidence-vault-candidate-packet-fingerprint-v1",
         {"manifest": duplicate_manifest, "candidate_tiles": source_tiles},
