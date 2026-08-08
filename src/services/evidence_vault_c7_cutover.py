@@ -154,25 +154,32 @@ def canonicalize_c7_brand(value: str, *, allow_url: bool = True) -> str:
     """
 
     raw = str(value or "").strip()
-    if not raw or any(character.isspace() for character in raw):
+    if (
+        not raw
+        or not raw.isascii()
+        or any(character.isspace() for character in raw)
+    ):
         raise EvidenceVaultC7CutoverError("invalid_brand_identity")
     if "://" in raw:
         if not allow_url:
             raise EvidenceVaultC7CutoverError("allowlist_token_is_not_a_domain")
-        parsed = urlsplit(raw)
         try:
-            parsed_port = parsed.port
+            parsed = urlsplit(raw)
+            host = parsed.hostname
+            username = parsed.username
+            password = parsed.password
         except ValueError as exc:
             raise EvidenceVaultC7CutoverError("invalid_brand_url") from exc
         if (
             parsed.scheme not in {"http", "https"}
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed_port is not None
+            or not host
+            or username is not None
+            or password is not None
+            or ":" in parsed.netloc
+            or "[" in parsed.netloc
+            or "]" in parsed.netloc
         ):
             raise EvidenceVaultC7CutoverError("invalid_brand_url")
-        host = parsed.hostname
     else:
         if any(character in raw for character in "/?#@:"):
             raise EvidenceVaultC7CutoverError("invalid_brand_domain")

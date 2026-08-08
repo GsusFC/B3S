@@ -80,6 +80,16 @@ def test_emergency_deny_has_precedence_over_every_other_error() -> None:
     )
 
     assert decision.reason == "emergency_deny_engaged"
+    malformed = current_c7_cutover_decision(
+        "https://[example.com",
+        environ={
+            ENVIRONMENT_ENV: "production",
+            MASTER_ENABLE_ENV: "invalid",
+            EMERGENCY_DENY_ENV: "true",
+            ALLOWLIST_ENV: "*,example.com,",
+        },
+    )
+    assert malformed.reason == "emergency_deny_engaged"
 
 
 @pytest.mark.parametrize(
@@ -151,6 +161,17 @@ def test_exact_canonical_brand_can_enable_without_exposing_allowlist(
         "01.02.03.04",
         "xn--bcher-kva.example",
         "bücher.example",
+        "Kexample.com",
+        "https://Kexample.com",
+        "https://[v1.example.com]",
+        "https://[example.com",
+        "https://example.com]",
+        "https://[]",
+        "https://example.com:",
+        "https://example.com:/",
+        "https://example.com:?query",
+        "https://example.com:#fragment",
+        "https://example.com／evil",
     ],
 )
 def test_membership_is_exact_and_ambiguous_authorities_are_rejected(brand: str) -> None:
