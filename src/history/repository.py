@@ -5842,7 +5842,6 @@ class PostgresHistoryRepository:
         """Keep runtime unavailable until one verified, atomic read exists."""
 
         del domain_or_url, workspace_slug
-        self._ensure_migrated()
         return None
 
     def get_evidence_vault_runtime_ready_c7_group_attestation(
@@ -5859,7 +5858,6 @@ class PostgresHistoryRepository:
         """
 
         del domain_or_url, workspace_slug
-        self._ensure_migrated()
         return None
 
     def get_or_create_evidence_vault_operational_score_evaluation(

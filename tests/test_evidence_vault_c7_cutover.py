@@ -264,3 +264,21 @@ def test_emergency_switch_flip_during_snapshot_denies_presentation(
 
     assert result is None
     assert repository.calls == ["snapshot"]
+
+
+def test_c7_runtime_denial_stubs_do_not_run_migrations(monkeypatch) -> None:
+    from src.history.repository import PostgresHistoryRepository
+
+    def fail_if_called(_self) -> None:
+        raise AssertionError("runtime denial stubs must not migrate")
+
+    monkeypatch.setattr(PostgresHistoryRepository, "_ensure_migrated", fail_if_called)
+    repository = object.__new__(PostgresHistoryRepository)
+
+    assert repository.get_evidence_vault_c7_runtime_snapshot("example.com") is None
+    assert (
+        repository.get_evidence_vault_runtime_ready_c7_group_attestation(
+            "example.com"
+        )
+        is None
+    )
