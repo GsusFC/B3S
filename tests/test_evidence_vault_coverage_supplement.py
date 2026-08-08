@@ -81,6 +81,40 @@ def test_coverage_supplement_is_bounded_pending_and_reproducible() -> None:
     validate_coverage_supplement_result(result, request=request)
 
 
+def test_coverage_supplement_rejects_cross_brand_owned_evidence() -> None:
+    with pytest.raises(
+        EvidenceVaultCoverageSupplementError,
+        match="brand and subject identities mismatch",
+    ):
+        build_coverage_supplement_request(
+            brand_identity="victim.example",
+            subject_url="https://causaprima.ai",
+            parent_canonical_memory_version="b" * 64,
+            source_evidence_pack_sha256="c" * 64,
+            evidence_rows=[_row()],
+            tile_shortlists={"a" * 64: ["MG1"]},
+            target_tile_ids=["MG1"],
+            rationale="Cross-brand request must fail closed.",
+        )
+
+    foreign_row = _row()
+    foreign_row["url"] = "https://other-brand.example"
+    with pytest.raises(
+        EvidenceVaultCoverageSupplementError,
+        match="owned evidence identity mismatch",
+    ):
+        build_coverage_supplement_request(
+            brand_identity="causaprima.ai",
+            subject_url="https://causaprima.ai",
+            parent_canonical_memory_version="b" * 64,
+            source_evidence_pack_sha256="c" * 64,
+            evidence_rows=[foreign_row],
+            tile_shortlists={"a" * 64: ["MG1"]},
+            target_tile_ids=["MG1"],
+            rationale="Foreign owned evidence must fail closed.",
+        )
+
+
 def test_coverage_supplement_rejects_cross_tile_basis_tampering() -> None:
     request = _request()
     result = execute_coverage_supplement(

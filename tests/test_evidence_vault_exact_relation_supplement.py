@@ -15,6 +15,7 @@ from src.services.evidence_vault_candidate_resolver import (
 from src.services.evidence_vault_canonical_core import (
     build_candidate_tile,
     build_tile_contract_registry,
+    canonical_fingerprint,
     validate_candidate_packet,
 )
 from src.services.evidence_vault_exact_relation_supplement import (
@@ -94,6 +95,51 @@ def test_reviewed_assessments_project_to_exact_pending_relations() -> None:
         for tile_id in ("MG1", "MG3", "MG5")
         for relation in groups[tile_id]["relations"]
     )
+
+
+def test_exact_relation_rejects_cross_brand_source_laundering() -> None:
+    _, assessment, rows, pack, worksheet_sha = _sources()
+    common = {
+        "parent_canonical_memory_version": "b1bafe845ab85a888f71b044681eee69cd0548d0462a76d9288ecbc7074b887a",
+        "selected_tile_ids": ["C7"],
+        "assessment_artifact": assessment,
+        "assessment_review_rows": rows,
+        "assessment_worksheet_sha256": worksheet_sha,
+        "evidence_pack": pack,
+    }
+
+    with pytest.raises(
+        EvidenceVaultExactRelationSupplementError,
+        match="brand and subject identities mismatch",
+    ):
+        build_exact_relation_supplement_artifact(
+            brand_identity="victim.example",
+            subject_url="https://causaprima.ai",
+            **common,
+        )
+
+    relabelled_assessment = deepcopy(assessment)
+    relabelled_assessment["brand_identity"] = "victim.example"
+    relabelled_assessment["subject_url"] = "https://victim.example"
+    unsigned = {
+        key: value
+        for key, value in relabelled_assessment.items()
+        if key != "audit_fingerprint"
+    }
+    relabelled_assessment["audit_fingerprint"] = canonical_fingerprint(
+        "evidence-vault-independent-contract-audit-v1",
+        unsigned,
+    )
+    common["assessment_artifact"] = relabelled_assessment
+    with pytest.raises(
+        EvidenceVaultExactRelationSupplementError,
+        match="evidence pack identity mismatch",
+    ):
+        build_exact_relation_supplement_artifact(
+            brand_identity="victim.example",
+            subject_url="https://victim.example",
+            **common,
+        )
 
 
 def test_c7_is_one_all_of_decision_over_two_distinct_channels() -> None:

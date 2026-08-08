@@ -11,6 +11,7 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
 from src.services.evidence_memory_identity_v2 import (
     project_evidence_memory_row_identity,
@@ -94,6 +95,7 @@ def build_coverage_supplement_request(
         )
     brand = brand_identity.strip().lower()
     url = subject_url.strip()
+    _validate_matching_identity(brand, url)
     parent = _sha256(
         parent_canonical_memory_version,
         field="parent_canonical_memory_version",
@@ -128,6 +130,7 @@ def build_coverage_supplement_request(
         raise EvidenceVaultCoverageSupplementError(
             "coverage supplement evidence workset is invalid"
         )
+    _validate_owned_evidence_identity(evidence.values(), subject_url=url)
     if set(tile_shortlists) != set(evidence):
         raise EvidenceVaultCoverageSupplementError(
             "coverage supplement shortlist workset differs from evidence"
@@ -741,6 +744,7 @@ def validate_coverage_supplement_request(request: Mapping[str, Any]) -> None:
         raise EvidenceVaultCoverageSupplementError(
             "coverage supplement request identity is invalid"
         )
+    _validate_matching_identity(brand, subject_url)
     _sha256(
         request.get("parent_canonical_memory_version"),
         field="parent_canonical_memory_version",
@@ -839,6 +843,7 @@ def validate_coverage_supplement_request(request: Mapping[str, Any]) -> None:
                 "coverage supplement shortlist is invalid"
             )
         pair_count += len(tile_ids)
+    _validate_owned_evidence_identity(workset, subject_url=subject_url)
     if [row["evidence_fingerprint"] for row in workset] != sorted(seen):
         raise EvidenceVaultCoverageSupplementError(
             "coverage supplement workset order is invalid"
@@ -1095,6 +1100,75 @@ def _evidence_snapshot_fingerprint(row: Mapping[str, Any]) -> str:
         "evidence-vault-coverage-supplement-evidence-snapshot-v1",
         deepcopy(dict(row)),
     )
+
+
+def _identity_domain(value: str) -> str:
+    candidate = value if "://" in value else f"https://{value}"
+    try:
+        parsed = urlparse(candidate)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise EvidenceVaultCoverageSupplementError(
+            "coverage supplement identity is invalid"
+        ) from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or ":" in parsed.netloc
+        or "[" in parsed.netloc
+        or "]" in parsed.netloc
+    ):
+        raise EvidenceVaultCoverageSupplementError(
+            "coverage supplement identity is invalid"
+        )
+    domain = host.strip(".").lower().removeprefix("www.")
+    labels = domain.split(".")
+    if (
+        not domain.isascii()
+        or len(labels) < 2
+        or any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in label)
+            for label in labels
+        )
+    ):
+        raise EvidenceVaultCoverageSupplementError(
+            "coverage supplement identity is invalid"
+        )
+    return domain
+
+
+def _validate_matching_identity(brand_identity: str, subject_url: str) -> None:
+    brand_domain = _identity_domain(brand_identity)
+    if brand_identity != brand_domain or brand_domain != _identity_domain(subject_url):
+        raise EvidenceVaultCoverageSupplementError(
+            "coverage supplement brand and subject identities mismatch"
+        )
+
+
+def _validate_owned_evidence_identity(
+    rows: Any,
+    *,
+    subject_url: str,
+) -> None:
+    subject_domain = _identity_domain(subject_url)
+    for row in rows:
+        if row.get("source_class") == "owned_copy" or (
+            isinstance(row.get("metadata"), Mapping)
+            and row["metadata"].get("source_class") == "owned_copy"
+        ):
+            url = row.get("url")
+            if not isinstance(url, str) or _identity_domain(url) != subject_domain:
+                raise EvidenceVaultCoverageSupplementError(
+                    "coverage supplement owned evidence identity mismatch"
+                )
 
 
 def _evidence_rows(

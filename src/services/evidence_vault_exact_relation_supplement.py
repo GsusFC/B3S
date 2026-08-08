@@ -77,6 +77,7 @@ def build_exact_relation_supplement_artifact(
 
     brand = _canonical_brand(brand_identity)
     subject = _canonical_url(subject_url)
+    _validate_matching_identity(brand, subject)
     parent = _sha256(
         parent_canonical_memory_version,
         field="parent_canonical_memory_version",
@@ -90,6 +91,14 @@ def build_exact_relation_supplement_artifact(
         assessment_artifact,
         assessment_review_rows=assessment_review_rows,
     )
+    assessment_brand = _canonical_brand(assessment_artifact.get("brand_identity"))
+    assessment_subject = _canonical_url(assessment_artifact.get("subject_url"))
+    if assessment_brand != brand or (
+        _identity_domain(assessment_subject) != _identity_domain(subject)
+    ):
+        raise EvidenceVaultExactRelationSupplementError(
+            "exact relation assessment identity mismatch"
+        )
     if not set(selected).issubset(assessments):
         raise EvidenceVaultExactRelationSupplementError(
             "selected relation tiles are absent from the assessment"
@@ -101,6 +110,11 @@ def build_exact_relation_supplement_artifact(
     ):
         raise EvidenceVaultExactRelationSupplementError(
             "exact relation supplement evidence pack hash mismatch"
+        )
+    pack_subject = _canonical_url(pack.get("url"))
+    if _identity_domain(pack_subject) != _identity_domain(subject):
+        raise EvidenceVaultExactRelationSupplementError(
+            "exact relation evidence pack identity mismatch"
         )
     rows = pack.get("evidence")
     if not isinstance(rows, list):
@@ -422,6 +436,7 @@ def validate_exact_relation_supplement_structure(
         )
     brand = _canonical_brand(artifact.get("brand_identity"))
     subject = _canonical_url(artifact.get("subject_url"))
+    _validate_matching_identity(brand, subject)
     parent = _sha256(
         artifact.get("parent_canonical_memory_version"),
         field="parent_canonical_memory_version",
@@ -1319,19 +1334,81 @@ def _selected_tiles(values: Any) -> list[str]:
     return list(values)
 
 
+def _identity_domain(value: str) -> str:
+    candidate = value if "://" in value else f"https://{value}"
+    try:
+        parsed = urlparse(candidate)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise EvidenceVaultExactRelationSupplementError(
+            "exact relation identity is invalid"
+        ) from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or ":" in parsed.netloc
+        or "[" in parsed.netloc
+        or "]" in parsed.netloc
+    ):
+        raise EvidenceVaultExactRelationSupplementError(
+            "exact relation identity is invalid"
+        )
+    domain = host.strip(".").lower().removeprefix("www.")
+    labels = domain.split(".")
+    if (
+        not domain.isascii()
+        or len(labels) < 2
+        or any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in label)
+            for label in labels
+        )
+    ):
+        raise EvidenceVaultExactRelationSupplementError(
+            "exact relation identity is invalid"
+        )
+    return domain
+
+
+def _validate_matching_identity(brand_identity: str, subject_url: str) -> None:
+    if _identity_domain(brand_identity) != _identity_domain(subject_url):
+        raise EvidenceVaultExactRelationSupplementError(
+            "exact relation brand and subject identities mismatch"
+        )
+
+
 def _canonical_brand(value: Any) -> str:
-    if not isinstance(value, str) or value != value.strip().lower() or not value:
+    if (
+        not isinstance(value, str)
+        or value != value.strip().lower()
+        or not value
+        or any(character in value for character in "/?#@:")
+    ):
         raise EvidenceVaultExactRelationSupplementError(
             "exact relation brand identity is invalid"
         )
+    _identity_domain(value)
     return value
 
 
 def _canonical_url(value: Any) -> str:
-    if not isinstance(value, str) or value != value.strip() or not value:
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or not value
+        or "://" not in value
+    ):
         raise EvidenceVaultExactRelationSupplementError(
             "exact relation subject URL is invalid"
         )
+    _identity_domain(value)
     return value
 
 
