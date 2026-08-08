@@ -3581,10 +3581,31 @@ class PostgresHistoryRepository:
             ).fetchone()
             if (
                 binding_row is None
-                or str(binding_row["binding_fingerprint"])
-                != binding_fingerprint
+                or binding_row["id"] != binding_id
+                or binding_row["brand_id"] != brand_id
+                or binding_row["operational_source_packet_id"]
+                != source_row["id"]
+                or binding_row["watermark_event_id"] != watermark["id"]
+                or binding_row["capture_id"] != capture["capture_id"]
+                or int(binding_row["capture_sequence"]) != capture_sequence
+                or str(binding_row["provenance"]) != prepared["provenance"]
+                or str(binding_row["lineage_artifact_schema_version"])
+                != "evidence-vault-lineage-seed-export-v2"
                 or str(binding_row["lineage_artifact_fingerprint"])
                 != prepared["artifact_fingerprint"]
+                or str(binding_row["lineage_export_identity"])
+                != prepared["lineage_export_identity"]
+                or str(binding_row["lineage_export_fingerprint"])
+                != prepared["lineage_export_fingerprint"]
+                or int(binding_row["replay_origin_sequence"])
+                != prepared["replay_origin_sequence"]
+                or str(binding_row["member_set_fingerprint"])
+                != member_set_fingerprint
+                or str(binding_row["binding_fingerprint"])
+                != binding_fingerprint
+                or bool(binding_row["authority"])
+                or bool(binding_row["production_runtime_effect"])
+                or bool(binding_row["scanner_runtime_effect"])
             ):
                 raise EvidenceVaultOperationalAuthorityError(
                     "The lineage checkpoint conflicts with immutable content."
@@ -9353,11 +9374,44 @@ def _append_evidence_vault_capture_watermark_event(
         (brand_id, capture_id),
     ).fetchone()
     if existing is not None:
+        existing_content = {
+            "schema_version": "evidence-vault-capture-watermark-event-v1",
+            "brand_id": str(brand_id),
+            "capture_id": str(capture_id),
+            "capture_sequence": int(existing["capture_sequence"]),
+            "previous_event_id": (
+                str(existing["previous_event_id"])
+                if existing["previous_event_id"] is not None
+                else None
+            ),
+            "previous_event_fingerprint": existing.get(
+                "previous_event_fingerprint"
+            ),
+            "capture_content_hash": capture_content_hash,
+            "capture_observation_hash": capture_observation_hash,
+            "append_origin": append_origin,
+        }
+        expected_fingerprint = canonical_fingerprint(
+            "evidence-vault-capture-watermark-event-v1",
+            existing_content,
+        )
         if (
             str(existing["capture_content_hash"]) != capture_content_hash
             or str(existing["capture_observation_hash"])
             != capture_observation_hash
             or str(existing["append_origin"]) != append_origin
+            or str(existing["event_schema_version"])
+            != "evidence-vault-capture-watermark-event-v1"
+            or str(existing["event_fingerprint"]) != expected_fingerprint
+            or existing["id"]
+            != _stable_uuid(
+                brand_id,
+                "evidence-vault-capture-watermark-event-v1",
+                expected_fingerprint,
+            )
+            or bool(existing["authority"])
+            or bool(existing["production_runtime_effect"])
+            or bool(existing["scanner_runtime_effect"])
         ):
             raise CaptureConflictError(
                 "capture watermark replay differs from its immutable event"

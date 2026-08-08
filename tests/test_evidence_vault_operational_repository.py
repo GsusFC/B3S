@@ -133,7 +133,7 @@ def test_capture_watermark_is_commit_ordered_idempotent_and_append_only() -> Non
     assert {str(row[1]) for row in events[-3:]} == set(capture_ids)
 
     with psycopg.connect(dsn) as conn:
-        with pytest.raises(psycopg.Error, match="predecessor"):
+        with pytest.raises(psycopg.Error, match="fingerprint|predecessor"):
             conn.execute(
                 """
                 INSERT INTO b3s_history.evidence_vault_capture_watermark_events (

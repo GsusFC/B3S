@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 import hashlib
+import os
 import subprocess
 import sys
+from uuid import uuid4
 
 import pytest
 
@@ -19,6 +21,7 @@ from src.services.evidence_vault_canonical_core import (
 )
 from src.services.evidence_vault_exact_relation_supplement import (
     EVIDENCE_VAULT_EXACT_RELATION_SUPPLEMENT_VERSION,
+    EvidenceVaultExactRelationSupplementError,
     validate_exact_relation_supplement_structure,
 )
 from src.services.evidence_vault_lineage_replay import (
@@ -416,9 +419,8 @@ def test_seed_export_binds_exact_c7_source_to_exact_report_capture() -> None:
     assert build_lineage_seed_export_v2(**deepcopy(inputs)) == artifact
 
 
-def test_seed_export_rejects_self_consistent_c7_group_with_extra_member() -> None:
-    inputs = _inputs()
-    report = deepcopy(inputs["source_historical_report"])
+def test_exact_source_rejects_c7_group_with_extra_member() -> None:
+    report = deepcopy(_inputs()["source_historical_report"])
     report["raw"]["flow"]["candidate"]["evidence_pack"]["evidence"].append(
         {
             "ref": "linkedin.2",
@@ -436,25 +438,11 @@ def test_seed_export_rejects_self_consistent_c7_group_with_extra_member() -> Non
     normalized = derive_normalized_evidence_pack(
         report["raw"]["flow"]["candidate"]["evidence_pack"]
     )
-    inputs.update(
-        {
-            "source_historical_report": report,
-            "capture_observation": build_historical_report_capture_observation(
-                historical_report=report,
-                source_raw_bytes_sha256=RAW_SHA,
-                source_artifact_name="historical-c7-1.json",
-            ),
-            "normalized_evidence_pack": normalized,
-            "exact_relation_supplement": _exact_c7_source(normalized),
-        }
-    )
-    assert len(inputs["exact_relation_supplement"]["groups"][0]["relations"]) == 3
-
     with pytest.raises(
-        EvidenceVaultLineageReplayError,
-        match="C7 requires exact all_of owned-web/external-social semantics",
+        EvidenceVaultExactRelationSupplementError,
+        match="group state is invalid",
     ):
-        build_lineage_seed_export_v2(**inputs)
+        _exact_c7_source(normalized)
 
 
 @pytest.mark.parametrize("target", ["quote", "identity", "capture", "normalized_pack"])
@@ -535,3 +523,251 @@ def test_later_seed_requires_exact_predecessor_event_fingerprint() -> None:
     inputs["replay_origin_sequence"] = 3
     with pytest.raises(EvidenceVaultLineageReplayError, match="cannot exceed"):
         build_lineage_seed_export_v2(**inputs)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL"),
+    reason="B3S_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
+def test_postgres_lineage_binding_validates_exact_members_and_hashes() -> None:
+    import psycopg
+    from psycopg.types.json import Jsonb
+
+    from src.history.repository import PostgresHistoryRepository
+
+    if os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1":
+        pytest.fail("B3S_TEST_ALLOW_SCHEMA_DROP=1 is required")
+    dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+
+    repository = PostgresHistoryRepository(dsn)
+    repository.migrate()
+    inputs = _inputs()
+    repository.persist_capture_observation(inputs["capture_observation"])
+    exact_artifact = inputs["exact_relation_supplement"]
+    source_packet_id = uuid4()
+    with psycopg.connect(dsn) as conn:
+        brand_id = conn.execute(
+            """
+            SELECT id FROM b3s_history.brands
+            WHERE canonical_domain = 'causaprima.ai'
+            """
+        ).fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO b3s_history.evidence_vault_canonical_memory_packets (
+                id, brand_id, packet_fingerprint, schema_version,
+                brand_identity, parent_canonical_memory_version,
+                reference_resolution_fingerprint, reference_resolution,
+                manifest, candidate_tiles, authority_state, authority,
+                production_runtime_effect, scanner_runtime_effect,
+                packet_kind, packet_payload
+            ) VALUES (
+                %s, %s, %s, 'candidate-memory-v1', 'causaprima.ai', %s,
+                %s, %s, '{}'::jsonb, %s, 'pending_review', false,
+                false, false, 'operational_source_v2', '{}'::jsonb
+            )
+            """,
+            (
+                source_packet_id,
+                brand_id,
+                "8" * 64,
+                exact_artifact["parent_canonical_memory_version"],
+                "9" * 64,
+                Jsonb({
+                    "schema_version": (
+                        "evidence-vault-operational-source-resolution-v1"
+                    ),
+                    "source_kind": "exact_relation_supplement",
+                    "artifact_fingerprint": exact_artifact[
+                        "artifact_fingerprint"
+                    ],
+                    "artifact": exact_artifact,
+                }),
+                Jsonb([{} for _ in range(80)]),
+            ),
+        )
+
+    lineage_export = build_lineage_seed_export_v2(**inputs)
+    stored, replayed = repository.bind_evidence_vault_exact_source_capture_lineage(
+        "causaprima.ai",
+        lineage_export,
+    )
+
+    assert replayed is False
+    assert stored["member_count"] == 2
+    assert len(stored["binding_fingerprint"]) == 64
+    with psycopg.connect(dsn) as conn:
+        conn.execute(
+            """
+            UPDATE b3s_history.scan_runs
+            SET status = 'completed', completed_at = now(),
+                metadata = jsonb_set(metadata, '{diagnostic}', 'true'::jsonb)
+            WHERE source_scan_id = %s
+            """,
+            (inputs["capture_observation"]["source_scan_id"],),
+        )
+
+    for statement, parameters, message in (
+        (
+            "UPDATE b3s_history.captures SET content_hash = %s",
+            ("0" * 64,),
+            "immutable lineage input",
+        ),
+        (
+            "UPDATE b3s_history.scan_runs SET request_payload = '{}'::jsonb",
+            (),
+            "identity and observation are immutable",
+        ),
+        (
+            """
+            UPDATE b3s_history.scan_runs
+            SET metadata = jsonb_set(metadata, '{observation_hash}', to_jsonb(%s::text))
+            """,
+            ("0" * 64,),
+            "identity and observation are immutable",
+        ),
+        (
+            "UPDATE b3s_history.evidence_records SET content = 'forged'",
+            (),
+            "capture evidence is immutable",
+        ),
+    ):
+        with psycopg.connect(dsn) as conn:
+            with pytest.raises(psycopg.Error, match=message):
+                conn.execute(statement, parameters)
+
+    with psycopg.connect(dsn) as conn:
+        with pytest.raises(psycopg.Error, match="exact_source_artifact"):
+            conn.execute(
+                """
+                INSERT INTO b3s_history.evidence_vault_canonical_memory_packets (
+                    id, brand_id, packet_fingerprint, schema_version,
+                    brand_identity, parent_canonical_memory_version,
+                    reference_resolution_fingerprint, reference_resolution,
+                    manifest, candidate_tiles, authority_state, authority,
+                    production_runtime_effect, scanner_runtime_effect,
+                    packet_kind, packet_payload
+                )
+                SELECT %s, brand_id, %s, schema_version, brand_identity,
+                       parent_canonical_memory_version, %s,
+                       reference_resolution, manifest, candidate_tiles,
+                       authority_state, authority, production_runtime_effect,
+                       scanner_runtime_effect, packet_kind, packet_payload
+                FROM b3s_history.evidence_vault_canonical_memory_packets
+                WHERE id = %s
+                """,
+                (uuid4(), "7" * 64, "6" * 64, source_packet_id),
+            )
+
+    for keep_count in (0, 1):
+        with psycopg.connect(dsn) as conn:
+            conn.execute(
+                """
+                ALTER TABLE b3s_history.evidence_vault_operational_source_capture_lineage_members
+                DISABLE TRIGGER evidence_vault_source_capture_lineage_members_append_only
+                """
+            )
+            conn.execute(
+                """
+                DELETE FROM b3s_history.evidence_vault_operational_source_capture_lineage_members
+                WHERE id NOT IN (
+                    SELECT id
+                    FROM b3s_history.evidence_vault_operational_source_capture_lineage_members
+                    ORDER BY relation_id
+                    LIMIT %s
+                )
+                """,
+                (keep_count,),
+            )
+            with pytest.raises(psycopg.Error, match="exactly two independent"):
+                conn.execute(
+                    """
+                    SELECT b3s_history.validate_evidence_vault_lineage_binding_content(%s)
+                    """,
+                    (stored["binding_id"],),
+                )
+            conn.rollback()
+
+    with psycopg.connect(dsn) as conn:
+        binding = conn.execute(
+            """
+            SELECT brand_id, operational_source_packet_id, capture_id
+            FROM b3s_history.evidence_vault_operational_source_capture_lineage_bindings
+            WHERE id = %s
+            """,
+            (stored["binding_id"],),
+        ).fetchone()
+        member = conn.execute(
+            """
+            SELECT composite_group_id
+            FROM b3s_history.evidence_vault_operational_source_capture_lineage_members
+            WHERE binding_id = %s
+            LIMIT 1
+            """,
+            (stored["binding_id"],),
+        ).fetchone()
+        extra_evidence_id = uuid4()
+        conn.execute(
+            """
+            ALTER TABLE b3s_history.evidence_records
+            DISABLE TRIGGER evidence_vault_evidence_parent_immutable
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO b3s_history.evidence_records (
+                id, capture_id, evidence_ref, source, source_class,
+                evidence_type, url, content, content_hash, confidence, metadata
+            ) VALUES (
+                %s, %s, 'extra.1', 'test', 'other', 'test', '',
+                'extra evidence', %s, 'medium', '{}'::jsonb
+            )
+            """,
+            (extra_evidence_id, binding[2], hashlib.sha256(b"extra evidence").hexdigest()),
+        )
+        conn.execute(
+            """
+            INSERT INTO b3s_history.evidence_vault_operational_source_capture_lineage_members (
+                id, brand_id, binding_id, operational_source_packet_id,
+                capture_id, evidence_record_id, composite_group_id, relation_id,
+                evidence_id, source_identity_id, evidence_fingerprint,
+                channel_role, evidence_ref, source_ref, evidence_quote,
+                member_fingerprint, authority, production_runtime_effect,
+                scanner_runtime_effect
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                'owned_web', 'extra.1', 'extra.1', 'extra', %s,
+                false, false, false
+            )
+            """,
+            (
+                uuid4(), binding[0], stored["binding_id"], binding[1],
+                binding[2], extra_evidence_id, member[0], "0" * 64,
+                "1" * 64, "2" * 64, "3" * 64, "4" * 64,
+            ),
+        )
+        with pytest.raises(psycopg.Error, match="exactly two independent"):
+            conn.execute(
+                """
+                SELECT b3s_history.validate_evidence_vault_lineage_binding_content(%s)
+                """,
+                (stored["binding_id"],),
+            )
+        conn.rollback()
+
+    with psycopg.connect(dsn) as conn:
+        member_count = conn.execute(
+            """
+            SELECT count(*)
+            FROM b3s_history.evidence_vault_operational_source_capture_lineage_members
+            """
+        ).fetchone()[0]
+        assert member_count == 2
+        with pytest.raises(psycopg.Error, match="cannot be truncated"):
+            conn.execute(
+                """
+                TRUNCATE b3s_history.evidence_vault_operational_source_capture_lineage_members
+                """
+            )
