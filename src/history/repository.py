@@ -11051,6 +11051,34 @@ def _validate_operational_packet_lineage_for_storage(
             raise EvidenceVaultOperationalAuthorityError(
                 f"Accepted tile {tile_id} is absent from the source packet."
             )
+        if tile_id == "C7":
+            source_coverage = source_manifest.get("coverage_summary") or {}
+            source_basis = [
+                row
+                for row in source.get("basis") or []
+                if isinstance(row, Mapping)
+            ]
+            claim_ids = {row.get("claim_id") for row in source_basis}
+            source_identity_ids = {
+                row.get("source_identity_id") for row in source_basis
+            }
+            if (
+                source_coverage.get("source")
+                != "exact_relation_supplement"
+                or len(source_basis) != 2
+                or len(claim_ids) != 1
+                or None in claim_ids
+                or len(source_identity_ids) != 2
+                or any(
+                    row.get("polarity") != "supports"
+                    or row.get("review_status") != "accepted"
+                    or not row.get("decision_event_id")
+                    for row in source_basis
+                )
+            ):
+                raise EvidenceVaultOperationalAuthorityError(
+                    "Accepted C7 must be one complete exact two-member group."
+                )
         expected_pairs = {
             "semantic_state": source.get("candidate_state"),
             "basis": source.get("basis"),

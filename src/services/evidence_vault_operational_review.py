@@ -60,6 +60,24 @@ def build_reviewed_operational_source(
         raise EvidenceVaultOperationalReviewError(
             "human decisions must resolve every pending source relation exactly"
         )
+    pending_c7_relation_ids = {
+        str(row["relation_id"])
+        for tile in source["candidate_tiles"]
+        if tile.get("tile_id") == "C7"
+        for row in tile.get("basis") or []
+        if row.get("review_status") == "unreviewed"
+    }
+    coverage = manifest.get("coverage_summary") or {}
+    if (
+        coverage.get("source") != "exact_relation_supplement"
+        and any(
+            normalized[relation_id]["decision"] == "accept"
+            for relation_id in pending_c7_relation_ids
+        )
+    ):
+        raise EvidenceVaultOperationalReviewError(
+            "C7 authority requires an exact two-member relation source"
+        )
     try:
         validate_exact_relation_source_decisions(source, normalized)
     except EvidenceVaultExactRelationSupplementError as exc:
@@ -90,6 +108,9 @@ def build_reviewed_operational_source(
         reviewed_by_tile[tile_id] = sorted(
             basis, key=lambda row: str(row["relation_id"])
         )
+
+    if accepted_events_by_tile.get("C7"):
+        _validate_accepted_c7_basis(reviewed_by_tile.get("C7") or [])
 
     registry = build_tile_contract_registry()["tiles"]
     if parent is None:
@@ -245,6 +266,27 @@ def build_reviewed_operational_source(
         or [],
     )
     return reviewed_source, operational
+
+
+def _validate_accepted_c7_basis(values: list[Mapping[str, Any]]) -> None:
+    rows = [dict(row) for row in values]
+    claim_ids = {row.get("claim_id") for row in rows}
+    source_ids = {row.get("source_identity_id") for row in rows}
+    if (
+        len(rows) != 2
+        or len(claim_ids) != 1
+        or None in claim_ids
+        or len(source_ids) != 2
+        or any(
+            row.get("polarity") != "supports"
+            or row.get("review_status") != "accepted"
+            or not row.get("decision_event_id")
+            for row in rows
+        )
+    ):
+        raise EvidenceVaultOperationalReviewError(
+            "accepted C7 basis must be one complete two-member group"
+        )
 
 
 def _decisions(

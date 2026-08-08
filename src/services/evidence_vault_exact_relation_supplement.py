@@ -260,7 +260,10 @@ def build_exact_relation_supplement_artifact(
         if decision_rule == "all_of" and (
             len(source_ids) != len(members)
             or tile_id == "C7"
-            and channel_roles != {"owned_web", "external_social_profile"}
+            and (
+                len(members) != 2
+                or channel_roles != {"owned_web", "external_social_profile"}
+            )
         ):
             raise EvidenceVaultExactRelationSupplementError(
                 f"composite assessment {tile_id} lacks distinct required channels"
@@ -535,6 +538,8 @@ def validate_exact_relation_supplement_structure(
             and len(relations) != 1
             or decision_rule == "all_of"
             and len(relations) < 2
+            or tile_id == "C7"
+            and (decision_rule != "all_of" or len(relations) != 2)
         ):
             raise EvidenceVaultExactRelationSupplementError(
                 "exact relation supplement group state is invalid"
@@ -606,6 +611,8 @@ def validate_exact_relation_supplement_structure(
             contract != expected_contract
             or len(source_ids) != len(relations)
             and decision_rule == "all_of"
+            or tile_id == "C7"
+            and channel_roles != {"owned_web", "external_social_profile"}
         ):
             raise EvidenceVaultExactRelationSupplementError(
                 "exact relation supplement group contract is invalid"
@@ -930,6 +937,8 @@ def validate_exact_relation_source_decisions(
             and len(members) != 1
             or rule == "all_of"
             and len(members) < 2
+            or tile_id == "C7"
+            and (rule != "all_of" or len(members) != 2)
         ):
             raise EvidenceVaultExactRelationSupplementError(
                 "exact relation decision group is invalid"

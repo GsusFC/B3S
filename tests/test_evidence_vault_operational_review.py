@@ -1,3 +1,5 @@
+import pytest
+
 from src.services.evidence_vault_candidate_resolver import (
     canonical_aggregation_policy_fingerprint,
 )
@@ -13,11 +15,12 @@ from src.services.evidence_vault_operational_authority import (
     project_adopted_operational_memory,
 )
 from src.services.evidence_vault_operational_review import (
+    EvidenceVaultOperationalReviewError,
     build_reviewed_operational_source,
 )
 
 
-def _source():
+def _source(tile_id: str = "M1"):
     relation = {
         "relation_id": "1" * 64,
         "evidence_id": "2" * 64,
@@ -35,7 +38,7 @@ def _source():
     tiles = [
         build_candidate_tile(
             tile_id=row["tile_id"],
-            basis=[relation] if row["tile_id"] == "M1" else [],
+            basis=[relation] if row["tile_id"] == tile_id else [],
         )
         for row in build_tile_contract_registry()["tiles"]
     ]
@@ -72,6 +75,35 @@ def test_human_acceptance_creates_reviewed_relation_and_authoritative_tile() -> 
     assert accepted[0]["authority_source"] == "human"
     assert accepted[0]["decision_event_id"] == "human-event-1"
     assert operational["has_accepted_change"] is True
+
+
+def test_generic_single_relation_cannot_create_c7_authority() -> None:
+    with pytest.raises(
+        EvidenceVaultOperationalReviewError,
+        match="C7 authority requires an exact two-member relation source",
+    ):
+        build_reviewed_operational_source(
+            _source("C7"),
+            decisions={
+                "1" * 64: {
+                    "decision": "accept",
+                    "decision_event_id": "human-event-c7",
+                }
+            },
+            current_operational_memory=None,
+        )
+
+    _, rejected = build_reviewed_operational_source(
+        _source("C7"),
+        decisions={
+            "1" * 64: {
+                "decision": "reject",
+                "decision_event_id": "human-event-c7-reject",
+            }
+        },
+        current_operational_memory=None,
+    )
+    assert rejected["accepted_memory"]["accepted_tiles"] == []
 
 
 def test_human_rejection_removes_relation_without_creating_memory() -> None:

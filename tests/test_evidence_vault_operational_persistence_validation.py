@@ -50,6 +50,37 @@ def test_storage_recomputes_policy_authority_from_registered_source() -> None:
         )
 
 
+def test_storage_rejects_generic_or_partial_c7_authority() -> None:
+    source = _source_packet("C7")
+    operational = build_operational_memory_packet(
+        brand_identity="example.com",
+        source_candidate_packet_fingerprint=source[
+            "candidate_packet_fingerprint"
+        ],
+        aggregation_policy_fingerprint=canonical_aggregation_policy_fingerprint(),
+        candidate_tiles=source["candidate_tiles"],
+        dispositions={
+            "C7": {
+                "authority_state": "accepted",
+                "review_state": "none",
+                "authority_profile_id": "human-reviewed-v1",
+                "authority_source": "human",
+                "decision_event_id": "durable-review-m1",
+            }
+        },
+    )
+
+    with pytest.raises(
+        EvidenceVaultOperationalAuthorityError,
+        match="complete exact two-member group",
+    ):
+        _validate_operational_packet_lineage_for_storage(
+            operational,
+            current_memory=None,
+            source_candidate_packet=source,
+        )
+
+
 def test_storage_rejects_fake_human_decision_event() -> None:
     source = _source_packet()
     candidates = source["candidate_tiles"]
@@ -82,11 +113,11 @@ def test_storage_rejects_fake_human_decision_event() -> None:
         )
 
 
-def _source_packet() -> dict:
+def _source_packet(tile_id: str = "M1") -> dict:
     candidates = [
         build_candidate_tile(
             tile_id=str(tile["tile_id"]),
-            basis=[_basis()] if tile["tile_id"] == "M1" else [],
+            basis=[_basis()] if tile["tile_id"] == tile_id else [],
         )
         for tile in build_tile_contract_registry()["tiles"]
     ]
