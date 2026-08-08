@@ -212,24 +212,12 @@ class _Repository:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def get_evidence_vault_operational_memory(self, *_args, **_kwargs):
-        self.calls.append("memory")
+    def get_evidence_vault_c7_runtime_snapshot(self, *_args, **_kwargs):
+        self.calls.append("snapshot")
         return None
 
-    def get_evidence_vault_runtime_ready_c7_group_attestation(self, *_args, **_kwargs):
-        self.calls.append("attestation")
-        return None
 
-    def get_or_create_evidence_vault_operational_score_evaluation(
-        self,
-        *_args,
-        **_kwargs,
-    ):
-        self.calls.append("score")
-        return None, False
-
-
-def test_denied_runtime_projection_performs_zero_reads_or_score_writes(
+def test_denied_runtime_projection_performs_zero_snapshot_reads(
     monkeypatch,
 ) -> None:
     repository = _Repository()
@@ -242,7 +230,7 @@ def test_denied_runtime_projection_performs_zero_reads_or_score_writes(
     assert repository.calls == []
 
 
-def test_enabled_runtime_projection_stops_when_memory_is_unavailable(
+def test_enabled_runtime_projection_stays_unavailable_without_atomic_snapshot(
     monkeypatch,
 ) -> None:
     repository = _Repository()
@@ -252,126 +240,27 @@ def test_enabled_runtime_projection_stops_when_memory_is_unavailable(
     result = load_c7_runtime_projection(repository, "example.com")
 
     assert result is None
-    assert repository.calls == ["memory"]
+    assert repository.calls == ["snapshot"]
 
-def test_enabled_runtime_projection_stops_before_score_when_lineage_is_stale(
+
+def test_emergency_switch_flip_during_snapshot_denies_presentation(
     monkeypatch,
 ) -> None:
     for key, value in _environment().items():
         monkeypatch.setenv(key, value)
 
-    class MissingLineage(_Repository):
-        def get_evidence_vault_operational_memory(self, *_args, **_kwargs):
-            self.calls.append("memory")
-            return {"brand_identity": "example.com"}
+    class KillDuringSnapshot(_Repository):
+        def get_evidence_vault_c7_runtime_snapshot(self, *_args, **_kwargs):
+            self.calls.append("snapshot")
+            monkeypatch.setenv(EMERGENCY_DENY_ENV, "true")
+            return {
+                "canonical_memory": {},
+                "score_evaluation": {},
+                "active_group_attestation": {},
+            }
 
-    repository = MissingLineage()
+    repository = KillDuringSnapshot()
     result = load_c7_runtime_projection(repository, "example.com")
 
     assert result is None
-    assert repository.calls == ["memory", "attestation"]
-    assert "score" not in repository.calls
-
-
-def test_capture_head_change_after_score_denies_presentation(
-    monkeypatch,
-) -> None:
-    for key, value in _environment().items():
-        monkeypatch.setenv(key, value)
-
-    class HeadChangesAfterScore(_Repository):
-        def __init__(self) -> None:
-            super().__init__()
-            self.attestation_reads = 0
-
-        def get_evidence_vault_operational_memory(self, *_args, **_kwargs):
-            self.calls.append("memory")
-            return {"brand_identity": "example.com"}
-
-        def get_evidence_vault_runtime_ready_c7_group_attestation(
-            self,
-            *_args,
-            **_kwargs,
-        ):
-            self.calls.append("attestation")
-            self.attestation_reads += 1
-            if self.attestation_reads == 1:
-                return {"attestation_fingerprint": "b" * 64}
-            return None
-
-        def get_or_create_evidence_vault_operational_score_evaluation(
-            self,
-            *_args,
-            **_kwargs,
-        ):
-            self.calls.append("score")
-            return {"evaluation_identity": "a" * 64}, False
-
-    repository = HeadChangesAfterScore()
-    result = load_c7_runtime_projection(repository, "example.com")
-
-    assert result is None
-    assert repository.calls == ["memory", "attestation", "score", "attestation"]
-
-
-def test_emergency_switch_flip_before_score_prevents_score_write(
-    monkeypatch,
-) -> None:
-    for key, value in _environment().items():
-        monkeypatch.setenv(key, value)
-
-    class KillAfterMemory(_Repository):
-        def get_evidence_vault_operational_memory(self, *_args, **_kwargs):
-            self.calls.append("memory")
-            monkeypatch.setenv(EMERGENCY_DENY_ENV, "true")
-            return {"brand_identity": "example.com"}
-
-    repository = KillAfterMemory()
-
-    result = load_c7_runtime_projection(
-        repository,
-        "example.com",
-    )
-
-    assert result is None
-    assert repository.calls == ["memory"]
-    assert "score" not in repository.calls
-
-
-def test_emergency_switch_flip_after_score_hides_persisted_projection(
-    monkeypatch,
-) -> None:
-    for key, value in _environment().items():
-        monkeypatch.setenv(key, value)
-
-    class KillAfterScore(_Repository):
-        def get_evidence_vault_operational_memory(self, *_args, **_kwargs):
-            self.calls.append("memory")
-            return {"brand_identity": "example.com"}
-
-        def get_evidence_vault_runtime_ready_c7_group_attestation(
-            self,
-            *_args,
-            **_kwargs,
-        ):
-            self.calls.append("attestation")
-            return {"attestation_fingerprint": "b" * 64}
-
-        def get_or_create_evidence_vault_operational_score_evaluation(
-            self,
-            *_args,
-            **_kwargs,
-        ):
-            self.calls.append("score")
-            monkeypatch.setenv(EMERGENCY_DENY_ENV, "true")
-            return {"evaluation_identity": "a" * 64}, False
-
-    repository = KillAfterScore()
-
-    result = load_c7_runtime_projection(
-        repository,
-        "example.com",
-    )
-
-    assert result is None
-    assert repository.calls == ["memory", "attestation", "score"]
+    assert repository.calls == ["snapshot"]

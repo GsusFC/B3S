@@ -38,7 +38,6 @@ from web.report_store import (
     list_reports,
     list_reports_for_domain,
     load_report,
-    operational_c7_runtime_projection_for_domain,
 )
 from web.report_view_model import build_report_view_model
 from web.scan_runner import approve_degraded_scan, cancel_scan, recover_interrupted_scans, scan_status, start_scan
@@ -185,9 +184,6 @@ def _brand_profile(domain: str) -> dict:
         "not_detected": (current or {}).get("not_detected") or [],
         "visual_module": _moodboard_from_report(current) if current else {"available": False, "images": []},
         "vault_memory": _vault_tile_memory_profile(normalized_domain),
-        "operational_c7": operational_c7_runtime_projection_for_domain(
-            normalized_domain
-        ),
     }
 
 

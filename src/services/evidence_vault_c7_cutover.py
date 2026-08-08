@@ -123,26 +123,12 @@ class EvidenceVaultC7CutoverDecision:
 
 
 class C7RuntimeRepository(Protocol):
-    def get_evidence_vault_operational_memory(
+    def get_evidence_vault_c7_runtime_snapshot(
         self,
         domain_or_url: str,
         *,
         workspace_slug: str = "b3s",
     ) -> dict[str, Any] | None: ...
-
-    def get_evidence_vault_runtime_ready_c7_group_attestation(
-        self,
-        domain_or_url: str,
-        *,
-        workspace_slug: str = "b3s",
-    ) -> dict[str, Any] | None: ...
-
-    def get_or_create_evidence_vault_operational_score_evaluation(
-        self,
-        domain_or_url: str,
-        *,
-        workspace_slug: str = "b3s",
-    ) -> tuple[dict[str, Any] | None, bool]: ...
 
 
 def canonicalize_c7_brand(value: str, *, allow_url: bool = True) -> str:
@@ -390,10 +376,11 @@ def load_c7_runtime_projection(
     *,
     workspace_slug: str = "b3s",
 ) -> dict[str, Any] | None:
-    """Fail closed across read, score-write and presentation boundaries.
+    """Load one read-only transactional snapshot or remain unavailable.
 
-    The environment is re-read before each effect when no explicit test mapping
-    is supplied, so an emergency switch change is not hidden by import caching.
+    The production repository intentionally returns no snapshot until verified
+    raw lineage and an atomic read contract exist. This path never creates score
+    rows while serving a request.
     """
 
     def decision_now() -> EvidenceVaultC7CutoverDecision:
@@ -402,51 +389,28 @@ def load_c7_runtime_projection(
     first = decision_now()
     if not first.enabled or first.canonical_brand is None:
         return None
-    memory = repository.get_evidence_vault_operational_memory(
+    snapshot = repository.get_evidence_vault_c7_runtime_snapshot(
         first.canonical_brand,
         workspace_slug=workspace_slug,
     )
-    if memory is None:
-        return None
-    before_attestation = decision_now()
-    if not before_attestation.enabled or before_attestation != first:
-        return None
-    attestation = repository.get_evidence_vault_runtime_ready_c7_group_attestation(
-        first.canonical_brand,
-        workspace_slug=workspace_slug,
-    )
-    if attestation is None:
-        return None
-    before_score = decision_now()
-    if not before_score.enabled or before_score != first:
-        return None
-    evaluation, _created = (
-        repository.get_or_create_evidence_vault_operational_score_evaluation(
-            first.canonical_brand,
-            workspace_slug=workspace_slug,
-        )
-    )
-    if evaluation is None:
-        return None
-    before_present = decision_now()
-    if not before_present.enabled or before_present != first:
-        return None
-    current_attestation = (
-        repository.get_evidence_vault_runtime_ready_c7_group_attestation(
-            first.canonical_brand,
-            workspace_slug=workspace_slug,
-        )
-    )
-    if current_attestation != attestation:
+    if not isinstance(snapshot, Mapping):
         return None
     final = decision_now()
     if not final.enabled or final != first:
+        return None
+    memory = snapshot.get("canonical_memory")
+    evaluation = snapshot.get("score_evaluation")
+    attestation = snapshot.get("active_group_attestation")
+    if not all(
+        isinstance(value, Mapping)
+        for value in (memory, evaluation, attestation)
+    ):
         return None
     return build_c7_runtime_projection(
         decision=final,
         canonical_memory=memory,
         score_evaluation=evaluation,
-        active_group_attestation=current_attestation,
+        active_group_attestation=attestation,
     )
 
 

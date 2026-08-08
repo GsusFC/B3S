@@ -53,36 +53,6 @@
 </section>
 
 <section class="brand-profile-summary">
-  {% if brand.operational_c7 %}
-  <section class="brand-profile-block vault-memory" id="c7-operacional-vault">
-    <div class="section-head">
-      <span class="label">c7_operacional</span>
-      <span class="tag">// autoridad v2 actual · solo b3s-vault</span>
-    </div>
-    <p class="prose text-pretty">
-      Proyección separada del C7 histórico. No modifica el informe SV9 ni su score inmutable.
-    </p>
-    <div class="vault-memory-metrics" aria-label="Estado operativo de C7">
-      <article class="vault-memory-metric">
-        <span>estado</span>
-        <strong>{{ brand.operational_c7.status }}</strong>
-      </article>
-      <article class="vault-memory-metric">
-        <span>semántica</span>
-        <strong>{{ brand.operational_c7.semantic_state }}</strong>
-      </article>
-      <article class="vault-memory-metric">
-        <span>puntos C7</span>
-        <strong>{{ brand.operational_c7.effective_points }}</strong>
-      </article>
-    </div>
-    <p class="mono muted">
-      memoria {{ brand.operational_c7.canonical_memory_version[:12] }}
-      · evaluación {{ brand.operational_c7.evaluation_identity[:12] }}
-      · producción=false
-    </p>
-  </section>
-  {% endif %}
   {% if brand.vault_memory.enabled %}
   <section class="brand-profile-block vault-memory" id="memoria-vault">
     <div class="section-head">

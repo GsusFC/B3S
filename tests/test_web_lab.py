@@ -1404,13 +1404,15 @@ def test_operational_c7_report_adapter_does_not_open_repository_when_denied(
     )
 
 
-def test_brand_view_hides_operational_c7_when_runtime_guard_denies(monkeypatch):
+def test_public_brand_view_never_resolves_operational_c7(monkeypatch):
+    from web import report_store
     from web.app import app
 
     monkeypatch.setattr("web.app.list_reports_for_domain", lambda domain: [])
     monkeypatch.setattr(
-        "web.app.operational_c7_runtime_projection_for_domain",
-        lambda _domain: None,
+        report_store,
+        "operational_c7_runtime_projection_for_domain",
+        lambda _domain: pytest.fail("public brand view must not resolve operational C7"),
     )
 
     response = TestClient(app).get("/brand/example.com?lang=es")
@@ -1418,30 +1420,7 @@ def test_brand_view_hides_operational_c7_when_runtime_guard_denies(monkeypatch):
     assert response.status_code == 200
     assert response.headers["cache-control"] == "private, no-store"
     assert "c7_operacional" not in response.text
-
-
-def test_brand_view_labels_operational_c7_separately_from_legacy(monkeypatch):
-    from web.app import app
-
-    monkeypatch.setattr("web.app.list_reports_for_domain", lambda domain: [])
-    monkeypatch.setattr(
-        "web.app.operational_c7_runtime_projection_for_domain",
-        lambda _domain: {
-            "status": "accepted",
-            "semantic_state": "ok",
-            "effective_points": 2,
-            "canonical_memory_version": "a" * 64,
-            "evaluation_identity": "b" * 64,
-        },
-    )
-
-    response = TestClient(app).get("/brand/example.com?lang=es")
-
-    assert response.status_code == 200
-    assert response.headers["cache-control"] == "private, no-store"
-    assert "c7_operacional" in response.text
-    assert "Proyección separada del C7 histórico" in response.text
-    assert "producción=false" in response.text
+    assert "Proyección separada del C7 histórico" not in response.text
 
 
 def test_brand_view_handles_missing_scan(monkeypatch):

@@ -5678,6 +5678,18 @@ class PostgresHistoryRepository:
             except EvidenceVaultCompositeGroupLifecycleError:
                 return None
 
+    def get_evidence_vault_c7_runtime_snapshot(
+        self,
+        domain_or_url: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        """Keep runtime unavailable until one verified, atomic read exists."""
+
+        del domain_or_url, workspace_slug
+        self._ensure_migrated()
+        return None
+
     def get_evidence_vault_runtime_ready_c7_group_attestation(
         self,
         domain_or_url: str,
