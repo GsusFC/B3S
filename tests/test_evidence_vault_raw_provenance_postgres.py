@@ -1003,6 +1003,7 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
                     "brand_id": str(brand_id), "source_scan_id": "scan-raw-partial",
                     "status": "completed", "pipeline_version": "test-v1",
                     "acquisition_state": "completed", "requested_at": now_text,
+                    "recorded_at": now_text,
                     "request_payload": raw_observation,
                     "metadata": {"observation_hash": observation_hash},
                 },
@@ -1480,6 +1481,7 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
                     "id": str(later_scan_id),
                     "source_scan_id": later_source_scan_id,
                     "requested_at": later_text,
+                    "recorded_at": later_text,
                     "request_payload": later_observation,
                     "metadata": {"observation_hash": later_observation_hash},
                 },
@@ -1974,6 +1976,7 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
                     "status": "completed", "pipeline_version": "test-v1",
                     "acquisition_state": "completed",
                     "requested_at": positive_text,
+                    "recorded_at": positive_text,
                     "request_payload": positive_observation,
                     "metadata": {"observation_hash": positive_observation_hash},
                 },
@@ -2644,6 +2647,7 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
                         "status": "completed", "pipeline_version": "test-v1",
                         "acquisition_state": "completed",
                         "requested_at": concurrent_now_text,
+                        "recorded_at": concurrent_now_text,
                         "request_payload": concurrent_observation,
                         "metadata": {
                             "observation_hash": concurrent_observation_hash

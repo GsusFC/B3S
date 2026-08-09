@@ -1684,6 +1684,7 @@ BEGIN
             IS DISTINCT FROM capture_row.observed_at
        OR (scan_row.request_payload ->> 'recorded_at')::timestamptz
             IS DISTINCT FROM capture_row.recorded_at
+       OR scan_row.recorded_at IS DISTINCT FROM capture_row.recorded_at
        OR scan_row.request_payload ->> 'pipeline_version' IS DISTINCT FROM
             scan_row.pipeline_version
        OR scan_row.request_payload ->> 'acquisition_state' IS DISTINCT FROM
@@ -1950,13 +1951,13 @@ BEGIN
     INSERT INTO b3s_history.scan_runs (
         id, workspace_id, brand_id, source_scan_id, source_run_id, status,
         pipeline_version, acquisition_state, requested_at, started_at,
-        completed_at, error_summary, request_payload, metadata
+        completed_at, recorded_at, error_summary, request_payload, metadata
     ) VALUES (
         scan_row.id, scan_row.workspace_id, scan_row.brand_id,
         scan_row.source_scan_id, COALESCE(scan_row.source_run_id, ''),
         scan_row.status, scan_row.pipeline_version,
         COALESCE(scan_row.acquisition_state, 'unknown'), scan_row.requested_at,
-        scan_row.started_at, scan_row.completed_at,
+        scan_row.started_at, scan_row.completed_at, scan_row.recorded_at,
         COALESCE(scan_row.error_summary, ''),
         COALESCE(scan_row.request_payload, '{}'::jsonb),
         COALESCE(scan_row.metadata, '{}'::jsonb)
@@ -1974,6 +1975,7 @@ BEGIN
           AND stored.requested_at IS NOT DISTINCT FROM scan_row.requested_at
           AND stored.started_at IS NOT DISTINCT FROM scan_row.started_at
           AND stored.completed_at IS NOT DISTINCT FROM scan_row.completed_at
+          AND stored.recorded_at IS NOT DISTINCT FROM scan_row.recorded_at
           AND stored.error_summary IS NOT DISTINCT FROM COALESCE(scan_row.error_summary, '')
           AND stored.request_payload IS NOT DISTINCT FROM COALESCE(scan_row.request_payload, '{}'::jsonb)
           AND stored.metadata IS NOT DISTINCT FROM
@@ -2005,23 +2007,10 @@ BEGIN
           AND stored.canonical_memory_version IS NOT DISTINCT FROM
                 plan_row.canonical_memory_version
           AND stored.mode IS NOT DISTINCT FROM plan_row.mode
-          AND stored.status IS NOT DISTINCT FROM plan_row.status
           AND stored.plan_payload IS NOT DISTINCT FROM plan_row.plan_payload
-          AND stored.attempt_count IS NOT DISTINCT FROM COALESCE(plan_row.attempt_count, 0)
-          AND stored.lease_owner IS NOT DISTINCT FROM plan_row.lease_owner
-          AND stored.lease_token IS NOT DISTINCT FROM plan_row.lease_token
-          AND stored.lease_generation IS NOT DISTINCT FROM COALESCE(plan_row.lease_generation, 0)
-          AND stored.lease_expires_at IS NOT DISTINCT FROM plan_row.lease_expires_at
-          AND stored.claimed_at IS NOT DISTINCT FROM plan_row.claimed_at
-          AND stored.started_at IS NOT DISTINCT FROM plan_row.started_at
-          AND stored.heartbeat_at IS NOT DISTINCT FROM plan_row.heartbeat_at
-          AND stored.result_fingerprint IS NOT DISTINCT FROM plan_row.result_fingerprint
-          AND stored.result_payload IS NOT DISTINCT FROM plan_row.result_payload
-          AND stored.result_persisted_at IS NOT DISTINCT FROM plan_row.result_persisted_at
-          AND stored.candidate_packet_fingerprint IS NOT DISTINCT FROM plan_row.candidate_packet_fingerprint
-          AND stored.completed_at IS NOT DISTINCT FROM plan_row.completed_at
-          AND stored.superseded_at IS NOT DISTINCT FROM plan_row.superseded_at
-          AND stored.last_error IS NOT DISTINCT FROM COALESCE(plan_row.last_error, '')
+          -- Lifecycle columns are database-owned mutable execution state. Exact
+          -- replay compares only the immutable parent contract and never resets
+          -- a claimed/completed/failed plan to the caller's initial status.
           AND stored.authority IS NOT DISTINCT FROM COALESCE(plan_row.authority, false)
           AND stored.authority_scope IS NOT DISTINCT FROM COALESCE(plan_row.authority_scope, 'b3s-vault')
           AND stored.production_runtime_effect IS NOT DISTINCT FROM COALESCE(plan_row.production_runtime_effect, false)
