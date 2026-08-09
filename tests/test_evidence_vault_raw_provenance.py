@@ -1033,3 +1033,41 @@ def test_public_key_registry_fingerprint_binds_rotation_and_status(
         initial_fp,
         public_key_registry_fingerprint(rotated),
     }
+
+
+def test_preconstructed_models_are_revalidated_at_every_trust_boundary(
+    key_one: Ed25519PrivateKey,
+    key_two: Ed25519PrivateKey,
+) -> None:
+    receipt = _sign(_owned_claims(), key_one)
+    valid_registry = PublicKeyRegistry.model_validate(_registry(key_one))
+    bypassed_registry = valid_registry.model_copy(
+        update={
+            "keys": {
+                **valid_registry.keys,
+                "acquisition-2026-02": {
+                    "version": 1,
+                    "status": "verification_only",
+                    "public_key_base64": _public_b64(key_two),
+                },
+            }
+        }
+    )
+    with pytest.raises(ValidationError, match="public key versions must be unique"):
+        verify_raw_acquisition_receipt(
+            receipt,
+            public_key_registry=bypassed_registry,
+        )
+
+    bypassed_claims = receipt.claims.model_copy(update={"workspace_slug": "B3S"})
+    with pytest.raises(ValidationError, match="workspace_slug"):
+        raw_acquisition_receipt_fingerprint(bypassed_claims)
+    with pytest.raises(ValidationError, match="workspace_slug"):
+        validate_c7_receipt_time_policy(
+            [
+                bypassed_claims,
+                RawAcquisitionReceiptClaims.model_validate(_external_claims()),
+            ],
+            database_received_at=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+            database_time=datetime(2026, 6, 1, 12, 1, tzinfo=timezone.utc),
+        )

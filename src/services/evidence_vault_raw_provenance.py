@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -840,14 +841,15 @@ def _claims_from_receipt(
     value: RawAcquisitionReceiptClaims | RawAcquisitionReceipt | Mapping[str, Any],
 ) -> RawAcquisitionReceiptClaims:
     if isinstance(value, RawAcquisitionReceiptClaims):
-        return value
+        return _model_from(value, RawAcquisitionReceiptClaims)
     if isinstance(value, RawAcquisitionReceipt):
-        return value.claims
+        return _model_from(value, RawAcquisitionReceipt).claims
     if not isinstance(value, Mapping):
         raise EvidenceVaultRawProvenanceError("receipt time-policy member must be an object")
-    if set(value) == set(RawAcquisitionReceiptClaims.model_fields):
-        return RawAcquisitionReceiptClaims.model_validate(dict(value))
-    return RawAcquisitionReceipt.model_validate(dict(value)).claims
+    detached = deepcopy(dict(value))
+    if set(detached) == set(RawAcquisitionReceiptClaims.model_fields):
+        return RawAcquisitionReceiptClaims.model_validate(detached)
+    return RawAcquisitionReceipt.model_validate(detached).claims
 
 
 def _signed_payload_bytes(payload: SignedRawAcquisitionPayload) -> bytes:
@@ -856,10 +858,12 @@ def _signed_payload_bytes(payload: SignedRawAcquisitionPayload) -> bytes:
 
 def _model_from(value: Any, model_type: type[BaseModel]) -> Any:
     if isinstance(value, model_type):
-        return value
+        # Pydantic model_copy(update=...) and mutable nested mappings do not
+        # re-run validators.  Reparse a detached dump at every trust boundary.
+        value = value.model_dump(mode="python", round_trip=True, warnings="none")
     if not isinstance(value, Mapping):
         raise EvidenceVaultRawProvenanceError(f"{model_type.__name__} must be an object")
-    return model_type.model_validate(dict(value))
+    return model_type.model_validate(deepcopy(dict(value)))
 
 
 def _decode_base64(value: str, *, expected_length: int, field: str) -> bytes:
