@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""Run the isolated verified-raw acquisition worker on one Unix socket.
+
+Secret material is read only from owner-restricted files in this process.  The
+web/scanner process needs only the public socket path and the default-off flag.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+from pathlib import Path
+import stat
+from typing import Any, Callable, TypeVar
+from urllib.parse import urlsplit
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+import httpx
+
+from src.history.evidence_vault_raw_repository import EvidenceVaultRawRepository
+from src.services.evidence_vault_acquisition_ipc_server import (
+    serve_unix_trusted_acquisition,
+)
+from src.services.evidence_vault_acquisition_runtime import (
+    HttpxExaExactUrlFetcher,
+    HttpxOwnedFetcher,
+    TrustedAcquisitionRuntime,
+)
+from src.services.evidence_vault_acquisition_worker import TrustedAcquisitionWorker
+from src.services.evidence_vault_incremental_refresh import build_vault_scan_plan
+from src.services.evidence_vault_raw_provenance import PublicKeyRegistry
+
+
+_MAX_SECRET_BYTES = 16_384
+_T = TypeVar("_T")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--socket-path", type=Path, required=True)
+    parser.add_argument("--private-key-file", type=Path, required=True)
+    parser.add_argument("--registry-file", type=Path, required=True)
+    parser.add_argument("--ingest-dsn-file", type=Path, required=True)
+    parser.add_argument("--exa-api-key-file", type=Path)
+    parser.add_argument("--socket-mode", choices=("0600", "0660"), default="0660")
+    args = parser.parse_args()
+
+    private_key = _load_private_key(args.private_key_file)
+    registry = _load_json_model(args.registry_file, PublicKeyRegistry)
+    ingest_dsn = _load_secret_text(args.ingest_dsn_file, field="ingest_dsn")
+    _validate_postgres_dsn(ingest_dsn)
+    exa_api_key = (
+        _load_secret_text(args.exa_api_key_file, field="exa_api_key")
+        if args.exa_api_key_file is not None
+        else None
+    )
+
+    # Ignore ambient proxy/netrc settings so acquisition egress is deployment-owned.
+    with httpx.Client(trust_env=False) as owned_client, httpx.Client(
+        trust_env=False
+    ) as provider_client:
+        owned_fetcher = HttpxOwnedFetcher(owned_client)
+        external_fetcher = (
+            HttpxExaExactUrlFetcher(provider_client, api_key=exa_api_key)
+            if exa_api_key is not None
+            else None
+        )
+        runtime = TrustedAcquisitionRuntime(
+            private_key=private_key,
+            public_key_registry=registry,
+            owned_fetch=owned_fetcher,
+            external_fetch=external_fetcher,
+        )
+        repository = EvidenceVaultRawRepository(
+            ingest_dsn,
+            public_key_registry=registry,
+            operation_plan_builder=_operation_plan,
+        )
+        worker = TrustedAcquisitionWorker(
+            collect=runtime.collect,
+            sign=runtime.sign,
+            persist=repository.persist,
+            lookup=repository.lookup,
+            public_key_registry=registry,
+        )
+        serve_unix_trusted_acquisition(
+            worker,
+            args.socket_path,
+            socket_mode=int(args.socket_mode, 8),
+        )
+    return 0
+
+
+def _operation_plan(command: Any, evidence_records: Any) -> dict[str, Any]:
+    canonical_domain = urlsplit(command.brand_url).hostname
+    if not isinstance(canonical_domain, str) or not canonical_domain:
+        raise ValueError("canonical brand domain is absent")
+    return build_vault_scan_plan(
+        brand_identity=canonical_domain,
+        subject_url=command.brand_url,
+        mode="baseline",
+        current_evidence_records=evidence_records,
+    )
+
+
+def _load_private_key(path: Path) -> Ed25519PrivateKey:
+    encoded = _load_secret_text(path, field="private_key")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        if len(raw) != 32:
+            raise ValueError("wrong Ed25519 private key size")
+        return Ed25519PrivateKey.from_private_bytes(raw)
+    except Exception:
+        raise ValueError("private_key_file_invalid") from None
+
+
+def _load_secret_text(path: Path, *, field: str) -> str:
+    raw = _read_regular_file(path, maximum=_MAX_SECRET_BYTES, private=True)
+    try:
+        value = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise ValueError(f"{field}_file_invalid") from None
+    if (
+        not value
+        or value != value.strip()
+        or "\x00" in value
+        or "\r" in value
+        or "\n" in value
+    ):
+        raise ValueError(f"{field}_file_invalid")
+    return value
+
+
+def _load_json_model(path: Path, model: type[_T]) -> _T:
+    raw = _read_regular_file(path, maximum=131_072, private=False)
+    try:
+        value = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_constant,
+        )
+        return model.model_validate(value, strict=True)  # type: ignore[attr-defined]
+    except Exception:
+        raise ValueError("public_key_registry_file_invalid") from None
+
+
+def _read_regular_file(path: Path, *, maximum: int, private: bool) -> bytes:
+    candidate = Path(path)
+    try:
+        before = candidate.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid():
+            raise ValueError("unsafe file owner or type")
+        if private and stat.S_IMODE(before.st_mode) & 0o077:
+            raise ValueError("secret file permissions are not owner-only")
+        if not 0 < before.st_size <= maximum:
+            raise ValueError("file size invalid")
+        descriptor = os.open(candidate, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                raise ValueError("file changed during open")
+            raw = os.read(descriptor, maximum + 1)
+            trailing = os.read(descriptor, 1)
+        finally:
+            os.close(descriptor)
+        if trailing or len(raw) != before.st_size or len(raw) > maximum:
+            raise ValueError("file changed or exceeds limit")
+        return raw
+    except Exception:
+        raise ValueError("worker_file_invalid") from None
+
+
+def _validate_postgres_dsn(value: str) -> None:
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
+        raise ValueError("ingest_dsn_file_invalid")
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key")
+        value[key] = item
+    return value
+
+
+def _reject_constant(value: str) -> Any:
+    raise ValueError(f"non-finite JSON constant {value}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

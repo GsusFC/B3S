@@ -70,9 +70,17 @@ class SafeReceiptArrival(_StrictPublicModel):
 class SafeDeterministicDocument(_StrictPublicModel):
     role: Literal["owned_web", "external_social_profile"]
     source_url: str = Field(min_length=8, max_length=2048)
-    extracted_document: str = Field(min_length=1, max_length=100_000_000)
+    extracted_document: str = Field(min_length=1, max_length=2_097_152)
     extracted_document_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     receipt_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+    @field_validator("extracted_document")
+    @classmethod
+    def _document_utf8_bound(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 2_097_152:
+            raise ValueError("extracted document exceeds the durable v1 bound")
+        return value
 
 
 class SignedAcquisitionResultEnvelope(_StrictPublicModel):

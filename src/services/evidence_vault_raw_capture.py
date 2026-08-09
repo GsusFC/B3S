@@ -397,6 +397,32 @@ def validate_signed_raw_capture(
     )
 
 
+def prepare_deterministic_document_for_signing(
+    *,
+    channel_role: str,
+    raw_fragment: Mapping[str, Any],
+) -> DeterministicExtraction:
+    """Reproduce the exact v1 document before its hash is signed.
+
+    This function is structural signing preparation only.  It does not produce a
+    ``VerifiedRawCapture`` and grants no evidence authority.
+    """
+
+    if not isinstance(raw_fragment, Mapping):
+        raise EvidenceVaultRawCaptureError("deterministic raw fragment must be an object")
+    detached = deepcopy(dict(raw_fragment))
+    if channel_role == "owned_web":
+        document = _owned_document(detached)
+    elif channel_role == "external_social_profile":
+        document = _external_document(detached)
+    else:
+        raise EvidenceVaultRawCaptureError("channel_role is not extractable")
+    return DeterministicExtraction(
+        document=document,
+        sha256=hashlib.sha256(document.encode("utf-8")).hexdigest(),
+    )
+
+
 def extract_deterministic_document(
     verified_raw_capture: VerifiedRawCapture,
     *,
@@ -690,6 +716,7 @@ __all__ = [
     "extract_deterministic_document",
     "parse_and_validate_signed_raw_capture",
     "parse_signed_raw_capture",
+    "prepare_deterministic_document_for_signing",
     "raw_capture_content_hash",
     "reproduce_passage",
     "reproduce_passage_locator",

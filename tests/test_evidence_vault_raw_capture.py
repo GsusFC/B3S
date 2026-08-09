@@ -779,3 +779,24 @@ def test_exact_models_and_locators_reject_extra_or_malformed_fields() -> None:
             passage_locator={"kind": "regex", "pattern": "proof"},
             durable_evidence_record_content="proof from exact source",
         )
+
+
+def test_signing_preparation_is_structural_and_matches_verified_extraction() -> None:
+    from src.services.evidence_vault_raw_capture import (
+        prepare_deterministic_document_for_signing,
+    )
+
+    snapshot, owned, _external = _group()
+    prepared = prepare_deterministic_document_for_signing(
+        channel_role="owned_web",
+        raw_fragment=snapshot.raw_payload["sources"]["owned"],
+    )
+    built = _build(snapshot, [owned])
+    verified = _verify(built)
+    assert prepared == extract_deterministic_document(
+        verified, receipt_fingerprint=owned.receipt_fingerprint
+    )
+    with pytest.raises(EvidenceVaultRawCaptureError, match="not extractable"):
+        prepare_deterministic_document_for_signing(
+            channel_role="generic", raw_fragment={"text": "forbidden"}
+        )
