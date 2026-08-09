@@ -799,24 +799,44 @@ def receipt_set_fingerprint(
 
 
 def validate_c7_receipt_time_policy(
-    receipts: Sequence[RawAcquisitionReceiptClaims | RawAcquisitionReceipt | Mapping[str, Any]],
+    receipts: Sequence[
+        RawAcquisitionReceiptClaims | RawAcquisitionReceipt | Mapping[str, Any]
+    ],
     *,
-    database_received_at: datetime,
+    database_received_at: datetime | Sequence[datetime],
     database_time: datetime,
 ) -> datetime:
-    """Validate the two-member v1 time/scan/session policy using DB-supplied time.
+    """Validate two signed members against their DB-recorded arrival instants.
 
-    Capture identity is intentionally not accepted here: it is a later durable-FK
-    invariant.  This pure slice validates every identity that is present in the
-    signed claims and returns the UTC expiration instant on success.
+    A single arrival remains supported when both rows are inserted under one
+    database timestamp.  Shadow reads pass each immutable row's own
+    ``received_at`` so a later member cannot borrow an earlier arrival window.
+    Capture identity is a separate durable-FK invariant.
     """
 
-    received_at = _aware_utc(database_received_at, field="database_received_at")
     now = _aware_utc(database_time, field="database_time")
-    if now < received_at:
-        raise EvidenceVaultRawProvenanceError("database_time precedes database_received_at")
     if isinstance(receipts, (str, bytes)) or not isinstance(receipts, Sequence) or len(receipts) != 2:
         raise EvidenceVaultRawProvenanceError("C7 live policy requires exactly two receipts")
+    if isinstance(database_received_at, datetime):
+        received = [
+            _aware_utc(database_received_at, field="database_received_at")
+            for _ in receipts
+        ]
+    else:
+        if (
+            isinstance(database_received_at, (str, bytes))
+            or not isinstance(database_received_at, Sequence)
+            or len(database_received_at) != len(receipts)
+        ):
+            raise EvidenceVaultRawProvenanceError(
+                "database_received_at must contain one timestamp per receipt"
+            )
+        received = [
+            _aware_utc(value, field="database_received_at")
+            for value in database_received_at
+        ]
+    if any(now < value for value in received):
+        raise EvidenceVaultRawProvenanceError("database_time precedes database_received_at")
     claims = [_claims_from_receipt(value) for value in receipts]
     if {claim.channel_role for claim in claims} != {"owned_web", "external_social_profile"}:
         raise EvidenceVaultRawProvenanceError("C7 live policy requires one receipt per qualifying role")
@@ -824,14 +844,17 @@ def validate_c7_receipt_time_policy(
         if len({getattr(claim, field) for claim in claims}) != 1:
             raise EvidenceVaultRawProvenanceError(f"C7 receipts have mixed {field}")
     fetched = [_parse_canonical_utc(claim.fetched_at, field="fetched_at") for claim in claims]
-    for fetched_at in fetched:
+    for fetched_at, received_at in zip(fetched, received, strict=True):
         if fetched_at > received_at + MAX_FUTURE_SKEW or fetched_at > now + MAX_FUTURE_SKEW:
             raise EvidenceVaultRawProvenanceError("receipt fetched_at exceeds the five-minute future allowance")
         if abs(received_at - fetched_at) > MAX_RECEIPT_DELAY:
             raise EvidenceVaultRawProvenanceError("receipt fetched_at is not within fifteen minutes of received_at")
     if max(fetched) - min(fetched) > MAX_MEMBER_SKEW:
         raise EvidenceVaultRawProvenanceError("receipt member timestamps differ by more than fifteen minutes")
-    eligible_until = min(min(fetched), received_at) + LIVE_ELIGIBILITY_TTL
+    eligible_until = min(
+        min(fetched_at, received_at)
+        for fetched_at, received_at in zip(fetched, received, strict=True)
+    ) + LIVE_ELIGIBILITY_TTL
     if now >= eligible_until:
         raise EvidenceVaultRawProvenanceError("receipt set has expired")
     return eligible_until

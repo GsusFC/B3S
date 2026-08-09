@@ -1071,3 +1071,31 @@ def test_preconstructed_models_are_revalidated_at_every_trust_boundary(
             database_received_at=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
             database_time=datetime(2026, 6, 1, 12, 1, tzinfo=timezone.utc),
         )
+
+
+def test_time_policy_uses_each_durable_receipt_arrival() -> None:
+    owned = RawAcquisitionReceiptClaims.model_validate(
+        _owned_claims(fetched_at="2026-06-01T12:00:00Z")
+    )
+    external = RawAcquisitionReceiptClaims.model_validate(
+        _external_claims(fetched_at="2026-06-01T12:10:00Z")
+    )
+    eligible = validate_c7_receipt_time_policy(
+        [owned, external],
+        database_received_at=[
+            datetime(2026, 6, 1, 12, 1, tzinfo=timezone.utc),
+            datetime(2026, 6, 1, 12, 11, tzinfo=timezone.utc),
+        ],
+        database_time=datetime(2026, 6, 1, 12, 12, tzinfo=timezone.utc),
+    )
+    assert eligible == datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
+
+    with pytest.raises(EvidenceVaultRawProvenanceError, match="fifteen minutes"):
+        validate_c7_receipt_time_policy(
+            [owned, external],
+            database_received_at=[
+                datetime(2026, 6, 1, 12, 1, tzinfo=timezone.utc),
+                datetime(2026, 6, 1, 12, 30, tzinfo=timezone.utc),
+            ],
+            database_time=datetime(2026, 6, 1, 12, 31, tzinfo=timezone.utc),
+        )
