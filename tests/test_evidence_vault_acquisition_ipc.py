@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import multiprocessing
 import os
@@ -10,6 +11,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import shutil
 from typing import Any
@@ -70,7 +72,9 @@ def _result() -> SignedAcquisitionResultEnvelope:
                 "role": "owned_web",
                 "source_url": "https://example.com",
                 "extracted_document": "Durable verified acquisition document.",
-                "extracted_document_sha256": "3" * 64,
+                "extracted_document_sha256": hashlib.sha256(
+                    b"Durable verified acquisition document."
+                ).hexdigest(),
                 "receipt_fingerprint": _FINGERPRINT,
             }
         ],
@@ -254,7 +258,9 @@ def test_public_document_projection_enforces_character_and_utf8_byte_caps() -> N
         "role": "owned_web",
         "receipt_fingerprint": "a" * 64,
         "source_url": "https://example.com",
-        "extracted_document_sha256": "b" * 64,
+        "extracted_document_sha256": hashlib.sha256(
+            ("x" * 2_097_152).encode()
+        ).hexdigest(),
     }
     accepted = SafeDeterministicDocument(
         **common, extracted_document="x" * 2_097_152
@@ -281,3 +287,95 @@ def test_framing_rejects_trailing_bytes_after_one_message() -> None:
     finally:
         reader.close()
         writer.close()
+
+
+def test_public_result_rejects_document_hash_source_and_external_only_corruption() -> None:
+    payload = _result().model_dump(mode="python", round_trip=True)
+    payload["documents"][0]["extracted_document"] += " corrupted"
+    with pytest.raises(ValueError, match="hash differs"):
+        SignedAcquisitionResultEnvelope.model_validate(payload, strict=True)
+
+    payload = _result().model_dump(mode="python", round_trip=True)
+    payload["documents"][0]["source_url"] = "https://other.example/path"
+    with pytest.raises(ValueError, match="differs from the command brand"):
+        SignedAcquisitionResultEnvelope.model_validate(payload, strict=True)
+
+    payload = _result().model_dump(mode="python", round_trip=True)
+    payload["documents"][0]["role"] = "external_social_profile"
+    payload["documents"][0]["source_url"] = (
+        "https://www.linkedin.com/company/example"
+    )
+    with pytest.raises(ValueError, match="invalid exact role set"):
+        SignedAcquisitionResultEnvelope.model_validate(payload, strict=True)
+
+
+def test_server_bounds_concurrent_handlers_and_rejects_excess_peer(
+    socket_dir: Path,
+) -> None:
+    os.chmod(socket_dir, 0o700)
+    path = socket_dir / "bounded.sock"
+    stop = threading.Event()
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingWorker:
+        def capture(self, _command):
+            entered.set()
+            assert release.wait(2)
+            return _result()
+
+    server = threading.Thread(
+        target=serve_unix_trusted_acquisition,
+        args=(BlockingWorker(), path),
+        kwargs={
+            "stop_event": stop,
+            "socket_mode": 0o600,
+            "accept_timeout_seconds": 0.05,
+            "request_frame_timeout_seconds": 0.1,
+            "max_concurrent_connections": 1,
+        },
+        daemon=True,
+    )
+    first_result = []
+    first = threading.Thread(
+        target=lambda: first_result.append(
+            UnixTrustedAcquisitionClient(path, timeout_seconds=2).capture(_command())
+        )
+    )
+    server.start()
+    try:
+        _wait_for_socket(path, server)
+        first.start()
+        assert entered.wait(1)
+        with pytest.raises(
+            EvidenceVaultAcquisitionTransportError, match="worker_unavailable"
+        ):
+            UnixTrustedAcquisitionClient(path, timeout_seconds=0.2).capture(
+                _command()
+            )
+        release.set()
+        first.join(2)
+        assert len(first_result) == 1
+    finally:
+        release.set()
+        stop.set()
+        server.join(2)
+
+
+def test_public_document_rejects_noncanonical_role_urls() -> None:
+    document = "Exact bytes"
+    common = {
+        "extracted_document": document,
+        "extracted_document_sha256": hashlib.sha256(document.encode()).hexdigest(),
+        "receipt_fingerprint": "a" * 64,
+    }
+    with pytest.raises(ValueError, match="owned source URL"):
+        SafeDeterministicDocument(
+            **common, role="owned_web", source_url="https://EXAMPLE.com/path"
+        )
+    with pytest.raises(ValueError, match="external source URL"):
+        SafeDeterministicDocument(
+            **common,
+            role="external_social_profile",
+            source_url="https://linkedin.com/company/example",
+        )

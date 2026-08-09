@@ -9,13 +9,17 @@ from html.parser import HTMLParser
 import ipaddress
 import json
 import socket
-from typing import Any, Callable, Mapping, Protocol
+import ssl
+from typing import Any, Callable, Literal, Mapping, Protocol
+
+import httpcore
+import httpx
 from urllib.parse import urljoin, urlsplit
 from uuid import uuid4
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from src.services.evidence_vault_acquisition_contract import TrustedAcquisitionCommand
 from src.services.evidence_vault_acquisition_worker import SignedAcquisition
@@ -74,6 +78,10 @@ class EvidenceVaultAcquisitionRuntimeError(RuntimeError):
     """Worker-local live acquisition is not eligible for a signed receipt."""
 
 
+class _ExternalProviderResultError(EvidenceVaultAcquisitionRuntimeError):
+    """The provider responded, but its exact result cannot qualify."""
+
+
 class _StrictRuntimeModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -105,6 +113,16 @@ class ExternalProviderObservation(_StrictRuntimeModel):
 class CollectedAcquisition(_StrictRuntimeModel):
     owned: OwnedHttpObservation
     external: ExternalProviderObservation | None
+    external_outcome: Literal[
+        "not_discovered",
+        "captured",
+        "owned_only_downgrade",
+    ]
+    external_failure_reason: Literal[
+        "provider_not_configured",
+        "provider_unavailable",
+        "provider_result_ineligible",
+    ] | None
 
 
 class OwnedFetcher(Protocol):
@@ -125,6 +143,7 @@ class TrustedAcquisitionRuntime:
     """Worker-local collect/sign capabilities; this is not an IPC surface."""
 
     __slots__ = (
+        "__allow_owned_only_downgrade",
         "__external_fetch",
         "__owned_fetch",
         "__private_key",
@@ -138,11 +157,20 @@ class TrustedAcquisitionRuntime:
         public_key_registry: PublicKeyRegistry | Mapping[str, Any],
         owned_fetch: OwnedFetcher,
         external_fetch: ExternalFetcher | None = None,
+        allow_owned_only_downgrade: bool = False,
     ) -> None:
         if not isinstance(private_key, Ed25519PrivateKey):
             raise EvidenceVaultAcquisitionRuntimeError("worker_private_key_invalid")
-        if not callable(owned_fetch) or (external_fetch is not None and not callable(external_fetch)):
-            raise EvidenceVaultAcquisitionRuntimeError("worker_fetch_capability_invalid")
+        if not callable(owned_fetch) or (
+            external_fetch is not None and not callable(external_fetch)
+        ):
+            raise EvidenceVaultAcquisitionRuntimeError(
+                "worker_fetch_capability_invalid"
+            )
+        if not isinstance(allow_owned_only_downgrade, bool):
+            raise EvidenceVaultAcquisitionRuntimeError(
+                "worker_downgrade_policy_invalid"
+            )
         try:
             registry = PublicKeyRegistry.model_validate(
                 public_key_registry.model_dump(mode="json")
@@ -165,6 +193,7 @@ class TrustedAcquisitionRuntime:
             registry = None
         if registry is None:
             raise EvidenceVaultAcquisitionRuntimeError("worker_key_registry_mismatch")
+        self.__allow_owned_only_downgrade = allow_owned_only_downgrade
         self.__private_key = private_key
         self.__registry_json = registry.model_dump_json()
         self.__owned_fetch = owned_fetch
@@ -181,19 +210,49 @@ class TrustedAcquisitionRuntime:
             raise EvidenceVaultAcquisitionRuntimeError("owned_collection_failed")
         linkedin_url = _owned_linkedin_fact(owned.raw_fragment)
         external: ExternalProviderObservation | None = None
-        if linkedin_url is not None and self.__external_fetch is not None:
-            try:
-                candidate = _model(
-                    self.__external_fetch(linkedin_url),
-                    ExternalProviderObservation,
-                )
-                _validate_external_observation(linkedin_url, candidate)
-                external = candidate
-            except Exception:
-                external = None
+        outcome: Literal[
+            "not_discovered",
+            "captured",
+            "owned_only_downgrade",
+        ] = "not_discovered"
+        failure_reason: Literal[
+            "provider_not_configured",
+            "provider_unavailable",
+            "provider_result_ineligible",
+        ] | None = None
+        if linkedin_url is not None:
+            if self.__external_fetch is None:
+                failure_reason = "provider_not_configured"
+            else:
+                try:
+                    candidate_value = self.__external_fetch(linkedin_url)
+                except _ExternalProviderResultError:
+                    failure_reason = "provider_result_ineligible"
+                except EvidenceVaultAcquisitionRuntimeError:
+                    failure_reason = "provider_unavailable"
+                else:
+                    try:
+                        candidate = _model(
+                            candidate_value,
+                            ExternalProviderObservation,
+                        )
+                        _validate_external_observation(linkedin_url, candidate)
+                    except (ValidationError, ValueError):
+                        failure_reason = "provider_result_ineligible"
+                    else:
+                        external = candidate
+                        outcome = "captured"
+            if external is None:
+                if not self.__allow_owned_only_downgrade:
+                    raise EvidenceVaultAcquisitionRuntimeError(
+                        "external_collection_failed"
+                    )
+                outcome = "owned_only_downgrade"
         return CollectedAcquisition(
             owned=owned,
             external=external,
+            external_outcome=outcome,
+            external_failure_reason=failure_reason,
         ).model_dump(mode="json")
 
     def sign(
@@ -205,11 +264,16 @@ class TrustedAcquisitionRuntime:
         try:
             frozen = _model(collected, CollectedAcquisition)
             _validate_owned_observation(validated, frozen.owned)
+            linkedin_url = _owned_linkedin_fact(frozen.owned.raw_fragment)
             if frozen.external is not None:
-                linkedin_url = _owned_linkedin_fact(frozen.owned.raw_fragment)
                 if linkedin_url is None:
                     raise ValueError("external collection has no owned raw link")
                 _validate_external_observation(linkedin_url, frozen.external)
+            _validate_external_outcome(
+                frozen,
+                linkedin_url=linkedin_url,
+                allow_owned_only_downgrade=self.__allow_owned_only_downgrade,
+            )
             registry = PublicKeyRegistry.model_validate_json(
                 self.__registry_json,
                 strict=True,
@@ -225,6 +289,85 @@ class TrustedAcquisitionRuntime:
         if signed is None:
             raise EvidenceVaultAcquisitionRuntimeError("acquisition_signing_failed")
         return signed
+
+
+class PublicOnlyNetworkBackend(httpcore.NetworkBackend):
+    """Reject non-global resolution and connected peers before HTTP bytes exist."""
+
+    def __init__(
+        self,
+        *,
+        resolver: Callable[..., Any] = socket.getaddrinfo,
+        delegate: httpcore.NetworkBackend | None = None,
+    ) -> None:
+        self._resolver = resolver
+        self._delegate = delegate or httpcore.SyncBackend()
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Any = None,
+    ) -> httpcore.NetworkStream:
+        resolved = _require_public_resolution(
+            host,
+            port=port,
+            resolver=self._resolver,
+        )
+        selected_address = resolved[0]
+        stream = self._delegate.connect_tcp(
+            selected_address,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+        try:
+            server_address = stream.get_extra_info("server_addr")
+            address = server_address[0]
+            peer = ipaddress.ip_address(address)
+            resolved_addresses = {
+                ipaddress.ip_address(item) for item in resolved
+            }
+            if not peer.is_global or peer not in resolved_addresses:
+                raise ValueError("connected peer is not the pinned global address")
+        except Exception:
+            stream.close()
+            raise EvidenceVaultAcquisitionRuntimeError(
+                "network_peer_scope_invalid"
+            ) from None
+        return stream
+
+    def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Any = None,
+    ) -> httpcore.NetworkStream:
+        del path, timeout, socket_options
+        raise EvidenceVaultAcquisitionRuntimeError(
+            "network_unix_socket_denied"
+        )
+
+    def sleep(self, seconds: float) -> None:
+        self._delegate.sleep(seconds)
+
+
+class PublicOnlyHTTPTransport(httpx.HTTPTransport):
+    """HTTPX transport whose network backend enforces public peers pre-request."""
+
+    def __init__(self) -> None:
+        super().__init__(trust_env=False, retries=0)
+        self._pool.close()
+        self._pool = httpcore.ConnectionPool(
+            ssl_context=ssl.create_default_context(),
+            max_connections=10,
+            max_keepalive_connections=0,
+            retries=0,
+            network_backend=PublicOnlyNetworkBackend(),
+        )
 
 
 class HttpxOwnedFetcher:
@@ -251,64 +394,100 @@ class HttpxOwnedFetcher:
                 canonical_domain=canonical_domain,
                 resolver=self._resolver,
             )
-            response = self._client.get(
+            with self._client.stream(
+                "GET",
                 current,
                 headers={
                     "accept": "text/html,application/xhtml+xml,text/plain;q=0.8",
+                    "accept-encoding": "identity",
                     "user-agent": "B3S-Evidence-Vault-Acquisition/1",
                 },
                 follow_redirects=False,
                 timeout=20.0,
-            )
-            status = int(response.status_code)
-            if status in {300, 301, 302, 303, 307, 308}:
-                location = response.headers.get("location")
-                if not isinstance(location, str) or not location:
-                    raise EvidenceVaultAcquisitionRuntimeError("owned_redirect_invalid")
-                destination = urljoin(current, location)
-                _require_public_same_brand_url(
-                    destination,
-                    canonical_domain=canonical_domain,
-                    resolver=self._resolver,
-                )
-                redirects.append(
-                    RedirectHop(
-                        request_url=current,
-                        status_code=status,
-                        location_url=destination,
+            ) as response:
+                _require_public_peer(response)
+                _require_identity_encoding(response.headers)
+                status = int(response.status_code)
+                if status in {300, 301, 302, 303, 307, 308}:
+                    location = response.headers.get("location")
+                    if not isinstance(location, str) or not location:
+                        raise EvidenceVaultAcquisitionRuntimeError(
+                            "owned_redirect_invalid"
+                        )
+                    destination = urljoin(current, location)
+                    _require_public_same_brand_url(
+                        destination,
+                        canonical_domain=canonical_domain,
+                        resolver=self._resolver,
                     )
+                    redirects.append(
+                        RedirectHop(
+                            request_url=current,
+                            status_code=status,
+                            location_url=destination,
+                        )
+                    )
+                    current = destination
+                    continue
+                if not 200 <= status <= 299:
+                    raise EvidenceVaultAcquisitionRuntimeError(
+                        "owned_http_status_ineligible"
+                    )
+                body = _read_bounded_body(response, maximum=_MAX_CAPTURE_BYTES)
+                media_type, charset = _media_type_and_charset(
+                    response.headers.get("content-type")
                 )
-                current = destination
-                continue
-            if not 200 <= status <= 299:
-                raise EvidenceVaultAcquisitionRuntimeError("owned_http_status_ineligible")
-            body = bytes(response.content)
-            if not 1 <= len(body) <= _MAX_CAPTURE_BYTES:
-                raise EvidenceVaultAcquisitionRuntimeError("owned_response_size_invalid")
-            media_type, charset = _media_type_and_charset(response.headers.get("content-type"))
-            if media_type not in {"text/html", "application/xhtml+xml", "text/plain"}:
-                raise EvidenceVaultAcquisitionRuntimeError("owned_media_type_ineligible")
-            try:
-                content = body.decode(charset, errors="strict")
-            except (LookupError, UnicodeDecodeError):
-                raise EvidenceVaultAcquisitionRuntimeError("owned_text_decode_failed") from None
-            if not content.strip():
-                raise EvidenceVaultAcquisitionRuntimeError("owned_content_empty")
-            fragment: dict[str, JsonValue] = {"url": current, "content": content}
-            linkedin = _discover_linkedin_company_url(content, base_url=current)
-            if linkedin is not None:
-                fragment["linkedin"] = linkedin
-            return OwnedHttpObservation(
-                requested_url=command.brand_url,
-                redirect_chain=redirects,
-                final_url=current,
-                fetched_at=_utc_now(),
-                status_code=status,
-                selected_headers=_selected_headers(response.headers),
-                media_type=media_type,
-                byte_count=len(body),
-                raw_fragment=fragment,
-            )
+                if media_type not in {
+                    "text/html",
+                    "application/xhtml+xml",
+                    "text/plain",
+                }:
+                    raise EvidenceVaultAcquisitionRuntimeError(
+                        "owned_media_type_ineligible"
+                    )
+                try:
+                    content = body.decode(charset, errors="strict")
+                except (LookupError, UnicodeDecodeError):
+                    raise EvidenceVaultAcquisitionRuntimeError(
+                        "owned_text_decode_failed"
+                    ) from None
+                if not content.strip():
+                    raise EvidenceVaultAcquisitionRuntimeError(
+                        "owned_content_empty"
+                    )
+                if media_type in {"text/html", "application/xhtml+xml"}:
+                    document_text, linkedin = _extract_owned_html(
+                        content,
+                        base_url=current,
+                    )
+                    if not document_text:
+                        raise EvidenceVaultAcquisitionRuntimeError(
+                            "owned_document_empty"
+                        )
+                    fragment: dict[str, JsonValue] = {
+                        "url": current,
+                        "raw_body": content,
+                        "text": document_text,
+                    }
+                else:
+                    fragment = {
+                        "url": current,
+                        "text": content,
+                    }
+                    linkedin = None
+                if linkedin is not None:
+                    fragment["linkedin"] = linkedin
+                return OwnedHttpObservation(
+                    requested_url=command.brand_url,
+                    redirect_chain=redirects,
+                    final_url=current,
+                    fetched_at=_utc_now(),
+                    status_code=status,
+                    selected_headers=_selected_headers(response.headers),
+                    media_type=media_type,
+                    byte_count=len(body),
+                    raw_fragment=fragment,
+                )
         raise EvidenceVaultAcquisitionRuntimeError("owned_redirect_limit_exceeded")
 
 
@@ -336,36 +515,43 @@ class HttpxExaExactUrlFetcher:
             "evidence-vault-exa-exact-url-request-v1",
             request_body,
         )
-        response = self._client.post(
+        with self._client.stream(
+            "POST",
             "https://api.exa.ai/contents",
             headers={
                 "accept": "application/json",
+                "accept-encoding": "identity",
                 "content-type": "application/json",
                 "x-api-key": self._api_key,
             },
             content=canonical_json(request_body).encode("utf-8"),
             timeout=30.0,
-        )
-        status = int(response.status_code)
-        body = bytes(response.content)
-        if not 200 <= status <= 299 or not 1 <= len(body) <= _MAX_PROVIDER_BYTES:
-            raise EvidenceVaultAcquisitionRuntimeError("exa_response_ineligible")
-        media_type, _charset = _media_type_and_charset(response.headers.get("content-type"))
+        ) as response:
+            _require_public_peer(response)
+            _require_identity_encoding(response.headers)
+            status = int(response.status_code)
+            if not 200 <= status <= 299:
+                raise EvidenceVaultAcquisitionRuntimeError("exa_response_ineligible")
+            body = _read_bounded_body(response, maximum=_MAX_PROVIDER_BYTES)
+            selected_headers = _selected_headers(response.headers)
+            media_type, _charset = _media_type_and_charset(
+                response.headers.get("content-type")
+            )
         if media_type != "application/json":
-            raise EvidenceVaultAcquisitionRuntimeError("exa_media_type_ineligible")
+            raise _ExternalProviderResultError("exa_media_type_ineligible")
         try:
             payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
-            raise EvidenceVaultAcquisitionRuntimeError("exa_json_invalid") from None
+            raise _ExternalProviderResultError("exa_json_invalid") from None
         results = payload.get("results") if isinstance(payload, Mapping) else None
         if not isinstance(results, list):
-            raise EvidenceVaultAcquisitionRuntimeError("exa_results_invalid")
+            raise _ExternalProviderResultError("exa_results_invalid")
         matches: list[tuple[int, Mapping[str, Any]]] = []
         for ordinal, item in enumerate(results):
             if isinstance(item, Mapping) and item.get("url") == source_url:
                 matches.append((ordinal, item))
         if len(matches) != 1:
-            raise EvidenceVaultAcquisitionRuntimeError("exa_exact_result_not_unique")
+            raise _ExternalProviderResultError("exa_exact_result_not_unique")
         ordinal, item = matches[0]
         title = item.get("title")
         summary = item.get("summary")
@@ -376,7 +562,7 @@ class HttpxExaExactUrlFetcher:
             or not isinstance(highlights, list)
             or not all(isinstance(value, str) for value in highlights)
         ):
-            raise EvidenceVaultAcquisitionRuntimeError("exa_result_fields_invalid")
+            raise _ExternalProviderResultError("exa_result_fields_invalid")
         fragment: dict[str, JsonValue] = {
             "url": source_url,
             "title": title,
@@ -390,7 +576,7 @@ class HttpxExaExactUrlFetcher:
             reported_source_url=source_url,
             fetched_at=_utc_now(),
             status_code=status,
-            selected_headers=_selected_headers(response.headers),
+            selected_headers=selected_headers,
             media_type=media_type,
             byte_count=len(body),
             raw_fragment=fragment,
@@ -405,7 +591,12 @@ def _sign_collected(
     registry: PublicKeyRegistry,
 ) -> SignedAcquisition:
     raw_payload: dict[str, Any] = {
-        "sources": {"owned": collected.owned.raw_fragment}
+        "sources": {"owned": collected.owned.raw_fragment},
+        "acquisition_outcome": {
+            "schema_version": "evidence-vault-acquisition-outcome-v1",
+            "external": collected.external_outcome,
+            "failure_reason": collected.external_failure_reason,
+        },
     }
     if collected.external is not None:
         raw_payload["sources"]["external"] = collected.external.raw_fragment
@@ -573,6 +764,38 @@ def _model(value: Any, model: type[BaseModel]) -> Any:
     return model.model_validate(deepcopy(dict(value)), strict=True)
 
 
+def _validate_external_outcome(
+    collected: CollectedAcquisition,
+    *,
+    linkedin_url: str | None,
+    allow_owned_only_downgrade: bool,
+) -> None:
+    if collected.external_outcome == "captured":
+        if (
+            collected.external is None
+            or linkedin_url is None
+            or collected.external_failure_reason is not None
+        ):
+            raise ValueError("captured external outcome is inconsistent")
+        return
+    if collected.external_outcome == "not_discovered":
+        if (
+            collected.external is not None
+            or linkedin_url is not None
+            or collected.external_failure_reason is not None
+        ):
+            raise ValueError("not-discovered external outcome is inconsistent")
+        return
+    if (
+        collected.external_outcome != "owned_only_downgrade"
+        or collected.external is not None
+        or linkedin_url is None
+        or collected.external_failure_reason is None
+        or not allow_owned_only_downgrade
+    ):
+        raise ValueError("owned-only downgrade is inconsistent or denied")
+
+
 def _validate_owned_observation(
     command: TrustedAcquisitionCommand,
     observation: OwnedHttpObservation,
@@ -626,13 +849,17 @@ def _owned_linkedin_fact(fragment: Mapping[str, Any]) -> str | None:
     return value
 
 
-class _LinkParser(HTMLParser):
+class _OwnedHtmlParser(HTMLParser):
     def __init__(self, base_url: str) -> None:
         super().__init__(convert_charrefs=True)
         self.base_url = base_url
         self.links: set[str] = set()
+        self.text_parts: list[str] = []
+        self._suppressed_depth = 0
 
-    def handle_starttag(self, _tag: str, attrs: list[tuple[str, str | None]]) -> None:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() in {"script", "style", "noscript", "template"}:
+            self._suppressed_depth += 1
         for name, value in attrs:
             if name.lower() != "href" or not isinstance(value, str):
                 continue
@@ -643,17 +870,34 @@ class _LinkParser(HTMLParser):
                 continue
             self.links.add(candidate)
 
+    def handle_endtag(self, tag: str) -> None:
+        if (
+            tag.lower() in {"script", "style", "noscript", "template"}
+            and self._suppressed_depth
+        ):
+            self._suppressed_depth -= 1
 
-def _discover_linkedin_company_url(content: str, *, base_url: str) -> str | None:
-    parser = _LinkParser(base_url)
+    def handle_data(self, data: str) -> None:
+        if not self._suppressed_depth and data.strip():
+            self.text_parts.append(data)
+
+
+def _extract_owned_html(
+    content: str,
+    *,
+    base_url: str,
+) -> tuple[str, str | None]:
+    parser = _OwnedHtmlParser(base_url)
     try:
         parser.feed(content)
         parser.close()
     except Exception:
-        return None
-    if len(parser.links) != 1:
-        return None
-    return next(iter(parser.links))
+        raise EvidenceVaultAcquisitionRuntimeError(
+            "owned_html_parse_failed"
+        ) from None
+    document = " ".join(" ".join(parser.text_parts).split()).strip()
+    linkedin = next(iter(parser.links)) if len(parser.links) == 1 else None
+    return document, linkedin
 
 
 def _strict_linkedin_company_url(value: str) -> None:
@@ -662,7 +906,8 @@ def _strict_linkedin_company_url(value: str) -> None:
     parsed = urlsplit(value)
     if (
         parsed.scheme != "https"
-        or (parsed.hostname or "").lower().removeprefix("www.") != "linkedin.com"
+        or parsed.netloc != "www.linkedin.com"
+        or parsed.hostname != "www.linkedin.com"
         or parsed.username is not None
         or parsed.password is not None
         or parsed.port is not None
@@ -684,6 +929,45 @@ def _strict_linkedin_company_url(value: str) -> None:
         raise ValueError("LinkedIn company URL is invalid")
 
 
+def _require_public_peer(response: Any) -> None:
+    try:
+        network_stream = response.extensions["network_stream"]
+        server_address = network_stream.get_extra_info("server_addr")
+        address = server_address[0]
+        if not isinstance(address, str) or not ipaddress.ip_address(address).is_global:
+            raise ValueError("peer is not global")
+    except Exception:
+        raise EvidenceVaultAcquisitionRuntimeError("network_peer_scope_invalid") from None
+
+
+def _require_public_resolution(
+    host: str,
+    *,
+    port: int,
+    resolver: Callable[..., Any],
+) -> tuple[str, ...]:
+    try:
+        answers = resolver(host, port, type=socket.SOCK_STREAM)
+        parsed_addresses = {
+            ipaddress.ip_address(item[4][0]) for item in answers
+        }
+        if not parsed_addresses or any(
+            not address.is_global for address in parsed_addresses
+        ):
+            raise ValueError("non-global address")
+        return tuple(
+            str(address)
+            for address in sorted(
+                parsed_addresses,
+                key=lambda item: (item.version, int(item)),
+            )
+        )
+    except Exception:
+        raise EvidenceVaultAcquisitionRuntimeError(
+            "network_dns_scope_invalid"
+        ) from None
+
+
 def _require_public_same_brand_url(
     value: str,
     *,
@@ -703,12 +987,11 @@ def _require_public_same_brand_url(
     ):
         raise EvidenceVaultAcquisitionRuntimeError("owned_url_scope_invalid")
     try:
-        answers = resolver(host, 443, type=socket.SOCK_STREAM)
-        addresses = {item[4][0] for item in answers}
-        if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
-            raise ValueError("non-global address")
-    except Exception:
-        raise EvidenceVaultAcquisitionRuntimeError("owned_dns_scope_invalid") from None
+        _require_public_resolution(host, port=443, resolver=resolver)
+    except EvidenceVaultAcquisitionRuntimeError:
+        raise EvidenceVaultAcquisitionRuntimeError(
+            "owned_dns_scope_invalid"
+        ) from None
 
 
 def _canonical_host(value: str) -> str:
@@ -722,6 +1005,33 @@ def _selected_headers(headers: Mapping[str, Any]) -> dict[str, str]:
         if canonical in _SAFE_HEADERS:
             selected[canonical] = str(value)
     return selected
+
+
+def _require_identity_encoding(headers: Mapping[str, Any]) -> None:
+    value = headers.get("content-encoding")
+    if value is not None and str(value).strip().lower() not in {"", "identity"}:
+        raise EvidenceVaultAcquisitionRuntimeError(
+            "response_content_encoding_ineligible"
+        )
+
+
+def _read_bounded_body(response: Any, *, maximum: int) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    try:
+        iterator = response.iter_raw()
+    except Exception:
+        raise EvidenceVaultAcquisitionRuntimeError("response_stream_invalid") from None
+    for chunk in iterator:
+        if not isinstance(chunk, bytes):
+            raise EvidenceVaultAcquisitionRuntimeError("response_stream_invalid")
+        size += len(chunk)
+        if size > maximum:
+            raise EvidenceVaultAcquisitionRuntimeError("response_size_invalid")
+        chunks.append(chunk)
+    if size == 0:
+        raise EvidenceVaultAcquisitionRuntimeError("response_size_invalid")
+    return b"".join(chunks)
 
 
 def _media_type_and_charset(value: Any) -> tuple[str, str]:
@@ -764,5 +1074,7 @@ __all__ = [
     "HttpxExaExactUrlFetcher",
     "HttpxOwnedFetcher",
     "OwnedHttpObservation",
+    "PublicOnlyHTTPTransport",
+    "PublicOnlyNetworkBackend",
     "TrustedAcquisitionRuntime",
 ]

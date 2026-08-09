@@ -6,6 +6,8 @@ no database, network-collector, signing, private-key, or worker-runtime imports.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import ipaddress
 import re
 from typing import Literal, Protocol
@@ -82,6 +84,16 @@ class SafeDeterministicDocument(_StrictPublicModel):
             raise ValueError("extracted document exceeds the durable v1 bound")
         return value
 
+    @model_validator(mode="after")
+    def _validate_document_binding(self) -> "SafeDeterministicDocument":
+        expected = hashlib.sha256(
+            self.extracted_document.encode("utf-8")
+        ).hexdigest()
+        if not hmac.compare_digest(self.extracted_document_sha256, expected):
+            raise ValueError("public document hash differs from its bytes")
+        _validate_role_source_url(self.role, self.source_url)
+        return self
+
 
 class SignedAcquisitionResultEnvelope(_StrictPublicModel):
     """Minimal verified result; no raw payload, headers, claims, DB time or secret."""
@@ -124,8 +136,17 @@ class SignedAcquisitionResultEnvelope(_StrictPublicModel):
         if self.receipt_set_fingerprint != expected_set:
             raise ValueError("public receipt_set_fingerprint differs from documents")
         roles = [document.role for document in self.documents]
-        if len(roles) != len(set(roles)):
-            raise ValueError("public documents must have unique roles")
+        if set(roles) not in (
+            {"owned_web"},
+            {"owned_web", "external_social_profile"},
+        ) or len(roles) != len(set(roles)):
+            raise ValueError("public documents have an invalid exact role set")
+        brand_host = _canonical_brand_origin(self.brand_url)
+        owned = next(
+            document for document in self.documents if document.role == "owned_web"
+        )
+        if _canonical_web_host(owned.source_url) != brand_host:
+            raise ValueError("public owned source differs from the command brand")
         return self
 
 
@@ -134,6 +155,67 @@ class TrustedAcquisitionClient(Protocol):
         self,
         command: TrustedAcquisitionCommand,
     ) -> SignedAcquisitionResultEnvelope: ...
+
+
+def _validate_role_source_url(role: str, value: str) -> None:
+    if role == "owned_web":
+        _canonical_web_host(value)
+        return
+    parsed = urlsplit(value)
+    path_parts = parsed.path.split("/")
+    slug = (
+        path_parts[2]
+        if len(path_parts) == 3 and path_parts[1] == "company"
+        else ""
+    )
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or not value.isascii()
+        or parsed.scheme != "https"
+        or parsed.netloc != "www.linkedin.com"
+        or parsed.query
+        or parsed.fragment
+        or parsed.path.endswith("/")
+        or not slug
+        or len(slug) > 100
+        or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?", slug)
+    ):
+        raise ValueError("public external source URL is invalid")
+
+
+def _canonical_web_host(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or not value.isascii()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or "\\" in value
+    ):
+        raise ValueError("public owned source URL is invalid")
+    parsed = urlsplit(value)
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if (
+        parsed.scheme != "https"
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port is not None
+        or parsed.netloc != parsed.hostname
+        or parsed.fragment
+    ):
+        raise ValueError("public owned source URL is invalid")
+    labels = host.split(".")
+    if len(labels) < 2 or any(
+        label.startswith("xn--") or not _DOMAIN_LABEL.fullmatch(label)
+        for label in labels
+    ):
+        raise ValueError("public owned source URL is invalid")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    raise ValueError("public owned source URL is invalid")
 
 
 def _canonical_brand_origin(value: str) -> str:

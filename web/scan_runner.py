@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import copy
+import hashlib
 import logging
 import os
 import threading
@@ -241,7 +242,18 @@ def _scan_cancelled(scan_id: str) -> bool:
 def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool) -> None:
     try:
         _set_phase(scan_id, "capture", "running")
-        snapshot = _capture_snapshot(scan_id, url, brand_name)
+        from src.config import (
+            BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED,
+        )
+
+        if BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED:
+            snapshot = _capture_verified_raw_shadow(
+                scan_id=scan_id,
+                url=url,
+                brand_name=brand_name,
+            )
+        else:
+            snapshot = _capture_snapshot(scan_id, url, brand_name)
         if _scan_cancelled(scan_id):
             return
         _set_phase(scan_id, "capture", "done")
@@ -263,9 +275,6 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                     return
             snapshot["acquisition_gate"] = current_gate
 
-        if _scan_cancelled(scan_id):
-            return
-        _capture_verified_raw_shadow(scan_id=scan_id, url=url)
         if _scan_cancelled(scan_id):
             return
         _set_phase(scan_id, "interpret", "running")
@@ -321,8 +330,13 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 _LOG.exception("failed to persist terminal scanner error", extra={"scan_id": scan_id})
 
 
-def _capture_verified_raw_shadow(*, scan_id: str, url: str) -> None:
-    """Persist signed raw provenance before interpretation when explicitly enabled."""
+def _capture_verified_raw_shadow(
+    *,
+    scan_id: str,
+    url: str,
+    brand_name: str,
+) -> dict[str, Any]:
+    """Persist and project the exact verified documents before interpretation."""
 
     from src.config import (
         BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED,
@@ -330,7 +344,7 @@ def _capture_verified_raw_shadow(*, scan_id: str, url: str) -> None:
     )
 
     if not BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED:
-        return
+        raise RuntimeError("verified_raw_acquisition_disabled")
     if os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() != "vault":
         raise RuntimeError("verified_raw_acquisition_invalid_environment")
     if not BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH:
@@ -355,10 +369,18 @@ def _capture_verified_raw_shadow(*, scan_id: str, url: str) -> None:
                 brand_url=canonical_url,
             )
         )
+        documents = list(result.documents)
+        valid_result = bool(
+            documents
+            and any(document.role == "owned_web" for document in documents)
+        )
     except Exception:
         result = None
-    if result is None:
+        documents = []
+        valid_result = False
+    if result is None or not valid_result:
         raise RuntimeError("verified_raw_acquisition_failed")
+
     safe_status = {
         "state": "persisted_shadow",
         "capture_id": result.capture_id,
@@ -369,10 +391,128 @@ def _capture_verified_raw_shadow(*, scan_id: str, url: str) -> None:
     with _LOCK:
         status = _SCANS.get(scan_id)
         if status is None or status.get("state") == "cancelled":
-            return
+            raise RuntimeError("verified_raw_acquisition_cancelled")
         status["verified_raw_acquisition"] = safe_status
         persisted_status = _status_copy_locked(status)
     _persist_scan_status(persisted_status)
+    return _verified_raw_pre_analysis_snapshot(
+        scan_id=scan_id,
+        brand_name=brand_name,
+        canonical_url=canonical_url,
+        documents=documents,
+    )
+
+
+def _verified_raw_pre_analysis_snapshot(
+    *,
+    scan_id: str,
+    brand_name: str,
+    canonical_url: str,
+    documents: list[Any],
+) -> dict[str, Any]:
+    source_by_role = {
+        "owned_web": "web",
+        "external_social_profile": "exa",
+    }
+    raw_inputs: list[dict[str, Any]] = []
+    acquisition_steps: dict[str, Any] = {}
+    acquisition_rows: list[dict[str, str]] = []
+    for document in documents:
+        source = source_by_role.get(document.role)
+        if source is None:
+            raise RuntimeError("verified_raw_acquisition_failed")
+        raw_inputs.append(
+            {
+                "source": "verified_raw_document",
+                "payload": {
+                    "role": document.role,
+                    "url": document.source_url,
+                    "content": document.extracted_document,
+                    "extracted_document_sha256": (
+                        document.extracted_document_sha256
+                    ),
+                    "receipt_fingerprint": document.receipt_fingerprint,
+                },
+            }
+        )
+        acquisition_steps[source] = {
+            "source": source,
+            "status": "success",
+            "details": {
+                "reason": "verified_raw_document_persisted",
+                "verified_raw": True,
+            },
+        }
+        acquisition_rows.append(
+            {
+                "source": source,
+                "status": "success",
+                "detail": "verified_raw_document_persisted",
+            }
+        )
+    if "exa" not in acquisition_steps:
+        acquisition_steps["exa"] = {
+            "source": "exa",
+            "status": "error",
+            "error": "verified_external_document_unavailable",
+            "details": {
+                "reason": "verified_external_document_unavailable",
+                "verified_raw": True,
+            },
+        }
+        acquisition_rows.append(
+            {
+                "source": "exa",
+                "status": "error",
+                "detail": "verified_external_document_unavailable",
+            }
+        )
+    for source in ("searchapi", "github", "context", "visual_acquisition"):
+        acquisition_steps[source] = {
+            "source": source,
+            "status": "disabled",
+            "details": {
+                "reason": "not_executed_in_verified_raw_mode",
+                "verified_raw": True,
+            },
+        }
+        acquisition_rows.append(
+            {
+                "source": source,
+                "status": "disabled",
+                "detail": "not_executed_in_verified_raw_mode",
+            }
+        )
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        if status is not None:
+            status["acquisition"] = sorted(
+                acquisition_rows,
+                key=lambda row: row["source"],
+            )
+            persisted_status = _status_copy_locked(status)
+        else:
+            persisted_status = None
+    if persisted_status is not None:
+        _persist_scan_status(persisted_status)
+    return {
+        "run": {
+            "brand_name": brand_name,
+            "id": _stable_verified_source_run_id(scan_id),
+            "url": canonical_url,
+        },
+        "raw_inputs": raw_inputs,
+        "acquisition_steps": acquisition_steps,
+        "features": [],
+    }
+
+
+def _stable_verified_source_run_id(scan_id: str) -> int:
+    value = int.from_bytes(
+        hashlib.sha256(scan_id.encode("utf-8")).digest()[:8],
+        "big",
+    ) & ((1 << 63) - 1)
+    return value or 1
 
 
 def _attach_evidence_stability(report: dict[str, Any]) -> dict[str, Any]:

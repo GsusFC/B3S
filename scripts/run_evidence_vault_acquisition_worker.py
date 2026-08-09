@@ -26,6 +26,7 @@ from src.services.evidence_vault_acquisition_ipc_server import (
 from src.services.evidence_vault_acquisition_runtime import (
     HttpxExaExactUrlFetcher,
     HttpxOwnedFetcher,
+    PublicOnlyHTTPTransport,
     TrustedAcquisitionRuntime,
 )
 from src.services.evidence_vault_acquisition_worker import TrustedAcquisitionWorker
@@ -45,6 +46,14 @@ def main() -> int:
     parser.add_argument("--ingest-dsn-file", type=Path, required=True)
     parser.add_argument("--exa-api-key-file", type=Path)
     parser.add_argument("--socket-mode", choices=("0600", "0660"), default="0660")
+    parser.add_argument(
+        "--allow-owned-only-downgrade",
+        action="store_true",
+        help=(
+            "Explicitly persist a signed owned-only outcome when an owned "
+            "external link cannot be acquired; disabled by default"
+        ),
+    )
     args = parser.parse_args()
 
     private_key = _load_private_key(args.private_key_file)
@@ -58,8 +67,12 @@ def main() -> int:
     )
 
     # Ignore ambient proxy/netrc settings so acquisition egress is deployment-owned.
-    with httpx.Client(trust_env=False) as owned_client, httpx.Client(
-        trust_env=False
+    with httpx.Client(
+        transport=PublicOnlyHTTPTransport(),
+        trust_env=False,
+    ) as owned_client, httpx.Client(
+        transport=PublicOnlyHTTPTransport(),
+        trust_env=False,
     ) as provider_client:
         owned_fetcher = HttpxOwnedFetcher(owned_client)
         external_fetcher = (
@@ -72,6 +85,7 @@ def main() -> int:
             public_key_registry=registry,
             owned_fetch=owned_fetcher,
             external_fetch=external_fetcher,
+            allow_owned_only_downgrade=args.allow_owned_only_downgrade,
         )
         repository = EvidenceVaultRawRepository(
             ingest_dsn,

@@ -45,6 +45,9 @@ def serve_unix_trusted_acquisition(
     stop_event: threading.Event | None = None,
     socket_mode: int = 0o660,
     accept_timeout_seconds: float = 0.25,
+    request_frame_timeout_seconds: float = 2.0,
+    response_io_timeout_seconds: float = 300.0,
+    max_concurrent_connections: int = 4,
 ) -> None:
     """Serve the single capture verb until ``stop_event`` is set.
 
@@ -64,7 +67,24 @@ def serve_unix_trusted_acquisition(
         or not 0.05 <= float(accept_timeout_seconds) <= 5.0
     ):
         raise ValueError("accept timeout is invalid")
+    for value, label, lower, upper in (
+        (request_frame_timeout_seconds, "request frame", 0.05, 10.0),
+        (response_io_timeout_seconds, "response I/O", 1.0, 300.0),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not lower <= float(value) <= upper
+        ):
+            raise ValueError(f"{label} timeout is invalid")
+    if (
+        isinstance(max_concurrent_connections, bool)
+        or not isinstance(max_concurrent_connections, int)
+        or not 1 <= max_concurrent_connections <= 32
+    ):
+        raise ValueError("max concurrent connections is invalid")
     event = stop_event or threading.Event()
+    connection_slots = threading.BoundedSemaphore(max_concurrent_connections)
     _remove_stale_owned_socket(Path(path))
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -81,17 +101,50 @@ def serve_unix_trusted_acquisition(
                 connection, _ = server.accept()
             except socket.timeout:
                 continue
-            with connection:
-                connection.settimeout(300.0)
-                _serve_connection(worker, connection)
+            if not connection_slots.acquire(blocking=False):
+                connection.close()
+                continue
+            threading.Thread(
+                target=_handle_connection,
+                args=(
+                    worker,
+                    connection,
+                    connection_slots,
+                    float(request_frame_timeout_seconds),
+                    float(response_io_timeout_seconds),
+                ),
+                daemon=True,
+                name="evidence-vault-acquisition-connection",
+            ).start()
     finally:
         server.close()
         _remove_stale_owned_socket(Path(path))
 
 
+def _handle_connection(
+    worker: _CaptureCapability,
+    connection: socket.socket,
+    connection_slots: threading.BoundedSemaphore,
+    request_frame_timeout_seconds: float,
+    response_io_timeout_seconds: float,
+) -> None:
+    try:
+        with connection:
+            connection.settimeout(request_frame_timeout_seconds)
+            _serve_connection(
+                worker,
+                connection,
+                response_io_timeout_seconds=response_io_timeout_seconds,
+            )
+    finally:
+        connection_slots.release()
+
+
 def _serve_connection(
     worker: _CaptureCapability,
     connection: socket.socket,
+    *,
+    response_io_timeout_seconds: float,
 ) -> None:
     request_id = str(uuid4())
     try:
@@ -102,6 +155,7 @@ def _serve_connection(
             strict=True,
         )
         request_id = request.request_id
+        connection.settimeout(response_io_timeout_seconds)
     except Exception:
         response = _failure(request_id, "invalid_request")
     else:

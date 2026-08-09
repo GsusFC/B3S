@@ -16,6 +16,7 @@ from src.services.evidence_vault_acquisition_runtime import (
     HttpxExaExactUrlFetcher,
     HttpxOwnedFetcher,
     OwnedHttpObservation,
+    PublicOnlyNetworkBackend,
     TrustedAcquisitionRuntime,
 )
 from src.services.evidence_vault_raw_capture import (
@@ -163,8 +164,12 @@ def test_runtime_persists_owned_only_when_external_provider_cannot_qualify() -> 
         public_key_registry=registry,
         owned_fetch=lambda _command: _owned(),
         external_fetch=unavailable,
+        allow_owned_only_downgrade=True,
     )
-    signed = runtime.sign(_command(), runtime.collect(_command()))
+    collected = runtime.collect(_command())
+    assert collected["external_outcome"] == "owned_only_downgrade"
+    assert collected["external_failure_reason"] == "provider_unavailable"
+    signed = runtime.sign(_command(), collected)
     assert [receipt.claims.channel_role for receipt in signed.receipts] == [
         "owned_web"
     ]
@@ -196,6 +201,15 @@ def test_runtime_rejects_mismatched_key_and_tampered_collected_external() -> Non
         runtime.sign(_command(), collected)
 
 
+class _NetworkStream:
+    def __init__(self, address: str = "93.184.216.34") -> None:
+        self.address = address
+
+    def get_extra_info(self, name: str):
+        assert name == "server_addr"
+        return (self.address, 443)
+
+
 class _Response:
     def __init__(
         self,
@@ -206,6 +220,18 @@ class _Response:
         self.status_code = status_code
         self.content = content
         self.headers = headers
+        self.extensions = {"network_stream": _NetworkStream()}
+
+    def iter_raw(self):
+        midpoint = len(self.content) // 2
+        yield self.content[:midpoint]
+        yield self.content[midpoint:]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        return None
 
 
 class _GetClient:
@@ -213,7 +239,8 @@ class _GetClient:
         self.responses = list(responses)
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    def get(self, url: str, **kwargs: Any) -> _Response:
+    def stream(self, method: str, url: str, **kwargs: Any) -> _Response:
+        assert method == "GET"
         self.calls.append((url, kwargs))
         return self.responses.pop(0)
 
@@ -247,7 +274,8 @@ def test_owned_http_fetcher_records_real_redirect_body_headers_and_owned_link() 
     )(_command())
     assert observation.final_url == "https://example.com/about"
     assert observation.byte_count == len(body)
-    assert observation.raw_fragment["content"] == body.decode()
+    assert observation.raw_fragment["raw_body"] == body.decode()
+    assert observation.raw_fragment["text"] == "LinkedIn Durable body"
     assert observation.raw_fragment["linkedin"] == (
         "https://www.linkedin.com/company/example"
     )
@@ -277,7 +305,8 @@ class _PostClient:
         self.response = response
         self.calls: list[dict[str, Any]] = []
 
-    def post(self, _url: str, **kwargs: Any) -> _Response:
+    def stream(self, method: str, _url: str, **kwargs: Any) -> _Response:
+        assert method == "POST"
         self.calls.append(kwargs)
         return self.response
 
@@ -317,3 +346,149 @@ def test_exa_fetcher_requires_one_exact_url_result_and_real_fields() -> None:
     )
     with pytest.raises(EvidenceVaultAcquisitionRuntimeError, match="not_unique"):
         HttpxExaExactUrlFetcher(duplicate, api_key="worker-only")(source_url)
+
+
+def test_http_fetchers_stream_and_reject_oversized_bodies() -> None:
+    huge_owned = _Response(
+        200,
+        b"x" * 2_097_153,
+        {"content-type": "text/plain"},
+    )
+    with pytest.raises(EvidenceVaultAcquisitionRuntimeError, match="response_size"):
+        HttpxOwnedFetcher(
+            _GetClient([huge_owned]), resolver=_global_resolver
+        )(_command())
+
+    huge_provider = _Response(
+        200,
+        b"x" * 4_194_305,
+        {"content-type": "application/json"},
+    )
+    with pytest.raises(EvidenceVaultAcquisitionRuntimeError, match="response_size"):
+        HttpxExaExactUrlFetcher(
+            _PostClient(huge_provider), api_key="worker-only"
+        )("https://www.linkedin.com/company/example")
+
+
+def test_http_fetcher_rejects_private_connected_peer_even_after_public_dns() -> None:
+    response = _Response(200, b"durable", {"content-type": "text/plain"})
+    response.extensions = {"network_stream": _NetworkStream("127.0.0.1")}
+    with pytest.raises(EvidenceVaultAcquisitionRuntimeError, match="peer_scope"):
+        HttpxOwnedFetcher(
+            _GetClient([response]), resolver=_global_resolver
+        )(_command())
+
+
+def test_external_failure_is_terminal_by_default_and_not_discovered_is_explicit() -> None:
+    key, registry = _key_registry()
+
+    def unavailable(_url: str):
+        raise EvidenceVaultAcquisitionRuntimeError("provider unavailable")
+
+    strict_runtime = TrustedAcquisitionRuntime(
+        private_key=key,
+        public_key_registry=registry,
+        owned_fetch=lambda _command: _owned(),
+        external_fetch=unavailable,
+    )
+    with pytest.raises(
+        EvidenceVaultAcquisitionRuntimeError, match="external_collection_failed"
+    ):
+        strict_runtime.collect(_command())
+
+    no_link_runtime = TrustedAcquisitionRuntime(
+        private_key=key,
+        public_key_registry=registry,
+        owned_fetch=lambda _command: _owned(linkedin=False),
+    )
+    collected = no_link_runtime.collect(_command())
+    assert collected["external_outcome"] == "not_discovered"
+    assert collected["external_failure_reason"] is None
+    signed = no_link_runtime.sign(_command(), collected)
+    assert signed.pre_receipt_snapshot.raw_payload["acquisition_outcome"] == {
+        "schema_version": "evidence-vault-acquisition-outcome-v1",
+        "external": "not_discovered",
+        "failure_reason": None,
+    }
+
+
+class _BackendStream:
+    def __init__(self, address: str) -> None:
+        self.address = address
+        self.closed = False
+
+    def get_extra_info(self, name: str):
+        assert name == "server_addr"
+        return (self.address, 443)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _BackendDelegate:
+    def __init__(self, address: str) -> None:
+        self.stream = _BackendStream(address)
+        self.connect_calls = 0
+
+    def connect_tcp(self, *_args, **_kwargs):
+        self.connect_calls += 1
+        return self.stream
+
+    def sleep(self, _seconds: float) -> None:
+        return None
+
+
+def test_connect_backend_blocks_private_resolution_and_rebound_peer_pre_http() -> None:
+    private_delegate = _BackendDelegate("93.184.216.34")
+    private_dns = lambda *_args, **_kwargs: [
+        (None, None, None, None, ("127.0.0.1", 443))
+    ]
+    backend = PublicOnlyNetworkBackend(
+        resolver=private_dns, delegate=private_delegate
+    )
+    with pytest.raises(EvidenceVaultAcquisitionRuntimeError, match="dns_scope"):
+        backend.connect_tcp("example.com", 443)
+    assert private_delegate.connect_calls == 0
+
+    rebound_delegate = _BackendDelegate("127.0.0.1")
+    backend = PublicOnlyNetworkBackend(
+        resolver=_global_resolver, delegate=rebound_delegate
+    )
+    with pytest.raises(EvidenceVaultAcquisitionRuntimeError, match="peer_scope"):
+        backend.connect_tcp("example.com", 443)
+    assert rebound_delegate.connect_calls == 1
+    assert rebound_delegate.stream.closed is True
+
+
+def test_http_fetcher_requires_identity_encoding_and_exact_www_linkedin() -> None:
+    encoded = _Response(
+        200, b"compressed",
+        {"content-type": "text/plain", "content-encoding": "gzip"},
+    )
+    with pytest.raises(
+        EvidenceVaultAcquisitionRuntimeError, match="content_encoding"
+    ):
+        HttpxOwnedFetcher(
+            _GetClient([encoded]), resolver=_global_resolver
+        )(_command())
+
+    body = b'<a href="https://linkedin.com/company/example">not canonical</a>'
+    observation = HttpxOwnedFetcher(
+        _GetClient([_Response(200, body, {"content-type": "text/html"})]),
+        resolver=_global_resolver,
+    )(_command())
+    assert "linkedin" not in observation.raw_fragment
+
+
+def test_explicit_downgrade_distinguishes_ineligible_provider_result() -> None:
+    key, registry = _key_registry()
+    runtime = TrustedAcquisitionRuntime(
+        private_key=key,
+        public_key_registry=registry,
+        owned_fetch=lambda _command: _owned(),
+        external_fetch=lambda _url: {"malformed": True},
+        allow_owned_only_downgrade=True,
+    )
+    collected = runtime.collect(_command())
+    assert collected["external_outcome"] == "owned_only_downgrade"
+    assert collected["external_failure_reason"] == "provider_result_ineligible"

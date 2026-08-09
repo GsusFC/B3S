@@ -161,6 +161,15 @@ def _evidence_from_raw_inputs(raw_inputs: list[Any], *, brand_name: str = "", sc
         if source == "screenshot_capture" or is_visual_acquisition_source(source):
             continue
         payload = _payload_dict(entry)
+        if source == "verified_raw_document":
+            record = _evidence_from_verified_raw_document(
+                index=index,
+                source=source,
+                payload=payload,
+            )
+            if record is not None:
+                records.append(record)
+            continue
         if source == "web":
             records.extend(_evidence_from_web_payload(index=index, source=source, payload=payload))
             continue
@@ -247,6 +256,52 @@ def _intent_from_acquisition_source(source: str, details: dict[str, Any]) -> str
     if source == "exa":
         return "external_proof"
     return source or "acquisition"
+
+
+def _evidence_from_verified_raw_document(
+    *,
+    index: int,
+    source: str,
+    payload: dict[str, Any],
+) -> EvidenceRecord | None:
+    role = str(payload.get("role") or "")
+    content = payload.get("content")
+    url = payload.get("url")
+    document_sha256 = payload.get("extracted_document_sha256")
+    receipt_fingerprint = payload.get("receipt_fingerprint")
+    if (
+        role not in {"owned_web", "external_social_profile"}
+        or not isinstance(content, str)
+        or not content
+        or not isinstance(url, str)
+        or not url
+        or not isinstance(document_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", document_sha256)
+        or not isinstance(receipt_fingerprint, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", receipt_fingerprint)
+    ):
+        return None
+    external = role == "external_social_profile"
+    return EvidenceRecord(
+        ref=f"raw_inputs.{index}.verified_raw.{role}",
+        source=source,
+        evidence_type=(
+            "external_proof.verified_social_profile"
+            if external
+            else "raw_input.verified_owned_web"
+        ),
+        content=content[:_RAW_INPUT_CONTENT_CHARS],
+        url=url,
+        confidence="high",
+        metadata={
+            "source_class": "external_proof" if external else "owned_surface",
+            "provider": "verified_raw_acquisition",
+            "channel_role": role,
+            "receipt_fingerprint": receipt_fingerprint,
+            "extracted_document_sha256": document_sha256,
+            "verified_raw": True,
+        },
+    )
 
 
 def _evidence_from_exa_payload(
