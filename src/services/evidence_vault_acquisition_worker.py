@@ -1,59 +1,70 @@
-"""Narrow process boundary for trusted Evidence Vault acquisition.
+"""Worker-side handler for trusted Evidence Vault acquisition.
 
-This module deliberately contains no transport, key loading, database, environment,
-or subprocess code.  A future worker process may inject those capabilities here;
-the web/report process should depend only on :class:`TrustedAcquisitionClient`.
+This module defines the handler and its capability contracts. It deliberately does
+not implement transport, process isolation, key loading, database access,
+environment access, or subprocess management. A deployment must place the handler
+behind its own isolation boundary and inject worker-local capabilities.
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
+import hmac
 import ipaddress
+import json
 import re
 from typing import Any, Literal, Mapping, Protocol
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+
+from src.services.evidence_vault_canonical_core import canonical_fingerprint
+from src.services.evidence_vault_raw_capture import (
+    VerifiedRawCapture,
+    build_signed_raw_capture,
+    extract_deterministic_document,
+    validate_signed_raw_capture,
+)
+from src.services.evidence_vault_raw_provenance import (
+    DirectAcquisition,
+    PreReceiptSnapshot,
+    ProviderApiAcquisition,
+    RECEIPT_SET_FINGERPRINT_VERSION,
+    PublicKeyRegistry,
+    RawAcquisitionReceipt,
+    pre_receipt_snapshot_sha256,
+    receipt_set_fingerprint,
+    validate_c7_receipt_time_policy,
+    verify_raw_acquisition_receipt,
+)
 
 
 SIGNED_ACQUISITION_RESULT_SCHEMA_VERSION = "evidence-vault-signed-acquisition-result-v1"
 
-_WORKSPACE_SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9_-]{0,126}[a-z0-9])?$")
+_WORKSPACE_SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$")
 _SOURCE_SCAN_ID = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,254}[A-Za-z0-9])?$")
 _DOMAIN_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-_FORBIDDEN_PUBLIC_KEYS = frozenset(
-    {
-        "authorization",
-        "cookie",
-        "database_url",
-        "ed25519_private_key",
-        "ingest_credential",
-        "ingest_credentials",
-        "ingest_dsn",
-        "private_key",
-        "private_key_bytes",
-        "proxy_authorization",
-        "scanner_ingest_dsn",
-        "set_cookie",
-        "signing_key",
-    }
-)
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_UUID_128 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
 class EvidenceVaultAcquisitionWorkerError(RuntimeError):
-    """The trusted acquisition boundary failed without returning public data."""
+    """The trusted acquisition handler failed without exposing internal data."""
 
 
 class EvidenceVaultAcquisitionReplayConflictError(EvidenceVaultAcquisitionWorkerError):
-    """Persistence returned content different from the result it was asked to store."""
+    """A valid durable replay differs from the newly attempted acquisition."""
 
 
-class TrustedAcquisitionCommand(BaseModel):
-    """The complete and only command accepted across the process boundary."""
-
+class _StrictWorkerModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    workspace_slug: str = Field(min_length=1, max_length=128)
+
+class TrustedAcquisitionCommand(_StrictWorkerModel):
+    """The complete command accepted by the worker-side handler."""
+
+    workspace_slug: str = Field(min_length=1, max_length=63)
     source_scan_id: str = Field(min_length=1, max_length=256)
     brand_url: str = Field(min_length=1, max_length=2048)
 
@@ -74,63 +85,150 @@ class TrustedAcquisitionCommand(BaseModel):
     @field_validator("brand_url")
     @classmethod
     def _validate_brand_url(cls, value: str) -> str:
-        if value != value.strip() or not value.isascii():
-            raise ValueError("invalid_brand_url")
-        try:
-            parsed = urlsplit(value)
-            host = parsed.hostname
-            port = parsed.port
-        except ValueError as exc:
-            raise ValueError("invalid_brand_url") from exc
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not host
-            or parsed.username is not None
-            or parsed.password is not None
-            or port is not None
-            or parsed.fragment
-        ):
-            raise ValueError("invalid_brand_url")
-        host = host.lower().removesuffix(".")
-        if host.startswith("xn--") or ".xn--" in host:
-            raise ValueError("invalid_brand_url")
-        try:
-            ipaddress.ip_address(host)
-        except ValueError:
-            labels = host.removeprefix("www.").split(".")
-            if len(labels) < 2 or any(not _DOMAIN_LABEL.fullmatch(label) for label in labels):
-                raise ValueError("invalid_brand_url")
-        else:
-            raise ValueError("invalid_brand_url")
+        _canonical_brand_origin(value)
         return value
 
 
-class SignedAcquisitionResultEnvelope(BaseModel):
-    """Public signed acquisition data returned only after durable persistence.
+class SignedAcquisition(_StrictWorkerModel):
+    """Strict worker-internal output of the collection signing capability."""
 
-    ``signed_acquisition`` remains a mapping until the receipt-core slice is
-    wired.  The envelope itself is exact-field and JSON-only, and rejects common
-    secret-bearing fields recursively.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    schema_version: Literal[SIGNED_ACQUISITION_RESULT_SCHEMA_VERSION]
-    workspace_slug: str = Field(min_length=1, max_length=128)
-    source_scan_id: str = Field(min_length=1, max_length=256)
-    brand_url: str = Field(min_length=1, max_length=2048)
-    signed_acquisition: dict[str, JsonValue]
+    pre_receipt_snapshot: PreReceiptSnapshot
+    receipts: list[RawAcquisitionReceipt] = Field(min_length=1, max_length=2)
+    receipt_set_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
-    def _validate_public_result(self) -> "SignedAcquisitionResultEnvelope":
+    def _validate_exact_receipt_group(self) -> "SignedAcquisition":
+        fingerprints = [receipt.receipt_fingerprint for receipt in self.receipts]
+        if fingerprints != sorted(fingerprints) or len(fingerprints) != len(set(fingerprints)):
+            raise ValueError("receipts must be a sorted unique fingerprint set")
+        roles = [receipt.claims.channel_role for receipt in self.receipts]
+        if len(roles) != len(set(roles)):
+            raise ValueError("receipts must have unique roles")
+        expected_set = receipt_set_fingerprint(self.receipts)
+        if not hmac.compare_digest(self.receipt_set_fingerprint, expected_set):
+            raise ValueError("receipt_set_fingerprint does not match receipts")
+
+        snapshot = self.pre_receipt_snapshot
+        expected_identity: dict[str, str] = {
+            "workspace_slug": snapshot.workspace_slug,
+            "source_scan_id": snapshot.source_scan_id,
+            "acquisition_session_id": snapshot.acquisition_session_id,
+            "canonical_brand_domain": snapshot.canonical_brand_domain,
+            "pre_receipt_snapshot_sha256": pre_receipt_snapshot_sha256(snapshot),
+        }
+        for receipt in self.receipts:
+            for field, expected in expected_identity.items():
+                if getattr(receipt.claims, field) != expected:
+                    raise ValueError(f"receipt {field} does not match the snapshot")
+        return self
+
+
+class DurableReceiptReadback(_StrictWorkerModel):
+    """Exact durable identity and immutable database arrival for one receipt row."""
+
+    receipt_id: str
+    receipt_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    received_at: AwareDatetime
+
+    @field_validator("receipt_id")
+    @classmethod
+    def _receipt_id_is_uuid(cls, value: str) -> str:
+        return _canonical_uuid(value, field="receipt_id")
+
+
+class DurableAcquisitionReadback(_StrictWorkerModel):
+    """Full worker-internal database readback required after ingest or lookup."""
+
+    capture_id: str
+    capture_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    durable_raw_capture_payload: dict[str, JsonValue]
+    database_time: AwareDatetime
+    receipt_rows: list[DurableReceiptReadback] = Field(min_length=1, max_length=2)
+
+    @field_validator("capture_id")
+    @classmethod
+    def _capture_id_is_uuid(cls, value: str) -> str:
+        return _canonical_uuid(value, field="capture_id")
+
+    @model_validator(mode="after")
+    def _rows_are_exact_and_immutable(self) -> "DurableAcquisitionReadback":
+        fingerprints = [row.receipt_fingerprint for row in self.receipt_rows]
+        if fingerprints != sorted(fingerprints) or len(fingerprints) != len(set(fingerprints)):
+            raise ValueError("receipt_rows must be a sorted unique fingerprint set")
+        receipt_ids = [row.receipt_id for row in self.receipt_rows]
+        if len(receipt_ids) != len(set(receipt_ids)):
+            raise ValueError("receipt_rows must have unique receipt ids")
+        if any(row.received_at > self.database_time for row in self.receipt_rows):
+            raise ValueError("database_time precedes a durable receipt row")
+        return self
+
+
+class SafeReceiptArrival(_StrictWorkerModel):
+    """Minimal public projection of one durable database receipt row."""
+
+    receipt_id: str
+    receipt_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    received_at: AwareDatetime
+
+    @field_validator("receipt_id")
+    @classmethod
+    def _receipt_id_is_uuid(cls, value: str) -> str:
+        return _canonical_uuid(value, field="receipt_id")
+
+
+class SafeDeterministicDocument(_StrictWorkerModel):
+    """Allowlisted public projection reproduced from one verified receipt."""
+
+    role: Literal["owned_web", "external_social_profile"]
+    source_url: str = Field(min_length=8, max_length=2048)
+    extracted_document: str = Field(min_length=1, max_length=100_000_000)
+    extracted_document_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    receipt_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class SignedAcquisitionResultEnvelope(_StrictWorkerModel):
+    """Safe public result returned only after a verified durable readback."""
+
+    schema_version: Literal[SIGNED_ACQUISITION_RESULT_SCHEMA_VERSION]
+    workspace_slug: str = Field(min_length=1, max_length=63)
+    source_scan_id: str = Field(min_length=1, max_length=256)
+    brand_url: str = Field(min_length=1, max_length=2048)
+    capture_id: str
+    capture_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    receipt_set_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    receipt_rows: list[SafeReceiptArrival] = Field(min_length=1, max_length=2)
+    documents: list[SafeDeterministicDocument] = Field(min_length=1, max_length=2)
+
+    @field_validator("capture_id")
+    @classmethod
+    def _capture_id_is_uuid(cls, value: str) -> str:
+        return _canonical_uuid(value, field="capture_id")
+
+    @model_validator(mode="after")
+    def _validate_safe_public_projection(self) -> "SignedAcquisitionResultEnvelope":
         TrustedAcquisitionCommand(
             workspace_slug=self.workspace_slug,
             source_scan_id=self.source_scan_id,
             brand_url=self.brand_url,
         )
-        if not self.signed_acquisition:
-            raise ValueError("signed_acquisition_must_not_be_empty")
-        _reject_secret_fields(self.signed_acquisition)
+        document_fingerprints = [document.receipt_fingerprint for document in self.documents]
+        row_fingerprints = [row.receipt_fingerprint for row in self.receipt_rows]
+        if row_fingerprints != document_fingerprints:
+            raise ValueError("public receipt rows and documents differ")
+        if document_fingerprints != sorted(document_fingerprints):
+            raise ValueError("public documents must be sorted by receipt fingerprint")
+        expected_set = canonical_fingerprint(
+            RECEIPT_SET_FINGERPRINT_VERSION,
+            {
+                "schema_version": RECEIPT_SET_FINGERPRINT_VERSION,
+                "receipt_fingerprints": document_fingerprints,
+            },
+        )
+        if not hmac.compare_digest(self.receipt_set_fingerprint, expected_set):
+            raise ValueError("public receipt_set_fingerprint differs from documents")
+        roles = [document.role for document in self.documents]
+        if len(roles) != len(set(roles)):
+            raise ValueError("public documents must have unique roles")
         return self
 
 
@@ -144,12 +242,12 @@ class TrustedAcquisitionClient(Protocol):
 
 
 class AcquisitionReplayLookup(Protocol):
-    """Worker-local durable replay lookup performed before any recollection."""
+    """Worker-local durable replay lookup performed before recollection."""
 
     def __call__(
         self,
         command: TrustedAcquisitionCommand,
-    ) -> Mapping[str, Any] | None: ...
+    ) -> DurableAcquisitionReadback | Mapping[str, Any] | None: ...
 
 
 class AcquisitionCollector(Protocol):
@@ -159,34 +257,34 @@ class AcquisitionCollector(Protocol):
 
 
 class AcquisitionSigner(Protocol):
-    """Worker-local signing capability; key material is captured by its implementation."""
+    """Worker-local signing capability; private material remains in its closure."""
 
     def __call__(
         self,
         command: TrustedAcquisitionCommand,
         collected: Mapping[str, Any],
-    ) -> Mapping[str, Any]: ...
+    ) -> SignedAcquisition | Mapping[str, Any]: ...
 
 
 class AcquisitionPersister(Protocol):
-    """Worker-local atomic ingest capability; credentials are implementation-private."""
+    """Worker-local atomic ingest capability returning a fresh durable readback."""
 
     def __call__(
         self,
         command: TrustedAcquisitionCommand,
-        signed_acquisition: Mapping[str, Any],
-    ) -> Mapping[str, Any]: ...
+        signed_acquisition: SignedAcquisition,
+    ) -> DurableAcquisitionReadback | Mapping[str, Any]: ...
 
 
 class TrustedAcquisitionWorker:
-    """Worker-side handler for collect -> sign -> persist.
+    """Worker-side collect -> sign -> persist handler, not a process boundary.
 
     The injected callables may close over transport, private-key, and ingest
-    state, but this handler has no parameter or return field for that state.  It
-    exposes only ``capture(command)`` and never offers an arbitrary-signing verb.
+    state. The handler has no parameter or public return field for that state,
+    and it never offers an arbitrary-signing verb.
     """
 
-    __slots__ = ("__collect", "__lookup", "__persist", "__sign")
+    __slots__ = ("__collect", "__lookup", "__persist", "__public_key_registry_json", "__sign")
 
     def __init__(
         self,
@@ -194,72 +292,237 @@ class TrustedAcquisitionWorker:
         collect: AcquisitionCollector,
         sign: AcquisitionSigner,
         persist: AcquisitionPersister,
+        public_key_registry: PublicKeyRegistry | Mapping[str, Any],
         lookup: AcquisitionReplayLookup | None = None,
     ) -> None:
         if not callable(collect) or not callable(sign) or not callable(persist):
             raise TypeError("worker capabilities must be callable")
         if lookup is not None and not callable(lookup):
             raise TypeError("worker replay lookup must be callable")
+        try:
+            registry = _reparse_model(public_key_registry, PublicKeyRegistry)
+        except Exception:
+            raise EvidenceVaultAcquisitionWorkerError("invalid_public_key_registry") from None
         self.__collect = collect
         self.__sign = sign
         self.__persist = persist
         self.__lookup = lookup
+        # Keep an immutable serialized pin rather than a caller-owned nested dict.
+        self.__public_key_registry_json = registry.model_dump_json()
 
     def capture(
         self,
         command: TrustedAcquisitionCommand | Mapping[str, Any],
     ) -> SignedAcquisitionResultEnvelope:
-        """Collect, sign, and persist one command before exposing a result."""
+        """Collect, verify, persist, reread, and safely project one command."""
 
         validated = _parse_command(command)
+        registry = self.__pinned_registry()
+
         if self.__lookup is not None:
             try:
-                replay = self.__lookup(validated)
+                replay_value = self.__lookup(validated)
+                if replay_value is not None:
+                    replay, verified, _stored = _validate_durable_readback(
+                        replay_value,
+                        command=validated,
+                        public_key_registry=registry,
+                    )
+                    return _build_public_result(validated, replay, verified)
             except Exception:
-                raise EvidenceVaultAcquisitionWorkerError(
-                    "replay_lookup_failed"
-                ) from None
-            if replay is not None:
-                replay_mapping = _require_mapping(
-                    replay,
-                    failure="replay_lookup_failed",
-                )
-                return _build_result(validated, replay_mapping)
+                raise EvidenceVaultAcquisitionWorkerError("replay_lookup_failed") from None
+
         try:
             collected = self.__collect(validated)
+            collected_mapping = _require_mapping(collected, failure="collection_failed")
+        except EvidenceVaultAcquisitionWorkerError:
+            raise
         except Exception:
             raise EvidenceVaultAcquisitionWorkerError("collection_failed") from None
-        collected_mapping = _require_mapping(collected, failure="collection_failed")
 
         try:
-            signed = self.__sign(validated, collected_mapping)
+            signed_value = self.__sign(validated, collected_mapping)
+            attempted = _validate_signed_acquisition(
+                signed_value,
+                command=validated,
+                public_key_registry=registry,
+            )
         except Exception:
             raise EvidenceVaultAcquisitionWorkerError("signing_failed") from None
-        signed_mapping = _require_mapping(signed, failure="signing_failed")
-        attempted = _build_result(validated, signed_mapping)
 
         try:
-            persisted = self.__persist(validated, deepcopy(attempted.signed_acquisition))
+            persist_input = _reparse_model(attempted, SignedAcquisition)
+            persisted_value = self.__persist(validated, persist_input)
+            persisted, verified, stored = _validate_durable_readback(
+                persisted_value,
+                command=validated,
+                public_key_registry=registry,
+            )
         except Exception:
             raise EvidenceVaultAcquisitionWorkerError("persistence_failed") from None
-        persisted_mapping = _require_mapping(persisted, failure="persistence_failed")
-        stored = _build_result(validated, persisted_mapping)
+
         if stored != attempted:
             raise EvidenceVaultAcquisitionReplayConflictError("persisted_result_diverged")
-        return stored
+        try:
+            return _build_public_result(validated, persisted, verified)
+        except Exception:
+            raise EvidenceVaultAcquisitionWorkerError("persistence_failed") from None
 
+    def __pinned_registry(self) -> PublicKeyRegistry:
+        try:
+            return PublicKeyRegistry.model_validate(json.loads(self.__public_key_registry_json), strict=True)
+        except Exception:
+            raise EvidenceVaultAcquisitionWorkerError("invalid_public_key_registry") from None
 
 
 def _parse_command(
     command: TrustedAcquisitionCommand | Mapping[str, Any],
 ) -> TrustedAcquisitionCommand:
-    if isinstance(command, TrustedAcquisitionCommand):
-        command = command.model_dump(mode="python", round_trip=True, warnings="none")
     try:
-        return TrustedAcquisitionCommand.model_validate(deepcopy(command), strict=True)
+        return _reparse_model(command, TrustedAcquisitionCommand)
     except Exception:
         raise EvidenceVaultAcquisitionWorkerError("invalid_command") from None
 
+
+def _validate_signed_acquisition(
+    value: SignedAcquisition | Mapping[str, Any],
+    *,
+    command: TrustedAcquisitionCommand,
+    public_key_registry: PublicKeyRegistry,
+) -> SignedAcquisition:
+    signed = _reparse_model(value, SignedAcquisition)
+    _require_command_identity(command, signed.pre_receipt_snapshot)
+    built = build_signed_raw_capture(
+        signed.pre_receipt_snapshot,
+        signed.receipts,
+        public_key_registry=public_key_registry,
+    )
+    verified = validate_signed_raw_capture(
+        built.durable_raw_capture_payload,
+        capture_content_hash=built.capture_content_hash,
+        public_key_registry=public_key_registry,
+    )
+    if _signed_from_verified(verified) != signed:
+        raise ValueError("signed acquisition changed during verification")
+    return signed
+
+
+def _validate_durable_readback(
+    value: DurableAcquisitionReadback | Mapping[str, Any],
+    *,
+    command: TrustedAcquisitionCommand,
+    public_key_registry: PublicKeyRegistry,
+) -> tuple[DurableAcquisitionReadback, VerifiedRawCapture, SignedAcquisition]:
+    readback = _reparse_model(value, DurableAcquisitionReadback)
+    verified = validate_signed_raw_capture(
+        readback.durable_raw_capture_payload,
+        capture_content_hash=readback.capture_content_hash,
+        public_key_registry=public_key_registry,
+    )
+    _require_command_identity(command, verified.pre_receipt_snapshot)
+    stored = _signed_from_verified(verified)
+
+    expected_fingerprints = [receipt.receipt_fingerprint for receipt in stored.receipts]
+    row_fingerprints = [row.receipt_fingerprint for row in readback.receipt_rows]
+    if row_fingerprints != expected_fingerprints:
+        raise ValueError("durable receipt rows do not match the verified receipt set")
+
+    for receipt, row in zip(stored.receipts, readback.receipt_rows, strict=True):
+        verified_receipt = verify_raw_acquisition_receipt(
+            receipt,
+            public_key_registry=public_key_registry,
+            database_received_at=row.received_at,
+        )
+        if verified_receipt != receipt:
+            raise ValueError("durable receipt changed during database-time verification")
+
+    if len(stored.receipts) == 2:
+        validate_c7_receipt_time_policy(
+            stored.receipts,
+            database_received_at=[row.received_at for row in readback.receipt_rows],
+            database_time=readback.database_time,
+        )
+    return readback, verified, stored
+
+
+def _signed_from_verified(verified: VerifiedRawCapture) -> SignedAcquisition:
+    return SignedAcquisition(
+        pre_receipt_snapshot=verified.pre_receipt_snapshot,
+        receipts=list(verified.receipts),
+        receipt_set_fingerprint=verified.envelope.receipt_set_fingerprint,
+    )
+
+
+def _build_public_result(
+    command: TrustedAcquisitionCommand,
+    readback: DurableAcquisitionReadback,
+    verified: VerifiedRawCapture,
+) -> SignedAcquisitionResultEnvelope:
+    documents: list[SafeDeterministicDocument] = []
+    for receipt in verified.receipts:
+        extraction = extract_deterministic_document(
+            verified,
+            receipt_fingerprint=receipt.receipt_fingerprint,
+        )
+        acquisition = receipt.claims.acquisition
+        if receipt.claims.channel_role == "owned_web" and isinstance(acquisition, DirectAcquisition):
+            source_url = acquisition.final_url
+        elif receipt.claims.channel_role == "external_social_profile" and isinstance(
+            acquisition,
+            ProviderApiAcquisition,
+        ):
+            source_url = acquisition.reported_source_url
+        else:
+            raise ValueError("verified receipt has no safe source URL")
+        documents.append(
+            SafeDeterministicDocument(
+                role=receipt.claims.channel_role,
+                source_url=source_url,
+                extracted_document=extraction.document,
+                extracted_document_sha256=extraction.sha256,
+                receipt_fingerprint=receipt.receipt_fingerprint,
+            )
+        )
+    return SignedAcquisitionResultEnvelope(
+        schema_version=SIGNED_ACQUISITION_RESULT_SCHEMA_VERSION,
+        workspace_slug=command.workspace_slug,
+        source_scan_id=command.source_scan_id,
+        brand_url=command.brand_url,
+        capture_id=readback.capture_id,
+        capture_content_hash=readback.capture_content_hash,
+        receipt_set_fingerprint=verified.envelope.receipt_set_fingerprint,
+        receipt_rows=[
+            SafeReceiptArrival(
+                receipt_id=row.receipt_id,
+                receipt_fingerprint=row.receipt_fingerprint,
+                received_at=row.received_at,
+            )
+            for row in readback.receipt_rows
+        ],
+        documents=documents,
+    )
+
+
+def _require_command_identity(
+    command: TrustedAcquisitionCommand,
+    snapshot: PreReceiptSnapshot,
+) -> None:
+    command_domain = _canonical_brand_origin(command.brand_url)
+    if (
+        snapshot.workspace_slug != command.workspace_slug
+        or snapshot.source_scan_id != command.source_scan_id
+        or snapshot.canonical_brand_url != command.brand_url
+        or snapshot.canonical_brand_domain != command_domain
+    ):
+        raise ValueError("signed acquisition does not match its command")
+
+
+def _reparse_model(value: Any, model_type: type[BaseModel]) -> Any:
+    if isinstance(value, model_type):
+        value = value.model_dump(mode="python", round_trip=True, warnings="none")
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{model_type.__name__} must be an object")
+    return model_type.model_validate(deepcopy(dict(value)), strict=True)
 
 
 def _require_mapping(value: Any, *, failure: str) -> Mapping[str, Any]:
@@ -268,37 +531,75 @@ def _require_mapping(value: Any, *, failure: str) -> Mapping[str, Any]:
     return value
 
 
-
-def _build_result(
-    command: TrustedAcquisitionCommand,
-    signed_acquisition: Mapping[str, Any],
-) -> SignedAcquisitionResultEnvelope:
+def _canonical_brand_origin(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or not value.isascii()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or "\\" in value
+    ):
+        raise ValueError("invalid_brand_url")
     try:
-        public_payload = deepcopy(dict(signed_acquisition))
-        return SignedAcquisitionResultEnvelope(
-            schema_version=SIGNED_ACQUISITION_RESULT_SCHEMA_VERSION,
-            workspace_slug=command.workspace_slug,
-            source_scan_id=command.source_scan_id,
-            brand_url=command.brand_url,
-            signed_acquisition=public_payload,
-        )
-    except Exception:
-        raise EvidenceVaultAcquisitionWorkerError("invalid_signed_result") from None
+        parsed = urlsplit(value)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid_brand_url") from exc
+    if (
+        parsed.scheme != "https"
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.fragment
+        or parsed.query
+        or parsed.path != ""
+        or parsed.netloc != host
+    ):
+        raise ValueError("invalid_brand_url")
+    if (
+        host != host.lower()
+        or host.startswith("www.")
+        or host.endswith(".")
+        or not host.isascii()
+        or value != f"https://{host}"
+    ):
+        raise ValueError("invalid_brand_url")
+    labels = host.split(".")
+    if len(labels) < 2 or any(
+        label.startswith("xn--") or not _DOMAIN_LABEL.fullmatch(label)
+        for label in labels
+    ):
+        raise ValueError("invalid_brand_url")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    raise ValueError("invalid_brand_url")
 
 
+def _canonical_uuid(value: str, *, field: str) -> str:
+    if not isinstance(value, str) or not _UUID_128.fullmatch(value) or int(value.replace("-", ""), 16) == 0:
+        raise ValueError(f"{field} must be a canonical non-zero UUID")
+    return value
 
-def _reject_secret_fields(value: JsonValue, *, path: tuple[str, ...] = ()) -> None:
-    if isinstance(value, dict):
-        for raw_key, child in value.items():
-            key = str(raw_key).strip().lower().replace("-", "_")
-            child_path = (*path, str(raw_key))
-            if key in _FORBIDDEN_PUBLIC_KEYS or "private_key" in key:
-                raise ValueError(f"secret field is not public: {'/'.join(child_path)}")
-            if key.startswith("ingest_") and any(
-                token in key for token in ("credential", "dsn", "password", "secret", "token")
-            ):
-                raise ValueError(f"secret field is not public: {'/'.join(child_path)}")
-            _reject_secret_fields(child, path=child_path)
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            _reject_secret_fields(child, path=(*path, str(index)))
+
+__all__ = [
+    "SIGNED_ACQUISITION_RESULT_SCHEMA_VERSION",
+    "AcquisitionCollector",
+    "AcquisitionPersister",
+    "AcquisitionReplayLookup",
+    "AcquisitionSigner",
+    "DurableAcquisitionReadback",
+    "DurableReceiptReadback",
+    "EvidenceVaultAcquisitionReplayConflictError",
+    "EvidenceVaultAcquisitionWorkerError",
+    "SafeDeterministicDocument",
+    "SafeReceiptArrival",
+    "SignedAcquisition",
+    "SignedAcquisitionResultEnvelope",
+    "TrustedAcquisitionClient",
+    "TrustedAcquisitionCommand",
+    "TrustedAcquisitionWorker",
+]

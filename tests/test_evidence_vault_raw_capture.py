@@ -15,9 +15,12 @@ from src.services.evidence_vault_raw_capture import (
     RAW_PROVENANCE_ENVELOPE_VERSION,
     EvidenceVaultRawCaptureError,
     RawProvenanceEnvelope,
+    VerifiedRawCapture,
     build_signed_raw_capture,
     extract_deterministic_document,
     parse_and_validate_signed_raw_capture,
+    parse_signed_raw_capture,
+    validate_signed_raw_capture,
     raw_capture_content_hash,
     reproduce_passage_locator,
 )
@@ -48,6 +51,12 @@ def _sha_json(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _utf8_span(text: str, passage: str) -> tuple[int, int]:
+    character_start = text.index(passage)
+    start = len(text[:character_start].encode("utf-8"))
+    return start, start + len(passage.encode("utf-8"))
+
+
 def _key() -> Ed25519PrivateKey:
     return Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
 
@@ -65,6 +74,8 @@ def _registry(key: Ed25519PrivateKey) -> dict:
                 "version": 1,
                 "status": "current",
                 "public_key_base64": base64.b64encode(public).decode("ascii"),
+                "signing_not_before": "2026-01-01T00:00:00Z",
+                "signing_ended_at": None,
             }
         },
     }
@@ -96,7 +107,7 @@ def _snapshot(raw_payload: dict | None = None) -> PreReceiptSnapshot:
         source_scan_id="scan-70",
         acquisition_session_id=SESSION_ID,
         canonical_brand_domain="example.com",
-        canonical_brand_url="https://example.com/",
+        canonical_brand_url="https://example.com",
         raw_payload=deepcopy(raw_payload if raw_payload is not None else _raw_payload()),
     )
 
@@ -187,13 +198,41 @@ def _group() -> tuple[PreReceiptSnapshot, RawAcquisitionReceipt, RawAcquisitionR
     return snapshot, _receipt(snapshot, "owned_web"), _receipt(snapshot, "external_social_profile")
 
 
+def _build(
+    snapshot: PreReceiptSnapshot,
+    receipts: list[RawAcquisitionReceipt],
+    *,
+    public_key_registry=None,
+):
+    return build_signed_raw_capture(
+        snapshot,
+        receipts,
+        public_key_registry=_registry(_key()),
+    )
+
+
+def _verify(built) -> VerifiedRawCapture:
+    return validate_signed_raw_capture(
+        built.raw_payload,
+        capture_content_hash=built.capture_content_hash,
+        public_key_registry=_registry(_key()),
+    )
+
+
+def _extract(built, receipt: RawAcquisitionReceipt):
+    return extract_deterministic_document(
+        _verify(built),
+        receipt_fingerprint=receipt.receipt_fingerprint,
+    )
+
+
 def test_partial_one_receipt_capture_is_exact_detached_and_replayable() -> None:
     snapshot = _snapshot()
     owned = _receipt(snapshot, "owned_web")
     original_snapshot = deepcopy(snapshot.model_dump(mode="json"))
     original_receipt = owned.model_dump(mode="json")
 
-    built = build_signed_raw_capture(snapshot, [owned])
+    built = _build(snapshot, [owned])
 
     assert snapshot.model_dump(mode="json") == original_snapshot
     assert owned.model_dump(mode="json") == original_receipt
@@ -214,7 +253,7 @@ def test_partial_one_receipt_capture_is_exact_detached_and_replayable() -> None:
     assert len(envelope["signed_receipts"]) == 1
     assert built.capture_content_hash == raw_capture_content_hash(built.raw_payload)
 
-    parsed = parse_and_validate_signed_raw_capture(
+    parsed = parse_signed_raw_capture(
         built.raw_payload,
         capture_content_hash=built.capture_content_hash,
     )
@@ -224,23 +263,36 @@ def test_partial_one_receipt_capture_is_exact_detached_and_replayable() -> None:
     assert parsed.receipts == (owned,)
 
 
+def test_authority_builder_requires_registry_and_verified_wrapper_is_factory_only() -> None:
+    snapshot = _snapshot()
+    owned = _receipt(snapshot, "owned_web")
+    with pytest.raises(TypeError, match="public_key_registry"):
+        build_signed_raw_capture(snapshot, [owned])
+    with pytest.raises(EvidenceVaultRawCaptureError, match="public_key_registry is required"):
+        build_signed_raw_capture(
+            snapshot,
+            [owned],
+            public_key_registry=None,  # type: ignore[arg-type]
+        )
+    with pytest.raises(TypeError, match="signature verification"):
+        VerifiedRawCapture()
+
+
 def test_two_role_group_is_sorted_and_registry_verified() -> None:
     snapshot, owned, external = _group()
-    built = build_signed_raw_capture(
+    built = _build(
         snapshot,
         [external, owned],
         public_key_registry=_registry(_key()),
     )
-    fingerprints = [
-        item["receipt_fingerprint"]
-        for item in built.raw_payload[RESERVED_KEY]["signed_receipts"]
-    ]
+    fingerprints = [item["receipt_fingerprint"] for item in built.raw_payload[RESERVED_KEY]["signed_receipts"]]
     assert fingerprints == sorted(fingerprints)
     parsed = parse_and_validate_signed_raw_capture(
         built.raw_payload,
         capture_content_hash=built.capture_content_hash,
         public_key_registry=_registry(_key()),
     )
+    assert isinstance(parsed, VerifiedRawCapture)
     assert {receipt.claims.channel_role for receipt in parsed.receipts} == {
         "owned_web",
         "external_social_profile",
@@ -251,24 +303,22 @@ def test_builder_rejects_reserved_key_duplicate_role_mixed_identity_and_fragment
     snapshot, owned, _external = _group()
     reserved_snapshot = _snapshot({**_raw_payload(), RESERVED_KEY: {"forged": True}})
     with pytest.raises(EvidenceVaultRawCaptureError, match="reserved key"):
-        build_signed_raw_capture(reserved_snapshot, [_receipt(reserved_snapshot, "owned_web")])
+        _build(reserved_snapshot, [_receipt(reserved_snapshot, "owned_web")])
     with pytest.raises(EvidenceVaultRawCaptureError, match="unique channel roles"):
-        build_signed_raw_capture(snapshot, [owned, owned])
+        _build(snapshot, [owned, owned])
 
     other_data = _raw_payload()
     other_data["sources"]["owned"]["markdown_content"] += " changed"
     other_snapshot = _snapshot(other_data)
     other_receipt = _receipt(other_snapshot, "owned_web")
     with pytest.raises(EvidenceVaultRawCaptureError, match="pre_receipt_snapshot_sha256"):
-        build_signed_raw_capture(snapshot, [other_receipt])
+        _build(snapshot, [other_receipt])
 
     bad_fragment = owned.model_copy(
-        update={
-            "claims": owned.claims.model_copy(update={"raw_fragment_sha256": "f" * 64})
-        }
+        update={"claims": owned.claims.model_copy(update={"raw_fragment_sha256": "f" * 64})}
     )
     with pytest.raises((ValidationError, EvidenceVaultRawCaptureError)):
-        build_signed_raw_capture(snapshot, [bad_fragment])
+        _build(snapshot, [bad_fragment])
 
 
 @pytest.mark.parametrize("count", [0, 3])
@@ -276,13 +326,13 @@ def test_builder_requires_one_or_two_receipts(count: int) -> None:
     snapshot, owned, external = _group()
     members = [owned, external, owned][:count]
     with pytest.raises(EvidenceVaultRawCaptureError, match="one or two"):
-        build_signed_raw_capture(snapshot, members)
+        _build(snapshot, members)
 
 
 def test_caller_and_result_mutation_do_not_cross_the_capture_boundary() -> None:
     snapshot = _snapshot()
     owned = _receipt(snapshot, "owned_web")
-    built = build_signed_raw_capture(snapshot, [owned])
+    built = _build(snapshot, [owned])
     durable_before = deepcopy(built.raw_payload)
 
     snapshot.raw_payload["sources"]["owned"]["markdown_content"] = "mutated caller"
@@ -293,17 +343,17 @@ def test_caller_and_result_mutation_do_not_cross_the_capture_boundary() -> None:
 
 def test_parser_rejects_payload_envelope_receipt_set_and_capture_hash_tampering() -> None:
     snapshot, owned, external = _group()
-    built = build_signed_raw_capture(snapshot, [owned, external])
+    built = _build(snapshot, [owned, external])
 
     changed_payload = deepcopy(built.raw_payload)
     changed_payload["sources"]["owned"]["markdown_content"] += "!"
     with pytest.raises(EvidenceVaultRawCaptureError, match="capture_content_hash"):
-        parse_and_validate_signed_raw_capture(
+        parse_signed_raw_capture(
             changed_payload,
             capture_content_hash=built.capture_content_hash,
         )
     with pytest.raises(EvidenceVaultRawCaptureError, match="pre_receipt_snapshot_sha256"):
-        parse_and_validate_signed_raw_capture(
+        parse_signed_raw_capture(
             changed_payload,
             capture_content_hash=raw_capture_content_hash(changed_payload),
         )
@@ -311,7 +361,7 @@ def test_parser_rejects_payload_envelope_receipt_set_and_capture_hash_tampering(
     extra_envelope_field = deepcopy(built.raw_payload)
     extra_envelope_field[RESERVED_KEY]["authority"] = True
     with pytest.raises(ValidationError):
-        parse_and_validate_signed_raw_capture(
+        parse_signed_raw_capture(
             extra_envelope_field,
             capture_content_hash=raw_capture_content_hash(extra_envelope_field),
         )
@@ -319,7 +369,7 @@ def test_parser_rejects_payload_envelope_receipt_set_and_capture_hash_tampering(
     changed_set = deepcopy(built.raw_payload)
     changed_set[RESERVED_KEY]["receipt_set_fingerprint"] = "0" * 64
     with pytest.raises(ValidationError, match="receipt_set_fingerprint"):
-        parse_and_validate_signed_raw_capture(
+        parse_signed_raw_capture(
             changed_set,
             capture_content_hash=raw_capture_content_hash(changed_set),
         )
@@ -327,26 +377,27 @@ def test_parser_rejects_payload_envelope_receipt_set_and_capture_hash_tampering(
     reversed_receipts = deepcopy(built.raw_payload)
     reversed_receipts[RESERVED_KEY]["signed_receipts"].reverse()
     with pytest.raises(ValidationError, match="sorted"):
-        parse_and_validate_signed_raw_capture(
+        parse_signed_raw_capture(
             reversed_receipts,
             capture_content_hash=raw_capture_content_hash(reversed_receipts),
         )
 
 
-def test_registry_is_optional_but_when_supplied_detects_signature_tampering() -> None:
+def test_structural_parser_is_distinct_but_authority_requires_valid_signatures() -> None:
     snapshot = _snapshot()
     owned = _receipt(snapshot, "owned_web")
-    built = build_signed_raw_capture(snapshot, [owned])
+    built = _build(snapshot, [owned])
     tampered = deepcopy(built.raw_payload)
     signature = bytearray(base64.b64decode(tampered[RESERVED_KEY]["signed_receipts"][0]["signature"]))
     signature[0] ^= 1
     tampered[RESERVED_KEY]["signed_receipts"][0]["signature"] = base64.b64encode(signature).decode("ascii")
     tampered_hash = raw_capture_content_hash(tampered)
 
-    # Structural replay cannot establish signature authority without a registry.
-    parse_and_validate_signed_raw_capture(tampered, capture_content_hash=tampered_hash)
+    parse_signed_raw_capture(tampered, capture_content_hash=tampered_hash)
+    with pytest.raises(TypeError, match="public_key_registry"):
+        validate_signed_raw_capture(tampered, capture_content_hash=tampered_hash)
     with pytest.raises(EvidenceVaultRawCaptureError, match="signature is invalid"):
-        parse_and_validate_signed_raw_capture(
+        validate_signed_raw_capture(
             tampered,
             capture_content_hash=tampered_hash,
             public_key_registry=_registry(_key()),
@@ -355,9 +406,9 @@ def test_registry_is_optional_but_when_supplied_detects_signature_tampering() ->
 
 def test_owned_and_external_extractors_match_live_evidence_worker_helpers() -> None:
     snapshot, owned, external = _group()
-    built = build_signed_raw_capture(snapshot, [owned, external])
-    owned_extraction = extract_deterministic_document(built.raw_payload, owned)
-    external_extraction = extract_deterministic_document(built.raw_payload, external)
+    built = _build(snapshot, [owned, external])
+    owned_extraction = _extract(built, owned)
+    external_extraction = _extract(built, external)
 
     owned_fragment = snapshot.raw_payload["sources"]["owned"]
     external_fragment = snapshot.raw_payload["sources"]["external"]
@@ -376,8 +427,8 @@ def test_owned_extractor_uses_fixed_live_allowlist_order_not_caller_text() -> No
     }
     snapshot = _snapshot(raw_payload)
     owned = _receipt(snapshot, "owned_web")
-    built = build_signed_raw_capture(snapshot, [owned])
-    assert extract_deterministic_document(built.raw_payload, owned).document == "first text"
+    built = _build(snapshot, [owned])
+    assert _extract(built, owned).document == "first text"
 
     missing_payload = _raw_payload()
     missing_payload["sources"]["owned"] = {"document": "not allowlisted"}
@@ -389,9 +440,40 @@ def test_owned_extractor_uses_fixed_live_allowlist_order_not_caller_text() -> No
         private_key=_key(),
         public_key_registry=_registry(_key()),
     )
-    missing_built = build_signed_raw_capture(missing_snapshot, [missing])
+    missing_built = _build(missing_snapshot, [missing])
     with pytest.raises(EvidenceVaultRawCaptureError, match="allowlisted"):
-        extract_deterministic_document(missing_built.raw_payload, missing)
+        _extract(missing_built, missing)
+
+
+@pytest.mark.parametrize(
+    ("role", "field", "value", "error"),
+    [
+        ("owned_web", "text", {"unstable": "object"}, "must be a string"),
+        ("external_social_profile", "title", {"unstable": "object"}, "must be strings"),
+        ("external_social_profile", "summary", 7, "must be strings"),
+        ("external_social_profile", "text", None, "must be strings"),
+        ("external_social_profile", "highlights", ["valid", {"bad": True}], "list of strings"),
+    ],
+)
+def test_extractors_reject_present_non_string_allowlisted_values(
+    role: str,
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    raw_payload = _raw_payload()
+    raw_payload["sources"]["owned" if role == "owned_web" else "external"][field] = value
+    snapshot = _snapshot(raw_payload)
+    claims = _claims(snapshot, role)
+    claims["extracted_document_sha256"] = "f" * 64
+    receipt = sign_raw_acquisition_receipt(
+        claims,
+        private_key=_key(),
+        public_key_registry=_registry(_key()),
+    )
+    built = _build(snapshot, [receipt])
+    with pytest.raises(EvidenceVaultRawCaptureError, match=error):
+        _extract(built, receipt)
 
 
 def test_extractor_rejects_unsupported_version_missing_external_content_and_hash_drift() -> None:
@@ -403,9 +485,9 @@ def test_extractor_rejects_unsupported_version_missing_external_content_and_hash
         private_key=_key(),
         public_key_registry=_registry(_key()),
     )
-    unsupported_built = build_signed_raw_capture(snapshot, [unsupported])
+    unsupported_built = _build(snapshot, [unsupported])
     with pytest.raises(EvidenceVaultRawCaptureError, match="unsupported extractor"):
-        extract_deterministic_document(unsupported_built.raw_payload, unsupported)
+        _extract(unsupported_built, unsupported)
 
     missing_payload = _raw_payload()
     missing_payload["sources"]["external"] = {"url": "https://www.linkedin.com/company/example"}
@@ -417,9 +499,9 @@ def test_extractor_rejects_unsupported_version_missing_external_content_and_hash
         private_key=_key(),
         public_key_registry=_registry(_key()),
     )
-    missing_built = build_signed_raw_capture(missing_snapshot, [missing])
-    with pytest.raises(EvidenceVaultRawCaptureError, match="no reproducible content"):
-        extract_deterministic_document(missing_built.raw_payload, missing)
+    missing_built = _build(missing_snapshot, [missing])
+    with pytest.raises(EvidenceVaultRawCaptureError, match="required extractor fields"):
+        _extract(missing_built, missing)
 
     wrong_claims = _claims(snapshot, "owned_web")
     wrong_claims["extracted_document_sha256"] = "f" * 64
@@ -428,9 +510,9 @@ def test_extractor_rejects_unsupported_version_missing_external_content_and_hash
         private_key=_key(),
         public_key_registry=_registry(_key()),
     )
-    wrong_built = build_signed_raw_capture(snapshot, [wrong])
+    wrong_built = _build(snapshot, [wrong])
     with pytest.raises(EvidenceVaultRawCaptureError, match="signed extracted_document_sha256"):
-        extract_deterministic_document(wrong_built.raw_payload, wrong)
+        _extract(wrong_built, wrong)
 
 
 def test_raw_fragment_pointer_supports_rfc6901_escaping_and_arrays() -> None:
@@ -449,90 +531,137 @@ def test_raw_fragment_pointer_supports_rfc6901_escaping_and_arrays() -> None:
         private_key=_key(),
         public_key_registry=_registry(_key()),
     )
-    built = build_signed_raw_capture(snapshot, [receipt])
-    assert extract_deterministic_document(built.raw_payload, receipt).document == "Escaped pointer proof"
+    built = _build(snapshot, [receipt])
+    assert _extract(built, receipt).document == "Escaped pointer proof"
 
-    missing = deepcopy(built.raw_payload)
-    del missing["sources"]["owned/list"][0]["~record"]
-    with pytest.raises(EvidenceVaultRawCaptureError, match="does not resolve"):
-        extract_deterministic_document(missing, receipt)
+    with pytest.raises(EvidenceVaultRawCaptureError, match="VerifiedRawCapture"):
+        extract_deterministic_document(
+            built.raw_payload,  # type: ignore[arg-type]
+            receipt_fingerprint=receipt.receipt_fingerprint,
+        )
 
 
-def test_byte_range_locator_uses_utf8_bytes_and_rejects_split_boundaries() -> None:
-    document = "Aé🙂Z"
-    encoded = document.encode("utf-8")
-    start = len("A".encode("utf-8"))
-    end = len("Aé🙂".encode("utf-8"))
+def test_utf8_byte_range_locator_binds_exact_spans_in_both_documents() -> None:
+    passage = "Café proof spans exact durable evidence bytes"
+    document = f"Opening 🙂 {passage}. Closing."
+    evidence = f"Evidence prefix — {passage}; evidence suffix."
+    extracted_start, extracted_end = _utf8_span(document, passage)
+    evidence_start, evidence_end = _utf8_span(evidence, passage)
+    locator = {
+        "kind": "utf8_byte_range",
+        "extracted_start": extracted_start,
+        "extracted_end": extracted_end,
+        "evidence_start": evidence_start,
+        "evidence_end": evidence_end,
+    }
     reproduced = reproduce_passage_locator(
         extracted_document=document,
-        passage_locator={"kind": "byte_range", "start": start, "end": end},
-        durable_evidence_record_content="Record contains exactly é🙂 here.",
+        passage_locator=locator,
+        durable_evidence_record_content=evidence,
     )
-    assert reproduced.passage_text == "é🙂"
-    assert reproduced.passage_sha256 == _sha_text("é🙂")
-    assert end <= len(encoded)
+    assert reproduced.passage_text == passage
+    assert reproduced.passage_sha256 == _sha_text(passage)
 
+    split_boundary = dict(locator, extracted_start=len("Opening ".encode("utf-8")) + 1)
     with pytest.raises(EvidenceVaultRawCaptureError, match="UTF-8"):
         reproduce_passage_locator(
             extracted_document=document,
-            passage_locator={"kind": "byte_range", "start": 2, "end": end},
-            durable_evidence_record_content="é🙂",
+            passage_locator=split_boundary,
+            durable_evidence_record_content=evidence,
         )
-    with pytest.raises(EvidenceVaultRawCaptureError, match="not contained"):
+    with pytest.raises(EvidenceVaultRawCaptureError, match="do not match exactly"):
         reproduce_passage_locator(
             extracted_document=document,
-            passage_locator={"kind": "byte_range", "start": start, "end": end},
-            durable_evidence_record_content="different durable content",
+            passage_locator=dict(locator, evidence_start=evidence_start + 1),
+            durable_evidence_record_content=evidence,
         )
 
 
-def test_json_pointer_passage_reproduces_string_and_canonical_fragment() -> None:
-    document = canonical_json(
-        {
-            "proof/list": [
-                {"~value": "Café proof"},
-                {"nested": {"b": 2, "a": 1}},
-            ]
-        }
-    )
-    string_passage = reproduce_passage_locator(
-        extracted_document=document,
-        passage_locator={"kind": "json_pointer", "pointer": "/proof~1list/0/~0value"},
-        durable_evidence_record_content="Durable evidence: Café proof",
-    )
-    assert string_passage.passage_text == "Café proof"
+def test_passage_locator_accepts_exact_multilingual_meaningful_spans() -> None:
+    for passage in ("Nuestra misión", "使命宣言", "مرحبا بالعالم"):
+        prefix = "Context: "
+        extracted = f"{prefix}{passage} end"
+        evidence = f"Evidence says {passage} exactly"
+        extracted_start = len(prefix.encode("utf-8"))
+        evidence_start = len("Evidence says ".encode("utf-8"))
+        length = len(passage.encode("utf-8"))
+        reproduced = reproduce_passage_locator(
+            extracted_document=extracted,
+            passage_locator={
+                "kind": "utf8_byte_range",
+                "extracted_start": extracted_start,
+                "extracted_end": extracted_start + length,
+                "evidence_start": evidence_start,
+                "evidence_end": evidence_start + length,
+            },
+            durable_evidence_record_content=evidence,
+        )
+        assert reproduced.passage_text == passage
 
-    object_text = canonical_json({"b": 2, "a": 1})
-    object_passage = reproduce_passage_locator(
-        extracted_document=document,
-        passage_locator={"kind": "json_pointer", "pointer": "/proof~1list/1/nested"},
-        durable_evidence_record_content=f"Durable evidence: {object_text}",
-    )
-    assert object_passage.passage_text == '{"a":1,"b":2}'
-    with pytest.raises(EvidenceVaultRawCaptureError, match="does not resolve"):
+
+def test_passage_locator_rejects_trivial_common_and_legacy_locator_shapes() -> None:
+    with pytest.raises(EvidenceVaultRawCaptureError, match="shorter than 8"):
         reproduce_passage_locator(
-            extracted_document=document,
-            passage_locator={"kind": "json_pointer", "pointer": "/missing"},
-            durable_evidence_record_content="missing",
+            extracted_document="A totally unrelated page",
+            passage_locator={
+                "kind": "utf8_byte_range",
+                "extracted_start": 0,
+                "extracted_end": 1,
+                "evidence_start": 0,
+                "evidence_end": 1,
+            },
+            durable_evidence_record_content="Acme is official",
+        )
+    two_emoji = "🙂🙂"
+    with pytest.raises(EvidenceVaultRawCaptureError, match="four Unicode characters"):
+        reproduce_passage_locator(
+            extracted_document=two_emoji,
+            passage_locator={
+                "kind": "utf8_byte_range",
+                "extracted_start": 0,
+                "extracted_end": len(two_emoji.encode("utf-8")),
+                "evidence_start": 0,
+                "evidence_end": len(two_emoji.encode("utf-8")),
+            },
+            durable_evidence_record_content=two_emoji,
+        )
+    with pytest.raises(EvidenceVaultRawCaptureError, match="unsupported"):
+        reproduce_passage_locator(
+            extracted_document="proof from exact source",
+            passage_locator={"kind": "json_pointer", "pointer": "/proof"},
+            durable_evidence_record_content="proof from exact source",
         )
 
 
 def test_exact_models_and_locators_reject_extra_or_malformed_fields() -> None:
     snapshot, owned, _external = _group()
-    built = build_signed_raw_capture(snapshot, [owned])
+    built = _build(snapshot, [owned])
     envelope = deepcopy(built.raw_payload[RESERVED_KEY])
     envelope["authority"] = "accepted"
     with pytest.raises(ValidationError):
         RawProvenanceEnvelope.model_validate(envelope)
+    exact = {
+        "kind": "utf8_byte_range",
+        "extracted_start": 0,
+        "extracted_end": 23,
+        "evidence_start": 0,
+        "evidence_end": 23,
+    }
     with pytest.raises(EvidenceVaultRawCaptureError, match="non-exact fields"):
         reproduce_passage_locator(
-            extracted_document="proof",
-            passage_locator={"kind": "byte_range", "start": 0, "end": 5, "unit": "bytes"},
-            durable_evidence_record_content="proof",
+            extracted_document="proof from exact source",
+            passage_locator={**exact, "unit": "bytes"},
+            durable_evidence_record_content="proof from exact source",
+        )
+    with pytest.raises(EvidenceVaultRawCaptureError, match="offsets must be integers"):
+        reproduce_passage_locator(
+            extracted_document="proof from exact source",
+            passage_locator={**exact, "extracted_start": True},
+            durable_evidence_record_content="proof from exact source",
         )
     with pytest.raises(EvidenceVaultRawCaptureError, match="unsupported"):
         reproduce_passage_locator(
-            extracted_document="proof",
+            extracted_document="proof from exact source",
             passage_locator={"kind": "regex", "pattern": "proof"},
-            durable_evidence_record_content="proof",
+            durable_evidence_record_content="proof from exact source",
         )

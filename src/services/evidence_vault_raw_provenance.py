@@ -47,9 +47,7 @@ PUBLIC_KEY_REGISTRY_VERSION = "evidence-vault-ed25519-public-key-registry-v1"
 C7_LIVE_FRESHNESS_POLICY_VERSION = "evidence-vault-c7-live-freshness-policy-v1"
 RECEIPT_SET_FINGERPRINT_VERSION = "evidence-vault-raw-acquisition-receipt-set-v1"
 EXTERNAL_IDENTITY_PROVENANCE_VERSION = "external-identity-provenance-v1"
-EXTERNAL_IDENTITY_ASSOCIATION_POLICY_VERSION = (
-    "evidence-vault-external-identity-association-policy-v1"
-)
+EXTERNAL_IDENTITY_ASSOCIATION_POLICY_VERSION = "evidence-vault-external-identity-association-policy-v1"
 SOURCE_IDENTITY_SCHEMA_VERSION = "evidence-memory-document-v2"
 RAW_PROVENANCE_CAPTURE_KEY = "evidence_vault_raw_provenance"
 
@@ -61,9 +59,7 @@ MAX_REDIRECTS = 10
 MAX_PUBLIC_KEYS = 32
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_UUID_128_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-)
+_UUID_128_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _KEY_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,127}$")
 _WORKSPACE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 _DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -71,9 +67,7 @@ _HEADER_NAME_RE = re.compile(r"^[a-z0-9!#$%&'*+.^_`|~-]+$")
 _MEDIA_TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$")
 _LINKEDIN_COMPANY_PATH_RE = re.compile(r"^/company/[a-z0-9](?:[a-z0-9-]{0,99}[a-z0-9])?$")
 _JSON_POINTER_TOKEN_RE = re.compile(r"(?:[^~]|~[01])*")
-_CANONICAL_UTC_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$"
-)
+_CANONICAL_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
 _SAFE_RESPONSE_HEADERS = frozenset(
     {
         "accept-ranges",
@@ -157,10 +151,11 @@ class PreReceiptSnapshot(StrictContractModel):
 
     @model_validator(mode="after")
     def _brand_url_matches_domain(self) -> "PreReceiptSnapshot":
-        url = _strict_web_url(self.canonical_brand_url, field="canonical_brand_url")
-        _require_owned_host(url, self.canonical_brand_domain, field="canonical_brand_url")
-        if url.scheme != "https" or url.query or url.path not in {"", "/"}:
-            raise ValueError("canonical_brand_url must be the HTTPS brand origin")
+        _strict_owned_origin_url(
+            self.canonical_brand_url,
+            brand_domain=self.canonical_brand_domain,
+            field="canonical_brand_url",
+        )
         return self
 
 
@@ -292,11 +287,7 @@ class RawAcquisitionReceiptClaims(StrictContractModel):
         if len(value) > 32:
             raise ValueError("selected_headers exceeds the bounded v1 set")
         for name, header_value in value.items():
-            if (
-                not isinstance(name, str)
-                or not _HEADER_NAME_RE.fullmatch(name)
-                or name != name.lower()
-            ):
+            if not isinstance(name, str) or not _HEADER_NAME_RE.fullmatch(name) or name != name.lower():
                 raise ValueError("selected_headers names must be canonical lowercase HTTP tokens")
             if name in _SECRET_HEADER_NAMES or name not in _SAFE_RESPONSE_HEADERS:
                 raise ValueError(f"selected_headers contains a non-approved header: {name}")
@@ -380,12 +371,39 @@ class PublicKeyRecord(StrictContractModel):
     version: int = Field(ge=1)
     status: Literal["current", "verification_only", "revoked"]
     public_key_base64: str = Field(min_length=44, max_length=44)
+    signing_not_before: str
+    signing_ended_at: str | None = None
 
     @field_validator("public_key_base64")
     @classmethod
     def _key_is_canonical(cls, value: str) -> str:
         _decode_base64(value, expected_length=32, field="public_key_base64")
         return value
+
+    @field_validator("signing_not_before", "signing_ended_at")
+    @classmethod
+    def _signing_times_are_canonical(cls, value: str | None, info: Any) -> str | None:
+        if value is not None:
+            _parse_canonical_utc(value, field=info.field_name)
+        return value
+
+    @model_validator(mode="after")
+    def _signing_window_matches_status(self) -> "PublicKeyRecord":
+        if self.status == "current":
+            if self.signing_ended_at is not None:
+                raise ValueError("a current public key must not have signing_ended_at")
+            return self
+        if self.signing_ended_at is None:
+            raise ValueError("a retired public key requires signing_ended_at")
+        if _parse_canonical_utc(
+            self.signing_ended_at,
+            field="signing_ended_at",
+        ) < _parse_canonical_utc(
+            self.signing_not_before,
+            field="signing_not_before",
+        ):
+            raise ValueError("signing_ended_at precedes signing_not_before")
+        return self
 
 
 class PublicKeyRegistry(StrictContractModel):
@@ -413,6 +431,24 @@ class PublicKeyRegistry(StrictContractModel):
         materials = [record.public_key_base64 for record in self.keys.values()]
         if len(materials) != len(set(materials)):
             raise ValueError("public key material must not be reused under multiple ids")
+        ordered = sorted(self.keys.values(), key=lambda record: record.version)
+        prior_not_before: datetime | None = None
+        prior_ended_at: datetime | None = None
+        for record in ordered:
+            not_before = _parse_canonical_utc(
+                record.signing_not_before,
+                field="signing_not_before",
+            )
+            if prior_not_before is not None and not_before <= prior_not_before:
+                raise ValueError("public key versions must have strictly increasing signing_not_before")
+            if prior_ended_at is not None and prior_ended_at > not_before:
+                raise ValueError("public key signing windows must not overlap")
+            prior_not_before = not_before
+            prior_ended_at = (
+                _parse_canonical_utc(record.signing_ended_at, field="signing_ended_at")
+                if record.signing_ended_at is not None
+                else None
+            )
         return self
 
 
@@ -471,9 +507,7 @@ class ExternalIdentityProvenance(StrictContractModel):
             field="owned_source_url",
         )
         expected_role = (
-            "owned_web"
-            if self.association_method == "owned_raw_links_external_profile"
-            else "external_social_profile"
+            "owned_web" if self.association_method == "owned_raw_links_external_profile" else "external_social_profile"
         )
         if self.raw_fact_role != expected_role:
             raise ValueError("raw_fact_role does not match association_method")
@@ -555,34 +589,24 @@ def validate_external_identity_provenance(
     owned_receipt: RawAcquisitionReceipt | Mapping[str, Any],
     external_receipt: RawAcquisitionReceipt | Mapping[str, Any],
     durable_raw_capture_payload: Mapping[str, Any],
-    public_key_registry: PublicKeyRegistry | Mapping[str, Any] | None = None,
+    public_key_registry: PublicKeyRegistry | Mapping[str, Any],
 ) -> ExternalIdentityProvenance:
-    """Validate one strict raw association without doing I/O or granting authority.
-
-    Receipt signatures are intentionally checked only when ``public_key_registry``
-    is supplied. Receipt parsing and content-fingerprint validation always occur.
-    """
+    """Validate one strict raw association from cryptographically verified receipts."""
 
     model = _model_from(provenance, ExternalIdentityProvenance)
-    if public_key_registry is None:
-        owned = _model_from(owned_receipt, RawAcquisitionReceipt)
-        external = _model_from(external_receipt, RawAcquisitionReceipt)
-    else:
-        owned = verify_raw_acquisition_receipt(
-            owned_receipt,
-            public_key_registry=public_key_registry,
-        )
-        external = verify_raw_acquisition_receipt(
-            external_receipt,
-            public_key_registry=public_key_registry,
-        )
+    owned = verify_raw_acquisition_receipt(
+        owned_receipt,
+        public_key_registry=public_key_registry,
+    )
+    external = verify_raw_acquisition_receipt(
+        external_receipt,
+        public_key_registry=public_key_registry,
+    )
 
     if owned.claims.channel_role != "owned_web":
         raise EvidenceVaultRawProvenanceError("owned_receipt must have the owned_web role")
     if external.claims.channel_role != "external_social_profile":
-        raise EvidenceVaultRawProvenanceError(
-            "external_receipt must have the external_social_profile role"
-        )
+        raise EvidenceVaultRawProvenanceError("external_receipt must have the external_social_profile role")
     for field in (
         "workspace_slug",
         "source_scan_id",
@@ -591,48 +615,30 @@ def validate_external_identity_provenance(
         "pre_receipt_snapshot_sha256",
     ):
         if getattr(owned.claims, field) != getattr(external.claims, field):
-            raise EvidenceVaultRawProvenanceError(
-                f"external identity receipts have mixed {field}"
-            )
+            raise EvidenceVaultRawProvenanceError(f"external identity receipts have mixed {field}")
     if model.canonical_brand_domain != owned.claims.canonical_brand_domain:
-        raise EvidenceVaultRawProvenanceError(
-            "association canonical_brand_domain does not match its receipts"
-        )
+        raise EvidenceVaultRawProvenanceError("association canonical_brand_domain does not match its receipts")
     if not isinstance(external.claims.acquisition, ProviderApiAcquisition):
-        raise EvidenceVaultRawProvenanceError(
-            "external receipt does not expose provider API source identity"
-        )
+        raise EvidenceVaultRawProvenanceError("external receipt does not expose provider API source identity")
     if model.external_source_url != external.claims.acquisition.reported_source_url:
-        raise EvidenceVaultRawProvenanceError(
-            "external_source_url does not match the external receipt"
-        )
+        raise EvidenceVaultRawProvenanceError("external_source_url does not match the external receipt")
     if owned.claims.external_identity_provenance_fingerprint is not None:
-        raise EvidenceVaultRawProvenanceError(
-            "owned receipt must not depend on external identity provenance"
-        )
+        raise EvidenceVaultRawProvenanceError("owned receipt must not depend on external identity provenance")
     if not hmac.compare_digest(
         model.proof_receipt_fingerprint,
         owned.receipt_fingerprint,
     ):
-        raise EvidenceVaultRawProvenanceError(
-            "proof_receipt_fingerprint does not name the owned receipt"
-        )
+        raise EvidenceVaultRawProvenanceError("proof_receipt_fingerprint does not name the owned receipt")
     association_fingerprint = external_identity_provenance_fingerprint(model)
-    external_claimed_fingerprint = (
-        external.claims.external_identity_provenance_fingerprint
-    )
+    external_claimed_fingerprint = external.claims.external_identity_provenance_fingerprint
     if external_claimed_fingerprint is None or not hmac.compare_digest(
         external_claimed_fingerprint,
         association_fingerprint,
     ):
-        raise EvidenceVaultRawProvenanceError(
-            "external receipt does not claim the exact association fingerprint"
-        )
+        raise EvidenceVaultRawProvenanceError("external receipt does not claim the exact association fingerprint")
 
     if not isinstance(durable_raw_capture_payload, Mapping):
-        raise EvidenceVaultRawProvenanceError(
-            "durable_raw_capture_payload must be an object"
-        )
+        raise EvidenceVaultRawProvenanceError("durable_raw_capture_payload must be an object")
     payload = dict(durable_raw_capture_payload)
     payload.pop(RAW_PROVENANCE_CAPTURE_KEY, None)
     reconstructed_snapshot = PreReceiptSnapshot(
@@ -644,9 +650,7 @@ def validate_external_identity_provenance(
         canonical_brand_url=model.owned_source_url,
         raw_payload=payload,
     )
-    reconstructed_snapshot_sha256 = pre_receipt_snapshot_sha256(
-        reconstructed_snapshot
-    )
+    reconstructed_snapshot_sha256 = pre_receipt_snapshot_sha256(reconstructed_snapshot)
     if not hmac.compare_digest(
         owned.claims.pre_receipt_snapshot_sha256,
         reconstructed_snapshot_sha256,
@@ -657,20 +661,14 @@ def validate_external_identity_provenance(
     fact_receipt = owned if model.raw_fact_role == "owned_web" else external
     fragment_pointer = fact_receipt.claims.raw_fragment_json_pointer
     if not _json_pointer_contains(fragment_pointer, model.raw_fact_json_pointer):
-        raise EvidenceVaultRawProvenanceError(
-            "raw_fact_json_pointer lies outside its receipt raw fragment"
-        )
+        raise EvidenceVaultRawProvenanceError("raw_fact_json_pointer lies outside its receipt raw fragment")
     _resolve_json_pointer(payload, fragment_pointer)
     raw_fact = _resolve_json_pointer(payload, model.raw_fact_json_pointer)
     if isinstance(raw_fact, (Mapping, list)) or raw_fact is None:
         raise EvidenceVaultRawProvenanceError("raw association fact must be a JSON scalar")
-    raw_fact_sha256 = hashlib.sha256(
-        canonical_json(raw_fact).encode("utf-8")
-    ).hexdigest()
+    raw_fact_sha256 = hashlib.sha256(canonical_json(raw_fact).encode("utf-8")).hexdigest()
     if not hmac.compare_digest(model.raw_fact_sha256, raw_fact_sha256):
-        raise EvidenceVaultRawProvenanceError(
-            "raw_fact_sha256 does not match the resolved scalar"
-        )
+        raise EvidenceVaultRawProvenanceError("raw_fact_sha256 does not match the resolved scalar")
 
     expected_fact = (
         model.external_source_url
@@ -678,9 +676,7 @@ def validate_external_identity_provenance(
         else model.owned_source_url
     )
     if not isinstance(raw_fact, str) or raw_fact != expected_fact:
-        raise EvidenceVaultRawProvenanceError(
-            "resolved raw fact does not satisfy association_method"
-        )
+        raise EvidenceVaultRawProvenanceError("resolved raw fact does not satisfy association_method")
     return model
 
 
@@ -708,6 +704,11 @@ def sign_raw_acquisition_receipt(
     key_id = payload.claims.key_id
     if key_id != registry.current_key_id:
         raise EvidenceVaultRawProvenanceError("new receipts must use the registry current key")
+    _validate_key_signing_window(
+        claims=payload.claims,
+        record=registry.keys[key_id],
+        database_received_at=None,
+    )
     signing_key = _private_key(private_key)
     derived_public = signing_key.public_key().public_bytes(
         encoding=serialization.Encoding.Raw,
@@ -731,6 +732,7 @@ def verify_raw_acquisition_receipt(
     receipt: RawAcquisitionReceipt | Mapping[str, Any],
     *,
     public_key_registry: PublicKeyRegistry | Mapping[str, Any],
+    database_received_at: datetime | None = None,
 ) -> RawAcquisitionReceipt:
     """Strictly parse, re-fingerprint, and verify a receipt with a public-only registry."""
 
@@ -759,7 +761,39 @@ def verify_raw_acquisition_receipt(
         )
     except InvalidSignature as exc:
         raise EvidenceVaultRawProvenanceError("receipt signature is invalid") from exc
+    _validate_key_signing_window(
+        claims=model.claims,
+        record=record,
+        database_received_at=database_received_at,
+    )
     return model
+
+
+def _validate_key_signing_window(
+    *,
+    claims: RawAcquisitionReceiptClaims,
+    record: PublicKeyRecord,
+    database_received_at: datetime | None,
+) -> None:
+    fetched_at = _parse_canonical_utc(claims.fetched_at, field="fetched_at")
+    not_before = _parse_canonical_utc(
+        record.signing_not_before,
+        field="signing_not_before",
+    )
+    if fetched_at < not_before:
+        raise EvidenceVaultRawProvenanceError("receipt fetched_at precedes the key signing window")
+    if record.signing_ended_at is None:
+        return
+    ended_at = _parse_canonical_utc(record.signing_ended_at, field="signing_ended_at")
+    if fetched_at > ended_at:
+        raise EvidenceVaultRawProvenanceError("receipt fetched_at exceeds the retired key signing cutoff")
+    if database_received_at is not None:
+        received_at = _aware_utc(
+            database_received_at,
+            field="database_received_at",
+        )
+        if received_at > ended_at + MAX_RECEIPT_DELAY:
+            raise EvidenceVaultRawProvenanceError("receipt first arrived after the retired key transport allowance")
 
 
 def public_key_registry_fingerprint(
@@ -799,9 +833,7 @@ def receipt_set_fingerprint(
 
 
 def validate_c7_receipt_time_policy(
-    receipts: Sequence[
-        RawAcquisitionReceiptClaims | RawAcquisitionReceipt | Mapping[str, Any]
-    ],
+    receipts: Sequence[RawAcquisitionReceiptClaims | RawAcquisitionReceipt | Mapping[str, Any]],
     *,
     database_received_at: datetime | Sequence[datetime],
     database_time: datetime,
@@ -818,29 +850,27 @@ def validate_c7_receipt_time_policy(
     if isinstance(receipts, (str, bytes)) or not isinstance(receipts, Sequence) or len(receipts) != 2:
         raise EvidenceVaultRawProvenanceError("C7 live policy requires exactly two receipts")
     if isinstance(database_received_at, datetime):
-        received = [
-            _aware_utc(database_received_at, field="database_received_at")
-            for _ in receipts
-        ]
+        received = [_aware_utc(database_received_at, field="database_received_at") for _ in receipts]
     else:
         if (
             isinstance(database_received_at, (str, bytes))
             or not isinstance(database_received_at, Sequence)
             or len(database_received_at) != len(receipts)
         ):
-            raise EvidenceVaultRawProvenanceError(
-                "database_received_at must contain one timestamp per receipt"
-            )
-        received = [
-            _aware_utc(value, field="database_received_at")
-            for value in database_received_at
-        ]
+            raise EvidenceVaultRawProvenanceError("database_received_at must contain one timestamp per receipt")
+        received = [_aware_utc(value, field="database_received_at") for value in database_received_at]
     if any(now < value for value in received):
         raise EvidenceVaultRawProvenanceError("database_time precedes database_received_at")
     claims = [_claims_from_receipt(value) for value in receipts]
     if {claim.channel_role for claim in claims} != {"owned_web", "external_social_profile"}:
         raise EvidenceVaultRawProvenanceError("C7 live policy requires one receipt per qualifying role")
-    for field in ("workspace_slug", "source_scan_id", "acquisition_session_id"):
+    for field in (
+        "workspace_slug",
+        "source_scan_id",
+        "acquisition_session_id",
+        "canonical_brand_domain",
+        "pre_receipt_snapshot_sha256",
+    ):
         if len({getattr(claim, field) for claim in claims}) != 1:
             raise EvidenceVaultRawProvenanceError(f"C7 receipts have mixed {field}")
     fetched = [_parse_canonical_utc(claim.fetched_at, field="fetched_at") for claim in claims]
@@ -851,10 +881,10 @@ def validate_c7_receipt_time_policy(
             raise EvidenceVaultRawProvenanceError("receipt fetched_at is not within fifteen minutes of received_at")
     if max(fetched) - min(fetched) > MAX_MEMBER_SKEW:
         raise EvidenceVaultRawProvenanceError("receipt member timestamps differ by more than fifteen minutes")
-    eligible_until = min(
-        min(fetched_at, received_at)
-        for fetched_at, received_at in zip(fetched, received, strict=True)
-    ) + LIVE_ELIGIBILITY_TTL
+    eligible_until = (
+        min(min(fetched_at, received_at) for fetched_at, received_at in zip(fetched, received, strict=True))
+        + LIVE_ELIGIBILITY_TTL
+    )
     if now >= eligible_until:
         raise EvidenceVaultRawProvenanceError("receipt set has expired")
     return eligible_until
@@ -928,13 +958,7 @@ def _canonical_workspace(value: str) -> str:
 
 
 def _clean_text(value: str, *, field: str, maximum: int) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or value != value.strip()
-        or len(value) > maximum
-        or "\x00" in value
-    ):
+    if not isinstance(value, str) or not value or value != value.strip() or len(value) > maximum or "\x00" in value:
         raise ValueError(f"{field} must be canonical non-empty text")
     return value
 
@@ -1050,10 +1074,7 @@ def _strict_json_pointer(
 
 def _json_pointer_tokens(value: str) -> tuple[str, ...]:
     pointer = _strict_json_pointer(value)
-    return tuple(
-        token.replace("~1", "/").replace("~0", "~")
-        for token in pointer[1:].split("/")
-    )
+    return tuple(token.replace("~1", "/").replace("~0", "~") for token in pointer[1:].split("/"))
 
 
 def _json_pointer_contains(fragment_pointer: str, fact_pointer: str) -> bool:
@@ -1067,26 +1088,18 @@ def _resolve_json_pointer(value: Any, pointer: str) -> JsonValue:
     for token in _json_pointer_tokens(pointer):
         if isinstance(current, Mapping):
             if token not in current:
-                raise EvidenceVaultRawProvenanceError(
-                    f"JSON pointer does not resolve at object member {token!r}"
-                )
+                raise EvidenceVaultRawProvenanceError(f"JSON pointer does not resolve at object member {token!r}")
             current = current[token]
             continue
         if isinstance(current, list):
             if not re.fullmatch(r"0|[1-9][0-9]*", token):
-                raise EvidenceVaultRawProvenanceError(
-                    "JSON pointer array token is not a canonical index"
-                )
+                raise EvidenceVaultRawProvenanceError("JSON pointer array token is not a canonical index")
             index = int(token)
             if index >= len(current):
-                raise EvidenceVaultRawProvenanceError(
-                    "JSON pointer array index is out of bounds"
-                )
+                raise EvidenceVaultRawProvenanceError("JSON pointer array index is out of bounds")
             current = current[index]
             continue
-        raise EvidenceVaultRawProvenanceError(
-            "JSON pointer traverses through a scalar"
-        )
+        raise EvidenceVaultRawProvenanceError("JSON pointer traverses through a scalar")
     return current
 
 
@@ -1139,6 +1152,7 @@ __all__ = [
     "evidence_memory_source_identity_id",
     "external_identity_provenance_fingerprint",
     "pre_receipt_snapshot_sha256",
+    "public_key_registry_fingerprint",
     "raw_acquisition_receipt_fingerprint",
     "receipt_set_fingerprint",
     "sign_raw_acquisition_receipt",

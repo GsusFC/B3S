@@ -10,7 +10,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import hmac
-import json
 import re
 from typing import Annotated, Any, Literal, Mapping, Sequence
 
@@ -25,6 +24,7 @@ from src.services.evidence_vault_raw_provenance import (
     PublicKeyRegistry,
     RawAcquisitionReceipt,
     pre_receipt_snapshot_sha256,
+    public_key_registry_fingerprint,
     receipt_set_fingerprint,
     verify_raw_acquisition_receipt,
 )
@@ -104,11 +104,50 @@ class SignedRawCapture:
 
 @dataclass(frozen=True)
 class ValidatedRawCapture:
-    """Fully replayed signed capture with its reserved envelope removed."""
+    """Structurally replayed capture; this type grants no signature authority."""
 
     pre_receipt_snapshot: PreReceiptSnapshot
     envelope: RawProvenanceEnvelope
     capture_content_hash: str
+
+    @property
+    def receipts(self) -> tuple[RawAcquisitionReceipt, ...]:
+        return tuple(self.envelope.signed_receipts)
+
+    @property
+    def raw_payload(self) -> dict[str, JsonValue]:
+        return deepcopy(self.pre_receipt_snapshot.raw_payload)
+
+
+@dataclass(frozen=True, init=False)
+class VerifiedRawCapture:
+    """Signature-verified capture bound to one exact public-key policy."""
+
+    pre_receipt_snapshot: PreReceiptSnapshot
+    envelope: RawProvenanceEnvelope
+    capture_content_hash: str
+    public_key_registry_fingerprint: str
+
+    def __init__(self) -> None:
+        raise TypeError("VerifiedRawCapture is created only by signature verification")
+
+    @classmethod
+    def _from_verified(
+        cls,
+        *,
+        validated: ValidatedRawCapture,
+        registry_fingerprint: str,
+    ) -> "VerifiedRawCapture":
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "pre_receipt_snapshot", validated.pre_receipt_snapshot)
+        object.__setattr__(instance, "envelope", validated.envelope)
+        object.__setattr__(instance, "capture_content_hash", validated.capture_content_hash)
+        object.__setattr__(
+            instance,
+            "public_key_registry_fingerprint",
+            registry_fingerprint,
+        )
+        return instance
 
     @property
     def receipts(self) -> tuple[RawAcquisitionReceipt, ...]:
@@ -151,19 +190,17 @@ def build_signed_raw_capture(
     snapshot: PreReceiptSnapshot,
     receipts: Sequence[RawAcquisitionReceipt | Mapping[str, Any]],
     *,
-    public_key_registry: PublicKeyRegistry | Mapping[str, Any] | None = None,
+    public_key_registry: PublicKeyRegistry | Mapping[str, Any],
 ) -> SignedRawCapture:
     """Embed a canonical signed envelope without mutating any caller value."""
 
+    if public_key_registry is None:
+        raise EvidenceVaultRawCaptureError("public_key_registry is required")
     if not isinstance(snapshot, PreReceiptSnapshot):
         raise EvidenceVaultRawCaptureError("snapshot must be an exact PreReceiptSnapshot")
-    snapshot = PreReceiptSnapshot.model_validate(
-        deepcopy(snapshot.model_dump(mode="json"))
-    )
+    snapshot = PreReceiptSnapshot.model_validate(deepcopy(snapshot.model_dump(mode="json")))
     if RAW_PROVENANCE_CAPTURE_KEY in snapshot.raw_payload:
-        raise EvidenceVaultRawCaptureError(
-            f"raw_payload must not contain reserved key {RAW_PROVENANCE_CAPTURE_KEY!r}"
-        )
+        raise EvidenceVaultRawCaptureError(f"raw_payload must not contain reserved key {RAW_PROVENANCE_CAPTURE_KEY!r}")
     parsed_receipts = _validated_receipt_group(
         receipts,
         snapshot=snapshot,
@@ -194,7 +231,7 @@ def build_signed_raw_capture_payload(
     snapshot: PreReceiptSnapshot,
     receipts: Sequence[RawAcquisitionReceipt | Mapping[str, Any]],
     *,
-    public_key_registry: PublicKeyRegistry | Mapping[str, Any] | None = None,
+    public_key_registry: PublicKeyRegistry | Mapping[str, Any],
 ) -> dict[str, JsonValue]:
     """Convenience form returning only the detached durable payload."""
 
@@ -205,13 +242,12 @@ def build_signed_raw_capture_payload(
     ).durable_raw_capture_payload
 
 
-def parse_and_validate_signed_raw_capture(
+def parse_signed_raw_capture(
     durable_raw_capture_payload: Mapping[str, Any],
     *,
     capture_content_hash: str,
-    public_key_registry: PublicKeyRegistry | Mapping[str, Any] | None = None,
 ) -> ValidatedRawCapture:
-    """Replay the envelope, snapshot, receipts, fragments, set identity and hash."""
+    """Structurally replay a capture without granting signature authority."""
 
     if not isinstance(durable_raw_capture_payload, Mapping):
         raise EvidenceVaultRawCaptureError("durable_raw_capture_payload must be an object")
@@ -242,11 +278,10 @@ def parse_and_validate_signed_raw_capture(
     receipts = _validated_receipt_group(
         envelope.signed_receipts,
         snapshot=snapshot,
-        public_key_registry=public_key_registry,
+        public_key_registry=None,
     )
     expected_dumps = [
-        receipt.model_dump(mode="json")
-        for receipt in sorted(receipts, key=lambda receipt: receipt.receipt_fingerprint)
+        receipt.model_dump(mode="json") for receipt in sorted(receipts, key=lambda receipt: receipt.receipt_fingerprint)
     ]
     if envelope.model_dump(mode="json")["signed_receipts"] != expected_dumps:
         raise EvidenceVaultRawCaptureError("signed_receipts are not canonical structural dumps")
@@ -257,13 +292,38 @@ def parse_and_validate_signed_raw_capture(
     return ValidatedRawCapture(snapshot, envelope, expected_capture_hash)
 
 
+def parse_and_validate_signed_raw_capture(
+    durable_raw_capture_payload: Mapping[str, Any],
+    *,
+    capture_content_hash: str,
+    public_key_registry: PublicKeyRegistry | Mapping[str, Any],
+) -> VerifiedRawCapture:
+    """Replay a capture and verify every signature against one exact registry."""
+
+    if public_key_registry is None:
+        raise EvidenceVaultRawCaptureError("public_key_registry is required")
+    validated = parse_signed_raw_capture(
+        durable_raw_capture_payload,
+        capture_content_hash=capture_content_hash,
+    )
+    _validated_receipt_group(
+        validated.envelope.signed_receipts,
+        snapshot=validated.pre_receipt_snapshot,
+        public_key_registry=public_key_registry,
+    )
+    return VerifiedRawCapture._from_verified(
+        validated=validated,
+        registry_fingerprint=public_key_registry_fingerprint(public_key_registry),
+    )
+
+
 def validate_signed_raw_capture(
     durable_raw_capture_payload: Mapping[str, Any],
     *,
     capture_content_hash: str,
-    public_key_registry: PublicKeyRegistry | Mapping[str, Any] | None = None,
-) -> ValidatedRawCapture:
-    """Alias with a shorter name for authority-boundary callers."""
+    public_key_registry: PublicKeyRegistry | Mapping[str, Any],
+) -> VerifiedRawCapture:
+    """Verify a signed capture for authority-boundary callers."""
 
     return parse_and_validate_signed_raw_capture(
         durable_raw_capture_payload,
@@ -273,22 +333,38 @@ def validate_signed_raw_capture(
 
 
 def extract_deterministic_document(
-    durable_raw_capture_payload: Mapping[str, Any],
-    receipt: RawAcquisitionReceipt | Mapping[str, Any],
+    verified_raw_capture: VerifiedRawCapture,
+    *,
+    receipt_fingerprint: str,
 ) -> DeterministicExtraction:
-    """Reproduce the allowlisted live document and verify its signed SHA-256.
+    """Reproduce one signed document selected from a verified capture."""
 
-    Owned payloads mirror ``evidence_worker._summarize_payload(limit=None)`` for
-    its explicit string field allowlist, but deliberately fail rather than use
-    that helper's arbitrary-object JSON fallback. External payloads mirror
-    ``evidence_worker._external_result_content``.
-    """
-
-    model = _receipt_from(receipt, public_key_registry=None)
+    if type(verified_raw_capture) is not VerifiedRawCapture:
+        raise EvidenceVaultRawCaptureError("deterministic extraction requires an exact VerifiedRawCapture")
+    if not isinstance(receipt_fingerprint, str) or not _SHA256_RE.fullmatch(receipt_fingerprint):
+        raise EvidenceVaultRawCaptureError("receipt_fingerprint must be a lowercase SHA-256")
+    if not _SHA256_RE.fullmatch(verified_raw_capture.public_key_registry_fingerprint):
+        raise EvidenceVaultRawCaptureError("verified capture lacks a canonical public key registry fingerprint")
+    durable_payload = verified_raw_capture.raw_payload
+    durable_payload[RAW_PROVENANCE_CAPTURE_KEY] = verified_raw_capture.envelope.model_dump(mode="json")
+    replayed = parse_signed_raw_capture(
+        durable_payload,
+        capture_content_hash=verified_raw_capture.capture_content_hash,
+    )
+    selected = [
+        receipt
+        for receipt in replayed.receipts
+        if hmac.compare_digest(receipt.receipt_fingerprint, receipt_fingerprint)
+    ]
+    if len(selected) != 1:
+        raise EvidenceVaultRawCaptureError("receipt_fingerprint does not select exactly one verified receipt")
+    model = selected[0]
     if model.claims.extractor_version != DETERMINISTIC_EXTRACTOR_VERSION:
         raise EvidenceVaultRawCaptureError("receipt uses an unsupported extractor_version")
-    payload = _payload_without_envelope(durable_raw_capture_payload)
-    fragment = _resolve_json_pointer(payload, model.claims.raw_fragment_json_pointer)
+    fragment = _resolve_json_pointer(
+        replayed.raw_payload,
+        model.claims.raw_fragment_json_pointer,
+    )
     fragment_sha = _json_fragment_sha256(fragment)
     if not hmac.compare_digest(model.claims.raw_fragment_sha256, fragment_sha):
         raise EvidenceVaultRawCaptureError("raw_fragment_sha256 does not match resolved fragment")
@@ -302,9 +378,7 @@ def extract_deterministic_document(
         raise EvidenceVaultRawCaptureError("receipt channel_role is not extractable")
     document_sha = hashlib.sha256(document.encode("utf-8")).hexdigest()
     if not hmac.compare_digest(model.claims.extracted_document_sha256, document_sha):
-        raise EvidenceVaultRawCaptureError(
-            "deterministic document differs from signed extracted_document_sha256"
-        )
+        raise EvidenceVaultRawCaptureError("deterministic document differs from signed extracted_document_sha256")
     return DeterministicExtraction(document=document, sha256=document_sha)
 
 
@@ -314,7 +388,7 @@ def reproduce_passage_locator(
     passage_locator: Mapping[str, Any],
     durable_evidence_record_content: str,
 ) -> ReproducedPassage:
-    """Reproduce a byte-range or JSON-pointer passage and bind it to evidence."""
+    """Bind one meaningful passage to exact UTF-8 spans in both documents."""
 
     if not isinstance(extracted_document, str) or not extracted_document:
         raise EvidenceVaultRawCaptureError("extracted_document must be non-empty text")
@@ -324,53 +398,58 @@ def reproduce_passage_locator(
         raise EvidenceVaultRawCaptureError("passage_locator must be an object")
     locator = dict(passage_locator)
     kind = locator.get("kind")
-    if kind == "byte_range":
-        if set(locator) != {"kind", "start", "end"}:
-            raise EvidenceVaultRawCaptureError("byte_range locator has non-exact fields")
-        start, end = locator.get("start"), locator.get("end")
-        if (
-            isinstance(start, bool)
-            or isinstance(end, bool)
-            or not isinstance(start, int)
-            or not isinstance(end, int)
-        ):
-            raise EvidenceVaultRawCaptureError("byte_range offsets must be integers")
-        encoded = extracted_document.encode("utf-8")
-        if start < 0 or end <= start or end > len(encoded):
-            raise EvidenceVaultRawCaptureError("byte_range offsets are out of bounds or empty")
-        try:
-            passage = encoded[start:end].decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise EvidenceVaultRawCaptureError(
-                "byte_range offsets do not fall on UTF-8 code-point boundaries"
-            ) from exc
-    elif kind == "json_pointer":
-        if set(locator) != {"kind", "pointer"}:
-            raise EvidenceVaultRawCaptureError("json_pointer locator has non-exact fields")
-        pointer = locator.get("pointer")
-        try:
-            parsed = json.loads(
-                extracted_document,
-                object_pairs_hook=_unique_json_object,
-                parse_constant=_reject_json_constant,
-            )
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise EvidenceVaultRawCaptureError(
-                "JSON-pointer locator requires one strict JSON document"
-            ) from exc
-        selected = _resolve_json_pointer(parsed, pointer, allow_root=True)
-        passage = selected if isinstance(selected, str) else canonical_json(selected)
-        if not passage:
-            raise EvidenceVaultRawCaptureError("JSON-pointer locator selected empty text")
-    else:
+    common_fields = {
+        "kind",
+        "extracted_start",
+        "extracted_end",
+        "evidence_start",
+        "evidence_end",
+    }
+    expected_fields = common_fields if kind == "utf8_byte_range" else None
+    if expected_fields is None:
         raise EvidenceVaultRawCaptureError("passage_locator kind is unsupported")
-    if passage not in durable_evidence_record_content:
+    if set(locator) != expected_fields:
+        raise EvidenceVaultRawCaptureError(f"{kind} locator has non-exact fields")
+
+    offsets = (
+        locator["extracted_start"],
+        locator["extracted_end"],
+        locator["evidence_start"],
+        locator["evidence_end"],
+    )
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in offsets):
+        raise EvidenceVaultRawCaptureError("passage locator offsets must be integers")
+    extracted_start, extracted_end, evidence_start, evidence_end = offsets
+    extracted_bytes = extracted_document.encode("utf-8")
+    evidence_bytes = durable_evidence_record_content.encode("utf-8")
+    if (
+        extracted_start < 0
+        or extracted_end <= extracted_start
+        or extracted_end > len(extracted_bytes)
+        or evidence_start < 0
+        or evidence_end <= evidence_start
+        or evidence_end > len(evidence_bytes)
+    ):
+        raise EvidenceVaultRawCaptureError("passage locator offsets are out of bounds or empty")
+    selected_extracted_bytes = extracted_bytes[extracted_start:extracted_end]
+    selected_evidence_bytes = evidence_bytes[evidence_start:evidence_end]
+    try:
+        passage = selected_extracted_bytes.decode("utf-8")
+        selected_evidence_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
         raise EvidenceVaultRawCaptureError(
-            "reproduced passage is not contained in durable evidence record content"
-        )
+            "passage locator offsets do not fall on UTF-8 code-point boundaries"
+        ) from exc
+
+    if selected_extracted_bytes != selected_evidence_bytes:
+        raise EvidenceVaultRawCaptureError("extracted and durable evidence UTF-8 spans do not match exactly")
+    if len(selected_extracted_bytes) < 8:
+        raise EvidenceVaultRawCaptureError("reproduced passage is shorter than 8 UTF-8 bytes")
+    if len(passage) < 4:
+        raise EvidenceVaultRawCaptureError("reproduced passage must contain at least four Unicode characters")
     return ReproducedPassage(
         passage_text=passage,
-        passage_sha256=hashlib.sha256(passage.encode("utf-8")).hexdigest(),
+        passage_sha256=hashlib.sha256(selected_extracted_bytes).hexdigest(),
     )
 
 
@@ -397,10 +476,7 @@ def _validated_receipt_group(
         raise EvidenceVaultRawCaptureError("receipts must be a sequence")
     if not 1 <= len(receipts) <= 2:
         raise EvidenceVaultRawCaptureError("signed capture requires one or two receipts")
-    parsed = [
-        _receipt_from(receipt, public_key_registry=public_key_registry)
-        for receipt in receipts
-    ]
+    parsed = [_receipt_from(receipt, public_key_registry=public_key_registry) for receipt in receipts]
     roles = [receipt.claims.channel_role for receipt in parsed]
     if len(roles) != len(set(roles)):
         raise EvidenceVaultRawCaptureError("signed capture receipts must have unique channel roles")
@@ -414,9 +490,7 @@ def _validated_receipt_group(
     for receipt in parsed:
         for field in _GROUP_IDENTITY_FIELDS:
             if getattr(receipt.claims, field) != expected_identity[field]:
-                raise EvidenceVaultRawCaptureError(
-                    f"receipt {field} does not match the exact pre-receipt snapshot"
-                )
+                raise EvidenceVaultRawCaptureError(f"receipt {field} does not match the exact pre-receipt snapshot")
     return parsed
 
 
@@ -454,9 +528,7 @@ def _validate_receipt_fragments(
         )
         expected = _json_fragment_sha256(fragment)
         if not hmac.compare_digest(receipt.claims.raw_fragment_sha256, expected):
-            raise EvidenceVaultRawCaptureError(
-                "raw_fragment_sha256 does not match the pre-receipt snapshot"
-            )
+            raise EvidenceVaultRawCaptureError("raw_fragment_sha256 does not match the pre-receipt snapshot")
 
 
 def _payload_without_envelope(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -469,29 +541,33 @@ def _payload_without_envelope(value: Mapping[str, Any]) -> dict[str, Any]:
 
 def _owned_document(fragment: Mapping[str, Any]) -> str:
     for field in _OWNED_DOCUMENT_FIELDS:
+        if field in fragment and not isinstance(fragment[field], str):
+            raise EvidenceVaultRawCaptureError(f"owned_web allowlisted field {field!r} must be a string when present")
+    for field in _OWNED_DOCUMENT_FIELDS:
         value = fragment.get(field)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    raise EvidenceVaultRawCaptureError(
-        "owned_web raw fragment lacks an allowlisted non-empty document field"
-    )
+    raise EvidenceVaultRawCaptureError("owned_web raw fragment lacks an allowlisted non-empty document field")
 
 
 def _external_document(fragment: Mapping[str, Any]) -> str:
-    title = str(fragment.get("title") or "").strip()
-    summary = str(fragment.get("summary") or "").strip()
-    text = str(fragment.get("text") or "").strip()
-    highlights_value = fragment.get("highlights")
-    highlights = " ".join(
-        str(item)
-        for item in highlights_value if str(item).strip()
-    ) if isinstance(highlights_value, list) else ""
-    parts = [part for part in (title, summary, highlights, text) if part]
+    required = {"title", "summary", "text", "highlights"}
+    missing = required - set(fragment)
+    if missing:
+        raise EvidenceVaultRawCaptureError("external_social_profile raw fragment lacks required extractor fields")
+    title = fragment["title"]
+    summary = fragment["summary"]
+    text = fragment["text"]
+    highlights_value = fragment["highlights"]
+    if not all(isinstance(value, str) for value in (title, summary, text)):
+        raise EvidenceVaultRawCaptureError("external title, summary, and text must be strings")
+    if not isinstance(highlights_value, list) or not all(isinstance(item, str) for item in highlights_value):
+        raise EvidenceVaultRawCaptureError("external highlights must be a list of strings")
+    highlights = " ".join(item for item in highlights_value if item.strip())
+    parts = [part.strip() for part in (title, summary, highlights, text) if part.strip()]
     document = " ".join(" ".join(part.split()) for part in parts).strip()
     if not document:
-        raise EvidenceVaultRawCaptureError(
-            "external_social_profile raw fragment has no reproducible content"
-        )
+        raise EvidenceVaultRawCaptureError("external_social_profile raw fragment has no reproducible content")
     return document
 
 
@@ -509,16 +585,9 @@ def _strict_json_pointer_tokens(pointer: Any, *, allow_root: bool) -> tuple[str,
     if not pointer.startswith("/") or (not allow_root and pointer.endswith("/")):
         raise EvidenceVaultRawCaptureError("JSON pointer must select a non-root value")
     encoded_tokens = pointer[1:].split("/")
-    if any(
-        (not allow_root and token == "")
-        or not _JSON_POINTER_TOKEN_RE.fullmatch(token)
-        for token in encoded_tokens
-    ):
+    if any((not allow_root and token == "") or not _JSON_POINTER_TOKEN_RE.fullmatch(token) for token in encoded_tokens):
         raise EvidenceVaultRawCaptureError("JSON pointer is not strict RFC 6901")
-    return tuple(
-        token.replace("~1", "/").replace("~0", "~")
-        for token in encoded_tokens
-    )
+    return tuple(token.replace("~1", "/").replace("~0", "~") for token in encoded_tokens)
 
 
 def _resolve_json_pointer(value: Any, pointer: Any, *, allow_root: bool = False) -> Any:
@@ -526,15 +595,11 @@ def _resolve_json_pointer(value: Any, pointer: Any, *, allow_root: bool = False)
     for token in _strict_json_pointer_tokens(pointer, allow_root=allow_root):
         if isinstance(current, Mapping):
             if token not in current:
-                raise EvidenceVaultRawCaptureError(
-                    f"JSON pointer does not resolve at object member {token!r}"
-                )
+                raise EvidenceVaultRawCaptureError(f"JSON pointer does not resolve at object member {token!r}")
             current = current[token]
         elif isinstance(current, list):
             if not re.fullmatch(r"0|[1-9][0-9]*", token):
-                raise EvidenceVaultRawCaptureError(
-                    "JSON pointer array token is not a canonical index"
-                )
+                raise EvidenceVaultRawCaptureError("JSON pointer array token is not a canonical index")
             index = int(token)
             if index >= len(current):
                 raise EvidenceVaultRawCaptureError("JSON pointer array index is out of bounds")
@@ -542,19 +607,6 @@ def _resolve_json_pointer(value: Any, pointer: Any, *, allow_root: bool = False)
         else:
             raise EvidenceVaultRawCaptureError("JSON pointer traverses through a scalar")
     return current
-
-
-def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON object key: {key}")
-        result[key] = value
-    return result
-
-
-def _reject_json_constant(value: str) -> Any:
-    raise ValueError(f"non-JSON numeric constant: {value}")
 
 
 __all__ = [
@@ -567,10 +619,12 @@ __all__ = [
     "ReproducedPassage",
     "SignedRawCapture",
     "ValidatedRawCapture",
+    "VerifiedRawCapture",
     "build_signed_raw_capture",
     "build_signed_raw_capture_payload",
     "extract_deterministic_document",
     "parse_and_validate_signed_raw_capture",
+    "parse_signed_raw_capture",
     "raw_capture_content_hash",
     "reproduce_passage",
     "reproduce_passage_locator",

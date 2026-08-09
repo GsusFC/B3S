@@ -55,7 +55,7 @@ After all transport adapters return but before interpretation, the scan worker f
 
 The final capture observation includes the frozen raw snapshot, exact receipts and an order-independent `receipt_set_fingerprint`; its observation/capture hashes are recomputed at persistence. Migration 019 makes `(key_id, receipt_nonce)` and `receipt_fingerprint` schema-global unique and binds the receipt set to the exact workspace/scan/capture FK chain, preventing cross-workspace or cross-capture transplant.
 
-PR #70 adds an explicit `cryptography` dependency. The acquisition signer alone receives the private key; PostgreSQL and API/runtime receive only a strict bounded public-key registry. Missing, unknown, revoked or malformed keys mean no verified receipt. Rotation accepts explicitly versioned public keys; new signing uses exactly one current key.
+PR #70 adds an explicit `cryptography` dependency. The acquisition signer alone receives the private key; PostgreSQL and API/runtime receive only a strict bounded public-key registry. Missing, unknown, revoked or malformed keys mean no verified receipt. Rotation accepts explicitly versioned public keys with canonical `signing_not_before`/`signing_ended_at` windows; new signing uses exactly one current key. Verification-only keys accept only signatures fetched inside their historical window and first received within the bounded transport allowance; revoked keys always fail.
 
 There is no signer inside the FastAPI process. PR #70 extracts acquisition into a separate worker/process identity that alone holds the private key and scanner-ingest credential. Its narrow command accepts only `{workspace_slug, source_scan_id, canonical brand/url}`—never caller-supplied raw payloads or receipt claims—performs the transport collection itself, freezes/signs/persists the snapshot atomically, and only then returns the signed public result. API/report/replay/runtime receive public verification keys only and have no constructor or IPC verb that signs arbitrary content.
 
@@ -95,11 +95,11 @@ A qualifying evidence row must bind to one signed receipt through:
 - exact capture and brand foreign keys;
 - extractor schema/version;
 - persisted extracted document (bounded text/bytes) and its SHA-256;
-- byte offsets or a strict JSON pointer selecting the evidence passage;
+- `utf8_byte_range` offsets selecting the exact same passage independently in the extracted document and durable evidence content;
 - passage SHA-256 and evidence record content hash;
 - exact URL and source role.
 
-The repository re-resolves the raw-fragment pointer from `captures.raw_payload`, recomputes all hashes, reproduces extraction, and verifies the Ed25519 signature before inserting any provenance row. The C7 quote must remain an exact non-empty substring of the bound evidence content.
+The repository re-resolves the raw-fragment pointer from `captures.raw_payload`, recomputes all hashes, reproduces extraction, and verifies the Ed25519 signature before inserting any provenance row. Passage eligibility is versioned by `evidence-vault-meaningful-passage-policy-v1`: the two UTF-8 byte slices must be exactly equal, contain at least 8 UTF-8 bytes and at least 4 Unicode characters. This rejects trivial one-byte/common-character attachment without excluding ordinary multilingual quotes; it is not a semantic similarity predicate.
 
 ## 4. Migration `019_evidence_vault_verified_raw_provenance.sql`
 

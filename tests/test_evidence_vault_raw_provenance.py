@@ -84,6 +84,8 @@ def _registry(
                 "version": version,
                 "status": status,
                 "public_key_base64": _public_b64(key),
+                "signing_not_before": "2026-01-01T00:00:00Z",
+                "signing_ended_at": (None if status == "current" else "2026-06-01T12:30:00Z"),
             }
         },
     }
@@ -96,7 +98,7 @@ def _snapshot() -> dict:
         "source_scan_id": "scan-70",
         "acquisition_session_id": SESSION_ID,
         "canonical_brand_domain": "example.com",
-        "canonical_brand_url": "https://example.com/",
+        "canonical_brand_url": "https://example.com",
         "raw_payload": {
             "owned": {"html": "<main>Example</main>"},
             "external": {"text": "Example company"},
@@ -255,18 +257,14 @@ def _association_bundle(
     external_claims["pre_receipt_snapshot_sha256"] = snapshot_sha256
     external_claims["raw_fragment_json_pointer"] = "/external"
     external_claims["raw_fragment_sha256"] = _raw_sha(raw_payload["external"])
-    external_claims["external_identity_provenance_fingerprint"] = (
-        external_identity_provenance_fingerprint(provenance)
-    )
+    external_claims["external_identity_provenance_fingerprint"] = external_identity_provenance_fingerprint(provenance)
     external_receipt = _sign(external_claims, key)
     return provenance, owned_receipt, external_receipt, raw_payload
 
 
 def test_pre_receipt_snapshot_is_exact_and_uses_existing_canonical_json() -> None:
     model = PreReceiptSnapshot.model_validate(_snapshot())
-    expected = __import__("hashlib").sha256(
-        canonical_json(model.model_dump(mode="json")).encode("utf-8")
-    ).hexdigest()
+    expected = __import__("hashlib").sha256(canonical_json(model.model_dump(mode="json")).encode("utf-8")).hexdigest()
     assert pre_receipt_snapshot_sha256(model) == expected
     assert len(expected) == 64
     changed = deepcopy(_snapshot())
@@ -276,6 +274,25 @@ def test_pre_receipt_snapshot_is_exact_and_uses_existing_canonical_json() -> Non
         PreReceiptSnapshot.model_validate({**_snapshot(), "authority": True})
     with pytest.raises(ValidationError):
         PreReceiptSnapshot.model_validate({**_snapshot(), "canonical_brand_url": "https://other.test/"})
+
+
+@pytest.mark.parametrize(
+    "canonical_brand_url",
+    [
+        "https://example.com/",
+        "https://www.example.com",
+        "https://www.example.com/",
+        "https://example.com?",
+        "https://example.com?ref=x",
+    ],
+)
+def test_pre_receipt_snapshot_requires_exact_canonical_brand_origin(
+    canonical_brand_url: str,
+) -> None:
+    changed = _snapshot()
+    changed["canonical_brand_url"] = canonical_brand_url
+    with pytest.raises(ValidationError, match="exact HTTPS canonical brand origin"):
+        PreReceiptSnapshot.model_validate(changed)
 
 
 def test_claims_payload_and_receipt_have_only_the_exact_non_circular_layers(key_one: Ed25519PrivateKey) -> None:
@@ -363,7 +380,9 @@ def test_signature_base64_is_strict(key_one: Ed25519PrivateKey, signature: str) 
         RawAcquisitionReceipt.model_validate(receipt)
 
 
-def test_valid_signature_and_matching_private_key_are_required(key_one: Ed25519PrivateKey, key_two: Ed25519PrivateKey) -> None:
+def test_valid_signature_and_matching_private_key_are_required(
+    key_one: Ed25519PrivateKey, key_two: Ed25519PrivateKey
+) -> None:
     receipt = _sign(_owned_claims(), key_one)
     assert verify_raw_acquisition_receipt(receipt, public_key_registry=_registry(key_one)) == receipt
     with pytest.raises(EvidenceVaultRawProvenanceError, match="does not match"):
@@ -384,11 +403,15 @@ def test_unknown_revoked_and_rotated_keys_fail_closed(key_one: Ed25519PrivateKey
                 "version": 1,
                 "status": "verification_only",
                 "public_key_base64": _public_b64(key_one),
+                "signing_not_before": "2026-01-01T00:00:00Z",
+                "signing_ended_at": "2026-06-01T12:30:00Z",
             },
             "acquisition-2026-02": {
                 "version": 2,
                 "status": "current",
                 "public_key_base64": _public_b64(key_two),
+                "signing_not_before": "2026-06-01T12:30:00Z",
+                "signing_ended_at": None,
             },
         },
     }
@@ -409,6 +432,97 @@ def test_unknown_revoked_and_rotated_keys_fail_closed(key_one: Ed25519PrivateKey
     del unknown["keys"]["acquisition-2026-01"]
     with pytest.raises(EvidenceVaultRawProvenanceError, match="unknown"):
         verify_raw_acquisition_receipt(old_receipt, public_key_registry=unknown)
+
+
+def test_retired_key_accepts_historical_receipt_but_rejects_fresh_old_key_attack(
+    key_one: Ed25519PrivateKey,
+    key_two: Ed25519PrivateKey,
+) -> None:
+    historical = _sign(_owned_claims(fetched_at="2026-06-01T12:00:00Z"), key_one)
+    registry = {
+        "schema_version": PUBLIC_KEY_REGISTRY_VERSION,
+        "current_key_id": "acquisition-2026-02",
+        "keys": {
+            "acquisition-2026-01": {
+                "version": 1,
+                "status": "verification_only",
+                "public_key_base64": _public_b64(key_one),
+                "signing_not_before": "2026-01-01T00:00:00Z",
+                "signing_ended_at": "2026-06-01T12:30:00Z",
+            },
+            "acquisition-2026-02": {
+                "version": 2,
+                "status": "current",
+                "public_key_base64": _public_b64(key_two),
+                "signing_not_before": "2026-06-01T12:30:00Z",
+                "signing_ended_at": None,
+            },
+        },
+    }
+    assert (
+        verify_raw_acquisition_receipt(
+            historical,
+            public_key_registry=registry,
+            database_received_at=datetime(2026, 6, 1, 12, 10, tzinfo=UTC),
+        )
+        == historical
+    )
+    with pytest.raises(EvidenceVaultRawProvenanceError, match="first arrived"):
+        verify_raw_acquisition_receipt(
+            historical,
+            public_key_registry=registry,
+            database_received_at=datetime(2026, 6, 1, 12, 45, 0, 1, tzinfo=UTC),
+        )
+
+    fresh_claims = RawAcquisitionReceiptClaims.model_validate(_owned_claims(fetched_at="2026-06-01T12:31:00Z"))
+    payload = build_signed_raw_acquisition_payload(fresh_claims)
+    fresh = RawAcquisitionReceipt(
+        **payload.model_dump(mode="python"),
+        signature=base64.b64encode(
+            key_one.sign(canonical_json(payload.model_dump(mode="json")).encode("utf-8"))
+        ).decode("ascii"),
+    )
+    with pytest.raises(EvidenceVaultRawProvenanceError, match="signing cutoff"):
+        verify_raw_acquisition_receipt(fresh, public_key_registry=registry)
+
+
+def test_public_key_signing_windows_and_version_time_order_are_strict(
+    key_one: Ed25519PrivateKey,
+    key_two: Ed25519PrivateKey,
+) -> None:
+    with pytest.raises(EvidenceVaultRawProvenanceError, match="precedes the key signing window"):
+        sign_raw_acquisition_receipt(
+            _owned_claims(fetched_at="2025-12-31T23:59:59Z"),
+            private_key=key_one,
+            public_key_registry=_registry(key_one),
+        )
+
+    rotated = {
+        "schema_version": PUBLIC_KEY_REGISTRY_VERSION,
+        "current_key_id": "acquisition-2026-02",
+        "keys": {
+            "acquisition-2026-01": {
+                "version": 1,
+                "status": "verification_only",
+                "public_key_base64": _public_b64(key_one),
+                "signing_not_before": "2026-06-02T00:00:00Z",
+                "signing_ended_at": "2026-06-03T00:00:00Z",
+            },
+            "acquisition-2026-02": {
+                "version": 2,
+                "status": "current",
+                "public_key_base64": _public_b64(key_two),
+                "signing_not_before": "2026-06-01T00:00:00Z",
+                "signing_ended_at": None,
+            },
+        },
+    }
+    with pytest.raises(ValidationError, match="strictly increasing"):
+        PublicKeyRegistry.model_validate(rotated)
+
+    rotated["keys"]["acquisition-2026-02"]["signing_not_before"] = "2026-06-02T12:00:00Z"
+    with pytest.raises(ValidationError, match="must not overlap"):
+        PublicKeyRegistry.model_validate(rotated)
 
 
 @pytest.mark.parametrize(
@@ -494,11 +608,15 @@ def test_role_provider_mode_and_external_identity_are_exact() -> None:
     for mutate in (
         lambda c: c.update(provider="firecrawl"),
         lambda c: c.update(external_identity_provenance_fingerprint=None),
-        lambda c: c["acquisition"].update(redirect_chain=[{
-            "request_url": "https://www.linkedin.com/company/example/",
-            "status_code": 301,
-            "location_url": "https://www.linkedin.com/company/example/",
-        }]),
+        lambda c: c["acquisition"].update(
+            redirect_chain=[
+                {
+                    "request_url": "https://www.linkedin.com/company/example/",
+                    "status_code": 301,
+                    "location_url": "https://www.linkedin.com/company/example/",
+                }
+            ]
+        ),
     ):
         claims = _external_claims()
         mutate(claims)
@@ -565,23 +683,25 @@ def test_external_identity_association_is_exact_raw_and_reproducible(
     durable_with_reserved_provenance = deepcopy(snapshot)
     durable_with_reserved_provenance["evidence_vault_raw_provenance"] = {
         "association": exact,
-        "association_fingerprint": external_identity_provenance_fingerprint(
-            validated
-        ),
+        "association_fingerprint": external_identity_provenance_fingerprint(validated),
         "receipt_fingerprints": [
             owned.receipt_fingerprint,
             external.receipt_fingerprint,
         ],
     }
-    assert validate_external_identity_provenance(
-        provenance,
-        owned_receipt=owned,
-        external_receipt=external,
-        durable_raw_capture_payload=durable_with_reserved_provenance,
-    ) == validated
+    assert (
+        validate_external_identity_provenance(
+            provenance,
+            owned_receipt=owned,
+            external_receipt=external,
+            durable_raw_capture_payload=durable_with_reserved_provenance,
+            public_key_registry=_registry(key_one),
+        )
+        == validated
+    )
 
 
-def test_external_identity_signature_verification_is_explicitly_opt_in(
+def test_external_identity_requires_registry_and_rejects_changed_signature(
     key_one: Ed25519PrivateKey,
 ) -> None:
     provenance, owned, external, snapshot = _association_bundle(key_one)
@@ -590,12 +710,13 @@ def test_external_identity_signature_verification_is_explicitly_opt_in(
     signature[0] ^= 1
     changed["signature"] = base64.b64encode(signature).decode("ascii")
 
-    assert validate_external_identity_provenance(
-        provenance,
-        owned_receipt=owned,
-        external_receipt=changed,
-        durable_raw_capture_payload=snapshot,
-    ) == ExternalIdentityProvenance.model_validate(provenance)
+    with pytest.raises(TypeError, match="public_key_registry"):
+        validate_external_identity_provenance(
+            provenance,
+            owned_receipt=owned,
+            external_receipt=external,
+            durable_raw_capture_payload=snapshot,
+        )
     with pytest.raises(EvidenceVaultRawProvenanceError, match="signature is invalid"):
         validate_external_identity_provenance(
             provenance,
@@ -639,10 +760,13 @@ def test_external_identity_source_ids_have_evidence_memory_v2_parity() -> None:
             brand_domain="example.com",
         )
         assert projection is not None
-        assert evidence_memory_source_identity_id(
-            source_url=url,
-            raw_fact_role=role,
-        ) == projection["document_id"]
+        assert (
+            evidence_memory_source_identity_id(
+                source_url=url,
+                raw_fact_role=role,
+            )
+            == projection["document_id"]
+        )
 
 
 def test_external_identity_dag_has_no_external_receipt_or_self_hash_cycle(
@@ -664,6 +788,7 @@ def test_external_identity_dag_has_no_external_receipt_or_self_hash_cycle(
         owned_receipt=owned,
         external_receipt=changed_external,
         durable_raw_capture_payload=snapshot,
+        public_key_registry=_registry(key_one),
     ) == ExternalIdentityProvenance.model_validate(provenance)
 
 
@@ -726,9 +851,7 @@ def test_external_identity_rejects_pointer_hash_predicate_and_receipt_tampering(
     outside["raw_fact_json_pointer"] = "/external/profile/website"
     outside["raw_fact_sha256"] = _raw_sha("https://example.com")
     outside_claims = external.claims.model_dump(mode="json")
-    outside_claims["external_identity_provenance_fingerprint"] = (
-        external_identity_provenance_fingerprint(outside)
-    )
+    outside_claims["external_identity_provenance_fingerprint"] = external_identity_provenance_fingerprint(outside)
     outside_external = _sign(outside_claims, key_one)
     with pytest.raises(EvidenceVaultRawProvenanceError, match="outside"):
         validate_external_identity_provenance(
@@ -736,33 +859,24 @@ def test_external_identity_rejects_pointer_hash_predicate_and_receipt_tampering(
             owned_receipt=owned,
             external_receipt=outside_external,
             durable_raw_capture_payload=snapshot,
+            public_key_registry=_registry(key_one),
         )
 
     wrong_fact_snapshot = deepcopy(snapshot)
     wrong_fact = "https://www.linkedin.com/company/different"
-    wrong_fact_snapshot["owned"]["identity"][
-        "linkedin_company_url"
-    ] = wrong_fact
+    wrong_fact_snapshot["owned"]["identity"]["linkedin_company_url"] = wrong_fact
     wrong_fact_snapshot_sha256 = _raw_payload_snapshot_sha(wrong_fact_snapshot)
     wrong_fact_owned_claims = owned.claims.model_dump(mode="json")
-    wrong_fact_owned_claims["pre_receipt_snapshot_sha256"] = (
-        wrong_fact_snapshot_sha256
-    )
-    wrong_fact_owned_claims["raw_fragment_sha256"] = _raw_sha(
-        wrong_fact_snapshot["owned"]
-    )
+    wrong_fact_owned_claims["pre_receipt_snapshot_sha256"] = wrong_fact_snapshot_sha256
+    wrong_fact_owned_claims["raw_fragment_sha256"] = _raw_sha(wrong_fact_snapshot["owned"])
     wrong_fact_owned = _sign(wrong_fact_owned_claims, key_one)
     wrong_fact_provenance = deepcopy(provenance)
-    wrong_fact_provenance["proof_receipt_fingerprint"] = (
-        wrong_fact_owned.receipt_fingerprint
-    )
+    wrong_fact_provenance["proof_receipt_fingerprint"] = wrong_fact_owned.receipt_fingerprint
     wrong_fact_provenance["raw_fact_sha256"] = _raw_sha(wrong_fact)
     wrong_fact_external_claims = external.claims.model_dump(mode="json")
-    wrong_fact_external_claims["pre_receipt_snapshot_sha256"] = (
-        wrong_fact_snapshot_sha256
-    )
-    wrong_fact_external_claims["external_identity_provenance_fingerprint"] = (
-        external_identity_provenance_fingerprint(wrong_fact_provenance)
+    wrong_fact_external_claims["pre_receipt_snapshot_sha256"] = wrong_fact_snapshot_sha256
+    wrong_fact_external_claims["external_identity_provenance_fingerprint"] = external_identity_provenance_fingerprint(
+        wrong_fact_provenance
     )
     wrong_fact_external = _sign(wrong_fact_external_claims, key_one)
     with pytest.raises(EvidenceVaultRawProvenanceError, match="association_method"):
@@ -771,14 +885,13 @@ def test_external_identity_rejects_pointer_hash_predicate_and_receipt_tampering(
             owned_receipt=wrong_fact_owned,
             external_receipt=wrong_fact_external,
             durable_raw_capture_payload=wrong_fact_snapshot,
+            public_key_registry=_registry(key_one),
         )
 
     wrong_hash = deepcopy(provenance)
     wrong_hash["raw_fact_sha256"] = HASH_A
     wrong_hash_claims = external.claims.model_dump(mode="json")
-    wrong_hash_claims["external_identity_provenance_fingerprint"] = (
-        external_identity_provenance_fingerprint(wrong_hash)
-    )
+    wrong_hash_claims["external_identity_provenance_fingerprint"] = external_identity_provenance_fingerprint(wrong_hash)
     wrong_hash_external = _sign(wrong_hash_claims, key_one)
     with pytest.raises(EvidenceVaultRawProvenanceError, match="raw_fact_sha256"):
         validate_external_identity_provenance(
@@ -786,13 +899,14 @@ def test_external_identity_rejects_pointer_hash_predicate_and_receipt_tampering(
             owned_receipt=owned,
             external_receipt=wrong_hash_external,
             durable_raw_capture_payload=snapshot,
+            public_key_registry=_registry(key_one),
         )
 
     wrong_proof = deepcopy(provenance)
     wrong_proof["proof_receipt_fingerprint"] = HASH_D
     wrong_proof_claims = external.claims.model_dump(mode="json")
-    wrong_proof_claims["external_identity_provenance_fingerprint"] = (
-        external_identity_provenance_fingerprint(wrong_proof)
+    wrong_proof_claims["external_identity_provenance_fingerprint"] = external_identity_provenance_fingerprint(
+        wrong_proof
     )
     wrong_proof_external = _sign(wrong_proof_claims, key_one)
     with pytest.raises(EvidenceVaultRawProvenanceError, match="owned receipt"):
@@ -801,6 +915,7 @@ def test_external_identity_rejects_pointer_hash_predicate_and_receipt_tampering(
             owned_receipt=owned,
             external_receipt=wrong_proof_external,
             durable_raw_capture_payload=snapshot,
+            public_key_registry=_registry(key_one),
         )
 
     wrong_association_claims = external.claims.model_dump(mode="json")
@@ -812,20 +927,19 @@ def test_external_identity_rejects_pointer_hash_predicate_and_receipt_tampering(
             owned_receipt=owned,
             external_receipt=wrong_association_external,
             durable_raw_capture_payload=snapshot,
+            public_key_registry=_registry(key_one),
         )
 
     arbitrary_snapshot_owned_claims = owned.claims.model_dump(mode="json")
     arbitrary_snapshot_owned_claims["pre_receipt_snapshot_sha256"] = HASH_D
     arbitrary_snapshot_owned = _sign(arbitrary_snapshot_owned_claims, key_one)
     arbitrary_snapshot_provenance = deepcopy(provenance)
-    arbitrary_snapshot_provenance["proof_receipt_fingerprint"] = (
-        arbitrary_snapshot_owned.receipt_fingerprint
-    )
+    arbitrary_snapshot_provenance["proof_receipt_fingerprint"] = arbitrary_snapshot_owned.receipt_fingerprint
     arbitrary_snapshot_external_claims = external.claims.model_dump(mode="json")
     arbitrary_snapshot_external_claims["pre_receipt_snapshot_sha256"] = HASH_D
-    arbitrary_snapshot_external_claims[
-        "external_identity_provenance_fingerprint"
-    ] = external_identity_provenance_fingerprint(arbitrary_snapshot_provenance)
+    arbitrary_snapshot_external_claims["external_identity_provenance_fingerprint"] = (
+        external_identity_provenance_fingerprint(arbitrary_snapshot_provenance)
+    )
     arbitrary_snapshot_external = _sign(
         arbitrary_snapshot_external_claims,
         key_one,
@@ -836,6 +950,7 @@ def test_external_identity_rejects_pointer_hash_predicate_and_receipt_tampering(
             owned_receipt=arbitrary_snapshot_owned,
             external_receipt=arbitrary_snapshot_external,
             durable_raw_capture_payload=snapshot,
+            public_key_registry=_registry(key_one),
         )
 
     changed_payload = deepcopy(snapshot)
@@ -846,6 +961,7 @@ def test_external_identity_rejects_pointer_hash_predicate_and_receipt_tampering(
             owned_receipt=owned,
             external_receipt=external,
             durable_raw_capture_payload=changed_payload,
+            public_key_registry=_registry(key_one),
         )
 
 
@@ -874,6 +990,7 @@ def test_external_identity_rejects_method_role_and_cross_receipt_identity_tamper
                 owned_receipt=owned,
                 external_receipt=mixed_external,
                 durable_raw_capture_payload=snapshot,
+                public_key_registry=_registry(key_one),
             )
 
 
@@ -959,6 +1076,8 @@ def test_time_policy_rejects_mixed_identity_roles_cardinality_and_naive_db_time(
         ("workspace_slug", "other"),
         ("source_scan_id", "scan-71"),
         ("acquisition_session_id", "62345678-1234-4234-8234-123456789abc"),
+        ("canonical_brand_domain", "other.test"),
+        ("pre_receipt_snapshot_sha256", HASH_D),
     ):
         external = _external_claims()
         external[field] = value
@@ -1018,11 +1137,16 @@ def test_public_key_registry_fingerprint_binds_rotation_and_status(
     assert initial_fp == canonical_fingerprint(PUBLIC_KEY_REGISTRY_VERSION, initial)
 
     rotated = deepcopy(initial)
-    rotated["keys"]["acquisition-2026-01"]["status"] = "verification_only"
+    rotated["keys"]["acquisition-2026-01"].update(
+        status="verification_only",
+        signing_ended_at="2026-06-01T12:30:00Z",
+    )
     rotated["keys"]["acquisition-2026-02"] = {
         "version": 2,
         "status": "current",
         "public_key_base64": _public_b64(key_two),
+        "signing_not_before": "2026-06-01T12:30:00Z",
+        "signing_ended_at": None,
     }
     rotated["current_key_id"] = "acquisition-2026-02"
     assert public_key_registry_fingerprint(rotated) != initial_fp
@@ -1049,6 +1173,8 @@ def test_preconstructed_models_are_revalidated_at_every_trust_boundary(
                     "version": 1,
                     "status": "verification_only",
                     "public_key_base64": _public_b64(key_two),
+                    "signing_not_before": "2026-01-01T00:00:00Z",
+                    "signing_ended_at": "2026-06-01T12:30:00Z",
                 },
             }
         }
@@ -1074,12 +1200,8 @@ def test_preconstructed_models_are_revalidated_at_every_trust_boundary(
 
 
 def test_time_policy_uses_each_durable_receipt_arrival() -> None:
-    owned = RawAcquisitionReceiptClaims.model_validate(
-        _owned_claims(fetched_at="2026-06-01T12:00:00Z")
-    )
-    external = RawAcquisitionReceiptClaims.model_validate(
-        _external_claims(fetched_at="2026-06-01T12:10:00Z")
-    )
+    owned = RawAcquisitionReceiptClaims.model_validate(_owned_claims(fetched_at="2026-06-01T12:00:00Z"))
+    external = RawAcquisitionReceiptClaims.model_validate(_external_claims(fetched_at="2026-06-01T12:10:00Z"))
     eligible = validate_c7_receipt_time_policy(
         [owned, external],
         database_received_at=[
