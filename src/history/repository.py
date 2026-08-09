@@ -9,7 +9,7 @@ from importlib import resources
 import logging
 import re
 from threading import Lock
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping
 from uuid import UUID, uuid4, uuid5
 
 import psycopg
@@ -208,6 +208,11 @@ _ID_NAMESPACE = UUID("3ef1b80c-e7b7-4fb3-95ad-fb9e03c59d52")
 _SCHEMA = "b3s_history"
 _CONNECT_TIMEOUT_SECONDS = 5
 _LOG = logging.getLogger(__name__)
+_SCHEMA_POLICIES = frozenset({"migrate", "verify_head"})
+
+
+class SchemaHeadMismatchError(RuntimeError):
+    """The database migration manifest does not exactly match this build."""
 
 
 class PostgresHistoryRepository:
@@ -218,17 +223,24 @@ class PostgresHistoryRepository:
         dsn: str,
         *,
         connect: Callable[..., Any] = psycopg.connect,
+        schema_policy: Literal["migrate", "verify_head"] = "migrate",
     ) -> None:
         if not str(dsn or "").strip():
             raise ValueError("B3S_DATABASE_URL is required")
+        if schema_policy not in _SCHEMA_POLICIES:
+            raise ValueError("schema_policy must be 'migrate' or 'verify_head'")
         self.dsn = dsn
+        self.schema_policy = schema_policy
         self._connect_fn = connect
         self._migrated = False
         self._migration_lock = Lock()
 
     def migrate(self) -> list[str]:
-        """Apply immutable SQL migrations and reject edited applied files."""
+        """Apply immutable SQL migrations and reject manifest drift."""
 
+        if self.schema_policy != "migrate":
+            raise RuntimeError("schema policy verify_head does not permit migrations")
+        manifest = _migration_manifest()
         applied: list[str] = []
         with self._connect() as conn:
             conn.execute(
@@ -246,16 +258,24 @@ class PostgresHistoryRepository:
                 )
                 """
             )
-            for filename, sql_text in _migration_files():
-                version = filename.split("_", 1)[0]
-                checksum = hashlib.sha256(sql_text.encode("utf-8")).hexdigest()
+            for version, filename, checksum, sql_text in manifest:
                 row = conn.execute(
-                    f"SELECT checksum FROM {_SCHEMA}.schema_migrations WHERE version = %s",
+                    f"""
+                    SELECT filename, checksum
+                    FROM {_SCHEMA}.schema_migrations
+                    WHERE version = %s
+                    """,
                     (version,),
                 ).fetchone()
                 if row:
+                    if str(row["filename"]) != filename:
+                        raise SchemaHeadMismatchError(
+                            f"applied migration {version} has filename drift"
+                        )
                     if str(row["checksum"]) != checksum:
-                        raise RuntimeError(f"applied migration {filename} has changed")
+                        raise SchemaHeadMismatchError(
+                            f"applied migration {filename} has checksum drift"
+                        )
                     continue
                 conn.execute(sql_text, prepare=False)
                 conn.execute(
@@ -266,8 +286,41 @@ class PostgresHistoryRepository:
                     (version, filename, checksum),
                 )
                 applied.append(filename)
+            rows = conn.execute(
+                f"""
+                SELECT version, filename, checksum
+                FROM {_SCHEMA}.schema_migrations
+                ORDER BY version
+                """
+            ).fetchall()
+            _require_exact_migration_manifest(manifest, rows)
         self._migrated = True
         return applied
+
+    def verify_migration_head(self) -> None:
+        """Verify the exact packaged migration head without mutating PostgreSQL."""
+
+        manifest = _migration_manifest()
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+                )
+                rows = conn.execute(
+                    f"""
+                    SELECT version, filename, checksum
+                    FROM {_SCHEMA}.schema_migrations
+                    ORDER BY version
+                    """
+                ).fetchall()
+        except Exception:
+            # Do not surface connection details, credentials, or server errors at
+            # this runtime trust boundary.
+            raise SchemaHeadMismatchError(
+                "history schema migration manifest is unavailable"
+            ) from None
+        _require_exact_migration_manifest(manifest, rows)
+        self._migrated = True
 
     def import_report(
         self,
@@ -7903,7 +7956,11 @@ class PostgresHistoryRepository:
         if self._migrated:
             return
         with self._migration_lock:
-            if not self._migrated:
+            if self._migrated:
+                return
+            if self.schema_policy == "verify_head":
+                self.verify_migration_head()
+            else:
                 self.migrate()
 
     def _connect(self):
@@ -9376,6 +9433,81 @@ def _migration_files() -> list[tuple[str, str]]:
         for item in sorted(root.iterdir(), key=lambda path: path.name)
         if item.name.endswith(".sql")
     ]
+
+
+def _migration_manifest() -> list[tuple[str, str, str, str]]:
+    manifest: list[tuple[str, str, str, str]] = []
+    versions: set[str] = set()
+    for filename, sql_text in _migration_files():
+        version = filename.split("_", 1)[0]
+        if not version or version in versions:
+            raise RuntimeError("packaged history migration manifest is invalid")
+        versions.add(version)
+        manifest.append(
+            (
+                version,
+                filename,
+                hashlib.sha256(sql_text.encode("utf-8")).hexdigest(),
+                sql_text,
+            )
+        )
+    return manifest
+
+
+def _require_exact_migration_manifest(
+    expected: Iterable[tuple[str, str, str, str]],
+    actual: Iterable[Mapping[str, Any]],
+) -> None:
+    expected_rows = {
+        version: (filename, checksum)
+        for version, filename, checksum, _sql_text in expected
+    }
+    actual_rows: dict[str, tuple[str, str]] = {}
+    duplicate_versions: set[str] = set()
+    for row in actual:
+        try:
+            version = str(row["version"])
+            filename = str(row["filename"])
+            checksum = str(row["checksum"])
+        except (KeyError, TypeError):
+            raise SchemaHeadMismatchError(
+                "history schema migration manifest is malformed"
+            ) from None
+        if version in actual_rows:
+            duplicate_versions.add(version)
+        actual_rows[version] = (filename, checksum)
+
+    expected_versions = set(expected_rows)
+    actual_versions = set(actual_rows)
+    missing = sorted(expected_versions - actual_versions)
+    unexpected = sorted(actual_versions - expected_versions)
+    common = expected_versions & actual_versions
+    filename_drift = sorted(
+        version
+        for version in common
+        if actual_rows[version][0] != expected_rows[version][0]
+    )
+    checksum_drift = sorted(
+        version
+        for version in common
+        if actual_rows[version][1] != expected_rows[version][1]
+    )
+    problems: list[str] = []
+    if missing:
+        problems.append(f"missing versions [{', '.join(missing)}]")
+    if unexpected:
+        problems.append(f"unexpected/ahead versions ({len(unexpected)})")
+    if duplicate_versions:
+        problems.append(f"duplicate versions ({len(duplicate_versions)})")
+    if filename_drift:
+        problems.append(f"filename drift [{', '.join(filename_drift)}]")
+    if checksum_drift:
+        problems.append(f"checksum drift [{', '.join(checksum_drift)}]")
+    if problems:
+        raise SchemaHeadMismatchError(
+            "history schema is not at the packaged migration head: "
+            + "; ".join(problems)
+        )
 
 
 def _require_operational_c7_plan_allowed(

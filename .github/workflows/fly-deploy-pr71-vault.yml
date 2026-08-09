@@ -1,0 +1,82 @@
+name: Deploy isolated PR71 Vault
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_sha:
+        description: "Exact reviewed commit SHA to deploy"
+        required: true
+        type: string
+      confirm_app:
+        description: "Type b3s-pr71-vault"
+        required: true
+        type: string
+
+concurrency:
+  group: fly-deploy-b3s-pr71-vault
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ inputs.confirm_app == 'b3s-pr71-vault' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pr71-vault
+      url: https://b3s-pr71-vault.fly.dev
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.deployment_sha }}
+
+      - name: Verify immutable source and isolated target
+        env:
+          DEPLOY_SHA: ${{ inputs.deployment_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
+          test -z "$(git status --porcelain)"
+          test "$(sed -n 's/^app = "\([^"]*\)"/\1/p' fly.pr71-vault.toml)" = "b3s-pr71-vault"
+          grep -Fq 'source = "b3s_pr71_vault_data"' fly.pr71-vault.toml
+          grep -Fq 'B3S_EXPECTED_NEON_BRANCH_ID = "br-divine-star-aspobuer"' fly.pr71-vault.toml
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install release package
+        run: python -m pip install --disable-pip-version-check .
+
+      - name: Apply PostgreSQL migrations with the external migrator
+        env:
+          B3S_MIGRATION_DATABASE_URL: ${{ secrets.B3S_MIGRATION_DATABASE_URL }}
+        run: python scripts/migrate_b3s_history_postgres.py
+
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # master pinned 2026-07-27
+
+      - name: Validate isolated Fly configuration
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl config validate -a b3s-pr71-vault -c fly.pr71-vault.toml
+
+      - name: Deploy exact image
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          DEPLOY_SHA: ${{ inputs.deployment_sha }}
+        run: >-
+          flyctl deploy --remote-only
+          -a b3s-pr71-vault
+          -c fly.pr71-vault.toml
+          --build-arg B3S_BUILD_SHA="$DEPLOY_SHA"
+
+      - name: Verify public liveness and exact commit
+        env:
+          DEPLOY_SHA: ${{ inputs.deployment_sha }}
+        run: |
+          for attempt in $(seq 1 24); do
+            observed="$(curl --fail --silent --show-error https://b3s-pr71-vault.fly.dev/health | python -c 'import json,sys; print(json.load(sys.stdin).get("commit_sha", ""))')" || observed=""
+            test "$observed" = "$DEPLOY_SHA" && exit 0
+            sleep 5
+          done
+          echo "::error::Isolated Vault did not publish the expected commit"
+          exit 1

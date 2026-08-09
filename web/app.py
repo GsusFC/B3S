@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import base64
+import binascii
 import json
 import logging
 import os
 from pathlib import Path
+import re
+import secrets
+import unicodedata
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 import uuid
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -38,6 +43,7 @@ from web.report_store import (
     list_reports,
     list_reports_for_domain,
     load_report,
+    verify_postgres_runtime_ready,
 )
 from web.report_view_model import build_report_view_model
 from web.scan_runner import approve_degraded_scan, cancel_scan, recover_interrupted_scans, scan_status, start_scan
@@ -109,6 +115,7 @@ def _initialize_runtime() -> None:
         from scripts.sv9_flow_shadow_run import _load_env_file
 
         _load_env_file(str(env_file))
+    verify_postgres_runtime_ready()
     recover_interrupted_scans()
 
 
@@ -119,6 +126,180 @@ async def _lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="B3S — Brand Evidence Lab", lifespan=_lifespan)
+
+_SITE_BASIC_AUTH_ENABLED_ENV = "B3S_SITE_BASIC_AUTH_ENABLED"
+_SITE_BASIC_AUTH_USERNAME_ENV = "B3S_SITE_BASIC_AUTH_USERNAME"
+_SITE_BASIC_AUTH_PASSWORD_ENV = "B3S_SITE_BASIC_AUTH_PASSWORD"
+_SITE_BASIC_AUTH_USERNAME_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$"
+)
+_SITE_BASIC_AUTH_CHALLENGE = 'Basic realm="B3S", charset="UTF-8"'
+_SITE_BASIC_AUTH_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _valid_site_basic_auth_password(password: str) -> bool:
+    return (
+        32 <= len(password) <= 1024
+        and password == password.strip()
+        and not any(
+            unicodedata.category(character).startswith("C")
+            for character in password
+        )
+    )
+
+
+def _normalized_http_origin(value: str, *, origin_header: bool = False) -> str | None:
+    raw = value.strip()
+    if (
+        not raw
+        or "\\" in raw
+        or any(unicodedata.category(character).startswith("C") for character in raw)
+    ):
+        return None
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    if (
+        scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    if origin_header and (parsed.path or parsed.query or parsed.fragment):
+        return None
+    try:
+        hostname = parsed.hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return None
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+    default_port = 443 if scheme == "https" else 80
+    authority = hostname if port in {None, default_port} else f"{hostname}:{port}"
+    return f"{scheme}://{authority}"
+
+
+def _site_basic_auth_configuration() -> tuple[str, str, str]:
+    """Return (state, username, password) without ever logging credentials."""
+
+    raw_enabled = os.environ.get(_SITE_BASIC_AUTH_ENABLED_ENV, "").strip().lower()
+    if raw_enabled in {"", "false"}:
+        return "disabled", "", ""
+    if raw_enabled != "true":
+        return "invalid", "", ""
+
+    username = os.environ.get(_SITE_BASIC_AUTH_USERNAME_ENV, "")
+    password = os.environ.get(_SITE_BASIC_AUTH_PASSWORD_ENV, "")
+    valid_username = _SITE_BASIC_AUTH_USERNAME_RE.fullmatch(username) is not None
+    valid_password = _valid_site_basic_auth_password(password)
+    if not valid_username or not valid_password:
+        return "invalid", "", ""
+    return "enabled", username, password
+
+
+def _site_basic_auth_credentials(authorization: str | None) -> tuple[str, str] | None:
+    if not authorization:
+        return None
+    scheme, separator, encoded = authorization.partition(" ")
+    if scheme.lower() != "basic" or separator != " " or not encoded:
+        return None
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+    if ":" not in decoded:
+        return None
+    username, password = decoded.split(":", 1)
+    if _SITE_BASIC_AUTH_USERNAME_RE.fullmatch(username) is None:
+        return None
+    if not _valid_site_basic_auth_password(password):
+        return None
+    return username, password
+
+
+def _site_basic_auth_matches(
+    authorization: str | None,
+    *,
+    expected_username: str,
+    expected_password: str,
+) -> bool:
+    supplied = _site_basic_auth_credentials(authorization)
+    if supplied is None:
+        return False
+    supplied_username, supplied_password = supplied
+    username_matches = secrets.compare_digest(
+        supplied_username.encode("utf-8"),
+        expected_username.encode("utf-8"),
+    )
+    password_matches = secrets.compare_digest(
+        supplied_password.encode("utf-8"),
+        expected_password.encode("utf-8"),
+    )
+    return username_matches and password_matches
+
+
+def _site_basic_auth_unauthorized() -> PlainTextResponse:
+    return PlainTextResponse(
+        "Unauthorized\n",
+        status_code=401,
+        headers={
+            "WWW-Authenticate": _SITE_BASIC_AUTH_CHALLENGE,
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+def _site_basic_auth_forbidden() -> PlainTextResponse:
+    return PlainTextResponse(
+        "Forbidden\n",
+        status_code=403,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.middleware("http")
+async def require_site_basic_auth(request: Request, call_next):
+    path = request.url.path
+    if path == "/health" or path.startswith("/api/v1/"):
+        return await call_next(request)
+
+    state, username, password = _site_basic_auth_configuration()
+    if state == "disabled":
+        return await call_next(request)
+    if state == "invalid":
+        return PlainTextResponse(
+            "Service unavailable\n",
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    authorization_values = request.headers.getlist("authorization")
+    authorization = authorization_values[0] if len(authorization_values) == 1 else None
+    if not _site_basic_auth_matches(
+        authorization,
+        expected_username=username,
+        expected_password=password,
+    ):
+        return _site_basic_auth_unauthorized()
+
+    if request.method.upper() not in _SITE_BASIC_AUTH_SAFE_METHODS:
+        configured_origin = _normalized_http_origin(
+            os.environ.get("BRAND3_BASE_URL", "")
+        )
+        origin_values = request.headers.getlist("origin")
+        request_origin = (
+            _normalized_http_origin(origin_values[0], origin_header=True)
+            if len(origin_values) == 1
+            else None
+        )
+        if configured_origin is None or request_origin != configured_origin:
+            return _site_basic_auth_forbidden()
+    return await call_next(request)
+
+
 install_scanner_api(app)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 templates.env.autoescape = select_autoescape(("html", "j2"))
