@@ -119,6 +119,7 @@ class UnixTrustedAcquisitionClient:
                 client.connect(self._socket_path)
                 _send_frame(client, payload, maximum=_MAX_REQUEST_BYTES)
                 raw_response = _receive_frame(client, maximum=_MAX_RESPONSE_BYTES)
+                _reject_trailing_bytes(client)
         except (OSError, TimeoutError, ValueError):
             raise EvidenceVaultAcquisitionTransportError("worker_unavailable") from None
         try:
@@ -172,6 +173,20 @@ def _receive_exact(connection: socket.socket, length: int) -> bytes:
         chunks.append(part)
         remaining -= len(part)
     return b"".join(chunks)
+
+
+def _reject_trailing_bytes(connection: socket.socket) -> None:
+    prior_timeout = connection.gettimeout()
+    try:
+        connection.setblocking(False)
+        try:
+            extra = connection.recv(1, socket.MSG_PEEK)
+        except BlockingIOError:
+            extra = b""
+        if extra:
+            raise ValueError("trailing IPC bytes")
+    finally:
+        connection.settimeout(prior_timeout)
 
 
 def _strict_json_object(payload: bytes) -> dict[str, Any]:

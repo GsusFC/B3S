@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import json
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -140,3 +144,37 @@ def test_scan_runner_places_verified_raw_persistence_before_interpretation() -> 
     assert text.index("_capture_verified_raw_shadow") < text.index(
         "build_flow_sv9_shadow_eval"
     )
+
+
+def test_web_import_does_not_load_worker_repository_signing_or_secret_config() -> None:
+    environment = dict(os.environ)
+    environment["B3S_VAULT_SCANNER_INGEST_DATABASE_URL"] = "postgresql://secret"
+    environment["B3S_VAULT_ACQUISITION_PRIVATE_KEY"] = "private-key-secret"
+    code = """
+import json, sys
+from src import config
+import web.scan_runner
+forbidden = sorted(name for name in sys.modules if name.endswith((
+    'evidence_vault_acquisition_worker',
+    'evidence_vault_acquisition_ipc_server',
+    'evidence_vault_raw_repository',
+    'evidence_vault_raw_provenance',
+)))
+print(json.dumps({
+    'forbidden': forbidden,
+    'has_ingest_config': hasattr(config, 'B3S_VAULT_SCANNER_INGEST_DATABASE_URL'),
+    'has_private_config': hasattr(config, 'B3S_VAULT_ACQUISITION_PRIVATE_KEY'),
+}))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        text=True,
+        capture_output=True,
+        env=environment,
+    )
+    assert json.loads(completed.stdout) == {
+        "forbidden": [],
+        "has_ingest_config": False,
+        "has_private_config": False,
+    }

@@ -21,6 +21,7 @@ from src.services.evidence_vault_acquisition_ipc import (
     _MAX_REQUEST_BYTES,
     _MAX_RESPONSE_BYTES,
     _receive_frame,
+    _reject_trailing_bytes,
     _send_frame,
     _strict_json_object,
     _validated_socket_path,
@@ -95,6 +96,7 @@ def _serve_connection(
     request_id = str(uuid4())
     try:
         payload = _receive_frame(connection, maximum=_MAX_REQUEST_BYTES)
+        _reject_trailing_bytes(connection)
         request = _CaptureRequest.model_validate(
             _strict_json_object(payload),
             strict=True,

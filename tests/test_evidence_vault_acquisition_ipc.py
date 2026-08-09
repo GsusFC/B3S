@@ -19,6 +19,7 @@ import pytest
 
 from src.services.evidence_vault_acquisition_contract import (
     SIGNED_ACQUISITION_RESULT_SCHEMA_VERSION,
+    SafeDeterministicDocument,
     SignedAcquisitionResultEnvelope,
     TrustedAcquisitionCommand,
 )
@@ -28,6 +29,7 @@ from src.services.evidence_vault_acquisition_ipc import (
     UnixTrustedAcquisitionClient,
     _MAX_REQUEST_BYTES,
     _receive_frame,
+    _reject_trailing_bytes,
     _strict_json_object,
 )
 from src.services.evidence_vault_acquisition_ipc_server import (
@@ -245,3 +247,37 @@ print(json.dumps(sorted(name for name in sys.modules if name.endswith((
         capture_output=True,
     )
     assert json.loads(completed.stdout) == []
+
+
+def test_public_document_projection_enforces_character_and_utf8_byte_caps() -> None:
+    common = {
+        "role": "owned_web",
+        "receipt_fingerprint": "a" * 64,
+        "source_url": "https://example.com",
+        "extracted_document_sha256": "b" * 64,
+    }
+    accepted = SafeDeterministicDocument(
+        **common, extracted_document="x" * 2_097_152
+    )
+    assert len(accepted.extracted_document) == 2_097_152
+    with pytest.raises(ValueError, match="at most 2097152 characters"):
+        SafeDeterministicDocument(
+            **common, extracted_document="x" * 2_097_153
+        )
+    with pytest.raises(ValueError, match="durable v1 bound"):
+        SafeDeterministicDocument(
+            **common, extracted_document="é" * 1_048_577
+        )
+
+
+def test_framing_rejects_trailing_bytes_after_one_message() -> None:
+    reader, writer = socket.socketpair()
+    try:
+        payload = b'{}'
+        writer.sendall(struct.pack('>I', len(payload)) + payload + b'x')
+        assert _receive_frame(reader, maximum=32) == payload
+        with pytest.raises(ValueError, match="trailing IPC bytes"):
+            _reject_trailing_bytes(reader)
+    finally:
+        reader.close()
+        writer.close()
