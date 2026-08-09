@@ -765,6 +765,26 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
     assert exact_score is not None
     assert exact_score["score"] == 11
     assert exact_score["authority_coverage"]["accepted_tile_count"] == 6
+    with psycopg.connect(dsn) as conn:
+        score_created_at, adoption_stored_at = conn.execute(
+            """
+            SELECT scores.created_at, adoptions.created_at
+            FROM b3s_history.evidence_vault_canonical_score_evaluations AS scores
+            JOIN b3s_history.evidence_vault_canonical_memory_promotion_events AS adoptions
+              ON adoptions.id = scores.promotion_event_id
+            WHERE scores.evaluation_identity = %s
+            """,
+            (exact_score["evaluation_identity"],),
+        ).fetchone()
+        shadow_context = conn.execute(
+            "SELECT b3s_history.read_evidence_vault_c7_shadow_context(%s, %s)",
+            ("b3s", brand),
+        ).fetchone()[0]
+    assert score_created_at >= adoption_stored_at
+    assert {
+        review["source_packet_kind"]
+        for review in shadow_context["relation_reviews"]
+    } == {"operational_source_v2"}
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
     monkeypatch.setenv("BRAND3_VAULT_C7_CUTOVER_ENABLED", "true")
     monkeypatch.setenv("BRAND3_VAULT_C7_EMERGENCY_DENY", "false")

@@ -5922,9 +5922,12 @@ class PostgresHistoryRepository:
             if existing is not None:
                 return _vault_operational_score_record(existing), True
 
+            database_time = conn.execute(
+                "SELECT clock_timestamp() AS database_time"
+            ).fetchone()["database_time"]
             evaluation = build_operational_score_evaluation(
                 memory,
-                created_at=datetime.now(timezone.utc).isoformat(),
+                created_at=database_time.isoformat(),
             )
             reusable_row = conn.execute(
                 f"""

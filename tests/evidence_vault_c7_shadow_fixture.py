@@ -191,9 +191,9 @@ _ADOPTION_FIELDS = {
     "adoption_kind", "adopted_by", "actor_id", "event_payload",
 }
 _REVIEW_FIELDS = {
-    "id", "brand_id", "source_packet_id", "source_packet_fingerprint", "relation_id", "decision",
-    "reviewer_id", "rationale", "review_request_fingerprint", "authority", "authority_scope",
-    "production_runtime_effect", "scanner_runtime_effect", "created_at",
+    "id", "brand_id", "source_packet_id", "source_packet_fingerprint", "source_packet_kind",
+    "relation_id", "decision", "reviewer_id", "rationale", "review_request_fingerprint",
+    "authority", "authority_scope", "production_runtime_effect", "scanner_runtime_effect", "created_at",
 }
 _SCORE_FIELDS = {
     "id", "brand_id", "promotion_event_id", "canonical_memory_version", "evaluation_identity",
@@ -526,6 +526,7 @@ def _authority_rows() -> dict[str, Any]:
             "brand_id": brand_id,
             "source_packet_id": exact_source_id,
             "source_packet_fingerprint": exact_source["candidate_packet_fingerprint"],
+            "source_packet_kind": "operational_source_v2",
             "relation_id": relation_id,
             "decision": "accept",
             "reviewer_id": reviewer_id,
@@ -1004,7 +1005,10 @@ def _capture_proof(
         "recorded_at": _iso(acquired_at),
         "source_url": _BRAND_URL,
         "content_hash": signed_capture.capture_content_hash,
-        "acquisition_summary": observation.acquisition_summary,
+        "acquisition_summary": {
+            **observation.acquisition_summary,
+            "state": observation.acquisition_state,
+        },
         "limitations": list(observation.limitations),
         "raw_payload": signed_capture.raw_payload,
     })

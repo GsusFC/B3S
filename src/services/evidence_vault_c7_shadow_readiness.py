@@ -762,6 +762,7 @@ def _current_group(
             or reviewed_at_value > database_time
             or _uuid_text(row["brand_id"]) != brand_id
             or row["source_packet_fingerprint"] != exact_fingerprint
+            or row["source_packet_kind"] != "operational_source_v2"
             or decision not in {"accept", "reject"}
             or row["review_request_fingerprint"] != request_fingerprint
             or row["authority"] is not True
@@ -1361,7 +1362,13 @@ def _validate_capture_proof(
         or _datetime(capture["observed_at"]) != observation.observed_at
         or _datetime(capture["recorded_at"]) != observation.recorded_at
         or not _json_equal(capture["raw_payload"], observation.capture_payload)
-        or not _json_equal(capture["acquisition_summary"], observation.acquisition_summary)
+        or not _json_equal(
+            capture["acquisition_summary"],
+            {
+                **observation.acquisition_summary,
+                "state": observation.acquisition_state,
+            },
+        )
         or not _json_equal(capture["limitations"], list(observation.limitations))
         or capture["content_hash"] != observation.capture_hash
         or scan_metadata.get("observation_hash") != observation.observation_hash
@@ -2153,9 +2160,9 @@ _ADOPTION_FIELDS = {
     "adoption_kind", "adopted_by", "actor_id", "event_payload",
 }
 _REVIEW_FIELDS = {
-    "id", "brand_id", "source_packet_id", "source_packet_fingerprint", "relation_id", "decision",
-    "reviewer_id", "rationale", "review_request_fingerprint", "authority", "authority_scope",
-    "production_runtime_effect", "scanner_runtime_effect", "created_at",
+    "id", "brand_id", "source_packet_id", "source_packet_fingerprint", "source_packet_kind",
+    "relation_id", "decision", "reviewer_id", "rationale", "review_request_fingerprint",
+    "authority", "authority_scope", "production_runtime_effect", "scanner_runtime_effect", "created_at",
 }
 _SCORE_FIELDS = {
     "id", "brand_id", "promotion_event_id", "canonical_memory_version", "evaluation_identity",

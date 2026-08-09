@@ -119,6 +119,12 @@ def _review_rationale_tamper(snapshot: dict[str, Any]) -> None:
     snapshot["context"]["relation_reviews"][0]["rationale"] += " changed"
 
 
+def _review_source_packet_kind_tamper(snapshot: dict[str, Any]) -> None:
+    snapshot["context"]["relation_reviews"][0]["source_packet_kind"] = (
+        "operational_reviewed_v2"
+    )
+
+
 def _adoption_resolution_tamper(snapshot: dict[str, Any]) -> None:
     snapshot["context"]["operational_adoptions"][-1][
         "reference_resolution_fingerprint"
@@ -272,6 +278,12 @@ def _raw_capture_tamper(snapshot: dict[str, Any]) -> None:
     snapshot["proofs"][0]["acquisition"]["capture"]["raw_payload"]["sources"][
         "owned"
     ]["markdown_content"] += " changed"
+
+
+def _capture_summary_state_tamper(snapshot: dict[str, Any]) -> None:
+    snapshot["proofs"][0]["acquisition"]["capture"]["acquisition_summary"][
+        "state"
+    ] = "failed"
 
 
 def _passage_tamper(snapshot: dict[str, Any]) -> None:
@@ -568,6 +580,11 @@ def _duplicate_disposition_idempotency(snapshot: dict[str, Any]) -> None:
             id="review-request-rationale",
         ),
         pytest.param(
+            _review_source_packet_kind_tamper,
+            C7ShadowReadinessReason.CURRENT_GROUP_INVALID,
+            id="review-source-packet-kind",
+        ),
+        pytest.param(
             _adoption_resolution_tamper,
             C7ShadowReadinessReason.CURRENT_AUTHORITY_INVALID,
             id="adoption-resolution-link",
@@ -691,6 +708,11 @@ def _duplicate_disposition_idempotency(snapshot: dict[str, Any]) -> None:
             _raw_capture_tamper,
             C7ShadowReadinessReason.RAW_PROVENANCE_INVALID,
             id="raw-capture",
+        ),
+        pytest.param(
+            _capture_summary_state_tamper,
+            C7ShadowReadinessReason.RAW_PROVENANCE_INVALID,
+            id="capture-summary-state",
         ),
         pytest.param(
             _passage_tamper,
