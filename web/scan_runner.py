@@ -265,6 +265,9 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
 
         if _scan_cancelled(scan_id):
             return
+        _capture_verified_raw_shadow(scan_id=scan_id, url=url)
+        if _scan_cancelled(scan_id):
+            return
         _set_phase(scan_id, "interpret", "running")
         from scripts.sv9_flow_sv9_shadow_eval import build_flow_sv9_shadow_eval
 
@@ -316,6 +319,60 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 _persist_scan_status(persisted_status)
             except Exception:
                 _LOG.exception("failed to persist terminal scanner error", extra={"scan_id": scan_id})
+
+
+def _capture_verified_raw_shadow(*, scan_id: str, url: str) -> None:
+    """Persist signed raw provenance before interpretation when explicitly enabled."""
+
+    from src.config import (
+        BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED,
+        BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH,
+    )
+
+    if not BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED:
+        return
+    if os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() != "vault":
+        raise RuntimeError("verified_raw_acquisition_invalid_environment")
+    if not BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH:
+        raise RuntimeError("verified_raw_acquisition_unconfigured")
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    canonical_url = f"https://{host}"
+    try:
+        from src.services.evidence_vault_acquisition_contract import (
+            TrustedAcquisitionCommand,
+        )
+        from src.services.evidence_vault_acquisition_ipc import (
+            UnixTrustedAcquisitionClient,
+        )
+
+        result = UnixTrustedAcquisitionClient(
+            BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH,
+        ).capture(
+            TrustedAcquisitionCommand(
+                workspace_slug="b3s",
+                source_scan_id=scan_id,
+                brand_url=canonical_url,
+            )
+        )
+    except Exception:
+        result = None
+    if result is None:
+        raise RuntimeError("verified_raw_acquisition_failed")
+    safe_status = {
+        "state": "persisted_shadow",
+        "capture_id": result.capture_id,
+        "capture_content_hash": result.capture_content_hash,
+        "receipt_set_fingerprint": result.receipt_set_fingerprint,
+        "receipt_count": len(result.receipt_rows),
+    }
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        if status is None or status.get("state") == "cancelled":
+            return
+        status["verified_raw_acquisition"] = safe_status
+        persisted_status = _status_copy_locked(status)
+    _persist_scan_status(persisted_status)
 
 
 def _attach_evidence_stability(report: dict[str, Any]) -> dict[str, Any]:

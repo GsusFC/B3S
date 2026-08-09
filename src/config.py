@@ -258,3 +258,16 @@ BRAND3_SCREENSHOT_DIR = os.environ.get(
     "BRAND3_SCREENSHOT_DIR",
     str(Path(BRAND3_DB_PATH).parent / "screenshots"),
 )
+
+
+# Verified raw acquisition remains a Vault-only shadow path.  The web process
+# receives only this public Unix-socket location; worker private-key and ingest
+# DSN configuration deliberately do not exist in this module.
+BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED = os.environ.get(
+    "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED",
+    "false",
+).strip().lower() == "true"
+BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH = os.environ.get(
+    "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH",
+    "",
+).strip()
