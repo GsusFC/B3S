@@ -761,6 +761,18 @@ def verify_raw_acquisition_receipt(
     return model
 
 
+def public_key_registry_fingerprint(
+    public_key_registry: PublicKeyRegistry | Mapping[str, Any],
+) -> str:
+    """Content-address the exact public verification/rotation policy."""
+
+    registry = _model_from(public_key_registry, PublicKeyRegistry)
+    return canonical_fingerprint(
+        PUBLIC_KEY_REGISTRY_VERSION,
+        registry.model_dump(mode="json"),
+    )
+
+
 def receipt_set_fingerprint(
     receipts: Sequence[RawAcquisitionReceipt | Mapping[str, Any]],
 ) -> str:

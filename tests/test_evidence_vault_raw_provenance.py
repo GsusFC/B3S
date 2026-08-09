@@ -31,6 +31,7 @@ from src.services.evidence_vault_raw_provenance import (
     evidence_memory_source_identity_id,
     external_identity_provenance_fingerprint,
     pre_receipt_snapshot_sha256,
+    public_key_registry_fingerprint,
     raw_acquisition_receipt_fingerprint,
     receipt_set_fingerprint,
     sign_raw_acquisition_receipt,
@@ -1006,3 +1007,29 @@ def test_extra_fields_and_lax_type_coercion_are_rejected_at_every_layer(key_one:
     receipt["authority"] = False
     with pytest.raises(ValidationError):
         RawAcquisitionReceipt.model_validate(receipt)
+
+
+def test_public_key_registry_fingerprint_binds_rotation_and_status(
+    key_one: Ed25519PrivateKey,
+    key_two: Ed25519PrivateKey,
+) -> None:
+    initial = _registry(key_one)
+    initial_fp = public_key_registry_fingerprint(initial)
+    assert initial_fp == canonical_fingerprint(PUBLIC_KEY_REGISTRY_VERSION, initial)
+
+    rotated = deepcopy(initial)
+    rotated["keys"]["acquisition-2026-01"]["status"] = "verification_only"
+    rotated["keys"]["acquisition-2026-02"] = {
+        "version": 2,
+        "status": "current",
+        "public_key_base64": _public_b64(key_two),
+    }
+    rotated["current_key_id"] = "acquisition-2026-02"
+    assert public_key_registry_fingerprint(rotated) != initial_fp
+
+    revoked = deepcopy(rotated)
+    revoked["keys"]["acquisition-2026-01"]["status"] = "revoked"
+    assert public_key_registry_fingerprint(revoked) not in {
+        initial_fp,
+        public_key_registry_fingerprint(rotated),
+    }
