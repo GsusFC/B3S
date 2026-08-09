@@ -277,3 +277,57 @@ def test_public_result_rejects_secret_bearing_signed_fields() -> None:
 
     with pytest.raises(EvidenceVaultAcquisitionWorkerError, match="^invalid_signed_result$"):
         worker.capture(_command_payload())
+
+
+def test_durable_replay_lookup_returns_before_collect_sign_or_persist() -> None:
+    events: list[str] = []
+    replay = _signed_payload("durable-nonce")
+
+    def lookup(command: TrustedAcquisitionCommand) -> Mapping[str, Any] | None:
+        events.append(f"lookup:{command.source_scan_id}")
+        return deepcopy(replay)
+
+    worker = TrustedAcquisitionWorker(
+        lookup=lookup,
+        collect=lambda _command: events.append("collect") or {},
+        sign=lambda _command, _collected: events.append("sign") or {},
+        persist=lambda _command, _signed: events.append("persist") or {},
+    )
+
+    result = worker.capture(_command_payload())
+
+    assert result.signed_acquisition == replay
+    assert events == ["lookup:scan-70"]
+
+
+def test_replay_lookup_miss_precedes_normal_collect_sign_persist() -> None:
+    events: list[str] = []
+    payload = _signed_payload("new-nonce")
+
+    worker = TrustedAcquisitionWorker(
+        lookup=lambda _command: events.append("lookup") or None,
+        collect=lambda _command: events.append("collect") or {"snapshot": {}},
+        sign=lambda _command, _collected: events.append("sign") or deepcopy(payload),
+        persist=lambda _command, signed: events.append("persist") or deepcopy(dict(signed)),
+    )
+
+    assert worker.capture(_command_payload()).signed_acquisition == payload
+    assert events == ["lookup", "collect", "sign", "persist"]
+
+
+def test_replay_lookup_failure_is_generic_and_prevents_collection() -> None:
+    events: list[str] = []
+
+    def lookup(_command: TrustedAcquisitionCommand) -> Mapping[str, Any] | None:
+        raise RuntimeError("scanner ingest DSN secret")
+
+    worker = TrustedAcquisitionWorker(
+        lookup=lookup,
+        collect=lambda _command: events.append("collect") or {},
+        sign=lambda _command, _collected: {},
+        persist=lambda _command, _signed: {},
+    )
+
+    with pytest.raises(EvidenceVaultAcquisitionWorkerError, match="^replay_lookup_failed$"):
+        worker.capture(_command_payload())
+    assert events == []

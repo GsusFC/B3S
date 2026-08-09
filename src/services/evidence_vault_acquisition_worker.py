@@ -143,6 +143,15 @@ class TrustedAcquisitionClient(Protocol):
     ) -> SignedAcquisitionResultEnvelope: ...
 
 
+class AcquisitionReplayLookup(Protocol):
+    """Worker-local durable replay lookup performed before any recollection."""
+
+    def __call__(
+        self,
+        command: TrustedAcquisitionCommand,
+    ) -> Mapping[str, Any] | None: ...
+
+
 class AcquisitionCollector(Protocol):
     """Worker-local collection capability; its output never comes from the caller."""
 
@@ -177,7 +186,7 @@ class TrustedAcquisitionWorker:
     exposes only ``capture(command)`` and never offers an arbitrary-signing verb.
     """
 
-    __slots__ = ("__collect", "__persist", "__sign")
+    __slots__ = ("__collect", "__lookup", "__persist", "__sign")
 
     def __init__(
         self,
@@ -185,12 +194,16 @@ class TrustedAcquisitionWorker:
         collect: AcquisitionCollector,
         sign: AcquisitionSigner,
         persist: AcquisitionPersister,
+        lookup: AcquisitionReplayLookup | None = None,
     ) -> None:
         if not callable(collect) or not callable(sign) or not callable(persist):
             raise TypeError("worker capabilities must be callable")
+        if lookup is not None and not callable(lookup):
+            raise TypeError("worker replay lookup must be callable")
         self.__collect = collect
         self.__sign = sign
         self.__persist = persist
+        self.__lookup = lookup
 
     def capture(
         self,
@@ -199,6 +212,19 @@ class TrustedAcquisitionWorker:
         """Collect, sign, and persist one command before exposing a result."""
 
         validated = _parse_command(command)
+        if self.__lookup is not None:
+            try:
+                replay = self.__lookup(validated)
+            except Exception:
+                raise EvidenceVaultAcquisitionWorkerError(
+                    "replay_lookup_failed"
+                ) from None
+            if replay is not None:
+                replay_mapping = _require_mapping(
+                    replay,
+                    failure="replay_lookup_failed",
+                )
+                return _build_result(validated, replay_mapping)
         try:
             collected = self.__collect(validated)
         except Exception:
