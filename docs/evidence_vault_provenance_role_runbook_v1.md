@@ -1,6 +1,6 @@
 # Evidence Vault verified-raw PostgreSQL role runbook v1
 
-Status: deployment contract for Draft PR #70. Production remains **NO-GO**.
+Status: deployment contract for cumulative Draft PR #71 (including PR #70). Production remains **NO-GO**.
 
 Migrations 019/020 deliberately create no application `LOGIN` roles and embed no credentials. Provision logins in the deployment control plane. Never reuse the FastAPI/report DSN as scanner ingest, shadow-read, governance, or release-migration identity.
 
@@ -103,6 +103,14 @@ REVOKE CREATE ON SCHEMA b3s_history FROM
 ```
 
 The table-wide revocation does not remove a pre-existing column ACL; explicitly revoke any `SELECT`, `INSERT`, `UPDATE` or `REFERENCES` column grant found in `information_schema.column_privileges`. Apply only the scanner/governance direct function grants again after those revocations; never add direct runtime grants. Verify table, column, sequence, schema and function privileges from each login, and prove the runtime login has no effective database-wide `SECURITY DEFINER` execution except the three bounded B3S reads. Scanner/governance functions also use fixed `search_path`; their owner remains NOLOGIN. After both migrations validate, revoke owner membership from the release migrator and re-grant it only inside a later controlled migration window.
+
+## Core-parent immutability and physical-deletion boundary
+
+Migration 018 protects more than new Vault journals. It also installs database triggers on the pre-existing `captures`, `evidence_records`, `scan_runs`, and `brands` tables. Capture rows and evidence rows become immutable; scan identity/request/observation identity and brand workspace/domain identity cannot be rewritten. Migration 021 separately rejects deletion of operation plans.
+
+These guards apply even while C7 runtime and acquisition remain disabled. Combined with existing `ON DELETE CASCADE` relationships, they mean a physical delete of a workspace, brand, scan, or capture can fail whenever the cascade reaches a protected evidence record or operation plan. Disabling a feature flag does not restore deletability, and operators must not bypass the guards by disabling triggers or issuing direct SQL.
+
+The explicitly authorized landing posture for cumulative PR #71 accepts this fail-closed **no-physical-purge boundary**. It does not claim legal erasure, tenant offboarding, retention deletion, or crypto-shred support, and it does not authorize deployment or C7 activation. If any current production obligation requires physical deletion of these rows, that obligation remains a deployment blocker. Before C7 activation, approve and independently review a separate owner-controlled retention/erasure design; do not add an undocumented purge escape hatch to this migration stack.
 
 ## Operational rules
 
