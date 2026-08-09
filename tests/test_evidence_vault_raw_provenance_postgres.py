@@ -403,6 +403,87 @@ def test_verified_raw_sql_lock_order_and_privilege_surface_are_safe() -> None:
     or os.environ.get("B3S_ALLOW_SCHEMA_DROP") != "1",
     reason="destructive PostgreSQL integration requires B3S_TEST_DATABASE_URL and B3S_ALLOW_SCHEMA_DROP=1",
 )
+def test_postgres_upgrade_from_committed_019_applies_only_020() -> None:
+    import hashlib
+
+    import psycopg
+    from psycopg import sql as psycopg_sql
+    from src.history.repository import PostgresHistoryRepository, _migration_files
+
+    dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    owner = "b3s_history_vault_provenance_owner"
+    runtime_read = "b3s_history_vault_runtime_read"
+
+    def reset(admin) -> None:
+        admin.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+        for role in (runtime_read, owner):
+            if admin.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = %s)",
+                (role,),
+            ).fetchone()[0]:
+                admin.execute(
+                    psycopg_sql.SQL("REASSIGN OWNED BY {} TO CURRENT_USER").format(
+                        psycopg_sql.Identifier(role)
+                    )
+                )
+                admin.execute(
+                    psycopg_sql.SQL("DROP OWNED BY {}").format(
+                        psycopg_sql.Identifier(role)
+                    )
+                )
+                admin.execute(
+                    psycopg_sql.SQL("DROP ROLE {}").format(
+                        psycopg_sql.Identifier(role)
+                    )
+                )
+
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        reset(admin)
+    try:
+        with psycopg.connect(dsn) as admin:
+            admin.execute("CREATE SCHEMA b3s_history")
+            admin.execute(
+                """
+                CREATE TABLE b3s_history.schema_migrations (
+                    version text PRIMARY KEY,
+                    filename text NOT NULL,
+                    checksum text NOT NULL CHECK (length(checksum) = 64),
+                    applied_at timestamptz NOT NULL DEFAULT now()
+                )
+                """
+            )
+            for filename, sql_text in _migration_files():
+                if filename == "020_evidence_vault_c7_shadow_readiness.sql":
+                    break
+                admin.execute(sql_text, prepare=False)
+                admin.execute(
+                    """
+                    INSERT INTO b3s_history.schema_migrations
+                        (version, filename, checksum)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (
+                        filename.split("_", 1)[0],
+                        filename,
+                        hashlib.sha256(sql_text.encode("utf-8")).hexdigest(),
+                    ),
+                )
+
+        repository = PostgresHistoryRepository(dsn)
+        assert repository.migrate() == [
+            "020_evidence_vault_c7_shadow_readiness.sql"
+        ]
+        assert repository.migrate() == []
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            reset(admin)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL")
+    or os.environ.get("B3S_ALLOW_SCHEMA_DROP") != "1",
+    reason="destructive PostgreSQL integration requires B3S_TEST_DATABASE_URL and B3S_ALLOW_SCHEMA_DROP=1",
+)
 def test_postgres16_createrole_migrator_can_set_owner_before_transfer() -> None:
     import psycopg
     from psycopg import sql as psycopg_sql
@@ -412,10 +493,11 @@ def test_postgres16_createrole_migrator_can_set_owner_before_transfer() -> None:
     dsn = os.environ["B3S_TEST_DATABASE_URL"]
     migrator = "b3s_provenance_pg16_migrator_test"
     owner = "b3s_history_vault_provenance_owner"
+    runtime_read = "b3s_history_vault_runtime_read"
 
     def reset_roles(conn) -> None:
         conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
-        for role in (migrator, owner):
+        for role in (migrator, runtime_read, owner):
             if conn.execute(
                 "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = %s)",
                 (role,),
@@ -458,7 +540,7 @@ def test_postgres16_createrole_migrator_can_set_owner_before_transfer() -> None:
     )
     try:
         applied = PostgresHistoryRepository(migrator_dsn).migrate()
-        assert applied[-1] == "019_evidence_vault_verified_raw_provenance.sql"
+        assert applied[-1] == "020_evidence_vault_c7_shadow_readiness.sql"
         with psycopg.connect(dsn) as admin:
             assert admin.execute(
                 "SELECT pg_has_role(%s, %s, 'SET')", (migrator, owner)
@@ -495,11 +577,15 @@ def test_postgres_fixed_owner_fail_closed_and_preprovisioned_migrator() -> None:
     dsn = os.environ["B3S_TEST_DATABASE_URL"]
     migrator = "b3s_preprovisioned_migrator_test"
     owner = "b3s_history_vault_provenance_owner"
+    runtime_read = "b3s_history_vault_runtime_read"
     password = "preprovisioned-migrator-password"
 
     def reset(admin) -> None:
         admin.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
-        for role in (migrator, owner):
+        admin.execute(
+            "DROP FUNCTION IF EXISTS public.b3s_runtime_preexisting_definer()"
+        )
+        for role in (migrator, runtime_read, owner):
             if admin.execute(
                 "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = %s)",
                 (role,),
@@ -551,6 +637,111 @@ def test_postgres_fixed_owner_fail_closed_and_preprovisioned_migrator() -> None:
                 psycopg_sql.Identifier(owner)
             )
         )
+        admin.execute(
+            psycopg_sql.SQL("CREATE ROLE {} NOLOGIN").format(
+                psycopg_sql.Identifier(runtime_read)
+            )
+        )
+        unsafe_inherit_dsn = create_migrator(admin)
+        admin.execute(
+            psycopg_sql.SQL("GRANT {} TO {}").format(
+                psycopg_sql.Identifier(owner), psycopg_sql.Identifier(migrator)
+            )
+        )
+    try:
+        with pytest.raises(psycopg.Error, match="runtime_read has unsafe role attributes"):
+            PostgresHistoryRepository(unsafe_inherit_dsn).migrate()
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            reset(admin)
+
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        admin.execute(
+            psycopg_sql.SQL("CREATE ROLE {} NOLOGIN").format(
+                psycopg_sql.Identifier(owner)
+            )
+        )
+        admin.execute(
+            psycopg_sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(
+                psycopg_sql.Identifier(runtime_read)
+            )
+        )
+        admin.execute(
+            psycopg_sql.SQL("GRANT {} TO {}").format(
+                psycopg_sql.Identifier(owner), psycopg_sql.Identifier(runtime_read)
+            )
+        )
+        unsafe_membership_dsn = create_migrator(admin)
+        admin.execute(
+            psycopg_sql.SQL("GRANT {} TO {}").format(
+                psycopg_sql.Identifier(owner), psycopg_sql.Identifier(migrator)
+            )
+        )
+    try:
+        with pytest.raises(psycopg.Error, match="must not inherit another role"):
+            PostgresHistoryRepository(unsafe_membership_dsn).migrate()
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            reset(admin)
+
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        admin.execute(
+            psycopg_sql.SQL("CREATE ROLE {} NOLOGIN").format(
+                psycopg_sql.Identifier(owner)
+            )
+        )
+        admin.execute(
+            psycopg_sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(
+                psycopg_sql.Identifier(runtime_read)
+            )
+        )
+        admin.execute(
+            """
+            CREATE FUNCTION public.b3s_runtime_preexisting_definer()
+            RETURNS integer
+            LANGUAGE sql
+            SECURITY DEFINER
+            SET search_path = pg_catalog
+            AS 'SELECT 1'
+            """
+        )
+        admin.execute(
+            "REVOKE ALL ON FUNCTION public.b3s_runtime_preexisting_definer() "
+            "FROM PUBLIC"
+        )
+        admin.execute(
+            psycopg_sql.SQL(
+                "GRANT EXECUTE ON FUNCTION "
+                "public.b3s_runtime_preexisting_definer() TO {}"
+            ).format(psycopg_sql.Identifier(runtime_read))
+        )
+        unsafe_execute_dsn = create_migrator(admin)
+        admin.execute(
+            psycopg_sql.SQL("GRANT {} TO {}").format(
+                psycopg_sql.Identifier(owner), psycopg_sql.Identifier(migrator)
+            )
+        )
+    try:
+        with pytest.raises(
+            psycopg.Error,
+            match="preexisting SECURITY DEFINER EXECUTE",
+        ):
+            PostgresHistoryRepository(unsafe_execute_dsn).migrate()
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            reset(admin)
+
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        admin.execute(
+            psycopg_sql.SQL("CREATE ROLE {} NOLOGIN").format(
+                psycopg_sql.Identifier(owner)
+            )
+        )
+        admin.execute(
+            psycopg_sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(
+                psycopg_sql.Identifier(runtime_read)
+            )
+        )
         provisioned_dsn = create_migrator(admin)
         admin.execute(
             psycopg_sql.SQL("GRANT {} TO {}").format(
@@ -559,7 +750,7 @@ def test_postgres_fixed_owner_fail_closed_and_preprovisioned_migrator() -> None:
         )
     try:
         applied = PostgresHistoryRepository(provisioned_dsn).migrate()
-        assert applied[-1] == "019_evidence_vault_verified_raw_provenance.sql"
+        assert applied[-1] == "020_evidence_vault_c7_shadow_readiness.sql"
         with psycopg.connect(dsn) as admin:
             journal_owners = admin.execute("""
                 SELECT array_agg(DISTINCT owners.rolname), count(*)
@@ -590,14 +781,53 @@ def test_postgres_fixed_owner_fail_closed_and_preprovisioned_migrator() -> None:
                 "append_evidence_vault_raw_provenance_disposition",
                 "read_evidence_vault_raw_provenance",
                 "read_evidence_vault_raw_acquisition",
+                "read_evidence_vault_c7_shadow_context",
+                "read_evidence_vault_c7_shadow_provenance",
+                "read_evidence_vault_c7_shadow_acquisition",
                 "validate_evidence_vault_capture_watermark_row",
                 "validate_evidence_vault_raw_receipt_durable",
                 "validate_evidence_vault_verified_c7_binding_trigger",
             ],)).fetchone()
-            assert definer_owners == ([owner], 8)
+            assert definer_owners == ([owner], 11)
             assert not admin.execute(
                 "SELECT has_schema_privilege(%s, 'b3s_history', 'CREATE')",
                 (owner,),
+            ).fetchone()[0]
+            runtime_attributes = admin.execute(
+                """
+                SELECT rolcanlogin, rolinherit, rolsuper, rolcreaterole,
+                       rolcreatedb, rolreplication, rolbypassrls
+                FROM pg_roles WHERE rolname = %s
+                """,
+                (runtime_read,),
+            ).fetchone()
+            assert runtime_attributes == (False, False, False, False, False, False, False)
+            executable_definers = admin.execute(
+                """
+                SELECT array_agg(functions.proname ORDER BY functions.proname)
+                FROM pg_proc AS functions
+                JOIN pg_namespace AS schemas ON schemas.oid = functions.pronamespace
+                WHERE schemas.nspname = 'b3s_history'
+                  AND functions.prosecdef
+                  AND has_function_privilege(%s, functions.oid, 'EXECUTE')
+                """,
+                (runtime_read,),
+            ).fetchone()[0]
+            assert executable_definers == [
+                "read_evidence_vault_c7_shadow_acquisition",
+                "read_evidence_vault_c7_shadow_context",
+                "read_evidence_vault_c7_shadow_provenance",
+            ]
+            assert not admin.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_auth_members AS memberships
+                    JOIN pg_roles AS members ON members.oid = memberships.member
+                    WHERE members.rolname = %s
+                )
+                """,
+                (runtime_read,),
             ).fetchone()[0]
     finally:
         with psycopg.connect(dsn, autocommit=True) as admin:
@@ -640,9 +870,10 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
     dsn = os.environ["B3S_TEST_DATABASE_URL"]
     execute_only_role = "b3s_raw_execute_only_test"
     governance_role = "b3s_provenance_governance_test"
+    runtime_read = "b3s_history_vault_runtime_read"
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
-        for role in (execute_only_role, governance_role):
+        for role in (execute_only_role, governance_role, runtime_read):
             conn.execute(
                 psycopg_sql.SQL("DROP ROLE IF EXISTS {}").format(
                     psycopg_sql.Identifier(role)
@@ -650,7 +881,7 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
             )
     try:
         applied = PostgresHistoryRepository(dsn).migrate()
-        assert applied[-1] == "019_evidence_vault_verified_raw_provenance.sql"
+        assert applied[-1] == "020_evidence_vault_c7_shadow_readiness.sql"
         receipt = _signed_owned_receipt()
         dumped = receipt.model_dump(mode="json")
         with psycopg.connect(dsn) as conn:
@@ -2997,7 +3228,7 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
-            for role in (execute_only_role, governance_role):
+            for role in (execute_only_role, governance_role, runtime_read):
                 conn.execute(
                     psycopg_sql.SQL("DROP ROLE IF EXISTS {}").format(
                         psycopg_sql.Identifier(role)

@@ -143,9 +143,11 @@ SQL requirements:
 - migration preflight validates composite-parent integrity globally, but exact typed-observation/evidence-set checks apply only to 017-watermarked typed observations and new 019 envelopes—legacy/report rows are not backfilled or reclassified;
 - deferred validation recomputes observation/capture/evidence hashes from eligible durable payloads and proves the exact evidence set—no missing or extra evidence rows;
 - an existing scan/capture without its required watermark is a hard conflict, never a healthy `unchanged` replay;
-- new journals are owned by a `NOLOGIN` object-owner role. Migration fails if that owner cannot be created/pre-provisioned or the migrator lacks real `SET` capability (`MEMBER` on PostgreSQL 14/15). A separate tightly controlled `LOGIN` migrator DSN may `SET ROLE` to that owner only in the release migration job and is absent from runtime. Runtime gets only the read function, a distinct scanner-ingest role gets one ingest function, and a separate provenance-governance operator role gets one disposition-append function. Both writes are `SECURITY DEFINER` with fixed safe `search_path`, fully qualified objects, no dynamic SQL, and `REVOKE EXECUTE FROM PUBLIC`; none of those roles gets table DML or trigger-disable privileges. Production startup verifies the migration head but cannot apply DDL;
+- new journals are owned by a `NOLOGIN` object-owner role. Migration fails if that owner cannot be created/pre-provisioned or the migrator lacks real `SET` capability (`MEMBER` on PostgreSQL 14/15). A separate tightly controlled `LOGIN` migrator DSN may `SET ROLE` to that owner only in the release migration job and is absent from runtime. A distinct scanner-ingest role gets the ingest/replay surface, provenance governance gets binding/disposition append, and the later shadow runtime gets none of the unbounded 019 readers. Writes are `SECURITY DEFINER` with fixed safe `search_path`, fully qualified objects, no dynamic SQL, and `REVOKE EXECUTE FROM PUBLIC`; none of those roles gets table DML or trigger-disable privileges. Production startup verifies the migration head but cannot apply DDL;
 - the scanner-ingest credential and private key exist only in the separate trusted acquisition worker process; the FastAPI/report runtime environment contains neither. SQL cannot grant readiness: Python re-verifies Ed25519 at ingestion and every shadow/readiness read; a structurally inserted but invalid receipt is permanently non-qualifying;
 - no `authority=true`, production effect or scanner effect column is introduced.
+
+Migration 019 is immutable once journaled. Migration 020 adds three separate, bounded `SECURITY DEFINER` shadow-read projections without altering 019. Their dedicated `NOLOGIN NOINHERIT` runtime-read role owns no objects, inherits no role, has no schema `CREATE` or relation/sequence privileges, and receives only schema `USAGE` plus `EXECUTE` on those three projections. Every projection returns skinny exact counts, a capped row set and explicit overflow; overflow fails closed. The repository runs them in one bounded `REPEATABLE READ READ ONLY` transaction and obtains a final `clock_timestamp()` after all projections, so transaction-start time cannot conceal receipt expiry.
 
 Ed25519 verification remains mandatory in Python at ingestion and at every readiness read; SQL structural validation alone never grants readiness.
 
@@ -171,17 +173,17 @@ A brand is `verified_raw_ready` only when one repeatable-read transaction proves
 1. provenance public-key, freshness and retention configuration is strictly valid; shadow proof does not require `current_c7_cutover_decision.enabled`, an allowlist or production flags, and both production runtime stubs remain `None`;
 2. current operational memory has exactly one accepted C7 and no C7 pending reassessment;
 3. the accepted group is the existing exact two-member `all_of` group;
-4. reviewed packet, exact source packet, accepted decisions and current memory all bind exactly as PR #69 requires;
-5. one new verified-raw binding targets that exact packet/group;
-6. its watermark is the current brand head;
-7. it has exactly two distinct members and roles `{owned_web, external_social_profile}`;
+4. reviewed packet, exact source packet, accepted decisions and current memory all bind exactly as PR #69 requires, including repository-derived packet/adoption identities and a source → review → reviewed packet → adoption time chain no later than the final database clock;
+5. exactly two verified-raw bindings target that exact packet/group and correspond to the latest two consecutive brand watermarks;
+6. the later watermark is the current head, and both the database-owned watermark gap and receipt-arrival gap are between five minutes and 24 hours;
+7. each binding has exactly two distinct members and roles `{owned_web, external_social_profile}`;
 8. every receipt signature, raw locator, raw/extracted/passage hash and evidence binding revalidates;
 9. both receipts satisfy the v1 time policy and deterministic brand association;
 10. the current policy/key/group/attestation fingerprints match;
 11. no report-derived provenance row participates;
-12. the score evaluation is already persisted and exactly matches the same current memory, including `adoption_event_id`;
-13. the latest disposition chain for the exact receipt set/binding is valid and has no `revoke_runtime` event inside the same transaction;
-14. the returned shadow snapshot has one strict schema version and a recomputed snapshot fingerprint over memory, evaluation, provenance, disposition and attestation identities—never independently trusted mappings.
+12. the score evaluation is already persisted, exactly matches the same current memory including `adoption_event_id`, and is timestamped from that adoption through the final database clock;
+13. every disposition event revalidates in an unbroken parent/fingerprint/state chain for the exact receipt set/binding; final legal hold denies readiness, release returns to retained, and any runtime revocation is terminal, denies readiness, and takes reason priority across the two bindings;
+14. the returned shadow snapshot has one strict schema version and a recomputed private witness fingerprint over pinned registry, memory/adoption, exact/reviewed packet authority, review request/events, score evaluation, watermarks, bindings, disposition heads and attestation identities—never independently trusted mappings.
 
 Any missing, duplicated, malformed, stale or changing input returns a stable fail-closed reason and no attestation. PR #70 shadow results are explicitly “as of this repeatable-read snapshot”; a later runtime cutover must fence capture/adoption/disposition writes with the same brand lock or recheck a final head+revocation token before presentation.
 
@@ -200,7 +202,7 @@ Any missing, duplicated, malformed, stale or changing input returns a stable fai
 ### PostgreSQL 14/16/18
 
 - exact replay and divergent replay;
-- runtime-role denial for DDL, `SET ROLE`, journal DML and trigger disable; release migrator alone can authenticate, assume the `NOLOGIN` owner and apply/validate 019; forged schemas/hashes/signatures cannot become shadow-ready;
+- runtime-role denial for DDL, `SET ROLE`, journal DML and trigger disable; release migrator alone can authenticate, assume the `NOLOGIN` owner and apply/validate immutable 019 plus append-only 020; malformed or pre-provisioned runtime-read roles fail migration; forged schemas/hashes/signatures cannot become shadow-ready;
 - workspace/brand/scan/capture/operation-plan composite-parent contamination;
 - wrong observation/capture/raw/evidence hash, missing/extra evidence and unwatermarked existing-capture replay;
 - zero/one/three members, duplicate roles, duplicate receipts, cross-brand and cross-capture bindings;
@@ -230,7 +232,7 @@ Branch from exact PR #69 head; target PR #69, not PR #68 or `main`.
 2. collector emission for owned web and Exa LinkedIn only;
 3. migration 019, composite-parent preflight/constraints, privileges and atomic persistence;
 4. extract live collection/signing/persistence from the FastAPI thread into a separate worker identity; make `web/scan_runner` a narrow client, and keep report import separate/non-qualifying;
-5. verified C7 binding, retention/revocation events and shadow-readiness evaluator;
+5. append-only migration 020 bounded shadow projections, verified C7 binding, full disposition-chain validation and shadow-readiness evaluator;
 6. correct stale cutover/lineage docs to describe the no-write seam and quarantined template;
 7. negative/concurrency/PG14-16-18 suites;
 8. Draft PR with production explicitly `NO-GO`.

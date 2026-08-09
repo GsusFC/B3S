@@ -528,6 +528,7 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
         "017_evidence_vault_capture_lineage.sql",
         "018_evidence_vault_capture_lineage_hardening.sql",
         "019_evidence_vault_verified_raw_provenance.sql",
+        "020_evidence_vault_c7_shadow_readiness.sql",
     ]
     assert "packet_kind" in operational_memory_sql
     assert "operational_source_v2" in operational_memory_sql
@@ -797,7 +798,7 @@ def test_concurrent_release_migration_is_database_serialized() -> None:
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(lambda _index: migrate_concurrently(), range(2)))
-        assert sorted(len(result) for result in results) == [0, 18]
+        assert sorted(len(result) for result in results) == [0, 20]
         assert sorted({filename for result in results for filename in result}) == [
             f"{index:03d}_" + name
             for index, name in enumerate(
@@ -820,6 +821,8 @@ def test_concurrent_release_migration_is_database_serialized() -> None:
                     "evidence_vault_source_packet_bindings.sql",
                     "evidence_vault_capture_lineage.sql",
                     "evidence_vault_capture_lineage_hardening.sql",
+                    "evidence_vault_verified_raw_provenance.sql",
+                    "evidence_vault_c7_shadow_readiness.sql",
                 ],
                 start=1,
             )
@@ -872,6 +875,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "017_evidence_vault_capture_lineage.sql",
             "018_evidence_vault_capture_lineage_hardening.sql",
             "019_evidence_vault_verified_raw_provenance.sql",
+            "020_evidence_vault_c7_shadow_readiness.sql",
         ]
         assert repository.migrate() == []
 
@@ -1803,6 +1807,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "017_evidence_vault_capture_lineage.sql",
             "018_evidence_vault_capture_lineage_hardening.sql",
             "019_evidence_vault_verified_raw_provenance.sql",
+            "020_evidence_vault_c7_shadow_readiness.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0
@@ -1871,7 +1876,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
         assert stored[8] == (
             "b3s_history.evidence_vault_operational_relation_reviews"
         )
-        assert stored[9] == 18
+        assert stored[9] == 20
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
