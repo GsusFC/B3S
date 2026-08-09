@@ -527,6 +527,7 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
         "016_evidence_vault_source_packet_bindings.sql",
         "017_evidence_vault_capture_lineage.sql",
         "018_evidence_vault_capture_lineage_hardening.sql",
+        "019_evidence_vault_verified_raw_provenance.sql",
     ]
     assert "packet_kind" in operational_memory_sql
     assert "operational_source_v2" in operational_memory_sql
@@ -870,6 +871,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "016_evidence_vault_source_packet_bindings.sql",
             "017_evidence_vault_capture_lineage.sql",
             "018_evidence_vault_capture_lineage_hardening.sql",
+            "019_evidence_vault_verified_raw_provenance.sql",
         ]
         assert repository.migrate() == []
 
@@ -1800,6 +1802,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "016_evidence_vault_source_packet_bindings.sql",
             "017_evidence_vault_capture_lineage.sql",
             "018_evidence_vault_capture_lineage_hardening.sql",
+            "019_evidence_vault_verified_raw_provenance.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0
