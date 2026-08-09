@@ -244,6 +244,51 @@ def test_claim_is_single_winner_and_expired_lease_is_fenced() -> None:
         )
 
 
+def test_database_rejects_direct_operation_terminal_state_forgery() -> None:
+    import psycopg
+
+    repository = _reset_repository()
+    _persist_baseline(repository, "terminal-forgery-scan")
+    direct_completion = """
+        UPDATE b3s_history.evidence_vault_operation_plans
+        SET status = 'completed',
+            result_fingerprint = repeat('a', 64),
+            result_payload = jsonb_build_object('output_kind', 'no_delta'),
+            result_persisted_at = now(),
+            completed_at = now()
+        WHERE scan_run_id = (
+            SELECT id
+            FROM b3s_history.scan_runs
+            WHERE source_scan_id = %s
+        )
+    """
+    with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"]) as conn:
+        with pytest.raises(
+            psycopg.errors.RaiseException,
+            match="status transition is invalid",
+        ):
+            conn.execute(direct_completion, ("terminal-forgery-scan",))
+
+    claim = repository.claim_capture_operation_plan(
+        "terminal-forgery-scan",
+        worker_id="terminal-forgery-worker",
+        lease_seconds=60,
+    )
+    repository.mark_capture_operation_running(
+        "terminal-forgery-scan",
+        worker_id="terminal-forgery-worker",
+        lease_token=claim["lease_token"],
+        lease_generation=claim["lease_generation"],
+        lease_seconds=60,
+    )
+    with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"]) as conn:
+        with pytest.raises(
+            psycopg.errors.RaiseException,
+            match="status transition is invalid",
+        ):
+            conn.execute(direct_completion, ("terminal-forgery-scan",))
+
+
 def test_repository_rederives_shortlists_from_persisted_semantic_labels() -> None:
     repository = _reset_repository()
     _persist_baseline(repository, "tampered-semantic-shortlist")
@@ -375,7 +420,10 @@ def test_result_survives_crash_and_retry_performs_zero_second_llm_calls() -> Non
             )
 
     with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"]) as conn:
-        with pytest.raises(psycopg.errors.RaiseException, match="result is immutable"):
+        with pytest.raises(
+            psycopg.errors.RaiseException,
+            match="result is immutable",
+        ):
             conn.execute(
                 """
                 UPDATE b3s_history.evidence_vault_operation_plans
@@ -386,6 +434,156 @@ def test_result_survives_crash_and_retry_performs_zero_second_llm_calls() -> Non
                 """,
                 ("crash-scan",),
             )
+
+    with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"]) as conn:
+        with pytest.raises(
+            psycopg.errors.RaiseException,
+            match="terminal Evidence Vault operation plans are immutable",
+        ):
+            conn.execute(
+                """
+                UPDATE b3s_history.evidence_vault_operation_plans
+                SET status = 'superseded', superseded_at = now()
+                WHERE scan_run_id = (
+                    SELECT id FROM b3s_history.scan_runs WHERE source_scan_id = %s
+                )
+                """,
+                ("crash-scan",),
+            )
+
+    with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"]) as conn:
+        with pytest.raises(
+            psycopg.errors.RaiseException,
+            match="operation plans are append-only",
+        ):
+            conn.execute(
+                """
+                DELETE FROM b3s_history.evidence_vault_operation_plans
+                WHERE scan_run_id = (
+                    SELECT id FROM b3s_history.scan_runs WHERE source_scan_id = %s
+                )
+                """,
+                ("crash-scan",),
+            )
+
+    with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"]) as conn:
+        with pytest.raises(psycopg.errors.RaiseException):
+            conn.execute(
+                "DELETE FROM b3s_history.scan_runs WHERE source_scan_id = %s",
+                ("crash-scan",),
+            )
+
+    with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"]) as conn:
+        with pytest.raises(
+            psycopg.errors.RaiseException,
+            match="append-only Evidence Vault journals cannot be truncated",
+        ):
+            conn.execute(
+                "TRUNCATE b3s_history.evidence_vault_operation_plans CASCADE"
+            )
+
+    with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"]) as conn:
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            conn.execute(
+                """
+                WITH workspace AS (
+                    SELECT id FROM b3s_history.workspaces WHERE slug = 'b3s'
+                ), inserted_brand AS (
+                    INSERT INTO b3s_history.brands (
+                        id, workspace_id, canonical_domain, display_name,
+                        canonical_url, first_observed_at, latest_observed_at
+                    )
+                    SELECT
+                        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'::uuid,
+                        workspace.id,
+                        'other.example',
+                        'Other',
+                        'https://other.example',
+                        now(),
+                        now()
+                    FROM workspace
+                    RETURNING id
+                )
+                INSERT INTO b3s_history.evidence_vault_operational_relation_reviews (
+                    id, brand_id, source_packet_id, source_packet_fingerprint,
+                    relation_id, decision, reviewer_id, rationale,
+                    review_request_fingerprint
+                )
+                SELECT
+                    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'::uuid,
+                    inserted_brand.id,
+                    reviews.source_packet_id,
+                    reviews.source_packet_fingerprint,
+                    'c' || substr(reviews.relation_id, 2),
+                    reviews.decision,
+                    'cross-brand-reviewer',
+                    'must be rejected by the composite source identity',
+                    'd' || substr(reviews.review_request_fingerprint, 2)
+                FROM inserted_brand
+                CROSS JOIN LATERAL (
+                    SELECT *
+                    FROM b3s_history.evidence_vault_operational_relation_reviews
+                    LIMIT 1
+                ) AS reviews
+                """
+            )
+
+    with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"]) as conn:
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            conn.execute(
+                """
+                INSERT INTO b3s_history.evidence_vault_operational_relation_reviews (
+                    id, brand_id, source_packet_id, source_packet_fingerprint,
+                    relation_id, decision, reviewer_id, rationale,
+                    review_request_fingerprint
+                )
+                SELECT
+                    'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'::uuid,
+                    packets.brand_id,
+                    packets.id,
+                    packets.packet_fingerprint,
+                    repeat('e', 64),
+                    'accept',
+                    'wrong-kind-reviewer',
+                    'must be rejected because this is not a source packet',
+                    repeat('f', 64)
+                FROM b3s_history.evidence_vault_canonical_memory_packets AS packets
+                WHERE packets.packet_kind = 'operational_v2'
+                LIMIT 1
+                """
+            )
+
+    with psycopg.connect(
+        os.environ["B3S_TEST_DATABASE_URL"], autocommit=True
+    ) as conn:
+        for packet_kind in (
+            "operational_source_v2",
+            "operational_reviewed_v2",
+            "operational_v2",
+        ):
+            with pytest.raises(psycopg.errors.CheckViolation):
+                with conn.transaction():
+                    conn.execute(
+                        """
+                        ALTER TABLE
+                            b3s_history.evidence_vault_canonical_memory_packets
+                        DISABLE TRIGGER
+                            evidence_vault_canonical_packets_append_only
+                        """
+                    )
+                    conn.execute(
+                        """
+                        UPDATE b3s_history.evidence_vault_canonical_memory_packets
+                        SET packet_payload = NULL
+                        WHERE id = (
+                            SELECT id
+                            FROM b3s_history.evidence_vault_canonical_memory_packets
+                            WHERE packet_kind = %s
+                            LIMIT 1
+                        )
+                        """,
+                        (packet_kind,),
+                    )
 
 
 def test_parent_advance_after_result_persistence_terminalizes_as_superseded() -> None:

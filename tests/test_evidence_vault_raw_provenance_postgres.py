@@ -403,7 +403,7 @@ def test_verified_raw_sql_lock_order_and_privilege_surface_are_safe() -> None:
     or os.environ.get("B3S_ALLOW_SCHEMA_DROP") != "1",
     reason="destructive PostgreSQL integration requires B3S_TEST_DATABASE_URL and B3S_ALLOW_SCHEMA_DROP=1",
 )
-def test_postgres_upgrade_from_committed_019_applies_only_020() -> None:
+def test_postgres_upgrade_from_committed_019_applies_020_and_021() -> None:
     import hashlib
 
     import psycopg
@@ -471,7 +471,8 @@ def test_postgres_upgrade_from_committed_019_applies_only_020() -> None:
 
         repository = PostgresHistoryRepository(dsn)
         assert repository.migrate() == [
-            "020_evidence_vault_c7_shadow_readiness.sql"
+            "020_evidence_vault_c7_shadow_readiness.sql",
+            "021_evidence_vault_cumulative_landing_hardening.sql",
         ]
         assert repository.migrate() == []
     finally:
@@ -540,7 +541,7 @@ def test_postgres16_createrole_migrator_can_set_owner_before_transfer() -> None:
     )
     try:
         applied = PostgresHistoryRepository(migrator_dsn).migrate()
-        assert applied[-1] == "020_evidence_vault_c7_shadow_readiness.sql"
+        assert applied[-1] == "021_evidence_vault_cumulative_landing_hardening.sql"
         with psycopg.connect(dsn) as admin:
             assert admin.execute(
                 "SELECT pg_has_role(%s, %s, 'SET')", (migrator, owner)
@@ -750,7 +751,7 @@ def test_postgres_fixed_owner_fail_closed_and_preprovisioned_migrator() -> None:
         )
     try:
         applied = PostgresHistoryRepository(provisioned_dsn).migrate()
-        assert applied[-1] == "020_evidence_vault_c7_shadow_readiness.sql"
+        assert applied[-1] == "021_evidence_vault_cumulative_landing_hardening.sql"
         with psycopg.connect(dsn) as admin:
             journal_owners = admin.execute("""
                 SELECT array_agg(DISTINCT owners.rolname), count(*)
@@ -881,7 +882,7 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
             )
     try:
         applied = PostgresHistoryRepository(dsn).migrate()
-        assert applied[-1] == "020_evidence_vault_c7_shadow_readiness.sql"
+        assert applied[-1] == "021_evidence_vault_cumulative_landing_hardening.sql"
         receipt = _signed_owned_receipt()
         dumped = receipt.model_dump(mode="json")
         with psycopg.connect(dsn) as conn:

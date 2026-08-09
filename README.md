@@ -95,14 +95,19 @@ The B3S historical model is implemented in **PostgreSQL** under the isolated `b3
 docker compose up -d db   # postgres 16 on localhost:5433 (b3s/b3s)
 ```
 
-Validate and import the current file-backed reports:
+Validate, migrate, and import the current file-backed reports:
 
 ```bash
 .venv/bin/python scripts/import_b3s_reports_postgres.py --dry-run
+.venv/bin/python scripts/import_b3s_reports_postgres.py --migrate-only
 .venv/bin/python scripts/import_b3s_reports_postgres.py
 ```
 
-The import is idempotent and rejects a reused report id with different content. The schema, invariants, queries and cutover boundary are documented in `docs/b3s_postgres_history_v1.md`.
+The importer applies immutable packaged migrations through
+`021_evidence_vault_cumulative_landing_hardening.sql`, is idempotent, and
+rejects a reused report id with different content. The schema, invariants,
+integration scope, and cutover boundary are documented in
+[`docs/b3s_postgres_history_v1.md`](docs/b3s_postgres_history_v1.md).
 
 Legacy Brand3 SV9 captures have a separate, opt-in path. It validates without
 writes by default and can only persist into the fixed, non-operational
@@ -223,6 +228,13 @@ history. This candidate still has no canonical, runtime, or scoring authority;
 see
 [`docs/evidence_accepted_memory_v1.md`](docs/evidence_accepted_memory_v1.md).
 
+Vault v2 separately persists exact reviewed/adopted authority, operation plans,
+capture lineage, and verified-raw provenance in PostgreSQL. That authority is
+limited to its versioned Vault history: it does not alter production/scanner
+scoring or presentation. The Fly Vault config keeps C7 cutover denied and the
+verified-raw worker/socket path disabled, so this code is dormant deployment
+infrastructure rather than an enabled runtime C7 path.
+
 Prepare and evaluate the versioned identity review set with:
 
 ```bash
@@ -237,13 +249,20 @@ reviewer supplies a separate `reviews.jsonl`; see
 
 Fly deploys use the GitHub `production` environment and its `FLY_API_TOKEN` secret. The `Fly Deploy` workflow is manual from `main` while the guarded rollout is active. Automatic deploys after successful CI remain disabled until the repository variable `AUTO_DEPLOY_ENABLED` is explicitly changed from `false` to `true`.
 
-Every deploy validates `fly.toml`, builds the committed Dockerfile and runs the idempotent PostgreSQL migration as Fly's `release_command` before replacing the application Machine.
+Both Fly configs use the same shell-wrapped release command to verify the
+committed image before running the idempotent PostgreSQL migration. Production
+uses `fly.toml`; Vault deployment requires explicit `fly.vault.toml` and does
+not itself authorize or enable C7 cutover.
 
 ## Status
 
-Experimental. Scoring runs shadow-only. Contracts and policies are expected to change; policy changes must carry a changelog entry justified by a real captured case.
+Experimental. Contracts and policies are expected to change; policy changes
+must carry a changelog entry justified by a real captured case. Vault C7 runtime
+cutover remains disabled.
 
-The full local test suite is currently green. Three destructive,
-environment-dependent PostgreSQL integration tests are skipped unless an
-explicit disposable database is configured, and FastAPI's test client emits an
-upstream Starlette deprecation warning.
+CI runs PostgreSQL 16 integration coverage for history/import, archive
+isolation, Vault persistence/execution, capture lineage, verified provenance,
+shadow readiness, and schema upgrades. Local destructive runs require a
+disposable `B3S_TEST_DATABASE_URL` plus both `B3S_ALLOW_SCHEMA_DROP=1` and
+`B3S_TEST_ALLOW_SCHEMA_DROP=1`; without the required environment, those tests
+remain gated.

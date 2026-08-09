@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CHECKOUT_V7_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 SETUP_PYTHON_V7_SHA = "5fda3b95a4ea91299a34e894583c3862153e4b97"
+RELEASE_COMMAND = (
+    "sh -lc 'python scripts/verify_release_build.py && "
+    "python scripts/import_b3s_reports_postgres.py --migrate-only'"
+)
 
 
 def _read(relative_path: str) -> str:
@@ -20,10 +25,11 @@ def test_container_persists_immutable_build_identity():
     assert 'org.opencontainers.image.revision="${B3S_BUILD_SHA}"' in dockerfile
 
 
-def test_release_command_rejects_unidentified_images():
-    fly_config = _read("fly.toml")
+def test_release_commands_reject_unidentified_images_before_migrating():
+    for relative_path in ("fly.toml", "fly.vault.toml"):
+        fly_config = tomllib.loads(_read(relative_path))
 
-    assert "python scripts/verify_release_build.py &&" in fly_config
+        assert fly_config["deploy"]["release_command"] == RELEASE_COMMAND
 
 
 def test_deploy_workflow_builds_and_verifies_the_exact_commit():

@@ -1358,11 +1358,20 @@ class PostgresHistoryRepository:
                        operation_plans.result_fingerprint AS stored_result_fingerprint,
                        operation_plans.candidate_packet_fingerprint AS stored_candidate_packet_fingerprint
                 FROM {_SCHEMA}.captures
-                JOIN {_SCHEMA}.scan_runs ON scan_runs.id = captures.scan_run_id
+                JOIN {_SCHEMA}.scan_runs
+                  ON scan_runs.id = captures.scan_run_id
+                 AND scan_runs.brand_id = captures.brand_id
                 LEFT JOIN {_SCHEMA}.evidence_vault_operation_plans AS operation_plans
-                  ON operation_plans.scan_run_id = scan_runs.id
-                JOIN {_SCHEMA}.brands ON brands.id = captures.brand_id
-                JOIN {_SCHEMA}.workspaces ON workspaces.id = brands.workspace_id
+                  ON operation_plans.workspace_id = scan_runs.workspace_id
+                 AND operation_plans.brand_id = scan_runs.brand_id
+                 AND operation_plans.scan_run_id = scan_runs.id
+                JOIN {_SCHEMA}.brands
+                  ON brands.workspace_id = scan_runs.workspace_id
+                 AND brands.id = scan_runs.brand_id
+                 AND brands.id = captures.brand_id
+                JOIN {_SCHEMA}.workspaces
+                  ON workspaces.id = scan_runs.workspace_id
+                 AND workspaces.id = brands.workspace_id
                 WHERE workspaces.slug = %s
                   AND brands.canonical_domain = %s
                 ORDER BY captures.observed_at DESC,
@@ -5247,8 +5256,16 @@ class PostgresHistoryRepository:
                         f"""
                         SELECT operations.*, brands.canonical_domain
                         FROM {_SCHEMA}.evidence_vault_operation_plans AS operations
+                        JOIN {_SCHEMA}.scan_runs AS operation_scans
+                          ON operation_scans.workspace_id = operations.workspace_id
+                         AND operation_scans.brand_id = operations.brand_id
+                         AND operation_scans.id = operations.scan_run_id
+                        JOIN {_SCHEMA}.captures AS operation_captures
+                          ON operation_captures.brand_id = operations.brand_id
+                         AND operation_captures.scan_run_id = operations.scan_run_id
                         JOIN {_SCHEMA}.brands
-                          ON brands.id = operations.brand_id
+                          ON brands.workspace_id = operations.workspace_id
+                         AND brands.id = operations.brand_id
                         WHERE operations.brand_id = %s
                           AND operations.operation_plan_fingerprint = %s
                           AND operations.observation_hash = %s
@@ -5850,11 +5867,11 @@ class PostgresHistoryRepository:
         *,
         workspace_slug: str = "b3s",
     ) -> dict[str, Any] | None:
-        """Deny runtime readiness until a verified raw-lineage variant exists.
+        """Keep runtime cutover denied despite private verified-raw readiness.
 
-        Migration 017 intentionally admits only report-derived audit bindings.
-        A later schema and validator must establish trusted live or verified-raw
-        provenance before this API may return an accepted group attestation.
+        Migrations 019-020 and the private validator can prove verified-raw
+        provenance without granting runtime authority. This stub remains closed
+        until a separately authorized atomic runtime-read adapter replaces it.
         """
 
         del domain_or_url, workspace_slug
@@ -10102,10 +10119,18 @@ def _vault_operation_row(
                brands.canonical_domain,
                clock_timestamp() AS db_now
         FROM {_SCHEMA}.evidence_vault_operation_plans AS operation_plans
-        JOIN {_SCHEMA}.scan_runs ON scan_runs.id = operation_plans.scan_run_id
-        JOIN {_SCHEMA}.captures ON captures.scan_run_id = scan_runs.id
-        JOIN {_SCHEMA}.brands ON brands.id = operation_plans.brand_id
-        JOIN {_SCHEMA}.workspaces ON workspaces.id = operation_plans.workspace_id
+        JOIN {_SCHEMA}.scan_runs
+          ON scan_runs.id = operation_plans.scan_run_id
+         AND scan_runs.workspace_id = operation_plans.workspace_id
+         AND scan_runs.brand_id = operation_plans.brand_id
+        JOIN {_SCHEMA}.captures
+          ON captures.scan_run_id = scan_runs.id
+         AND captures.brand_id = operation_plans.brand_id
+        JOIN {_SCHEMA}.brands
+          ON brands.id = operation_plans.brand_id
+         AND brands.workspace_id = operation_plans.workspace_id
+        JOIN {_SCHEMA}.workspaces
+          ON workspaces.id = operation_plans.workspace_id
         WHERE workspaces.slug = %s
           AND scan_runs.source_scan_id = %s
         {lock_clause}
