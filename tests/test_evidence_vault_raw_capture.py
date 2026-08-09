@@ -31,6 +31,8 @@ from src.services.evidence_vault_raw_provenance import (
     RAW_ACQUISITION_RECEIPT_VERSION,
     PreReceiptSnapshot,
     RawAcquisitionReceipt,
+    evidence_memory_source_identity_id,
+    external_identity_provenance_fingerprint,
     pre_receipt_snapshot_sha256,
     sign_raw_acquisition_receipt,
 )
@@ -86,6 +88,7 @@ def _raw_payload() -> dict:
         "sources": {
             "owned": {
                 "url": "https://example.com/",
+                "linkedin": "https://www.linkedin.com/company/example",
                 "markdown_content": "  # Café Example\n\nDurable owned proof.  ",
                 "ignored": "caller-selected text is forbidden",
             },
@@ -125,7 +128,12 @@ def _external_document(raw_payload: dict) -> str:
     return _external_result_content(raw_payload["sources"]["external"])
 
 
-def _claims(snapshot: PreReceiptSnapshot, role: str) -> dict:
+def _claims(
+    snapshot: PreReceiptSnapshot,
+    role: str,
+    *,
+    external_provenance_fingerprint: str | None = None,
+) -> dict:
     raw_payload = snapshot.raw_payload
     common = {
         "schema_version": RAW_ACQUISITION_RECEIPT_VERSION,
@@ -180,14 +188,54 @@ def _claims(snapshot: PreReceiptSnapshot, role: str) -> dict:
         "raw_fragment_json_pointer": "/sources/external",
         "raw_fragment_sha256": _sha_json(fragment),
         "extracted_document_sha256": _sha_text(_external_document(raw_payload)),
-        "external_identity_provenance_fingerprint": "d" * 64,
+        "external_identity_provenance_fingerprint": (
+            external_provenance_fingerprint or "d" * 64
+        ),
     }
 
 
-def _receipt(snapshot: PreReceiptSnapshot, role: str) -> RawAcquisitionReceipt:
+def _association(
+    snapshot: PreReceiptSnapshot,
+    owned_receipt: RawAcquisitionReceipt,
+) -> dict:
+    external_url = "https://www.linkedin.com/company/example"
+    owned_url = "https://example.com"
+    return {
+        "schema_version": "external-identity-provenance-v1",
+        "policy_version": "evidence-vault-external-identity-association-policy-v1",
+        "association_method": "owned_raw_links_external_profile",
+        "canonical_brand_domain": "example.com",
+        "owned_source_url": owned_url,
+        "external_source_url": external_url,
+        "proof_receipt_fingerprint": owned_receipt.receipt_fingerprint,
+        "raw_fact_role": "owned_web",
+        "raw_fact_json_pointer": "/sources/owned/linkedin",
+        "raw_fact_sha256": _sha_json(external_url),
+        "source_identity_schema_version": "evidence-memory-document-v2",
+        "owned_source_identity_id": evidence_memory_source_identity_id(
+            source_url=owned_url,
+            raw_fact_role="owned_web",
+        ),
+        "external_source_identity_id": evidence_memory_source_identity_id(
+            source_url=external_url,
+            raw_fact_role="external_social_profile",
+        ),
+    }
+
+
+def _receipt(
+    snapshot: PreReceiptSnapshot,
+    role: str,
+    *,
+    external_provenance_fingerprint: str | None = None,
+) -> RawAcquisitionReceipt:
     key = _key()
     return sign_raw_acquisition_receipt(
-        _claims(snapshot, role),
+        _claims(
+            snapshot,
+            role,
+            external_provenance_fingerprint=external_provenance_fingerprint,
+        ),
         private_key=key,
         public_key_registry=_registry(key),
     )
@@ -195,7 +243,16 @@ def _receipt(snapshot: PreReceiptSnapshot, role: str) -> RawAcquisitionReceipt:
 
 def _group() -> tuple[PreReceiptSnapshot, RawAcquisitionReceipt, RawAcquisitionReceipt]:
     snapshot = _snapshot()
-    return snapshot, _receipt(snapshot, "owned_web"), _receipt(snapshot, "external_social_profile")
+    owned = _receipt(snapshot, "owned_web")
+    association = _association(snapshot, owned)
+    external = _receipt(
+        snapshot,
+        "external_social_profile",
+        external_provenance_fingerprint=external_identity_provenance_fingerprint(
+            association
+        ),
+    )
+    return snapshot, owned, external
 
 
 def _build(
@@ -204,10 +261,24 @@ def _build(
     *,
     public_key_registry=None,
 ):
+    owned = next(
+        (receipt for receipt in receipts if receipt.claims.channel_role == "owned_web"),
+        None,
+    )
+    association = (
+        _association(snapshot, owned)
+        if owned is not None
+        and any(
+            receipt.claims.channel_role == "external_social_profile"
+            for receipt in receipts
+        )
+        else None
+    )
     return build_signed_raw_capture(
         snapshot,
         receipts,
         public_key_registry=_registry(_key()),
+        external_identity_provenance=association,
     )
 
 
@@ -248,6 +319,7 @@ def test_partial_one_receipt_capture_is_exact_detached_and_replayable() -> None:
         "pre_receipt_snapshot_sha256",
         "signed_receipts",
         "receipt_set_fingerprint",
+        "external_identity_provenance",
     }
     assert envelope["schema_version"] == RAW_PROVENANCE_ENVELOPE_VERSION
     assert len(envelope["signed_receipts"]) == 1
@@ -297,6 +369,30 @@ def test_two_role_group_is_sorted_and_registry_verified() -> None:
         "owned_web",
         "external_social_profile",
     }
+
+
+def test_external_capture_requires_and_replays_exact_signed_association() -> None:
+    snapshot, owned, external = _group()
+    association = _association(snapshot, owned)
+    built = _build(snapshot, [owned, external])
+    assert built.raw_payload[RESERVED_KEY]["external_identity_provenance"] == association
+    assert _verify(built).envelope.external_identity_provenance is not None
+
+    with pytest.raises(EvidenceVaultRawCaptureError, match="association object"):
+        build_signed_raw_capture(
+            snapshot,
+            [owned, external],
+            public_key_registry=_registry(_key()),
+        )
+    tampered = deepcopy(association)
+    tampered["raw_fact_json_pointer"] = "/sources/external/url"
+    with pytest.raises(EvidenceVaultRawCaptureError):
+        build_signed_raw_capture(
+            snapshot,
+            [owned, external],
+            public_key_registry=_registry(_key()),
+            external_identity_provenance=tampered,
+        )
 
 
 def test_builder_rejects_reserved_key_duplicate_role_mixed_identity_and_fragment() -> None:
@@ -464,14 +560,24 @@ def test_extractors_reject_present_non_string_allowlisted_values(
     raw_payload = _raw_payload()
     raw_payload["sources"]["owned" if role == "owned_web" else "external"][field] = value
     snapshot = _snapshot(raw_payload)
-    claims = _claims(snapshot, role)
+    owned = _receipt(snapshot, "owned_web") if role == "external_social_profile" else None
+    association = _association(snapshot, owned) if owned is not None else None
+    claims = _claims(
+        snapshot,
+        role,
+        external_provenance_fingerprint=(
+            external_identity_provenance_fingerprint(association)
+            if association is not None
+            else None
+        ),
+    )
     claims["extracted_document_sha256"] = "f" * 64
     receipt = sign_raw_acquisition_receipt(
         claims,
         private_key=_key(),
         public_key_registry=_registry(_key()),
     )
-    built = _build(snapshot, [receipt])
+    built = _build(snapshot, [owned, receipt] if owned is not None else [receipt])
     with pytest.raises(EvidenceVaultRawCaptureError, match=error):
         _extract(built, receipt)
 
@@ -492,14 +598,22 @@ def test_extractor_rejects_unsupported_version_missing_external_content_and_hash
     missing_payload = _raw_payload()
     missing_payload["sources"]["external"] = {"url": "https://www.linkedin.com/company/example"}
     missing_snapshot = _snapshot(missing_payload)
-    missing_claims = _claims(missing_snapshot, "external_social_profile")
+    missing_owned = _receipt(missing_snapshot, "owned_web")
+    missing_association = _association(missing_snapshot, missing_owned)
+    missing_claims = _claims(
+        missing_snapshot,
+        "external_social_profile",
+        external_provenance_fingerprint=external_identity_provenance_fingerprint(
+            missing_association
+        ),
+    )
     missing_claims["extracted_document_sha256"] = _sha_text("invented")
     missing = sign_raw_acquisition_receipt(
         missing_claims,
         private_key=_key(),
         public_key_registry=_registry(_key()),
     )
-    missing_built = _build(missing_snapshot, [missing])
+    missing_built = _build(missing_snapshot, [missing_owned, missing])
     with pytest.raises(EvidenceVaultRawCaptureError, match="required extractor fields"):
         _extract(missing_built, missing)
 

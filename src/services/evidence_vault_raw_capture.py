@@ -20,12 +20,15 @@ from src.services.evidence_vault_raw_provenance import (
     PRE_RECEIPT_SNAPSHOT_VERSION,
     RAW_PROVENANCE_CAPTURE_KEY,
     EvidenceVaultRawProvenanceError,
+    ExternalIdentityProvenance,
     PreReceiptSnapshot,
     PublicKeyRegistry,
     RawAcquisitionReceipt,
+    external_identity_provenance_fingerprint,
     pre_receipt_snapshot_sha256,
     public_key_registry_fingerprint,
     receipt_set_fingerprint,
+    validate_external_identity_provenance,
     verify_raw_acquisition_receipt,
 )
 
@@ -75,6 +78,7 @@ class RawProvenanceEnvelope(_StrictModel):
     pre_receipt_snapshot_sha256: Sha256
     signed_receipts: list[RawAcquisitionReceipt] = Field(min_length=1, max_length=2)
     receipt_set_fingerprint: Sha256
+    external_identity_provenance: ExternalIdentityProvenance | None
 
     @model_validator(mode="after")
     def _receipt_group_is_canonical(self) -> "RawProvenanceEnvelope":
@@ -87,6 +91,25 @@ class RawProvenanceEnvelope(_StrictModel):
         expected_set = receipt_set_fingerprint(self.signed_receipts)
         if not hmac.compare_digest(self.receipt_set_fingerprint, expected_set):
             raise ValueError("receipt_set_fingerprint does not match signed_receipts")
+        external_receipts = [
+            receipt
+            for receipt in self.signed_receipts
+            if receipt.claims.channel_role == "external_social_profile"
+        ]
+        if external_receipts:
+            if len(self.signed_receipts) != 2 or self.external_identity_provenance is None:
+                raise ValueError("external receipt requires its exact two-role association object")
+            expected_association = external_receipts[0].claims.external_identity_provenance_fingerprint
+            actual_association = external_identity_provenance_fingerprint(
+                self.external_identity_provenance
+            )
+            if expected_association is None or not hmac.compare_digest(
+                expected_association,
+                actual_association,
+            ):
+                raise ValueError("external identity provenance does not match its receipt")
+        elif self.external_identity_provenance is not None:
+            raise ValueError("owned-only capture must not carry external identity provenance")
         return self
 
 
@@ -191,6 +214,7 @@ def build_signed_raw_capture(
     receipts: Sequence[RawAcquisitionReceipt | Mapping[str, Any]],
     *,
     public_key_registry: PublicKeyRegistry | Mapping[str, Any],
+    external_identity_provenance: ExternalIdentityProvenance | Mapping[str, Any] | None = None,
 ) -> SignedRawCapture:
     """Embed a canonical signed envelope without mutating any caller value."""
 
@@ -207,6 +231,27 @@ def build_signed_raw_capture(
         public_key_registry=public_key_registry,
     )
     _validate_receipt_fragments(snapshot.raw_payload, parsed_receipts)
+    roles = {receipt.claims.channel_role: receipt for receipt in parsed_receipts}
+    parsed_association: ExternalIdentityProvenance | None = None
+    if "external_social_profile" in roles:
+        if external_identity_provenance is None or "owned_web" not in roles:
+            raise EvidenceVaultRawCaptureError(
+                "external receipt requires its exact two-role association object"
+            )
+        try:
+            parsed_association = validate_external_identity_provenance(
+                external_identity_provenance,
+                owned_receipt=roles["owned_web"],
+                external_receipt=roles["external_social_profile"],
+                durable_raw_capture_payload=snapshot.raw_payload,
+                public_key_registry=public_key_registry,
+            )
+        except EvidenceVaultRawProvenanceError as exc:
+            raise EvidenceVaultRawCaptureError(str(exc)) from exc
+    elif external_identity_provenance is not None:
+        raise EvidenceVaultRawCaptureError(
+            "owned-only capture must not carry external identity provenance"
+        )
     snapshot_hash = pre_receipt_snapshot_sha256(snapshot)
     envelope = RawProvenanceEnvelope(
         schema_version=RAW_PROVENANCE_ENVELOPE_VERSION,
@@ -218,6 +263,7 @@ def build_signed_raw_capture(
         pre_receipt_snapshot_sha256=snapshot_hash,
         signed_receipts=sorted(parsed_receipts, key=lambda receipt: receipt.receipt_fingerprint),
         receipt_set_fingerprint=receipt_set_fingerprint(parsed_receipts),
+        external_identity_provenance=parsed_association,
     )
     durable_payload = deepcopy(snapshot.raw_payload)
     durable_payload[RAW_PROVENANCE_CAPTURE_KEY] = envelope.model_dump(mode="json")
@@ -232,6 +278,7 @@ def build_signed_raw_capture_payload(
     receipts: Sequence[RawAcquisitionReceipt | Mapping[str, Any]],
     *,
     public_key_registry: PublicKeyRegistry | Mapping[str, Any],
+    external_identity_provenance: ExternalIdentityProvenance | Mapping[str, Any] | None = None,
 ) -> dict[str, JsonValue]:
     """Convenience form returning only the detached durable payload."""
 
@@ -239,6 +286,7 @@ def build_signed_raw_capture_payload(
         snapshot,
         receipts,
         public_key_registry=public_key_registry,
+        external_identity_provenance=external_identity_provenance,
     ).durable_raw_capture_payload
 
 
@@ -306,11 +354,28 @@ def parse_and_validate_signed_raw_capture(
         durable_raw_capture_payload,
         capture_content_hash=capture_content_hash,
     )
-    _validated_receipt_group(
+    verified_receipts = _validated_receipt_group(
         validated.envelope.signed_receipts,
         snapshot=validated.pre_receipt_snapshot,
         public_key_registry=public_key_registry,
     )
+    roles = {receipt.claims.channel_role: receipt for receipt in verified_receipts}
+    if "external_social_profile" in roles:
+        association = validated.envelope.external_identity_provenance
+        if association is None or "owned_web" not in roles:
+            raise EvidenceVaultRawCaptureError(
+                "verified external receipt lacks its exact association object"
+            )
+        try:
+            validate_external_identity_provenance(
+                association,
+                owned_receipt=roles["owned_web"],
+                external_receipt=roles["external_social_profile"],
+                durable_raw_capture_payload=validated.raw_payload,
+                public_key_registry=public_key_registry,
+            )
+        except EvidenceVaultRawProvenanceError as exc:
+            raise EvidenceVaultRawCaptureError(str(exc)) from exc
     return VerifiedRawCapture._from_verified(
         validated=validated,
         registry_fingerprint=public_key_registry_fingerprint(public_key_registry),

@@ -25,6 +25,8 @@ from src.services.evidence_vault_raw_provenance import (
     PreReceiptSnapshot,
     PublicKeyRegistry,
     RawAcquisitionReceipt,
+    evidence_memory_source_identity_id,
+    external_identity_provenance_fingerprint,
     pre_receipt_snapshot_sha256,
     receipt_set_fingerprint,
     sign_raw_acquisition_receipt,
@@ -104,6 +106,7 @@ def _raw_payload() -> dict[str, Any]:
         "sources": {
             "owned": {
                 "url": "https://example.com/about",
+                "linkedin": "https://www.linkedin.com/company/example",
                 "markdown_content": "  # Café Example\n\nDurable owned proof.  ",
                 "authorization": "raw-internal-value-must-not-be-public",
             },
@@ -173,6 +176,7 @@ def _claims(
     *,
     key_id: str = KEY_ID,
     nonce: str | None = None,
+    external_provenance_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     common = {
         "schema_version": RAW_ACQUISITION_RECEIPT_VERSION,
@@ -228,7 +232,7 @@ def _claims(
         "raw_fragment_json_pointer": "/sources/external",
         "raw_fragment_sha256": _sha_json(fragment),
         "extracted_document_sha256": _sha_text(_external_document(snapshot)),
-        "external_identity_provenance_fingerprint": "d" * 64,
+        "external_identity_provenance_fingerprint": external_provenance_fingerprint,
     }
 
 
@@ -240,12 +244,48 @@ def _receipt(
     signing_registry: Mapping[str, Any],
     key_id: str = KEY_ID,
     nonce: str | None = None,
+    external_provenance_fingerprint: str | None = None,
 ) -> RawAcquisitionReceipt:
     return sign_raw_acquisition_receipt(
-        _claims(snapshot, role, key_id=key_id, nonce=nonce),
+        _claims(
+            snapshot,
+            role,
+            key_id=key_id,
+            nonce=nonce,
+            external_provenance_fingerprint=external_provenance_fingerprint,
+        ),
         private_key=key,
         public_key_registry=signing_registry,
     )
+
+
+def _association(
+    snapshot: PreReceiptSnapshot,
+    owned_receipt: RawAcquisitionReceipt,
+) -> dict[str, Any]:
+    external_url = "https://www.linkedin.com/company/example"
+    owned_url = snapshot.canonical_brand_url
+    return {
+        "schema_version": "external-identity-provenance-v1",
+        "policy_version": "evidence-vault-external-identity-association-policy-v1",
+        "association_method": "owned_raw_links_external_profile",
+        "canonical_brand_domain": snapshot.canonical_brand_domain,
+        "owned_source_url": owned_url,
+        "external_source_url": external_url,
+        "proof_receipt_fingerprint": owned_receipt.receipt_fingerprint,
+        "raw_fact_role": "owned_web",
+        "raw_fact_json_pointer": "/sources/owned/linkedin",
+        "raw_fact_sha256": _sha_json(external_url),
+        "source_identity_schema_version": "evidence-memory-document-v2",
+        "owned_source_identity_id": evidence_memory_source_identity_id(
+            source_url=owned_url,
+            raw_fact_role="owned_web",
+        ),
+        "external_source_identity_id": evidence_memory_source_identity_id(
+            source_url=external_url,
+            raw_fact_role="external_social_profile",
+        ),
+    }
 
 
 def _bundle(
@@ -259,22 +299,44 @@ def _bundle(
     signing_key = key or _key()
     signing_registry = deepcopy(dict(registry or _registry(signing_key)))
     frozen_snapshot = snapshot or _snapshot()
-    receipts = [
-        _receipt(
+    receipts: list[RawAcquisitionReceipt] = []
+    owned: RawAcquisitionReceipt | None = None
+    if "owned_web" in roles:
+        owned = _receipt(
             frozen_snapshot,
-            role,
+            "owned_web",
             key=signing_key,
             signing_registry=signing_registry,
             key_id=signing_registry["current_key_id"],
-            nonce=owned_nonce if role == "owned_web" else None,
+            nonce=owned_nonce,
         )
-        for role in roles
-    ]
+        receipts.append(owned)
+    association = (
+        _association(frozen_snapshot, owned)
+        if "external_social_profile" in roles and owned is not None
+        else None
+    )
+    if "external_social_profile" in roles:
+        if association is None:
+            raise ValueError("external test fixture requires owned association proof")
+        receipts.append(
+            _receipt(
+                frozen_snapshot,
+                "external_social_profile",
+                key=signing_key,
+                signing_registry=signing_registry,
+                key_id=signing_registry["current_key_id"],
+                external_provenance_fingerprint=(
+                    external_identity_provenance_fingerprint(association)
+                ),
+            )
+        )
     receipts.sort(key=lambda receipt: receipt.receipt_fingerprint)
     signed = {
         "pre_receipt_snapshot": frozen_snapshot.model_dump(mode="json"),
         "receipts": [receipt.model_dump(mode="json") for receipt in receipts],
         "receipt_set_fingerprint": receipt_set_fingerprint(receipts),
+        "external_identity_provenance": association,
     }
     return {
         "key": signing_key,
@@ -302,6 +364,7 @@ def _readback(
         signed.pre_receipt_snapshot,
         signed.receipts,
         public_key_registry=registry,
+        external_identity_provenance=signed.external_identity_provenance,
     )
     arrivals = received_at or (
         [RECEIVED_OWNED]

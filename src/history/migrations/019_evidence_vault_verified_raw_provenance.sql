@@ -953,7 +953,8 @@ BEGIN
             ARRAY['schema_version', 'workspace_slug', 'source_scan_id',
                   'acquisition_session_id', 'canonical_brand_domain',
                   'canonical_brand_url', 'pre_receipt_snapshot_sha256',
-                  'signed_receipts', 'receipt_set_fingerprint']
+                  'signed_receipts', 'receipt_set_fingerprint',
+                  'external_identity_provenance']
        )
        OR provenance_envelope ->> 'schema_version' IS DISTINCT FROM
             'evidence-vault-raw-provenance-envelope-v1'
@@ -979,6 +980,11 @@ BEGIN
         RAISE EXCEPTION 'capture raw provenance envelope/content hash is invalid';
     END IF;
     IF NEW.channel_role = 'external_social_profile' THEN
+        IF provenance_envelope -> 'external_identity_provenance'
+                IS DISTINCT FROM NEW.external_identity_provenance THEN
+            RAISE EXCEPTION
+                'capture external identity provenance differs from durable receipt';
+        END IF;
         proof_pointer := NEW.external_identity_provenance ->> 'raw_fact_json_pointer';
         proof_method := NEW.external_identity_provenance ->> 'association_method';
         SELECT * INTO proof_receipt

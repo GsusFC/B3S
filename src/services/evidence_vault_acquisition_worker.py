@@ -28,6 +28,7 @@ from src.services.evidence_vault_raw_capture import (
 )
 from src.services.evidence_vault_raw_provenance import (
     DirectAcquisition,
+    ExternalIdentityProvenance,
     PreReceiptSnapshot,
     ProviderApiAcquisition,
     RECEIPT_SET_FINGERPRINT_VERSION,
@@ -95,6 +96,7 @@ class SignedAcquisition(_StrictWorkerModel):
     pre_receipt_snapshot: PreReceiptSnapshot
     receipts: list[RawAcquisitionReceipt] = Field(min_length=1, max_length=2)
     receipt_set_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    external_identity_provenance: ExternalIdentityProvenance | None
 
     @model_validator(mode="after")
     def _validate_exact_receipt_group(self) -> "SignedAcquisition":
@@ -396,6 +398,7 @@ def _validate_signed_acquisition(
         signed.pre_receipt_snapshot,
         signed.receipts,
         public_key_registry=public_key_registry,
+        external_identity_provenance=signed.external_identity_provenance,
     )
     verified = validate_signed_raw_capture(
         built.durable_raw_capture_payload,
@@ -450,6 +453,7 @@ def _signed_from_verified(verified: VerifiedRawCapture) -> SignedAcquisition:
         pre_receipt_snapshot=verified.pre_receipt_snapshot,
         receipts=list(verified.receipts),
         receipt_set_fingerprint=verified.envelope.receipt_set_fingerprint,
+        external_identity_provenance=verified.envelope.external_identity_provenance,
     )
 
 

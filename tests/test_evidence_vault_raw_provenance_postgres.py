@@ -835,6 +835,7 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
                     "pre_receipt_snapshot_sha256": pre_snapshot_hash,
                     "signed_receipts": [signed_dump],
                     "receipt_set_fingerprint": receipt_set_fingerprint([signed_dump]),
+                    "external_identity_provenance": None,
                 },
             }
             capture_hash = hashlib.sha256(canonical_json(raw_payload).encode()).hexdigest()
@@ -1362,6 +1363,7 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
                     "receipt_set_fingerprint": receipt_set_fingerprint(
                         [later_signed_dump]
                     ),
+                    "external_identity_provenance": None,
                 },
             }
             later_capture_hash = hashlib.sha256(
@@ -1749,6 +1751,7 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
                     "receipt_set_fingerprint": receipt_set_fingerprint(
                         positive_signed_dumps
                     ),
+                    "external_identity_provenance": external_provenance,
                 },
             }
             positive_capture_hash = hashlib.sha256(canonical_json(
@@ -2547,6 +2550,7 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
                         "receipt_set_fingerprint": receipt_set_fingerprint(
                             [concurrent_signed]
                         ),
+                        "external_identity_provenance": None,
                     },
                 }
                 concurrent_capture_hash = hashlib.sha256(
