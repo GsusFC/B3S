@@ -331,3 +331,12 @@ def test_replay_lookup_failure_is_generic_and_prevents_collection() -> None:
     with pytest.raises(EvidenceVaultAcquisitionWorkerError, match="^replay_lookup_failed$"):
         worker.capture(_command_payload())
     assert events == []
+
+
+def test_preconstructed_command_is_detached_and_revalidated() -> None:
+    command = TrustedAcquisitionCommand.model_validate(_command_payload())
+    bypassed = command.model_copy(update={"workspace_slug": "B3S"})
+    worker = _worker()
+
+    with pytest.raises(EvidenceVaultAcquisitionWorkerError, match="^invalid_command$"):
+        worker.capture(bypassed)

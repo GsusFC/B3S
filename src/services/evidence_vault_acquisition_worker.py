@@ -254,9 +254,9 @@ def _parse_command(
     command: TrustedAcquisitionCommand | Mapping[str, Any],
 ) -> TrustedAcquisitionCommand:
     if isinstance(command, TrustedAcquisitionCommand):
-        return command
+        command = command.model_dump(mode="python", round_trip=True, warnings="none")
     try:
-        return TrustedAcquisitionCommand.model_validate(command, strict=True)
+        return TrustedAcquisitionCommand.model_validate(deepcopy(command), strict=True)
     except Exception:
         raise EvidenceVaultAcquisitionWorkerError("invalid_command") from None
 
