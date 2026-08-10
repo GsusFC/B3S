@@ -309,11 +309,15 @@ async def require_site_basic_auth(request: Request, call_next):
             request,
             allow_referer_fallback=True,
         )
-        login_without_origin = (
-            path == "/vault/review/login"
-            and request.method.upper() == "POST"
+        csrf_protected_without_origin = (
+            request.method.upper() == "POST"
+            and (
+                path == "/vault/review/login"
+                or path == "/vault/review/logout"
+                or path.endswith("/decisions")
+            )
         )
-        if unsafe and not origin_valid and not login_without_origin:
+        if unsafe and not origin_valid and not csrf_protected_without_origin:
             return _site_basic_auth_forbidden()
         return await call_next(request)
 

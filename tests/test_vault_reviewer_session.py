@@ -271,7 +271,6 @@ def test_decision_requires_csrf_and_binds_server_reviewer(
     accepted = client.post(
         "/vault/review/example.com/decisions",
         data={**form, "csrf_token": session.csrf_token},
-        headers={"Origin": "https://testserver"},
         follow_redirects=False,
     )
 

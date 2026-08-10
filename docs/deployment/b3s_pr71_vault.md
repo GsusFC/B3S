@@ -27,7 +27,8 @@ route. The dedicated `/vault/review/*` surface is the deliberate exception: it
 uses only the evidence-reviewer credential, then an 8-hour signed
 HttpOnly/SameSite=Strict session with CSRF protection. Unsafe requests require
 an exact same-origin `Origin`; browsers that omit `Origin` may use an exact
-same-origin `Referer` fallback only on this reviewer surface. Only `/health` and `/api/v1/*`
+same-origin `Referer` fallback, or the route's own signed CSRF token for the
+login, logout, and decision POSTs. Only `/health` and `/api/v1/*`
 otherwise bypass the site gate; versioned API routes retain their existing
 bearer scopes.
 
