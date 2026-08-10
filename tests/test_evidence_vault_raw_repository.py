@@ -503,6 +503,7 @@ def test_postgres_scanner_execute_role_persists_looks_up_and_replays() -> None:
         "expected_database": expected_database,
         "expected_neon_project_id": None,
         "expected_neon_branch_id": None,
+        "expected_role": role,
     }
     command, signed, registry = _fixture()
     planner_calls = 0
@@ -522,6 +523,14 @@ def test_postgres_scanner_execute_role_persists_looks_up_and_replays() -> None:
             operation_plan_builder=counted_plan,
             **target,
         )
+        wrong_role_repository = EvidenceVaultRawRepository(
+            scanner_dsn,
+            public_key_registry=registry,
+            operation_plan_builder=counted_plan,
+            **{**target, "expected_role": "wrong_scanner_role"},
+        )
+        with pytest.raises(EvidenceVaultRawRepositoryError):
+            wrong_role_repository.verify_ingest_capability()
         first = repository.persist(command, signed)
         assert planner_calls == 1
         with psycopg.connect(admin_dsn) as admin:

@@ -36,6 +36,7 @@ from src.services.evidence_vault_raw_provenance import PublicKeyRegistry
 
 
 _MAX_SECRET_BYTES = 16_384
+_EXPECTED_SCANNER_ROLE = "b3s_pr71_scanner_ingest"
 _T = TypeVar("_T")
 
 
@@ -108,6 +109,7 @@ def _run(args: argparse.Namespace) -> int:
             public_key_registry=registry,
             operation_plan_builder=_operation_plan,
             expected_database=args.expected_database,
+            expected_role=_EXPECTED_SCANNER_ROLE,
             expected_neon_project_id=args.expected_neon_project_id,
             expected_neon_branch_id=args.expected_neon_branch_id,
         )

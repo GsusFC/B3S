@@ -201,7 +201,9 @@ WITH role_row AS (
     JOIN role_row ON role_row.oid = memberships.member
 )
 SELECT
-    session_user = current_user AS direct_session,
+    session_user = current_user
+        AND (%s::text IS NULL OR current_user::text = %s::text)
+        AS direct_session,
     role_row.rolcanlogin AND NOT role_row.rolsuper
         AND NOT role_row.rolinherit AND NOT role_row.rolcreaterole
         AND NOT role_row.rolcreatedb AND NOT role_row.rolreplication
@@ -460,6 +462,7 @@ class EvidenceVaultRawRepository:
         "__expected_database",
         "__expected_neon_branch_id",
         "__expected_neon_project_id",
+        "__expected_role",
         "__operation_plan_builder",
         "__public_key_registry_json",
     )
@@ -473,6 +476,7 @@ class EvidenceVaultRawRepository:
         expected_database: str,
         expected_neon_project_id: str | None,
         expected_neon_branch_id: str | None,
+        expected_role: str | None = None,
         connect: Callable[..., Any] = psycopg.connect,
     ) -> None:
         if not isinstance(dsn, str) or not dsn.strip():
@@ -488,6 +492,11 @@ class EvidenceVaultRawRepository:
             branch_id = _optional_target_identity_text(
                 expected_neon_branch_id,
                 maximum=255,
+            )
+            role = (
+                None
+                if expected_role is None
+                else _target_identity_text(expected_role, maximum=63)
             )
             if (project_id is None) != (branch_id is None):
                 raise ValueError("incomplete Neon target")
@@ -509,6 +518,7 @@ class EvidenceVaultRawRepository:
         self.__expected_database = database
         self.__expected_neon_project_id = project_id
         self.__expected_neon_branch_id = branch_id
+        self.__expected_role = role
         self.__operation_plan_builder = operation_plan_builder
         self.__public_key_registry_json = registry.model_dump_json()
 
@@ -603,6 +613,7 @@ class EvidenceVaultRawRepository:
             expected_database=self.__expected_database,
             expected_neon_project_id=self.__expected_neon_project_id,
             expected_neon_branch_id=self.__expected_neon_branch_id,
+            expected_role=self.__expected_role,
         )
 
     def __connect(self) -> Any:
@@ -831,10 +842,13 @@ def _assert_scanner_session(
     expected_database: str,
     expected_neon_project_id: str | None,
     expected_neon_branch_id: str | None,
+    expected_role: str | None,
 ) -> None:
     row = connection.execute(
         _ROLE_PREFLIGHT_SQL,
         (
+            expected_role,
+            expected_role,
             expected_database,
             expected_neon_project_id,
             expected_neon_branch_id,
