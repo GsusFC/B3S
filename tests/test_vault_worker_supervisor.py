@@ -413,6 +413,7 @@ def test_ingest_dsn_accepts_neon_tls_authority() -> None:
 
 def test_worker_target_is_required_and_passed_as_fixed_command_arguments(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     environment = {
         supervisor.EXPECTED_DATABASE_ENV: "neondb",
@@ -440,6 +441,9 @@ def test_worker_target_is_required_and_passed_as_fixed_command_arguments(
     )
     assert command[command.index("--expected-neon-project-id") + 1] == "project-1"
     assert command[command.index("--expected-neon-branch-id") + 1] == "branch-1"
+    assert "--allow-owned-only-downgrade" not in command
+    monkeypatch.setenv("BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS", "true")
+    assert "--allow-owned-only-downgrade" in supervisor._worker_command(paths, target)
 
     del environment[supervisor.EXPECTED_NEON_BRANCH_ENV]
     with pytest.raises(
