@@ -117,6 +117,7 @@ class DurableAcquisitionReadback(_StrictWorkerModel):
 
     capture_id: str
     capture_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    capture_observation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     durable_raw_capture_payload: dict[str, JsonValue]
     database_time: AwareDatetime
     receipt_rows: list[DurableReceiptReadback] = Field(min_length=1, max_length=2)
@@ -390,6 +391,7 @@ def _build_public_result(
         brand_url=command.brand_url,
         capture_id=readback.capture_id,
         capture_content_hash=readback.capture_content_hash,
+        capture_observation_hash=readback.capture_observation_hash,
         receipt_set_fingerprint=verified.envelope.receipt_set_fingerprint,
         receipt_rows=[
             SafeReceiptArrival(

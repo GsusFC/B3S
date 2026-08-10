@@ -389,6 +389,7 @@ def test_persist_calls_append_once_and_returns_only_verified_readback(monkeypatc
             "capture",
         )),
         capture_content_hash=built.capture_content_hash,
+        capture_observation_hash="3" * 64,
         durable_raw_capture_payload=built.durable_raw_capture_payload,
         database_time=datetime(2026, 8, 9, 2, 1, tzinfo=timezone.utc),
         receipt_rows=[

@@ -826,6 +826,7 @@ class EvidenceVaultRawRepository:
         return DurableAcquisitionReadback(
             capture_id=expected_capture_id,
             capture_content_hash=verified.capture_content_hash,
+            capture_observation_hash=observation.observation_hash,
             durable_raw_capture_payload=_durable_payload(verified),
             database_time=database_time,
             receipt_rows=arrivals,

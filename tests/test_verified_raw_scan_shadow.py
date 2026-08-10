@@ -68,6 +68,7 @@ def test_verified_raw_shadow_calls_only_public_ipc_and_records_safe_result(
             return SimpleNamespace(
                 capture_id="12345678-1234-4234-8234-123456789abc",
                 capture_content_hash="1" * 64,
+                capture_observation_hash="5" * 64,
                 receipt_set_fingerprint="2" * 64,
                 receipt_rows=[object(), object()],
                 documents=[
@@ -132,6 +133,11 @@ def test_verified_raw_shadow_calls_only_public_ipc_and_records_safe_result(
             },
         ]
         assert snapshot["acquisition_steps"]["searchapi"]["status"] == "disabled"
+        assert snapshot["source_capture"] == {
+            "source_scan_id": scan_id,
+            "observation_hash": "5" * 64,
+            "capture_hash": "1" * 64,
+        }
         assert snapshot["run"]["url"] == "https://example.com"
         command = observed[1][1]
         assert command.workspace_slug == "b3s"
@@ -141,6 +147,7 @@ def test_verified_raw_shadow_calls_only_public_ipc_and_records_safe_result(
             "state": "persisted_shadow",
             "capture_id": "12345678-1234-4234-8234-123456789abc",
             "capture_content_hash": "1" * 64,
+            "capture_observation_hash": "5" * 64,
             "receipt_set_fingerprint": "2" * 64,
             "receipt_count": 2,
         }
@@ -318,6 +325,8 @@ def test_verified_external_document_survives_real_evidence_pack() -> None:
         scan_id="stable-scan-id",
         brand_name="Example",
         canonical_url="https://example.com",
+        capture_content_hash="5" * 64,
+        capture_observation_hash="6" * 64,
         documents=documents,
     )
     pack = build_evidence_pack_from_snapshot(snapshot)
@@ -341,6 +350,8 @@ def test_verified_owned_only_never_fabricates_configured_searchapi_fallback(
         scan_id="owned-only",
         brand_name="Example",
         canonical_url="https://example.com",
+        capture_content_hash="5" * 64,
+        capture_observation_hash="6" * 64,
         documents=[
             SimpleNamespace(
                 role="owned_web",

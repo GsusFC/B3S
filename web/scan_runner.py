@@ -283,6 +283,9 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
         envelope = {"snapshot": snapshot, "source_run_id": snapshot["run"]["id"]}
         payload = build_flow_sv9_shadow_eval(envelope, include_full=True)
         payload = _attach_sv9_editorial(payload)
+        source_capture = snapshot.get("source_capture")
+        if isinstance(source_capture, dict):
+            payload["source_capture"] = dict(source_capture)
         payload["acquisition_gate"] = snapshot.get("acquisition_gate") or gate
         payload["acquisition_artifacts"] = _acquisition_artifacts_from_snapshot(snapshot)
         if _scan_cancelled(scan_id):
@@ -385,6 +388,7 @@ def _capture_verified_raw_shadow(
         "state": "persisted_shadow",
         "capture_id": result.capture_id,
         "capture_content_hash": result.capture_content_hash,
+        "capture_observation_hash": result.capture_observation_hash,
         "receipt_set_fingerprint": result.receipt_set_fingerprint,
         "receipt_count": len(result.receipt_rows),
     }
@@ -399,6 +403,8 @@ def _capture_verified_raw_shadow(
         scan_id=scan_id,
         brand_name=brand_name,
         canonical_url=canonical_url,
+        capture_content_hash=result.capture_content_hash,
+        capture_observation_hash=result.capture_observation_hash,
         documents=documents,
     )
 
@@ -408,6 +414,8 @@ def _verified_raw_pre_analysis_snapshot(
     scan_id: str,
     brand_name: str,
     canonical_url: str,
+    capture_content_hash: str,
+    capture_observation_hash: str,
     documents: list[Any],
 ) -> dict[str, Any]:
     source_by_role = {
@@ -500,6 +508,14 @@ def _verified_raw_pre_analysis_snapshot(
             "brand_name": brand_name,
             "id": _stable_verified_source_run_id(scan_id),
             "url": canonical_url,
+        },
+        # Hash-only binding metadata lets the later report prove it evaluates
+        # the exact worker-persisted capture without exposing raw payloads to
+        # FastAPI or reconstructing the worker's private observation.
+        "source_capture": {
+            "source_scan_id": scan_id,
+            "observation_hash": capture_observation_hash,
+            "capture_hash": capture_content_hash,
         },
         "raw_inputs": raw_inputs,
         "acquisition_steps": acquisition_steps,
