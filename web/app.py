@@ -107,6 +107,8 @@ _VAULT_REVIEW_STATE_FILTERS = (
 _VAULT_REVIEW_STATE_KEYS = frozenset(
     key for key, _label in _VAULT_REVIEW_STATE_FILTERS
 )
+_VAULT_REVIEW_LOGIN_CSRF_COOKIE = "b3s_vault_reviewer_login_csrf"
+_VAULT_REVIEW_LOGIN_CSRF_MAX_AGE = 10 * 60
 
 
 def _initialize_runtime() -> None:
@@ -302,13 +304,16 @@ async def require_site_basic_auth(request: Request, call_next):
     # fence for unsafe requests even though Basic is not required here.
     reviewer_surface = vault_reviewer_enabled() and _is_vault_reviewer_path(path)
     if reviewer_surface:
-        if (
-            request.method.upper() not in _SITE_BASIC_AUTH_SAFE_METHODS
-            and not _same_origin_request_is_valid(
-                request,
-                allow_referer_fallback=True,
-            )
-        ):
+        unsafe = request.method.upper() not in _SITE_BASIC_AUTH_SAFE_METHODS
+        origin_valid = _same_origin_request_is_valid(
+            request,
+            allow_referer_fallback=True,
+        )
+        login_without_origin = (
+            path == "/vault/review/login"
+            and request.method.upper() == "POST"
+        )
+        if unsafe and not origin_valid and not login_without_origin:
             return _site_basic_auth_forbidden()
         return await call_next(request)
 
@@ -950,14 +955,25 @@ def _vault_review_login_response(
     error: str = "",
     status_code: int = 200,
 ):
+    login_csrf = secrets.token_hex(32)
     response = templates.TemplateResponse(
         request,
         "vault_review_login.html.j2",
         {
             "next_path": safe_vault_review_path(next_path),
+            "login_csrf": login_csrf,
             "error": error,
         },
         status_code=status_code,
+    )
+    response.set_cookie(
+        key=_VAULT_REVIEW_LOGIN_CSRF_COOKIE,
+        value=login_csrf,
+        max_age=_VAULT_REVIEW_LOGIN_CSRF_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/vault/review/login",
     )
     return _vault_response_headers(response)
 
@@ -1696,10 +1712,29 @@ def create_vault_review_session(
     request: Request,
     token: str = Form(""),
     next_path: str = Form("/"),
+    login_csrf: str = Form(""),
 ):
     if not vault_reviewer_enabled():
         raise HTTPException(status_code=404, detail="Not found")
     destination = safe_vault_review_path(next_path)
+    origin_valid = _same_origin_request_is_valid(
+        request,
+        allow_referer_fallback=True,
+    )
+    if not origin_valid:
+        supplied_challenge = str(login_csrf or "").strip()
+        stored_challenge = request.cookies.get(_VAULT_REVIEW_LOGIN_CSRF_COOKIE, "")
+        if (
+            len(supplied_challenge) != 64
+            or len(stored_challenge) != 64
+            or not secrets.compare_digest(supplied_challenge, stored_challenge)
+        ):
+            return _vault_review_login_response(
+                request,
+                next_path=destination,
+                error="La sesión de acceso caducó. Recarga esta página e inténtalo de nuevo.",
+                status_code=403,
+            )
     try:
         principal = authenticate_vault_reviewer(token)
         cookie_value = issue_vault_reviewer_session(principal)
@@ -1726,6 +1761,13 @@ def create_vault_review_session(
         secure=True,
         samesite="strict",
         path="/vault/review",
+    )
+    response.delete_cookie(
+        _VAULT_REVIEW_LOGIN_CSRF_COOKIE,
+        path="/vault/review/login",
+        secure=True,
+        httponly=True,
+        samesite="strict",
     )
     return _vault_response_headers(response)
 

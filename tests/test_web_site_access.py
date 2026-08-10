@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import re
 import secrets
 
 import pytest
@@ -165,6 +166,27 @@ def test_vault_reviewer_surface_uses_dedicated_session_without_site_basic(
         follow_redirects=False,
     )
     assert referer_login.status_code == 303
+
+    challenge_client = TestClient(
+        app,
+        base_url="https://b3s-pr71-vault.example",
+    )
+    challenge_page = challenge_client.get("/vault/review/login")
+    challenge = re.search(
+        r'name="login_csrf" value="([0-9a-f]{64})"',
+        challenge_page.text,
+    )
+    assert challenge is not None
+    challenge_login = challenge_client.post(
+        "/vault/review/login",
+        data={
+            "token": reviewer_token,
+            "next_path": "/vault/review/example.com",
+            "login_csrf": challenge.group(1),
+        },
+        follow_redirects=False,
+    )
+    assert challenge_login.status_code == 303
 
 
 def test_correct_basic_credentials_proceed_to_existing_route_controls(monkeypatch) -> None:
