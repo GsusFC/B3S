@@ -76,7 +76,9 @@ def test_isolated_pr71_vault_config_is_exact_and_fail_closed():
     assert config["env"]["BRAND3_VAULT_C7_CUTOVER_ENABLED"] == "false"
     assert config["env"]["BRAND3_VAULT_C7_EMERGENCY_DENY"] == "true"
     assert config["env"]["BRAND3_VAULT_C7_ALLOWLIST"] == ""
-    assert config["env"]["BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED"] == "false"
+    assert config["env"]["B3S_VAULT_WORKER_ENABLED"] == "true"
+    assert config["env"]["BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED"] == "true"
+    assert config["env"]["BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH"] == ""
     assert config["http_service"]["auto_start_machines"] is True
     assert config["http_service"]["min_machines_running"] == 1
 
