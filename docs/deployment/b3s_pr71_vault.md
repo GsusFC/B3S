@@ -119,11 +119,14 @@ operator capabilities; neither is installed in the Fly app or this volume.
 
 ## C7 boundary
 
-The isolated L2 configuration enables only acquisition shadowing:
+The isolated L2 configuration enables only acquisition shadowing. Owned-web-only
+analysis may continue when no external identity is available; its explicit
+warning is non-qualifying and can never satisfy C7.
 
 ```text
 B3S_VAULT_WORKER_ENABLED=true
 BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED=true
+BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS=true
 BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH=
 BRAND3_VAULT_C7_CUTOVER_ENABLED=false
 BRAND3_VAULT_C7_EMERGENCY_DENY=true

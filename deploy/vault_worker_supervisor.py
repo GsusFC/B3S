@@ -554,7 +554,7 @@ def _write_all(descriptor: int, payload: bytes) -> None:
 
 
 def _worker_command(paths: RuntimePaths, target: WorkerTarget) -> list[str]:
-    return [
+    command = [
         sys.executable,
         str(_APP_ROOT / "scripts" / "run_evidence_vault_acquisition_worker.py"),
         "--socket-path",
@@ -578,6 +578,12 @@ def _worker_command(paths: RuntimePaths, target: WorkerTarget) -> list[str]:
         "--socket-mode",
         "0660",
     ]
+    if os.environ.get(
+        "BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS",
+        "",
+    ).strip().lower() == "true":
+        command.append("--allow-owned-only-downgrade")
+    return command
 
 
 def _worker_environment(_source: MutableMapping[str, str]) -> dict[str, str]:

@@ -244,6 +244,7 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
         _set_phase(scan_id, "capture", "running")
         from src.config import (
             BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED,
+            BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS,
         )
 
         if BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED:
@@ -260,6 +261,9 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
         gate = _build_acquisition_gate(
             snapshot.get("acquisition_steps") if isinstance(snapshot, dict) else {},
             allow_degraded_fallback=allow_degraded_fallback,
+            allow_owned_only_analysis=(
+                BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS
+            ),
         )
         if gate["state"] == "blocked" and allow_degraded_fallback and gate.get("can_continue"):
             gate = _approve_acquisition_gate(gate, decision_source="preapproved")
@@ -611,6 +615,7 @@ def _build_acquisition_gate(
     acquisition_steps: Any,
     *,
     allow_degraded_fallback: bool = False,
+    allow_owned_only_analysis: bool = False,
 ) -> dict[str, Any]:
     steps = acquisition_steps if isinstance(acquisition_steps, dict) else {}
     normalized = {str(source): _step_payload(step) for source, step in steps.items()}
@@ -660,17 +665,21 @@ def _build_acquisition_gate(
             "reason": "vertical external-proof fallback for Exa failure",
         }
         fallbacks.append(fallback)
-        issues.append(
-            _issue(
-                source="exa",
-                code="exa_failed",
-                severity="blocker",
-                message="Exa failed; external proof acquisition is incomplete.",
-                step=exa_step,
-                fallback="searchapi" if searchapi_available else "",
-                can_fallback=searchapi_available,
-            )
+        exa_issue = _issue(
+            source="exa",
+            code="exa_failed",
+            severity="warning" if allow_owned_only_analysis else "blocker",
+            message=(
+                "Exa failed; continuing with owned-web analysis only. "
+                "This result is not C7 qualifying proof."
+                if allow_owned_only_analysis
+                else "Exa failed; external proof acquisition is incomplete."
+            ),
+            step=exa_step,
+            fallback="searchapi" if searchapi_available else "",
+            can_fallback=searchapi_available,
         )
+        (warnings if allow_owned_only_analysis else issues).append(exa_issue)
     elif exa_status in {"empty", "partial"}:
         warnings.append(
             _issue(

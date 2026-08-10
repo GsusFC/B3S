@@ -380,3 +380,19 @@ def test_verified_owned_only_never_fabricates_configured_searchapi_fallback(
             "reason": "vertical external-proof fallback for Exa failure",
         }
     ]
+
+
+def test_owned_only_analysis_records_external_gap_without_blocking_score():
+    gate = scan_runner._build_acquisition_gate(
+        {
+            "web": {"status": "success"},
+            "exa": {"status": "error", "detail": "verified_external_document_unavailable"},
+            "searchapi": {"status": "disabled"},
+        },
+        allow_owned_only_analysis=True,
+    )
+    assert gate["state"] == "warning"
+    assert gate["issues"] == []
+    assert gate["can_continue"] is False
+    assert gate["warnings"][0]["code"] == "exa_failed"
+    assert "not C7 qualifying proof" in gate["warnings"][0]["message"]
