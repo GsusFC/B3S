@@ -864,6 +864,12 @@ class _OwnedHtmlParser(HTMLParser):
             if name.lower() != "href" or not isinstance(value, str):
                 continue
             candidate = urljoin(self.base_url, value.strip())
+            # Public company pages commonly publish one trailing slash, while
+            # the signed external target is canonicalized without it. Only
+            # remove that single safe suffix; query/fragment and other
+            # non-canonical forms remain rejected by the strict validator.
+            if candidate.endswith("/"):
+                candidate = candidate[:-1]
             try:
                 _strict_linkedin_company_url(candidate)
             except ValueError:

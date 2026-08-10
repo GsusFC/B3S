@@ -479,6 +479,15 @@ def test_http_fetcher_requires_identity_encoding_and_exact_www_linkedin() -> Non
     )(_command())
     assert "linkedin" not in observation.raw_fragment
 
+    trailing = b'<a href="https://www.linkedin.com/company/example/">canonical company</a>'
+    observation = HttpxOwnedFetcher(
+        _GetClient([_Response(200, trailing, {"content-type": "text/html"})]),
+        resolver=_global_resolver,
+    )(_command())
+    assert observation.raw_fragment["linkedin"] == (
+        "https://www.linkedin.com/company/example"
+    )
+
 
 def test_explicit_downgrade_distinguishes_ineligible_provider_result() -> None:
     key, registry = _key_registry()
