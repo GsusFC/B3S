@@ -344,6 +344,42 @@ def test_verified_external_document_survives_real_evidence_pack() -> None:
     )
 
 
+def test_verified_owned_only_report_pack_omits_unstored_acquisition_diagnostics() -> None:
+    from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
+
+    snapshot = {
+        "run": {"brand_name": "Example", "url": "https://example.com"},
+        "raw_inputs": [
+            {
+                "source": "verified_raw_document",
+                "payload": {
+                    "role": "owned_web",
+                    "url": "https://example.com",
+                    "content": "Exact owned verified text.",
+                    "extracted_document_sha256": "3" * 64,
+                    "extractor_version": "vault-extractor-v1",
+                    "receipt_fingerprint": "1" * 64,
+                },
+            }
+        ],
+        "acquisition_steps": {
+            "web": {"status": "success"},
+            "exa": {
+                "status": "error",
+                "detail": "verified_external_document_unavailable",
+            },
+        },
+        "features": [],
+    }
+    full_pack = build_evidence_pack_from_snapshot(snapshot)
+    capture_pack = build_evidence_pack_from_snapshot(
+        snapshot, include_acquisition_steps=False
+    )
+    assert len(full_pack.evidence) > len(capture_pack.evidence)
+    assert len(capture_pack.evidence) == 1
+    assert capture_pack.evidence[0].content == "Exact owned verified text."
+
+
 def test_verified_owned_only_never_fabricates_configured_searchapi_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

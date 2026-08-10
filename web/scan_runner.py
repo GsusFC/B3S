@@ -300,9 +300,15 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 # strip those advisory annotations at this trust boundary.
                 from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
 
-                candidate_payload["evidence_pack"] = build_evidence_pack_from_snapshot(
-                    snapshot
-                ).to_dict()
+                candidate_payload["evidence_pack"] = (
+                    build_evidence_pack_from_snapshot(
+                        snapshot,
+                        # Raw capture persistence owns the exact evidence set;
+                        # acquisition warnings are report metadata, not extra
+                        # evidence rows that could break the capture binding.
+                        include_acquisition_steps=False,
+                    ).to_dict()
+                )
         source_capture = snapshot.get("source_capture")
         if isinstance(source_capture, dict):
             payload["source_capture"] = dict(source_capture)

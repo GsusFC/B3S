@@ -90,6 +90,7 @@ def build_evidence_pack_from_snapshot(
     snapshot: dict[str, Any],
     *,
     visual_signature_evidence: dict[str, Any] | None = None,
+    include_acquisition_steps: bool = True,
 ) -> BrandEvidencePack:
     run = snapshot.get("run") if isinstance(snapshot.get("run"), dict) else {}
     brand_name = str(run.get("brand_name") or snapshot.get("brand_name") or "")
@@ -108,7 +109,10 @@ def build_evidence_pack_from_snapshot(
         _evidence_from_raw_inputs(snapshot.get("raw_inputs") or [], brand_name=brand_name, scan_url=url)
     )
     records.extend(raw_records)
-    records.extend(_evidence_from_acquisition_steps(snapshot.get("acquisition_steps")))
+    if include_acquisition_steps:
+        records.extend(
+            _evidence_from_acquisition_steps(snapshot.get("acquisition_steps"))
+        )
     records.extend(_evidence_from_features(snapshot.get("features") or []))
     records.extend(_evidence_from_visual_signature(visual_signature_evidence))
 
