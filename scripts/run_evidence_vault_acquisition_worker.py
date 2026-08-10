@@ -13,8 +13,9 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
 from typing import Any, Callable, TypeVar
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import httpx
@@ -45,6 +46,10 @@ def main() -> int:
     parser.add_argument("--registry-file", type=Path, required=True)
     parser.add_argument("--ingest-dsn-file", type=Path, required=True)
     parser.add_argument("--exa-api-key-file", type=Path)
+    parser.add_argument("--expected-database", required=True)
+    parser.add_argument("--expected-database-hostname", required=True)
+    parser.add_argument("--expected-neon-project-id", required=True)
+    parser.add_argument("--expected-neon-branch-id", required=True)
     parser.add_argument("--socket-mode", choices=("0600", "0660"), default="0660")
     parser.add_argument(
         "--allow-owned-only-downgrade",
@@ -55,11 +60,22 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+    try:
+        return _run(args)
+    except Exception:
+        print("verified-raw worker failed: startup_failed", file=sys.stderr)
+        return 78
 
+
+def _run(args: argparse.Namespace) -> int:
     private_key = _load_private_key(args.private_key_file)
     registry = _load_json_model(args.registry_file, PublicKeyRegistry)
     ingest_dsn = _load_secret_text(args.ingest_dsn_file, field="ingest_dsn")
     _validate_postgres_dsn(ingest_dsn)
+    if (
+        urlsplit(ingest_dsn).hostname or ""
+    ).lower() != args.expected_database_hostname.lower():
+        raise ValueError("ingest_dsn_target_invalid")
     exa_api_key = (
         _load_secret_text(args.exa_api_key_file, field="exa_api_key")
         if args.exa_api_key_file is not None
@@ -91,7 +107,11 @@ def main() -> int:
             ingest_dsn,
             public_key_registry=registry,
             operation_plan_builder=_operation_plan,
+            expected_database=args.expected_database,
+            expected_neon_project_id=args.expected_neon_project_id,
+            expected_neon_branch_id=args.expected_neon_branch_id,
         )
+        repository.verify_ingest_capability()
         worker = TrustedAcquisitionWorker(
             collect=runtime.collect,
             sign=runtime.sign,
@@ -187,9 +207,50 @@ def _read_regular_file(path: Path, *, maximum: int, private: bool) -> bytes:
 
 
 def _validate_postgres_dsn(value: str) -> None:
-    parsed = urlsplit(value)
-    if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
-        raise ValueError("ingest_dsn_file_invalid")
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"postgres", "postgresql"}
+            or not parsed.hostname
+            or not parsed.username
+            or not parsed.password
+            or not parsed.path
+            or parsed.path == "/"
+            or parsed.fragment
+        ):
+            raise ValueError
+        _ = parsed.port
+        pairs = parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+        keys = [key for key, _item in pairs]
+        if len(keys) != len(set(keys)):
+            raise ValueError
+        if {
+            "host",
+            "hostaddr",
+            "user",
+            "password",
+            "dbname",
+            "port",
+            "service",
+            "servicefile",
+            "options",
+        }.intersection(keys):
+            raise ValueError
+        ssl_modes = [item for key, item in pairs if key == "sslmode"]
+        channel_bindings = [
+            item for key, item in pairs if key == "channel_binding"
+        ]
+        authenticated_tls = ssl_modes == ["verify-full"] or (
+            ssl_modes == ["require"] and channel_bindings == ["require"]
+        )
+        if not authenticated_tls:
+            raise ValueError
+    except Exception:
+        raise ValueError("ingest_dsn_file_invalid") from None
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

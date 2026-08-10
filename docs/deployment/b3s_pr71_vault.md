@@ -46,9 +46,13 @@ or protected GitHub `pr71-vault` release context. Run migrations before deploy:
 
 ```bash
 B3S_MIGRATION_DATABASE_URL='...'   python scripts/migrate_b3s_history_postgres.py
+B3S_MIGRATION_DATABASE_URL='...'   python scripts/configure_b3s_runtime_role.py --role b3s_pr71_app_runtime --database-name neondb
 fly config validate -a b3s-pr71-vault -c fly.pr71-vault.toml
 fly deploy --remote-only   -a b3s-pr71-vault   -c fly.pr71-vault.toml   --build-arg B3S_BUILD_SHA="$(git rev-parse HEAD)"
 ```
+
+The role command is idempotent and only accepts the privileged URL through
+`B3S_MIGRATION_DATABASE_URL`; it never prints that URL or a password.
 
 Do not use `fly.toml`, `fly.vault.toml`, `b3s`, `b3s-vault`, their volumes, or
 their database branches in this workflow. The manual GitHub workflow requires
@@ -68,11 +72,39 @@ L1 operation requires only app-scoped credentials:
 Worker signing keys, scanner-ingest DSNs, governance DSNs, runtime-read DSNs,
 and the external migrator DSN do not belong in the web process.
 
+## L2 worker secret files
+
+Do not install the signer key, scanner-ingest DSN, or worker provider key with
+`fly secrets`. The enabled supervisor rejects those four inline environment
+variables. Provision them over the authenticated operator channel into the
+encrypted isolated volume at the fixed paths below:
+
+```text
+/data/b3s-vault-worker/private-key.b64
+/data/b3s-vault-worker/public-key-registry.json
+/data/b3s-vault-worker/ingest-dsn
+/data/b3s-vault-worker/exa-api-key
+```
+
+The directory must be root-owned mode `0700`; every file must be root-owned mode
+`0600`, a regular non-symlink, and contain exactly one value with no trailing
+newline. The volume root remains root-owned mode `1777`; its sticky bit prevents
+the web uid from replacing the root-owned secret directory while leaving the
+explicit report/SQLite paths writable. At startup, PID 1 validates stable file
+metadata, copies the values to short-lived worker-owned files under `/run`,
+starts the worker as `b3s-worker`, removes the `/run` files after the socket is
+ready, and gives the web uid only group access to the `0660` Unix socket. The
+persistent sources remain unreadable to `b3s` and must be removed when L2 ends.
+
+`B3S_C7_RUNTIME_READ_DATABASE_URL` and the governance DSN remain external
+operator capabilities; neither is installed in the Fly app or this volume.
+
 ## C7 boundary
 
 The always-on L1 service keeps:
 
 ```text
+B3S_VAULT_WORKER_ENABLED=false
 BRAND3_VAULT_C7_CUTOVER_ENABLED=false
 BRAND3_VAULT_C7_EMERGENCY_DENY=true
 BRAND3_VAULT_C7_ALLOWLIST=

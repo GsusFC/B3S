@@ -20,12 +20,31 @@ RUN pip install --no-cache-dir . \
     && apt-get update \
     && apt-get install -y --no-install-recommends gosu \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin b3s \
-    && mkdir -p /data/reports /data/screenshots \
-    && chown -R b3s:b3s /app /data /ms-playwright
+    && groupadd --gid 10001 b3s \
+    && groupadd --gid 10002 b3s-acquisition \
+    && useradd --create-home --uid 10001 --gid b3s --shell /usr/sbin/nologin b3s \
+    && useradd --no-create-home --home-dir /nonexistent --uid 10002 \
+        --gid b3s-acquisition --shell /usr/sbin/nologin b3s-worker \
+    && usermod --append --groups b3s-acquisition b3s \
+    && mkdir -p \
+        /app/data/reports \
+        /app/data/screenshots \
+        /data/reports \
+        /data/screenshots \
+        /usr/local/lib/b3s \
+    && chown -R b3s:b3s /app/data /data /ms-playwright
 
 COPY deploy/fly_entrypoint.sh /usr/local/bin/b3s-entrypoint
-RUN chmod 755 /usr/local/bin/b3s-entrypoint
+COPY deploy/prepare_vault_volume.py /usr/local/lib/b3s/prepare_vault_volume.py
+COPY deploy/vault_worker_supervisor.py /usr/local/lib/b3s/vault_worker_supervisor.py
+RUN chmod 755 /usr/local/bin/b3s-entrypoint \
+    && chmod 644 \
+        /usr/local/lib/b3s/prepare_vault_volume.py \
+        /usr/local/lib/b3s/vault_worker_supervisor.py \
+    && chown root:root \
+        /usr/local/bin/b3s-entrypoint \
+        /usr/local/lib/b3s/prepare_vault_volume.py \
+        /usr/local/lib/b3s/vault_worker_supervisor.py
 
 EXPOSE 8080
 

@@ -72,12 +72,54 @@ _READ_ONLY_SQL = "SET TRANSACTION READ ONLY"
 _ROLE_PREFLIGHT_SQL = """
 WITH role_row AS (
     SELECT * FROM pg_catalog.pg_roles WHERE rolname = current_user
-), forbidden_table_privilege AS (
+), allowed_functions AS (
+    SELECT routines.oid, routines.proowner, routines.proacl
+    FROM pg_catalog.pg_proc AS routines
+    WHERE routines.oid = ANY(ARRAY[
+        'b3s_history.append_evidence_vault_raw_acquisition(jsonb)'::regprocedure::oid,
+        'b3s_history.read_evidence_vault_raw_acquisition(text,text)'::regprocedure::oid
+    ])
+), allowed_function_acl_invalid AS (
     SELECT 1
+    FROM allowed_functions AS routines
+    CROSS JOIN role_row
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.aclexplode(
+            coalesce(
+                routines.proacl,
+                pg_catalog.acldefault('f', routines.proowner)
+            )
+        ) AS grants
+        WHERE grants.grantee = role_row.oid
+          AND grants.privilege_type = 'EXECUTE'
+          AND NOT grants.is_grantable
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.aclexplode(
+            coalesce(
+                routines.proacl,
+                pg_catalog.acldefault('f', routines.proowner)
+            )
+        ) AS grants
+        WHERE grants.privilege_type = 'EXECUTE'
+          AND (
+              grants.grantee = 0
+              OR grants.grantee NOT IN (role_row.oid, routines.proowner)
+              OR (grants.grantee = role_row.oid AND grants.is_grantable)
+          )
+    )
+), application_relations AS (
+    SELECT relations.oid, relations.relkind,
+           relations.relowner, relations.relacl
     FROM pg_catalog.pg_class AS relations
     JOIN pg_catalog.pg_namespace AS schemas ON schemas.oid = relations.relnamespace
-    WHERE schemas.nspname = 'b3s_history'
-      AND relations.relkind IN ('r', 'p')
+    WHERE schemas.nspname !~ '^pg_'
+      AND schemas.nspname <> 'information_schema'
+), forbidden_table_privilege AS (
+    SELECT 1
+    FROM application_relations AS relations
+    WHERE relations.relkind IN ('r', 'p', 'v', 'm', 'f')
       AND (
           pg_catalog.has_table_privilege(current_user, relations.oid, 'SELECT')
           OR pg_catalog.has_table_privilege(current_user, relations.oid, 'INSERT')
@@ -85,7 +127,74 @@ WITH role_row AS (
           OR pg_catalog.has_table_privilege(current_user, relations.oid, 'DELETE')
           OR pg_catalog.has_table_privilege(current_user, relations.oid, 'TRUNCATE')
           OR pg_catalog.has_table_privilege(current_user, relations.oid, 'TRIGGER')
+          OR pg_catalog.has_table_privilege(current_user, relations.oid, 'REFERENCES')
+          OR EXISTS (
+              SELECT 1
+              FROM pg_catalog.aclexplode(
+                  coalesce(
+                      relations.relacl,
+                      pg_catalog.acldefault('r', relations.relowner)
+                  )
+              ) AS grants
+              WHERE grants.grantee IN (0, (SELECT oid FROM role_row))
+                AND grants.privilege_type = 'MAINTAIN'
+          )
       )
+), forbidden_column_privilege AS (
+    SELECT 1
+    FROM application_relations AS relations
+    WHERE relations.relkind IN ('r', 'p', 'v', 'm', 'f')
+      AND pg_catalog.has_any_column_privilege(
+          current_user,
+          relations.oid,
+          'SELECT,INSERT,UPDATE,REFERENCES'
+      )
+), forbidden_sequence_privilege AS (
+    SELECT 1
+    FROM application_relations AS relations
+    WHERE relations.relkind = 'S'
+      AND (
+          pg_catalog.has_sequence_privilege(current_user, relations.oid, 'USAGE')
+          OR pg_catalog.has_sequence_privilege(current_user, relations.oid, 'SELECT')
+          OR pg_catalog.has_sequence_privilege(current_user, relations.oid, 'UPDATE')
+      )
+), forbidden_security_definer_execute AS (
+    SELECT 1
+    FROM pg_catalog.pg_proc AS routines
+    WHERE routines.prosecdef
+      AND routines.oid NOT IN (SELECT oid FROM allowed_functions)
+      AND pg_catalog.has_function_privilege(
+          current_user, routines.oid, 'EXECUTE'
+      )
+), forbidden_direct_function_grant AS (
+    SELECT 1
+    FROM pg_catalog.pg_proc AS routines
+    JOIN pg_catalog.pg_namespace AS schemas ON schemas.oid = routines.pronamespace
+    CROSS JOIN role_row
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+        coalesce(
+            routines.proacl,
+            pg_catalog.acldefault('f', routines.proowner)
+        )
+    ) AS grants
+    WHERE grants.grantee = role_row.oid
+      AND grants.privilege_type = 'EXECUTE'
+      AND routines.oid NOT IN (SELECT oid FROM allowed_functions)
+), forbidden_schema_create AS (
+    SELECT 1
+    FROM pg_catalog.pg_namespace AS schemas
+    WHERE schemas.nspname !~ '^pg_'
+      AND schemas.nspname <> 'information_schema'
+      AND pg_catalog.has_schema_privilege(
+          current_user, schemas.oid, 'CREATE'
+      )
+), owned_object AS (
+    SELECT 1
+    FROM pg_catalog.pg_shdepend AS dependencies
+    CROSS JOIN role_row
+    WHERE dependencies.refclassid = 'pg_catalog.pg_authid'::regclass
+      AND dependencies.refobjid = role_row.oid
+      AND dependencies.deptype = 'o'
 ), role_membership AS (
     SELECT 1
     FROM pg_catalog.pg_auth_members AS memberships
@@ -97,10 +206,17 @@ SELECT
         AND NOT role_row.rolinherit AND NOT role_row.rolcreaterole
         AND NOT role_row.rolcreatedb AND NOT role_row.rolreplication
         AND NOT role_row.rolbypassrls AS restricted_login,
+    pg_catalog.has_database_privilege(
+        current_user, current_database(), 'CONNECT'
+    ) AND NOT pg_catalog.has_database_privilege(
+        current_user, current_database(), 'CREATE'
+    ) AS database_scope,
     pg_catalog.has_schema_privilege(current_user, 'b3s_history', 'USAGE')
         AND NOT pg_catalog.has_schema_privilege(
             current_user, 'b3s_history', 'CREATE'
-        ) AS schema_scope,
+        )
+        AND NOT EXISTS (SELECT 1 FROM forbidden_schema_create)
+        AS schema_scope,
     pg_catalog.has_function_privilege(
         current_user,
         'b3s_history.append_evidence_vault_raw_acquisition(jsonb)'::regprocedure,
@@ -109,26 +225,27 @@ SELECT
         current_user,
         'b3s_history.read_evidence_vault_raw_acquisition(text,text)'::regprocedure,
         'EXECUTE'
-    ) AS required_execute,
-    NOT pg_catalog.has_function_privilege(
-        current_user,
-        'b3s_history.bind_evidence_vault_verified_c7_lineage(jsonb)'::regprocedure,
-        'EXECUTE'
-    ) AND NOT pg_catalog.has_function_privilege(
-        current_user,
-        'b3s_history.append_evidence_vault_raw_provenance_disposition(jsonb)'::regprocedure,
-        'EXECUTE'
-    ) AND NOT pg_catalog.has_function_privilege(
-        current_user,
-        'b3s_history.read_evidence_vault_raw_provenance(uuid)'::regprocedure,
-        'EXECUTE'
-    ) AS forbidden_execute_absent,
+    ) AND NOT EXISTS (SELECT 1 FROM allowed_function_acl_invalid)
+        AS required_execute,
+    NOT EXISTS (SELECT 1 FROM forbidden_security_definer_execute)
+        AND NOT EXISTS (SELECT 1 FROM forbidden_direct_function_grant)
+        AS forbidden_execute_absent,
     NOT EXISTS (SELECT 1 FROM forbidden_table_privilege)
         AS table_privileges_absent,
+    NOT EXISTS (SELECT 1 FROM forbidden_column_privilege)
+        AS column_privileges_absent,
+    NOT EXISTS (SELECT 1 FROM forbidden_sequence_privilege)
+        AS sequence_privileges_absent,
+    NOT EXISTS (SELECT 1 FROM owned_object)
+        AS ownership_absent,
     NOT EXISTS (SELECT 1 FROM role_membership)
         AND NOT pg_catalog.pg_has_role(
             current_user, 'b3s_history_vault_provenance_owner', 'MEMBER'
-        ) AS memberships_absent
+        ) AS memberships_absent,
+    current_database() = %s
+        AND current_setting('neon.project_id', true) IS NOT DISTINCT FROM %s
+        AND current_setting('neon.branch_id', true) IS NOT DISTINCT FROM %s
+        AS target_identity
 FROM role_row
 """
 
@@ -340,6 +457,9 @@ class EvidenceVaultRawRepository:
     __slots__ = (
         "__connect_fn",
         "__dsn",
+        "__expected_database",
+        "__expected_neon_branch_id",
+        "__expected_neon_project_id",
         "__operation_plan_builder",
         "__public_key_registry_json",
     )
@@ -350,12 +470,29 @@ class EvidenceVaultRawRepository:
         *,
         public_key_registry: PublicKeyRegistry | Mapping[str, Any],
         operation_plan_builder: OperationPlanBuilder,
+        expected_database: str,
+        expected_neon_project_id: str | None,
+        expected_neon_branch_id: str | None,
         connect: Callable[..., Any] = psycopg.connect,
     ) -> None:
         if not isinstance(dsn, str) or not dsn.strip():
             raise EvidenceVaultRawRepositoryError(_ERROR)
         if not callable(connect) or not callable(operation_plan_builder):
             raise EvidenceVaultRawRepositoryError(_ERROR)
+        try:
+            database = _target_identity_text(expected_database, maximum=63)
+            project_id = _optional_target_identity_text(
+                expected_neon_project_id,
+                maximum=255,
+            )
+            branch_id = _optional_target_identity_text(
+                expected_neon_branch_id,
+                maximum=255,
+            )
+            if (project_id is None) != (branch_id is None):
+                raise ValueError("incomplete Neon target")
+        except Exception:
+            raise EvidenceVaultRawRepositoryError(_ERROR) from None
         try:
             registry_value = (
                 public_key_registry.model_dump(mode="python", round_trip=True)
@@ -369,8 +506,23 @@ class EvidenceVaultRawRepository:
             raise EvidenceVaultRawRepositoryError(_ERROR)
         self.__dsn = dsn
         self.__connect_fn = connect
+        self.__expected_database = database
+        self.__expected_neon_project_id = project_id
+        self.__expected_neon_branch_id = branch_id
         self.__operation_plan_builder = operation_plan_builder
         self.__public_key_registry_json = registry.model_dump_json()
+
+    def verify_ingest_capability(self) -> None:
+        """Prove database connectivity and the execute-only scanner role."""
+
+        try:
+            with self.__connect() as connection:
+                connection.execute(_READ_ONLY_SQL)
+                self.__assert_scanner_session(connection)
+                return
+        except Exception:
+            pass
+        raise EvidenceVaultRawRepositoryError(_ERROR)
 
     def persist(
         self,
@@ -389,7 +541,7 @@ class EvidenceVaultRawRepository:
             )
             prepared = self.__prepare(validated_command, verified)
             with self.__connect() as connection:
-                _assert_scanner_session(connection)
+                self.__assert_scanner_session(connection)
                 append_row = connection.execute(
                     _APPEND_SQL,
                     (Jsonb(deepcopy(prepared.envelope)),),
@@ -425,7 +577,7 @@ class EvidenceVaultRawRepository:
             validated_command = _reparse_command(command)
             with self.__connect() as connection:
                 connection.execute(_READ_ONLY_SQL)
-                _assert_scanner_session(connection)
+                self.__assert_scanner_session(connection)
                 row = connection.execute(
                     _READ_SQL,
                     (validated_command.workspace_slug, validated_command.source_scan_id),
@@ -444,6 +596,14 @@ class EvidenceVaultRawRepository:
         except Exception:
             pass
         raise EvidenceVaultRawRepositoryError(_ERROR)
+
+    def __assert_scanner_session(self, connection: Any) -> None:
+        _assert_scanner_session(
+            connection,
+            expected_database=self.__expected_database,
+            expected_neon_project_id=self.__expected_neon_project_id,
+            expected_neon_branch_id=self.__expected_neon_branch_id,
+        )
 
     def __connect(self) -> Any:
         return self.__connect_fn(
@@ -665,16 +825,34 @@ class EvidenceVaultRawRepository:
 PostgresEvidenceVaultRawRepository = EvidenceVaultRawRepository
 
 
-def _assert_scanner_session(connection: Any) -> None:
-    row = connection.execute(_ROLE_PREFLIGHT_SQL).fetchone()
+def _assert_scanner_session(
+    connection: Any,
+    *,
+    expected_database: str,
+    expected_neon_project_id: str | None,
+    expected_neon_branch_id: str | None,
+) -> None:
+    row = connection.execute(
+        _ROLE_PREFLIGHT_SQL,
+        (
+            expected_database,
+            expected_neon_project_id,
+            expected_neon_branch_id,
+        ),
+    ).fetchone()
     expected = {
         "direct_session",
         "restricted_login",
+        "database_scope",
         "schema_scope",
         "required_execute",
         "forbidden_execute_absent",
         "table_privileges_absent",
+        "column_privileges_absent",
+        "sequence_privileges_absent",
+        "ownership_absent",
         "memberships_absent",
+        "target_identity",
     }
     if not isinstance(row, Mapping) or set(row) != expected or not all(
         row[field] is True for field in expected
@@ -1520,6 +1698,28 @@ def _durable_payload(verified: VerifiedRawCapture) -> dict[str, Any]:
     payload = verified.raw_payload
     payload["evidence_vault_raw_provenance"] = verified.envelope.model_dump(mode="json")
     return payload
+
+
+def _target_identity_text(value: str, *, maximum: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value.encode("utf-8")) > maximum
+        or any(not character.isprintable() for character in value)
+    ):
+        raise ValueError("database target identity is invalid")
+    return value
+
+
+def _optional_target_identity_text(
+    value: str | None,
+    *,
+    maximum: int,
+) -> str | None:
+    if value is None:
+        return None
+    return _target_identity_text(value, maximum=maximum)
 
 
 def _stable_uuid(*parts: Any) -> UUID:

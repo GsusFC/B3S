@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+from urllib.parse import urlsplit
 
 import psycopg
 
@@ -17,7 +18,11 @@ _EXPECTED = {
     "B3S_SITE_BASIC_AUTH_USERNAME": "vault",
     "B3S_EXPECTED_NEON_PROJECT_ID": "jolly-river-32467750",
     "B3S_EXPECTED_NEON_BRANCH_ID": "br-divine-star-aspobuer",
+    "B3S_EXPECTED_NEON_ENDPOINT_HOST": (
+        "ep-broad-river-as71uv9y.c-4.eu-central-1.aws.neon.tech"
+    ),
     "B3S_EXPECTED_DATABASE_NAME": "neondb",
+    "B3S_VAULT_WORKER_ENABLED": "false",
     "BRAND3_VAULT_C7_CUTOVER_ENABLED": "false",
     "BRAND3_VAULT_C7_EMERGENCY_DENY": "true",
     "BRAND3_VAULT_C7_ALLOWLIST": "",
@@ -31,7 +36,11 @@ def main() -> int:
         if os.environ.get(name, "") != expected:
             raise SystemExit("isolated Vault deployment target verification failed")
     dsn = os.environ.get("B3S_DATABASE_URL", "").strip()
-    if not dsn:
+    try:
+        dsn_hostname = urlsplit(dsn).hostname
+    except Exception:
+        dsn_hostname = None
+    if dsn_hostname != _EXPECTED["B3S_EXPECTED_NEON_ENDPOINT_HOST"]:
         raise SystemExit("isolated Vault deployment target verification failed")
     try:
         with psycopg.connect(dsn, connect_timeout=5) as connection:

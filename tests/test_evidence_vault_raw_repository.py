@@ -45,6 +45,13 @@ from src.services.evidence_vault_raw_provenance import (
 )
 
 
+_UNIT_TARGET = {
+    "expected_database": "unit_test",
+    "expected_neon_project_id": None,
+    "expected_neon_branch_id": None,
+}
+
+
 class _Cursor:
     def __init__(self, row: Any) -> None:
         self._row = row
@@ -73,11 +80,16 @@ class _Connection:
                 {
                     "direct_session": True,
                     "restricted_login": True,
+                    "database_scope": True,
                     "schema_scope": True,
                     "required_execute": True,
                     "forbidden_execute_absent": True,
                     "table_privileges_absent": True,
+                    "column_privileges_absent": True,
+                    "sequence_privileges_absent": True,
+                    "ownership_absent": True,
                     "memberships_absent": True,
+                    "target_identity": True,
                 }
             )
         if "append_evidence_vault_raw_acquisition" in sql:
@@ -217,6 +229,7 @@ def test_repository_prepares_exact_atomic_pre_interpretation_envelope() -> None:
         "postgresql://scanner-ingest",
         public_key_registry=registry,
         operation_plan_builder=_plan,
+        **_UNIT_TARGET,
         connect=_Connector(connection),
     )
     built = build_signed_raw_capture(
@@ -259,6 +272,7 @@ def test_repository_keeps_large_unicode_document_and_binds_utf8_safe_passage() -
         "postgresql://scanner-ingest",
         public_key_registry=registry,
         operation_plan_builder=_plan,
+        **_UNIT_TARGET,
         connect=_Connector(_Connection()),
     )
     built = build_signed_raw_capture(
@@ -291,6 +305,7 @@ def test_lookup_is_read_only_uses_only_definer_read_and_null_is_none() -> None:
         "postgresql://scanner-ingest",
         public_key_registry=registry,
         operation_plan_builder=_plan,
+        **_UNIT_TARGET,
         connect=connector,
     )
     assert repository.lookup(command) is None
@@ -305,6 +320,48 @@ def test_lookup_is_read_only_uses_only_definer_read_and_null_is_none() -> None:
     assert connector.calls[0][1]["connect_timeout"] == 5
 
 
+
+
+def test_verify_ingest_capability_connects_read_only_and_checks_exact_role() -> None:
+    _command, _signed, registry = _fixture()
+    connection = _Connection()
+    connector = _Connector(connection)
+    repository = EvidenceVaultRawRepository(
+        "postgresql://scanner-ingest",
+        public_key_registry=registry,
+        operation_plan_builder=_plan,
+        **_UNIT_TARGET,
+        connect=connector,
+    )
+
+    repository.verify_ingest_capability()
+
+    assert connection.calls[0] == ("SET TRANSACTION READ ONLY", None)
+    assert "restricted_login" in connection.calls[1][0]
+    assert connector.calls[0][1]["connect_timeout"] == 5
+
+
+def test_verify_ingest_capability_redacts_connection_or_role_failure() -> None:
+    _command, _signed, registry = _fixture()
+
+    def failed_connect(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("postgresql://scanner:do-not-leak@internal/vault")
+
+    repository = EvidenceVaultRawRepository(
+        "postgresql://scanner:do-not-leak@internal/vault",
+        public_key_registry=registry,
+        operation_plan_builder=_plan,
+        **_UNIT_TARGET,
+        connect=failed_connect,
+    )
+    with pytest.raises(EvidenceVaultRawRepositoryError) as caught:
+        repository.verify_ingest_capability()
+    assert str(caught.value) == "raw_acquisition_repository_failed"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert "do-not-leak" not in str(caught.value)
+
+
 def test_persist_calls_append_once_and_returns_only_verified_readback(monkeypatch: pytest.MonkeyPatch) -> None:
     command, signed, registry = _fixture()
     connection = _Connection()
@@ -312,6 +369,7 @@ def test_persist_calls_append_once_and_returns_only_verified_readback(monkeypatc
         "postgresql://scanner-ingest",
         public_key_registry=registry,
         operation_plan_builder=_plan,
+        **_UNIT_TARGET,
         connect=_Connector(connection),
     )
     built = build_signed_raw_capture(
@@ -364,6 +422,7 @@ def test_database_failure_is_redacted_and_transaction_receives_exception() -> No
         "postgresql://scanner-ingest:secret@internal",
         public_key_registry=registry,
         operation_plan_builder=_plan,
+        **_UNIT_TARGET,
         connect=_Connector(connection),
     )
     with pytest.raises(EvidenceVaultRawRepositoryError) as caught:
@@ -390,7 +449,14 @@ def test_postgres_scanner_execute_role_persists_looks_up_and_replays() -> None:
     admin_dsn = os.environ["B3S_TEST_DATABASE_URL"]
     role = "b3s_raw_repository_scanner_test"
     password = "repository-test-password"
+    public_schema_create_was_granted = False
     with psycopg.connect(admin_dsn, autocommit=True) as connection:
+        public_schema_create_was_granted = bool(
+            connection.execute(
+                "SELECT has_schema_privilege('public', 'public', 'CREATE')"
+            ).fetchone()[0]
+        )
+        connection.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
         connection.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
         connection.execute(
             """DO $$ BEGIN
@@ -430,8 +496,14 @@ def test_postgres_scanner_execute_role_persists_looks_up_and_replays() -> None:
             ).format(sql.Identifier(role))
         )
     connection_values = conninfo_to_dict(admin_dsn)
+    expected_database = str(connection_values["dbname"])
     connection_values.update(user=role, password=password)
     scanner_dsn = make_conninfo(**connection_values)
+    target = {
+        "expected_database": expected_database,
+        "expected_neon_project_id": None,
+        "expected_neon_branch_id": None,
+    }
     command, signed, registry = _fixture()
     planner_calls = 0
 
@@ -448,6 +520,7 @@ def test_postgres_scanner_execute_role_persists_looks_up_and_replays() -> None:
             scanner_dsn,
             public_key_registry=registry,
             operation_plan_builder=counted_plan,
+            **target,
         )
         first = repository.persist(command, signed)
         assert planner_calls == 1
@@ -494,6 +567,7 @@ def test_postgres_scanner_execute_role_persists_looks_up_and_replays() -> None:
             scanner_dsn,
             public_key_registry=external_bundle["registry"],
             operation_plan_builder=_plan,
+            **target,
         )
         external_result = external_repository.persist(
             external_command,
@@ -509,10 +583,125 @@ def test_postgres_scanner_execute_role_persists_looks_up_and_replays() -> None:
             ]["external_identity_provenance"]
             == external_signed.external_identity_provenance.model_dump(mode="json")
         )
+        repository.verify_ingest_capability()
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL(
+                    "GRANT SELECT(raw_payload) ON "
+                    "b3s_history.captures TO {}"
+                ).format(sql.Identifier(role))
+            )
+        with pytest.raises(EvidenceVaultRawRepositoryError):
+            repository.verify_ingest_capability()
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL(
+                    "REVOKE SELECT(raw_payload) ON "
+                    "b3s_history.captures FROM {}"
+                ).format(sql.Identifier(role))
+            )
+            admin.execute(
+                "CREATE SEQUENCE b3s_history.scanner_acl_probe"
+            )
+            admin.execute(
+                sql.SQL(
+                    "GRANT USAGE ON SEQUENCE "
+                    "b3s_history.scanner_acl_probe TO {}"
+                ).format(sql.Identifier(role))
+            )
+        with pytest.raises(EvidenceVaultRawRepositoryError):
+            repository.verify_ingest_capability()
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute("DROP SEQUENCE b3s_history.scanner_acl_probe")
+            admin.execute(
+                sql.SQL(
+                    "GRANT EXECUTE ON FUNCTION "
+                    "b3s_history.read_evidence_vault_c7_shadow_context(text,text) "
+                    "TO {}"
+                ).format(sql.Identifier(role))
+            )
+        with pytest.raises(EvidenceVaultRawRepositoryError):
+            repository.verify_ingest_capability()
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL(
+                    "REVOKE EXECUTE ON FUNCTION "
+                    "b3s_history.read_evidence_vault_c7_shadow_context(text,text) "
+                    "FROM {}"
+                ).format(sql.Identifier(role))
+            )
+            admin.execute(
+                "GRANT EXECUTE ON FUNCTION "
+                "b3s_history.append_evidence_vault_raw_acquisition(jsonb) "
+                "TO PUBLIC"
+            )
+        with pytest.raises(EvidenceVaultRawRepositoryError):
+            repository.verify_ingest_capability()
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(
+                "REVOKE EXECUTE ON FUNCTION "
+                "b3s_history.append_evidence_vault_raw_acquisition(jsonb) "
+                "FROM PUBLIC"
+            )
+            admin.execute(
+                sql.SQL(
+                    "GRANT EXECUTE ON FUNCTION "
+                    "b3s_history.append_evidence_vault_raw_acquisition(jsonb) "
+                    "TO {} WITH GRANT OPTION"
+                ).format(sql.Identifier(role))
+            )
+        with pytest.raises(EvidenceVaultRawRepositoryError):
+            repository.verify_ingest_capability()
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL(
+                    "REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION "
+                    "b3s_history.append_evidence_vault_raw_acquisition(jsonb) "
+                    "FROM {}"
+                ).format(sql.Identifier(role))
+            )
+            admin.execute(
+                sql.SQL("GRANT CREATE ON DATABASE {} TO {}").format(
+                    sql.Identifier(expected_database),
+                    sql.Identifier(role),
+                )
+            )
+        with pytest.raises(EvidenceVaultRawRepositoryError):
+            repository.verify_ingest_capability()
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("REVOKE CREATE ON DATABASE {} FROM {}").format(
+                    sql.Identifier(expected_database),
+                    sql.Identifier(role),
+                )
+            )
+            admin.execute("CREATE TABLE b3s_history.scanner_owned_probe(id integer)")
+            admin.execute(
+                sql.SQL(
+                    "ALTER TABLE b3s_history.scanner_owned_probe OWNER TO {}"
+                ).format(sql.Identifier(role))
+            )
+        with pytest.raises(EvidenceVaultRawRepositoryError):
+            repository.verify_ingest_capability()
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute("DROP TABLE b3s_history.scanner_owned_probe")
+        repository.verify_ingest_capability()
+        wrong_target_repository = EvidenceVaultRawRepository(
+            scanner_dsn,
+            public_key_registry=registry,
+            operation_plan_builder=_plan,
+            expected_database=f"{expected_database}_wrong",
+            expected_neon_project_id=None,
+            expected_neon_branch_id=None,
+        )
+        with pytest.raises(EvidenceVaultRawRepositoryError):
+            wrong_target_repository.verify_ingest_capability()
+
         privileged_repository = EvidenceVaultRawRepository(
             admin_dsn,
             public_key_registry=registry,
             operation_plan_builder=_plan,
+            **target,
         )
         with pytest.raises(EvidenceVaultRawRepositoryError):
             privileged_repository.lookup(command)
@@ -538,3 +727,5 @@ def test_postgres_scanner_execute_role_persists_looks_up_and_replays() -> None:
                 connection.execute(
                     sql.SQL("DROP ROLE {}").format(sql.Identifier(role))
                 )
+            if public_schema_create_was_granted:
+                connection.execute("GRANT CREATE ON SCHEMA public TO PUBLIC")

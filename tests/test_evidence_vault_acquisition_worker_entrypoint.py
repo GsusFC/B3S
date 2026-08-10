@@ -80,3 +80,25 @@ def test_registry_loader_rejects_duplicate_and_nonfinite_json(tmp_path: Path) ->
         path.chmod(0o600)
         with pytest.raises(ValueError, match="registry_file_invalid"):
             module._load_json_model(path, module.PublicKeyRegistry)
+
+
+def test_worker_dsn_validation_requires_authenticated_tls_and_fixed_authority() -> None:
+    module = _module()
+    module._validate_postgres_dsn(
+        "postgresql://scanner:secret@db.example/vault"
+        "?sslmode=require&channel_binding=require"
+    )
+    module._validate_postgres_dsn(
+        "postgresql://scanner:secret@db.example/vault?sslmode=verify-full"
+    )
+    for invalid in (
+        "postgresql://scanner:secret@db.example/vault?sslmode=require",
+        "postgresql://scanner:secret@db.example/vault?sslmode=verify-ca",
+        "postgresql://scanner:secret@db.example/vault?sslmode=disable",
+        "postgresql://scanner:secret@db.example/vault"
+        "?sslmode=require&channel_binding=require&host=other",
+        "postgresql://scanner:secret@db.example/vault"
+        "?sslmode=require&channel_binding=require&options=-c%20neon.branch_id%3Dfake",
+    ):
+        with pytest.raises(ValueError, match="ingest_dsn_file_invalid"):
+            module._validate_postgres_dsn(invalid)

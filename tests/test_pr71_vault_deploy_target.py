@@ -37,7 +37,13 @@ class _Connection:
 def _environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for name, value in target._EXPECTED.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setenv("B3S_DATABASE_URL", "postgresql://runtime:secret@db.invalid/neondb")
+    monkeypatch.setenv(
+        "B3S_DATABASE_URL",
+        (
+            "postgresql://runtime:secret@"
+            f"{target._EXPECTED['B3S_EXPECTED_NEON_ENDPOINT_HOST']}/neondb"
+        ),
+    )
 
 
 def test_exact_isolated_target_passes_read_only(monkeypatch, capsys):
@@ -85,3 +91,19 @@ def test_wrong_branch_fails_without_leaking_dsn(monkeypatch):
         target.main()
 
     assert "secret" not in str(raised.value)
+
+
+def test_wrong_dsn_hostname_fails_before_database_connection(monkeypatch) -> None:
+    _environment(monkeypatch)
+    monkeypatch.setenv(
+        "B3S_DATABASE_URL",
+        "postgresql://runtime:secret@wrong.example/neondb",
+    )
+    monkeypatch.setattr(
+        target.psycopg,
+        "connect",
+        lambda *_a, **_kw: pytest.fail("database must not be contacted"),
+    )
+
+    with pytest.raises(SystemExit, match="target verification failed"):
+        target.main()
