@@ -74,6 +74,7 @@ class SafeDeterministicDocument(_StrictPublicModel):
     source_url: str = Field(min_length=8, max_length=2048)
     extracted_document: str = Field(min_length=1, max_length=2_097_152)
     extracted_document_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    extractor_version: str = Field(min_length=1, max_length=128)
     receipt_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 

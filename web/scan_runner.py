@@ -439,6 +439,13 @@ def _verified_raw_pre_analysis_snapshot(
                     "extracted_document_sha256": (
                         document.extracted_document_sha256
                     ),
+                    "extractor_version": str(
+                        getattr(
+                            document,
+                            "extractor_version",
+                            "evidence-vault-deterministic-extractor-v1",
+                        )
+                    ),
                     "receipt_fingerprint": document.receipt_fingerprint,
                 },
             }

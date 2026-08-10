@@ -76,6 +76,7 @@ def _result() -> SignedAcquisitionResultEnvelope:
                 "extracted_document_sha256": hashlib.sha256(
                     b"Durable verified acquisition document."
                 ).hexdigest(),
+                "extractor_version": "evidence-vault-deterministic-extractor-v1",
                 "receipt_fingerprint": _FINGERPRINT,
             }
         ],
@@ -262,6 +263,7 @@ def test_public_document_projection_enforces_character_and_utf8_byte_caps() -> N
         "extracted_document_sha256": hashlib.sha256(
             ("x" * 2_097_152).encode()
         ).hexdigest(),
+        "extractor_version": "evidence-vault-deterministic-extractor-v1",
     }
     accepted = SafeDeterministicDocument(
         **common, extracted_document="x" * 2_097_152
@@ -368,6 +370,7 @@ def test_public_document_rejects_noncanonical_role_urls() -> None:
     common = {
         "extracted_document": document,
         "extracted_document_sha256": hashlib.sha256(document.encode()).hexdigest(),
+        "extractor_version": "evidence-vault-deterministic-extractor-v1",
         "receipt_fingerprint": "a" * 64,
     }
     with pytest.raises(ValueError, match="owned source URL"):

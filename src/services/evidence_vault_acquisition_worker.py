@@ -381,6 +381,7 @@ def _build_public_result(
                 source_url=source_url,
                 extracted_document=extraction.document,
                 extracted_document_sha256=extraction.sha256,
+                extractor_version=receipt.claims.extractor_version,
                 receipt_fingerprint=receipt.receipt_fingerprint,
             )
         )

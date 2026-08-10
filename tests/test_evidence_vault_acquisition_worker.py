@@ -534,6 +534,7 @@ def test_capture_returns_only_safe_deterministic_documents_after_durable_readbac
             "source_url",
             "extracted_document",
             "extracted_document_sha256",
+            "extractor_version",
             "receipt_fingerprint",
         }
         for document in public["documents"]

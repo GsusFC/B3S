@@ -268,6 +268,7 @@ def _evidence_from_verified_raw_document(
     content = payload.get("content")
     url = payload.get("url")
     document_sha256 = payload.get("extracted_document_sha256")
+    extractor_version = payload.get("extractor_version")
     receipt_fingerprint = payload.get("receipt_fingerprint")
     if (
         role not in {"owned_web", "external_social_profile"}
@@ -277,27 +278,27 @@ def _evidence_from_verified_raw_document(
         or not url
         or not isinstance(document_sha256, str)
         or not re.fullmatch(r"[0-9a-f]{64}", document_sha256)
+        or not isinstance(extractor_version, str)
+        or not extractor_version.strip()
         or not isinstance(receipt_fingerprint, str)
         or not re.fullmatch(r"[0-9a-f]{64}", receipt_fingerprint)
     ):
         return None
     external = role == "external_social_profile"
     return EvidenceRecord(
-        ref=f"raw_inputs.{index}.verified_raw.{role}",
-        source=source,
-        evidence_type=(
-            "external_proof.verified_social_profile"
-            if external
-            else "raw_input.verified_owned_web"
-        ),
-        content=content[:_RAW_INPUT_CONTENT_CHARS],
+        ref=f"raw-acquisition:{role}:{receipt_fingerprint}",
+        source=role,
+        evidence_type="text",
+        content=content,
         url=url,
         confidence="high",
         metadata={
-            "source_class": "external_proof" if external else "owned_surface",
+            "source_class": "external_proof" if external else "owned_copy",
             "provider": "verified_raw_acquisition",
+            "role": role,
             "channel_role": role,
             "receipt_fingerprint": receipt_fingerprint,
+            "extractor_version": extractor_version,
             "extracted_document_sha256": document_sha256,
             "verified_raw": True,
         },

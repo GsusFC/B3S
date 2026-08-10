@@ -950,10 +950,13 @@ def _deterministic_evidence_records(verified: VerifiedRawCapture) -> list[dict[s
                 "confidence": "high",
                 "metadata": {
                     "source_class": source_class,
+                    "provider": "verified_raw_acquisition",
                     "role": role,
+                    "channel_role": role,
                     "receipt_fingerprint": receipt.receipt_fingerprint,
                     "extractor_version": receipt.claims.extractor_version,
                     "extracted_document_sha256": extraction.sha256,
+                    "verified_raw": True,
                 },
             }
         )
