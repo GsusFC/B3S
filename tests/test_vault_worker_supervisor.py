@@ -243,6 +243,7 @@ def test_worker_environment_is_allowlisted_and_web_environment_is_scrubbed(tmp_p
     assert web_environment["B3S_DATABASE_URL"] == "postgresql://web-secret"
     assert web_environment["EXA_API_KEY"] == "web-exa-key"
     assert web_environment[supervisor.WEB_SOCKET_ENV] == str(socket_path)
+    assert web_environment["HOME"] == supervisor._WEB_HOME
 
 
 def test_socket_readiness_requires_worker_owned_group_socket_with_0660():

@@ -39,6 +39,7 @@ _RUN_ROOT = Path("/run")
 _SECRET_SOURCE_ROOT = Path("/data/b3s-vault-worker")
 _WORKER_USER = "b3s-worker"
 _WEB_USER = "b3s"
+_WEB_HOME = "/home/b3s"
 _ACQUISITION_GROUP = "b3s-acquisition"
 _SOCKET_FILENAME = "acquisition.sock"
 _SOCKET_MODE = 0o660
@@ -579,6 +580,9 @@ def _web_environment(source: MutableMapping[str, str], socket_path: Path) -> dic
     environment = dict(source)
     for name in WORKER_SECRET_ENV_NAMES:
         environment.pop(name, None)
+    # The supervisor runs as root. Do not let libpq inherit root's HOME and
+    # attempt to read root-owned client-certificate files after dropping uid.
+    environment["HOME"] = _WEB_HOME
     environment[WEB_SOCKET_ENV] = str(socket_path)
     return environment
 
