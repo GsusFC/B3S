@@ -266,17 +266,28 @@ def _is_vault_reviewer_path(path: str) -> bool:
     return path == "/vault/review" or path.startswith("/vault/review/")
 
 
-def _same_origin_request_is_valid(request: Request) -> bool:
+def _same_origin_request_is_valid(
+    request: Request,
+    *,
+    allow_referer_fallback: bool = False,
+) -> bool:
     configured_origin = _normalized_http_origin(
         os.environ.get("BRAND3_BASE_URL", "")
     )
+    if configured_origin is None:
+        return False
     origin_values = request.headers.getlist("origin")
-    request_origin = (
-        _normalized_http_origin(origin_values[0], origin_header=True)
-        if len(origin_values) == 1
-        else None
-    )
-    return configured_origin is not None and request_origin == configured_origin
+    if len(origin_values) == 1 and origin_values[0].strip().lower() not in {"", "null"}:
+        request_origin = _normalized_http_origin(
+            origin_values[0], origin_header=True
+        )
+        return request_origin == configured_origin
+    if not allow_referer_fallback:
+        return False
+    referer_values = request.headers.getlist("referer")
+    if len(referer_values) != 1:
+        return False
+    return _normalized_http_origin(referer_values[0]) == configured_origin
 
 
 @app.middleware("http")
@@ -293,7 +304,10 @@ async def require_site_basic_auth(request: Request, call_next):
     if reviewer_surface:
         if (
             request.method.upper() not in _SITE_BASIC_AUTH_SAFE_METHODS
-            and not _same_origin_request_is_valid(request)
+            and not _same_origin_request_is_valid(
+                request,
+                allow_referer_fallback=True,
+            )
         ):
             return _site_basic_auth_forbidden()
         return await call_next(request)

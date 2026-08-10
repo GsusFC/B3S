@@ -25,8 +25,9 @@ The isolated app sets `B3S_SITE_BASIC_AUTH_ENABLED=true`. HTTP Basic protects
 every browser, legacy, diagnostic, report, brand, artifact, and provider-check
 route. The dedicated `/vault/review/*` surface is the deliberate exception: it
 uses only the evidence-reviewer credential, then an 8-hour signed
-HttpOnly/SameSite=Strict session with CSRF protection. Unsafe requests still
-require the exact same-origin `Origin` header. Only `/health` and `/api/v1/*`
+HttpOnly/SameSite=Strict session with CSRF protection. Unsafe requests require
+an exact same-origin `Origin`; browsers that omit `Origin` may use an exact
+same-origin `Referer` fallback only on this reviewer surface. Only `/health` and `/api/v1/*`
 otherwise bypass the site gate; versioned API routes retain their existing
 bearer scopes.
 

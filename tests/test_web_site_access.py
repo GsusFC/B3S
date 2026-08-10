@@ -158,6 +158,14 @@ def test_vault_reviewer_surface_uses_dedicated_session_without_site_basic(
     assert login.status_code == 303
     assert "b3s_vault_reviewer_session=" in login.headers["set-cookie"]
 
+    referer_login = client.post(
+        "/vault/review/login",
+        data={"token": reviewer_token, "next_path": "/vault/review/example.com"},
+        headers={"Referer": "https://b3s-pr71-vault.example/vault/review/login"},
+        follow_redirects=False,
+    )
+    assert referer_login.status_code == 303
+
 
 def test_correct_basic_credentials_proceed_to_existing_route_controls(monkeypatch) -> None:
     _enable_site_access(monkeypatch)
