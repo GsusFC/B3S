@@ -501,3 +501,17 @@ def test_postgres_runtime_configuration_rejects_unjournaled_escape_surfaces() ->
                 )
             if public_schema_create_was_granted:
                 conn.execute("GRANT CREATE ON SCHEMA public TO PUBLIC")
+
+
+def test_role_safety_rejects_only_target_outgoing_membership() -> None:
+    connection = _Connection()
+
+    runtime_role._require_safe_target_role(connection, "runtime")
+
+    membership_sql = next(
+        statement
+        for statement, _params in connection.statements
+        if "FROM pg_catalog.pg_auth_members" in statement
+    )
+    assert "WHERE member = %s" in membership_sql
+    assert "roleid = %s" not in membership_sql

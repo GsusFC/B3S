@@ -170,13 +170,15 @@ def _require_safe_target_role(conn: Any, role: str) -> int:
         """
         SELECT 1
         FROM pg_catalog.pg_auth_members
-        WHERE member = %s OR roleid = %s
+        WHERE member = %s
         LIMIT 1
         """,
-        (role_oid, role_oid),
+        (role_oid,),
     ).fetchone()
     if membership is not None:
-        raise RuntimeRoleConfigurationError("target role must not participate in role memberships")
+        raise RuntimeRoleConfigurationError(
+            "target role must not inherit or assume another role"
+        )
 
     owned = conn.execute(
         """
