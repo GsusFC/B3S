@@ -283,6 +283,22 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
         envelope = {"snapshot": snapshot, "source_run_id": snapshot["run"]["id"]}
         payload = build_flow_sv9_shadow_eval(envelope, include_full=True)
         payload = _attach_sv9_editorial(payload)
+        if BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED:
+            flow_payload = payload.get("flow") if isinstance(payload.get("flow"), dict) else {}
+            candidate_payload = (
+                flow_payload.get("candidate")
+                if isinstance(flow_payload.get("candidate"), dict)
+                else None
+            )
+            if candidate_payload is not None:
+                # Labeling enriches the in-memory evidence pack for analysis.
+                # The report must persist the exact worker evidence rows, so
+                # strip those advisory annotations at this trust boundary.
+                from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
+
+                candidate_payload["evidence_pack"] = build_evidence_pack_from_snapshot(
+                    snapshot
+                ).to_dict()
         source_capture = snapshot.get("source_capture")
         if isinstance(source_capture, dict):
             payload["source_capture"] = dict(source_capture)
