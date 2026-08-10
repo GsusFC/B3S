@@ -101,22 +101,22 @@ operator capabilities; neither is installed in the Fly app or this volume.
 
 ## C7 boundary
 
-The always-on L1 service keeps:
+The isolated L2 configuration enables only acquisition shadowing:
 
 ```text
-B3S_VAULT_WORKER_ENABLED=false
+B3S_VAULT_WORKER_ENABLED=true
+BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED=true
+BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH=
 BRAND3_VAULT_C7_CUTOVER_ENABLED=false
 BRAND3_VAULT_C7_EMERGENCY_DENY=true
 BRAND3_VAULT_C7_ALLOWLIST=
-BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED=false
-BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH=
 ```
 
-Verified-raw worker operation is a later L2 gate. It requires separate OS and
-PostgreSQL identities, worker-only files, a supervised same-Machine Unix socket,
-two live captures 5 minutes–24 hours apart, human review/adoption, governance
-bindings, and a private readiness probe. C7 runtime remains a later independent
-gate even if readiness becomes true.
+The release Machine keeps the socket path empty; the supervisor injects its
+validated dynamic `/run` socket only into the live web child. L2 still requires
+two live captures 5 minutes–24 hours apart, review/adoption, governance bindings,
+and a private readiness probe. C7 runtime remains a later independent gate even
+if readiness becomes true.
 
 ## Rollback
 

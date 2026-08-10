@@ -42,6 +42,7 @@ def _environment(monkeypatch: pytest.MonkeyPatch) -> None:
         (
             "postgresql://runtime:secret@"
             f"{target._EXPECTED['B3S_EXPECTED_NEON_ENDPOINT_HOST']}/neondb"
+            "?sslmode=require&channel_binding=require"
         ),
     )
 
@@ -98,6 +99,35 @@ def test_wrong_dsn_hostname_fails_before_database_connection(monkeypatch) -> Non
     monkeypatch.setenv(
         "B3S_DATABASE_URL",
         "postgresql://runtime:secret@wrong.example/neondb",
+    )
+    monkeypatch.setattr(
+        target.psycopg,
+        "connect",
+        lambda *_a, **_kw: pytest.fail("database must not be contacted"),
+    )
+
+    with pytest.raises(SystemExit, match="target verification failed"):
+        target.main()
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "host=evil.example&sslmode=require&channel_binding=require",
+        "hostaddr=evil.example&sslmode=require&channel_binding=require",
+        "options=-c%20neon.project_id%3Djolly-river-32467750&sslmode=require&channel_binding=require",
+        "sslmode=disable",
+        "sslmode=require&channel_binding=require&sslmode=require",
+    ],
+)
+def test_effective_target_overrides_fail_before_connection(monkeypatch, query):
+    _environment(monkeypatch)
+    monkeypatch.setenv(
+        "B3S_DATABASE_URL",
+        (
+            "postgresql://runtime:secret@"
+            f"{target._EXPECTED['B3S_EXPECTED_NEON_ENDPOINT_HOST']}/neondb?{query}"
+        ),
     )
     monkeypatch.setattr(
         target.psycopg,
