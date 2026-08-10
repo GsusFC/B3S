@@ -769,7 +769,7 @@ def _build_acquisition_gate(
         )
 
     blocking = [item for item in issues if item.get("severity") == "blocker"]
-    can_continue = bool(blocking) and all(bool(item.get("can_fallback")) for item in blocking)
+    can_continue = not blocking or all(bool(item.get("can_fallback")) for item in blocking)
     state = "blocked" if blocking else ("warning" if warnings else "pass")
     return {
         "version": "b3s-acquisition-gate-v2",

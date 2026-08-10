@@ -429,6 +429,6 @@ def test_owned_only_analysis_records_external_gap_without_blocking_score():
     )
     assert gate["state"] == "warning"
     assert gate["issues"] == []
-    assert gate["can_continue"] is False
+    assert gate["can_continue"] is True
     assert gate["warnings"][0]["code"] == "exa_failed"
     assert "not C7 qualifying proof" in gate["warnings"][0]["message"]
