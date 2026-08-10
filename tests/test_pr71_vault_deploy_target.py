@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -151,3 +152,21 @@ def test_wrong_runtime_role_fails_after_database_connection(monkeypatch):
 
     with pytest.raises(SystemExit, match="target verification failed"):
         target.main()
+
+
+def test_ambient_libpq_overrides_are_absent_during_target_connection(monkeypatch):
+    _environment(monkeypatch)
+    monkeypatch.setenv("PGOPTIONS", "-c neon.project_id=wrong")
+    connection = _Connection(
+        ("neondb", "b3s_pr71_app_runtime", "jolly-river-32467750", "br-divine-star-aspobuer")
+    )
+    observed = {}
+
+    def connect(*_args, **_kwargs):
+        observed["PGOPTIONS"] = os.environ.get("PGOPTIONS")
+        return connection
+
+    monkeypatch.setattr(target.psycopg, "connect", connect)
+    assert target.main() == 0
+    assert observed["PGOPTIONS"] is None
+    assert os.environ["PGOPTIONS"] == "-c neon.project_id=wrong"

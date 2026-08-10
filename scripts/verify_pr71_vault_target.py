@@ -3,11 +3,45 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
+from collections.abc import Iterator
 from urllib.parse import parse_qsl, urlsplit
 
 import psycopg
+
+_LIBPQ_ENV_NAMES = (
+    "PGOPTIONS",
+    "PGSERVICE",
+    "PGHOST",
+    "PGPORT",
+    "PGHOSTADDR",
+    "PGDATABASE",
+    "PGUSER",
+    "PGPASSWORD",
+    "PGSSLMODE",
+    "PGCHANNELBINDING",
+    "PGSERVICEFILE",
+    "PGSYSCONFDIR",
+    "PGREQUIRESSL",
+    "PGTARGETSESSIONATTRS",
+    "PGAPPNAME",
+)
+
+
+@contextmanager
+def _without_libpq_environment() -> Iterator[None]:
+    saved = {
+        name: os.environ.pop(name)
+        for name in _LIBPQ_ENV_NAMES
+        if name in os.environ
+    }
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
+
 
 _EXPECTED = {
     "FLY_APP_NAME": "b3s-pr71-vault",
@@ -84,19 +118,20 @@ def main() -> int:
     except Exception:
         raise SystemExit("isolated Vault deployment target verification failed") from None
     try:
-        with psycopg.connect(dsn, connect_timeout=5) as connection:
-            connection_host = getattr(getattr(connection, "info", None), "host", None)
-            if connection_host is not None and connection_host.lower() != expected_host:
-                raise ValueError("connected host does not match isolated target")
-            connection.execute("SET TRANSACTION READ ONLY")
-            row = connection.execute(
-                """
-                SELECT current_database(),
-                       current_user,
-                       current_setting('neon.project_id', true),
-                       current_setting('neon.branch_id', true)
-                """
-            ).fetchone()
+        with _without_libpq_environment():
+            with psycopg.connect(dsn, connect_timeout=5) as connection:
+                connection_host = getattr(getattr(connection, "info", None), "host", None)
+                if connection_host is not None and connection_host.lower() != expected_host:
+                    raise ValueError("connected host does not match isolated target")
+                connection.execute("SET TRANSACTION READ ONLY")
+                row = connection.execute(
+                    """
+                    SELECT current_database(),
+                           current_user,
+                           current_setting('neon.project_id', true),
+                           current_setting('neon.branch_id', true)
+                    """
+                ).fetchone()
     except Exception:
         raise SystemExit("isolated Vault deployment target verification failed") from None
     if row != (

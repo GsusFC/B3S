@@ -40,6 +40,23 @@ _SECRET_SOURCE_ROOT = Path("/data/b3s-vault-worker")
 _WORKER_USER = "b3s-worker"
 _WEB_USER = "b3s"
 _WEB_HOME = "/home/b3s"
+_LIBPQ_ENV_NAMES = (
+    "PGOPTIONS",
+    "PGSERVICE",
+    "PGHOST",
+    "PGPORT",
+    "PGHOSTADDR",
+    "PGDATABASE",
+    "PGUSER",
+    "PGPASSWORD",
+    "PGSSLMODE",
+    "PGCHANNELBINDING",
+    "PGSERVICEFILE",
+    "PGSYSCONFDIR",
+    "PGREQUIRESSL",
+    "PGTARGETSESSIONATTRS",
+    "PGAPPNAME",
+)
 _ACQUISITION_GROUP = "b3s-acquisition"
 _SOCKET_FILENAME = "acquisition.sock"
 _SOCKET_MODE = 0o660
@@ -578,7 +595,7 @@ def _worker_environment(_source: MutableMapping[str, str]) -> dict[str, str]:
 
 def _web_environment(source: MutableMapping[str, str], socket_path: Path) -> dict[str, str]:
     environment = dict(source)
-    for name in WORKER_SECRET_ENV_NAMES:
+    for name in WORKER_SECRET_ENV_NAMES + _LIBPQ_ENV_NAMES:
         environment.pop(name, None)
     # The supervisor runs as root. Do not let libpq inherit root's HOME and
     # attempt to read root-owned client-certificate files after dropping uid.
