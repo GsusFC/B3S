@@ -22,15 +22,18 @@ controls. A mismatch aborts before an app Machine is updated.
 ## Access boundary
 
 The isolated app sets `B3S_SITE_BASIC_AUTH_ENABLED=true`. HTTP Basic protects
-every browser, legacy, diagnostic, report, brand, artifact, reviewer, and
-provider-check route. Only `/health` and `/api/v1/*` bypass the site gate;
-versioned API routes retain their existing bearer scopes. Unsafe browser
-requests additionally require an exact same-origin `Origin` header.
+every browser, legacy, diagnostic, report, brand, artifact, and provider-check
+route. The dedicated `/vault/review/*` surface is the deliberate exception: it
+uses only the evidence-reviewer credential, then an 8-hour signed
+HttpOnly/SameSite=Strict session with CSRF protection. Unsafe requests still
+require the exact same-origin `Origin` header. Only `/health` and `/api/v1/*`
+otherwise bypass the site gate; versioned API routes retain their existing
+bearer scopes.
 
-Store the site password, scanner bearer, and reviewer bearer in an approved
-secret manager. They must be fresh and the scanner and reviewer bearers must
-differ. Never place credentials in this file, URLs, screenshots, PR comments,
-or command history.
+Store the scanner bearer and reviewer bearer in an approved secret manager.
+They must be fresh and the scanner and reviewer bearers must differ. Never
+place credentials in this file, URLs, screenshots, PR comments, or command
+history.
 
 ## PostgreSQL identities
 

@@ -20,6 +20,7 @@ def _clear_site_access(monkeypatch) -> None:
 
 
 def _enable_site_access(monkeypatch) -> None:
+    monkeypatch.delenv("BRAND3_ENVIRONMENT", raising=False)
     monkeypatch.setenv("B3S_SITE_BASIC_AUTH_ENABLED", "true")
     monkeypatch.setenv("B3S_SITE_BASIC_AUTH_USERNAME", USERNAME)
     monkeypatch.setenv("B3S_SITE_BASIC_AUTH_PASSWORD", PASSWORD)
@@ -60,8 +61,6 @@ def test_site_access_gate_is_opt_in_and_preserves_legacy_access(monkeypatch, ena
         ("GET", "/report/missing-report.md"),
         ("GET", "/brand/example.com"),
         ("GET", "/artifacts/screenshots/missing.png"),
-        ("GET", "/vault/review/login"),
-        ("POST", "/vault/review/login"),
         ("GET", "/static/missing.css"),
         ("GET", "/docs"),
         ("GET", "/openapi.json"),
@@ -128,6 +127,36 @@ def test_enabled_gate_compares_both_credential_fields(monkeypatch) -> None:
 
     assert response.status_code == 401
     assert len(calls) == 2
+
+
+def test_vault_reviewer_surface_uses_dedicated_session_without_site_basic(
+    monkeypatch,
+) -> None:
+    _enable_site_access(monkeypatch)
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    reviewer_token = "reviewer-token-" + ("x" * 32)
+    monkeypatch.setenv("B3S_EVIDENCE_ADJUDICATION_TOKEN", reviewer_token)
+    monkeypatch.setenv("B3S_EVIDENCE_REVIEWER_ID", "test-reviewer")
+    client = TestClient(app)
+
+    login_page = client.get("/vault/review/login")
+    assert login_page.status_code == 200
+    assert "Unauthorized" not in login_page.text
+
+    blocked_post = client.post(
+        "/vault/review/login",
+        data={"token": reviewer_token},
+    )
+    assert blocked_post.status_code == 403
+
+    login = client.post(
+        "/vault/review/login",
+        data={"token": reviewer_token, "next_path": "/vault/review/example.com"},
+        headers={"Origin": "https://b3s-pr71-vault.example"},
+        follow_redirects=False,
+    )
+    assert login.status_code == 303
+    assert "b3s_vault_reviewer_session=" in login.headers["set-cookie"]
 
 
 def test_correct_basic_credentials_proceed_to_existing_route_controls(monkeypatch) -> None:

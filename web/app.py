@@ -260,10 +260,42 @@ def _site_basic_auth_forbidden() -> PlainTextResponse:
     )
 
 
+def _is_vault_reviewer_path(path: str) -> bool:
+    """Identify the reviewer-only surface that has its own session boundary."""
+
+    return path == "/vault/review" or path.startswith("/vault/review/")
+
+
+def _same_origin_request_is_valid(request: Request) -> bool:
+    configured_origin = _normalized_http_origin(
+        os.environ.get("BRAND3_BASE_URL", "")
+    )
+    origin_values = request.headers.getlist("origin")
+    request_origin = (
+        _normalized_http_origin(origin_values[0], origin_header=True)
+        if len(origin_values) == 1
+        else None
+    )
+    return configured_origin is not None and request_origin == configured_origin
+
+
 @app.middleware("http")
 async def require_site_basic_auth(request: Request, call_next):
     path = request.url.path
     if path == "/health" or path.startswith("/api/v1/"):
+        return await call_next(request)
+
+    # The reviewer surface is intentionally the one browser exception to the
+    # broad site Basic gate: it has a dedicated reviewer-token login, a signed
+    # HttpOnly session, CSRF protection, and no runtime effect. Keep the origin
+    # fence for unsafe requests even though Basic is not required here.
+    reviewer_surface = vault_reviewer_enabled() and _is_vault_reviewer_path(path)
+    if reviewer_surface:
+        if (
+            request.method.upper() not in _SITE_BASIC_AUTH_SAFE_METHODS
+            and not _same_origin_request_is_valid(request)
+        ):
+            return _site_basic_auth_forbidden()
         return await call_next(request)
 
     state, username, password = _site_basic_auth_configuration()
@@ -285,18 +317,11 @@ async def require_site_basic_auth(request: Request, call_next):
     ):
         return _site_basic_auth_unauthorized()
 
-    if request.method.upper() not in _SITE_BASIC_AUTH_SAFE_METHODS:
-        configured_origin = _normalized_http_origin(
-            os.environ.get("BRAND3_BASE_URL", "")
-        )
-        origin_values = request.headers.getlist("origin")
-        request_origin = (
-            _normalized_http_origin(origin_values[0], origin_header=True)
-            if len(origin_values) == 1
-            else None
-        )
-        if configured_origin is None or request_origin != configured_origin:
-            return _site_basic_auth_forbidden()
+    if (
+        request.method.upper() not in _SITE_BASIC_AUTH_SAFE_METHODS
+        and not _same_origin_request_is_valid(request)
+    ):
+        return _site_basic_auth_forbidden()
     return await call_next(request)
 
 
