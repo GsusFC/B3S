@@ -22,6 +22,7 @@ _EXPECTED = {
         "ep-broad-river-as71uv9y.c-4.eu-central-1.aws.neon.tech"
     ),
     "B3S_EXPECTED_DATABASE_NAME": "neondb",
+    "B3S_EXPECTED_RUNTIME_ROLE": "b3s_pr71_app_runtime",
     "B3S_VAULT_WORKER_ENABLED": "true",
     "BRAND3_VAULT_C7_CUTOVER_ENABLED": "false",
     "BRAND3_VAULT_C7_EMERGENCY_DENY": "true",
@@ -91,6 +92,7 @@ def main() -> int:
             row = connection.execute(
                 """
                 SELECT current_database(),
+                       current_user,
                        current_setting('neon.project_id', true),
                        current_setting('neon.branch_id', true)
                 """
@@ -99,6 +101,7 @@ def main() -> int:
         raise SystemExit("isolated Vault deployment target verification failed") from None
     if row != (
         expected_database,
+        _EXPECTED["B3S_EXPECTED_RUNTIME_ROLE"],
         _EXPECTED["B3S_EXPECTED_NEON_PROJECT_ID"],
         _EXPECTED["B3S_EXPECTED_NEON_BRANCH_ID"],
     ):

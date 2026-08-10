@@ -38,7 +38,20 @@ or command history.
 application DML contract but cannot create/alter/drop schema objects and cannot
 read the migration-019 raw provenance relations. At first access, runtime code
 opens a repeatable-read, read-only transaction and requires the exact packaged
-migration versions, filenames, and checksums.
+migration versions, filenames, and checksums. The isolated release verifier
+also requires `current_user = b3s_pr71_app_runtime`; an owner or migration
+credential on the same branch is rejected before the Machine update.
+
+The isolated L2 logins are fixed and distinct:
+
+- `b3s_pr71_app_runtime` — FastAPI/report runtime login
+- `b3s_pr71_scanner_ingest` — worker-only execute-only raw append/read login;
+  the worker preflight binds the session to this exact role
+- `b3s_pr71_c7_runtime_read` — external private readiness login
+- `b3s_pr71_c7_governance` — external governance/adoption capability
+
+Provision these names in the isolated Neon branch only. Never substitute the
+legacy generic role names from the reusable role runbook in this PR71 app.
 
 `B3S_MIGRATION_DATABASE_URL` is a separately controlled migration identity. It
 must never be installed with `fly secrets`; it exists only in the named operator

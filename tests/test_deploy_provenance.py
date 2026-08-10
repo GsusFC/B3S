@@ -71,6 +71,7 @@ def test_isolated_pr71_vault_config_is_exact_and_fail_closed():
     ]
     assert config["env"]["BRAND3_BASE_URL"] == "https://b3s-pr71-vault.fly.dev"
     assert config["env"]["B3S_EXPECTED_NEON_BRANCH_ID"] == "br-divine-star-aspobuer"
+    assert config["env"]["B3S_EXPECTED_RUNTIME_ROLE"] == "b3s_pr71_app_runtime"
     assert config["env"]["B3S_POSTGRES_REQUIRED"] == "true"
     assert config["env"]["B3S_SITE_BASIC_AUTH_ENABLED"] == "true"
     assert config["env"]["BRAND3_VAULT_C7_CUTOVER_ENABLED"] == "false"

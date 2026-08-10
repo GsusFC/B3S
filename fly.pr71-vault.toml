@@ -28,6 +28,7 @@ kill_timeout = "30s"
   B3S_EXPECTED_NEON_BRANCH_ID = "br-divine-star-aspobuer"
   B3S_EXPECTED_NEON_ENDPOINT_HOST = "ep-broad-river-as71uv9y.c-4.eu-central-1.aws.neon.tech"
   B3S_EXPECTED_DATABASE_NAME = "neondb"
+  B3S_EXPECTED_RUNTIME_ROLE = "b3s_pr71_app_runtime"
   # Gate all browser/legacy/diagnostic routes. API v1 retains bearer scopes.
   B3S_SITE_BASIC_AUTH_ENABLED = "true"
   B3S_SITE_BASIC_AUTH_USERNAME = "vault"

@@ -52,6 +52,7 @@ def test_exact_isolated_target_passes_read_only(monkeypatch, capsys):
     connection = _Connection(
         (
             "neondb",
+            "b3s_pr71_app_runtime",
             "jolly-river-32467750",
             "br-divine-star-aspobuer",
         )
@@ -85,7 +86,9 @@ def test_wrong_app_fails_before_database_connection(monkeypatch):
 
 def test_wrong_branch_fails_without_leaking_dsn(monkeypatch):
     _environment(monkeypatch)
-    connection = _Connection(("neondb", "jolly-river-32467750", "br-wrong"))
+    connection = _Connection(
+        ("neondb", "b3s_pr71_app_runtime", "jolly-river-32467750", "br-wrong")
+    )
     monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: connection)
 
     with pytest.raises(SystemExit) as raised:
@@ -134,6 +137,17 @@ def test_effective_target_overrides_fail_before_connection(monkeypatch, query):
         "connect",
         lambda *_a, **_kw: pytest.fail("database must not be contacted"),
     )
+
+    with pytest.raises(SystemExit, match="target verification failed"):
+        target.main()
+
+
+def test_wrong_runtime_role_fails_after_database_connection(monkeypatch):
+    _environment(monkeypatch)
+    connection = _Connection(
+        ("neondb", "neondb_owner", "jolly-river-32467750", "br-divine-star-aspobuer")
+    )
+    monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: connection)
 
     with pytest.raises(SystemExit, match="target verification failed"):
         target.main()
