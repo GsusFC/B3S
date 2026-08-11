@@ -258,3 +258,30 @@ BRAND3_SCREENSHOT_DIR = os.environ.get(
     "BRAND3_SCREENSHOT_DIR",
     str(Path(BRAND3_DB_PATH).parent / "screenshots"),
 )
+
+
+# The operational Vault planning/execution pipeline requires a second explicit
+# deployment capability. Merely naming an environment "vault" must not change
+# scanner persistence, interpretation, scoring, or report projection.
+BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED = os.environ.get(
+    "BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED",
+    "false",
+).strip().lower() == "true"
+
+# Verified raw acquisition remains a Vault-only shadow path.  The web process
+# receives only this public Unix-socket location; worker private-key and ingest
+# DSN configuration deliberately do not exist in this module.
+BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED = os.environ.get(
+    "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED",
+    "false",
+).strip().lower() == "true"
+BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH = os.environ.get(
+    "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH",
+    "",
+).strip()
+# Owned-only analysis may continue scoring when Exa identity is absent, but the
+# resulting snapshot can never satisfy the two-channel C7 readiness contract.
+BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS = os.environ.get(
+    "BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS",
+    "false",
+).strip().lower() == "true"

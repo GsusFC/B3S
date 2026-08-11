@@ -6,6 +6,8 @@ PostgreSQL is the system of record for B3S brand history. The schema is relation
 
 The implementation lives in `src/history/` and uses the isolated `b3s_history` schema. PostgreSQL is the primary historical read model when `B3S_DATABASE_URL` is configured. Completed scans are persisted to PostgreSQL and JSON at report completion; JSON remains the compatibility fallback until the scan lifecycle cutover described below. A conflicting immutable report id aborts before the JSON fallback is changed.
 
+The same repository also contains the Vault operational, lineage, verified-raw provenance, immutable planning-context, and strict raw-replay contracts through migration `023`. Those paths can persist exact reviewed authority inside the isolated Vault history, but do not grant production, scanner, scoring, or presentation authority. The verified-raw worker, operational pipeline, and C7 runtime cutover remain dormant unless their separate explicit deployment capabilities are enabled.
+
 ## Historical semantics
 
 B3S records two different timelines:
@@ -60,6 +62,9 @@ canonical/provisional reference are related but not interchangeable.
 - `evidence_claim_tile_review_events`: append-only semantic decisions over
   immutable claim-to-tile mapping ids, including their evidence, claim variant,
   tile, polarity, and mapping-series snapshot.
+- `evidence_vault_*`: versioned canonical and operational memory, score
+  evaluations, plans, exact relation reviews, capture lineage, verified raw
+  receipts/bindings/dispositions, and bounded C7 shadow-read projections.
 
 ## Invariants
 
@@ -130,6 +135,7 @@ Parser tests do not require PostgreSQL. Integration tests are opt-in locally and
 ```bash
 B3S_TEST_DATABASE_URL=postgresql://... \
 B3S_ALLOW_SCHEMA_DROP=1 \
+B3S_TEST_ALLOW_SCHEMA_DROP=1 \
   .venv/bin/python -m pytest tests/test_b3s_history.py -q
 ```
 
@@ -138,29 +144,34 @@ The Brand3 archive integration uses the same disposable-database guard:
 ```bash
 B3S_TEST_DATABASE_URL=postgresql://... \
 B3S_ALLOW_SCHEMA_DROP=1 \
+B3S_TEST_ALLOW_SCHEMA_DROP=1 \
   .venv/bin/python -m pytest \
   tests/test_brand3_sqlite_memory_backfill.py::test_archive_import_cli_is_idempotent_and_workspace_isolated \
   -q
 ```
 
-The integration suite drops only the `b3s_history` schema, refuses to run without the explicit `B3S_ALLOW_SCHEMA_DROP=1` opt-in, and must still target a disposable database.
+PostgreSQL integration tests may drop and recreate `b3s_history` and create temporary roles or test objects. They must target a disposable database. CI exports both destructive-test guards: `B3S_ALLOW_SCHEMA_DROP=1` for the history/provenance suites and `B3S_TEST_ALLOW_SCHEMA_DROP=1` for the Vault repository suites.
 
-It also invokes the same migration entry point used by Fly:
+It also exercises the legacy local/importer migration entry point:
 
 ```text
 python scripts/import_b3s_reports_postgres.py --migrate-only
 ```
 
-The first run must apply every packaged migration, the second must apply none,
-and migrations `007–008` must leave both semantic-review journals available.
-The claim-to-tile integration test also proves acceptance, restart recovery,
-revocation, supersession, and an unchanged ledger fingerprint. This proves the
-CLI and journal contracts on PostgreSQL; it does not replace an observed Fly
-release using the built image and production secret.
+Fly release commands do not invoke this path; they verify the exact head with
+SELECT-only runtime access after a separately authorized external migration.
+
+The first run must apply every packaged migration through
+`023_evidence_vault_raw_replay_projection.sql`; the second must apply
+none. Current PostgreSQL integration coverage includes base history/import,
+Brand3 archive isolation, Vault operational persistence and execution, capture
+lineage, verified-raw provenance and roles, bounded C7 shadow readiness, and
+populated-schema upgrades. It proves local/CI database contracts, not a Fly
+release, a provisioned acquisition worker, or runtime C7 cutover.
 
 ## Cutover boundary
 
-PostgreSQL already serves imported history and mirrors completed reports, but it is not yet the transactional live scan writer. The remaining controlled cutover is:
+For the main scanner, PostgreSQL serves imported history and mirrors completed reports, but is not yet the transactional live scan writer. Vault-specific persistence and provenance integrations do not change that boundary; the Fly worker/socket path is disabled and both C7 runtime-read methods remain fail-closed. The remaining controlled scan-lifecycle cutover is:
 
 1. Add persistent scan lifecycle methods to `PostgresHistoryRepository`.
 2. Write scan start, capture completion and evaluation completion transactionally.

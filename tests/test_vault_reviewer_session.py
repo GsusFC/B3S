@@ -27,6 +27,7 @@ def _configure_vault(monkeypatch) -> None:
         REVIEWER_TOKEN,
     )
     monkeypatch.setenv("B3S_EVIDENCE_REVIEWER_ID", REVIEWER_ID)
+    monkeypatch.setenv("BRAND3_BASE_URL", "https://testserver")
 
 
 def _preview(*, decision: str = "pending") -> dict:
@@ -95,12 +96,14 @@ def _login(client: TestClient):
             "token": REVIEWER_TOKEN,
             "next_path": "/vault/review/example.com",
         },
+        headers={"Origin": "https://testserver"},
         follow_redirects=False,
     )
 
 
 def test_reviewer_routes_do_not_exist_outside_vault(monkeypatch) -> None:
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "production")
+    monkeypatch.setenv("B3S_SITE_BASIC_AUTH_ENABLED", "false")
     client = TestClient(app, base_url="https://testserver")
 
     response = client.get("/vault/review/example.com")
@@ -156,6 +159,7 @@ def test_invalid_login_is_generic_and_does_not_set_cookie(
     response = client.post(
         "/vault/review/login",
         data={"token": "wrong-secret", "next_path": "/"},
+        headers={"Origin": "https://testserver"},
     )
 
     assert response.status_code == 401
@@ -259,6 +263,7 @@ def test_decision_requires_csrf_and_binds_server_reviewer(
     rejected = client.post(
         "/vault/review/example.com/decisions",
         data=form,
+        headers={"Origin": "https://testserver"},
     )
     assert rejected.status_code == 403
     assert captured == {}

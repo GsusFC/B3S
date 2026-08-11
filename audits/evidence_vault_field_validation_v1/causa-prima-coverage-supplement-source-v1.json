@@ -1,0 +1,83 @@
+{
+  "authority": false,
+  "brand_identity": "causaprima.ai",
+  "evidence_tile_requests": [
+    {
+      "ref": "raw_inputs.1.chunk.3",
+      "tile_ids": [
+        "C7",
+        "MG1",
+        "MG3",
+        "MG5"
+      ]
+    },
+    {
+      "ref": "raw_inputs.1",
+      "tile_ids": [
+        "C7",
+        "MG1",
+        "MG5",
+        "V3"
+      ]
+    },
+    {
+      "ref": "raw_inputs.2.exa.ai_visibility_results.1",
+      "tile_ids": [
+        "C7",
+        "V3"
+      ]
+    },
+    {
+      "ref": "raw_inputs.2.exa.news.3",
+      "tile_ids": [
+        "MG10"
+      ]
+    },
+    {
+      "ref": "raw_inputs.2.exa.mentions.12",
+      "tile_ids": [
+        "MG10"
+      ]
+    },
+    {
+      "ref": "raw_inputs.2.exa.mentions.14",
+      "tile_ids": [
+        "MG10"
+      ]
+    },
+    {
+      "ref": "raw_inputs.2.exa.mentions.15",
+      "tile_ids": [
+        "MG10"
+      ]
+    }
+  ],
+  "explicit_no_candidate_tile_ids": [
+    "I9",
+    "VA4"
+  ],
+  "limitations": [
+    "normalized evidence pack only",
+    "C7 requires cross-channel human synthesis",
+    "V3 requires category-context human review",
+    "I9 lacks usable visual breadth",
+    "VA4 lacks acted value evidence"
+  ],
+  "parent_canonical_memory_version": "1423ffd3fdce0e7e29d8adce16f91ad1b1f93be29a252aa6f545b809f50f78c4",
+  "rationale": "Narrow non-authoritative coverage supplement requested after human baseline review; no acquisition or score authority.",
+  "runtime_effect": false,
+  "schema_version": "evidence-vault-field-coverage-supplement-source-v1",
+  "source_evidence_pack_canonical_sha256": "33a1af7c0128dc9a02a250e1b2f1d9f3ee2693a8bf0003e96b88d0d57ddc65b6",
+  "source_evidence_pack_file": "../../fixtures/evidence_vault_field_validation_v1/causa_prima-a8ba05137817-normalized-evidence-pack.json",
+  "subject_url": "https://causaprima.ai",
+  "target_tile_ids": [
+    "C7",
+    "I9",
+    "MG1",
+    "MG10",
+    "MG3",
+    "MG5",
+    "V3",
+    "VA4"
+  ]
+}

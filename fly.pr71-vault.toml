@@ -1,0 +1,76 @@
+app = "b3s-pr71-vault"
+primary_region = "cdg"
+kill_signal = "SIGINT"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[deploy]
+  # The app credential is runtime-only. Database migrations run separately with
+  # B3S_MIGRATION_DATABASE_URL and must complete before this read-only head check.
+  release_command = "sh -lc 'python scripts/verify_release_build.py && python scripts/verify_b3s_history_postgres.py && python scripts/verify_pr71_vault_target.py'"
+  release_command_timeout = "5m"
+
+[env]
+  BRAND3_BASE_URL = "https://b3s-pr71-vault.fly.dev"
+  BRAND3_DB_PATH = "/data/brand3.sqlite3"
+  BRAND3_ENVIRONMENT = "vault"
+  # Explicit capability for the isolated, manually attested PR71 deployment.
+  BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED = "true"
+  BRAND3_SCREENSHOT_DIR = "/data/screenshots"
+  B3S_REPORTS_DIR = "/data/reports"
+  B3S_SCORING_DB_PATH = "/data/b3s_scoring.sqlite3"
+  B3S_CANONICAL_ENFORCEMENT_MODE = "repeated"
+  B3S_EVIDENCE_LEDGER_MODE = "shadow"
+  B3S_EVIDENCE_CLAIM_TILE_LEDGER_MODE = "shadow"
+  B3S_EVIDENCE_REVIEWER_ID = "pr71-isolated-reviewer"
+  B3S_POSTGRES_REQUIRED = "true"
+  B3S_EXPECTED_NEON_PROJECT_ID = "jolly-river-32467750"
+  B3S_EXPECTED_NEON_BRANCH_ID = "br-divine-star-aspobuer"
+  B3S_EXPECTED_NEON_ENDPOINT_HOST = "ep-broad-river-as71uv9y.c-4.eu-central-1.aws.neon.tech"
+  B3S_EXPECTED_DATABASE_NAME = "neondb"
+  B3S_EXPECTED_RUNTIME_ROLE = "b3s_pr71_app_runtime"
+  # Gate all browser/legacy/diagnostic routes. API v1 retains bearer scopes.
+  B3S_SITE_BASIC_AUTH_ENABLED = "true"
+  B3S_SITE_BASIC_AUTH_USERNAME = "vault"
+  # C7 remains denied until live verified-raw readiness and a separate cutover.
+  BRAND3_VAULT_C7_CUTOVER_ENABLED = "false"
+  BRAND3_VAULT_C7_EMERGENCY_DENY = "true"
+  BRAND3_VAULT_C7_ALLOWLIST = ""
+  B3S_VAULT_WORKER_ENABLED = "true"
+  BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED = "true"
+  # Score owned-web evidence when no external identity exists; never qualifies C7.
+  BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS = "true"
+  BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH = ""
+  SCREENSHOT_PROVIDER = "playwright"
+  BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS = "90"
+
+[[mounts]]
+  source = "b3s_pr71_vault_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 20
+    hard_limit = 30
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "1gb"

@@ -18,6 +18,7 @@
   {% endif %}
   <form method="post" action="/vault/review/login" class="vault-review-form">
     <input type="hidden" name="next_path" value="{{ next_path }}">
+    <input type="hidden" name="login_csrf" value="{{ login_csrf }}">
     <label>
       Credencial de revisión
       <input type="password" name="token" required autocomplete="current-password" autofocus>

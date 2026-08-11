@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import hashlib
 import json
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
 from src.entity_identity_provenance import (
@@ -564,6 +564,37 @@ def build_accepted_evidence_passage_catalog(
         },
     )
     return result
+
+
+def project_evidence_memory_row_identity(
+    row: Mapping[str, Any],
+    *,
+    brand_domain: str,
+) -> dict[str, Any] | None:
+    """Public deterministic identity projection for one capture evidence row."""
+
+    if not isinstance(row, Mapping):
+        raise TypeError("evidence row must be an object")
+    atom = _atom_from_row(dict(row), brand_domain=str(brand_domain).strip().lower())
+    if atom is None:
+        return None
+    return {
+        key: atom[key]
+        for key in (
+            "evidence_id",
+            "document_id",
+            "passage_id",
+            "claim_slot_id",
+            "claim_slot_method",
+            "source",
+            "source_class",
+            "evidence_type",
+            "url",
+            "source_domain",
+            "brand_domain",
+            "content_hash",
+        )
+    }
 
 
 def _atom_from_row(

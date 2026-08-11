@@ -1,0 +1,375 @@
+{
+  "artifacts": [
+    {
+      "bytes": 21669,
+      "file": "GO_NO_GO.md",
+      "sha256": "46221d3779fea2926d2e0bac567de70a4f5a45d618288b5ce99eaabe68156b59"
+    },
+    {
+      "bytes": 2659,
+      "file": "causa-prima-c7-composite-review.csv",
+      "sha256": "ed048d519004fd443007f406c7b2c1b93fc8331615290ace5d8df94e5ca26f68"
+    },
+    {
+      "bytes": 3357,
+      "file": "causa-prima-coverage-human-adoption-result.json",
+      "sha256": "754f0831b90bc00503d2f886172288a03bb8e7c35c2daf195545fea867b4fb5f"
+    },
+    {
+      "bytes": 3687,
+      "file": "causa-prima-coverage-supplement-review-v1.csv",
+      "sha256": "ffdd3d53d2fe2708e834c95fc82a3e4b988a01c02db7ae24cc53c733b0f813e9"
+    },
+    {
+      "bytes": 5273,
+      "file": "causa-prima-coverage-supplement-review-v2.csv",
+      "sha256": "67c1f249f18c64def2e2f9fd4c2ec0ea890b6f942b98d29c1779d50e3a2c33d0"
+    },
+    {
+      "bytes": 1928,
+      "file": "causa-prima-coverage-supplement-source-v1.json",
+      "sha256": "2741c0da48f73f9e0a8d28f76835d6dd39205d988daed3bbcae341019c18ef17"
+    },
+    {
+      "bytes": 2068,
+      "file": "causa-prima-coverage-supplement-source-v2.json",
+      "sha256": "4e5fbddab96cce46d92586049b20a4cdf4255acfbccf4bfe487e83a376de5c7a"
+    },
+    {
+      "bytes": 19113,
+      "file": "causa-prima-coverage-supplement-v1-prebinding-provider-result.json",
+      "sha256": "1ce2947e218c62beb8d5c58db1fb6047268a1f7db754a7a51861972fdbdcb1d7"
+    },
+    {
+      "bytes": 20506,
+      "file": "causa-prima-coverage-supplement-v1.json",
+      "sha256": "0032ea01b518e41cbf06c88591af67b5e08978bd0862ca4872f1f166de421bae"
+    },
+    {
+      "bytes": 23304,
+      "file": "causa-prima-coverage-supplement-v2.json",
+      "sha256": "cf34d2f7aabe2c1e444b7fefd2236e070029ca36c03c66c8a5c44e6fdb6122e8"
+    },
+    {
+      "bytes": 3278,
+      "file": "causa-prima-exact-relation-human-adoption-result.json",
+      "sha256": "918484137184e00ff587ff4a2544f8a68eead7270de58c7c7114374738436ef5"
+    },
+    {
+      "bytes": 11019,
+      "file": "causa-prima-exact-relation-supplement-v1.json",
+      "sha256": "944fea8054a800e668cc4a50cfb6537d40ba1ac8234809637fc86010e044aa3b"
+    },
+    {
+      "bytes": 3523,
+      "file": "causa-prima-magnetism-strict-relation-review.csv",
+      "sha256": "a1cdc29509ae720e89289c2b4620ceb8031093bea9a0a87f30d7de4112c12c11"
+    },
+    {
+      "bytes": 12906,
+      "file": "causa-prima-missing-tile-independent-audit.json",
+      "sha256": "6351c25f111095d30a5f67cabefcc60a763e0cb7b93cd9a7e3c8ea976f45bd17"
+    },
+    {
+      "bytes": 6614,
+      "file": "causa-prima-missing-tile-independent-review.csv",
+      "sha256": "6693a38b7d373b922c37a42e2f682f732e59106d6a99dcca305ad8aac2f10657"
+    },
+    {
+      "bytes": 7558,
+      "file": "causa_prima-human-review.csv",
+      "sha256": "5ac93f5d61538fc187b0e37367a7b38ca733097de936d63efcc9d82c7f82ae9f"
+    },
+    {
+      "bytes": 3534,
+      "file": "human-adoption-replay.json",
+      "sha256": "eac37cd88d109c85c21aeb683ef34033e7462398c0068146b4256ce146a7a9db"
+    },
+    {
+      "bytes": 3538,
+      "file": "human-adoption-result.json",
+      "sha256": "8a33faa95bf413c03ce163af8e69d9dbd2b588950897b1cb26d4269b3236df41"
+    },
+    {
+      "bytes": 105042,
+      "file": "implementation-tree.json",
+      "sha256": "1a9b25f2c5f533a693ff4335accd5a731b7b779a5232907ddb3ffd1d6811f368"
+    },
+    {
+      "bytes": 7043,
+      "file": "planner-replay.json",
+      "sha256": "91d679388687579d7c198a73b8febe135b71c0029e4b011bd3ad607a0db950dd"
+    },
+    {
+      "bytes": 3097,
+      "file": "postgres-causa-coverage-adoption-summary.json",
+      "sha256": "fc42104906f3f8b424095630ab73e54f807a5888469686c929d0ccebfb0b8944"
+    },
+    {
+      "bytes": 2625,
+      "file": "postgres-causa-exact-relation-adoption-summary.json",
+      "sha256": "2a7e7155681488b802d76d8d7449f7f17a51e54e8d57424938d16a46d41b964f"
+    },
+    {
+      "bytes": 9534,
+      "file": "postgres-human-adoption-summary.json",
+      "sha256": "b15c0945cfeb6a8564d078247d15d000a6ba1d1d2352c87e9b09c5b7a198afd6"
+    },
+    {
+      "bytes": 1434,
+      "file": "postgres-shadow-summary.json",
+      "sha256": "73ba3e3909b5a9e4e9b7d0b0a476d2b8706598da9af5d6b3638e9ef4fcc4f9aa"
+    },
+    {
+      "bytes": 23280,
+      "file": "semantic-shadow.json",
+      "sha256": "c2300b16db01bec69c690305c266755b75ce7060a08d13b03453c3b7fde8402b"
+    },
+    {
+      "bytes": 6048,
+      "file": "soccersolver-human-review.csv",
+      "sha256": "5bd09361a882e1050e7c1cdfb02a3c8d6a4ffc8df29752420bd49315fdeedc23"
+    }
+  ],
+  "authority": false,
+  "coverage_supplement": {
+    "accepted_relation_count": 4,
+    "cutover_authorized": false,
+    "economic_event_count": 1,
+    "human_review_completed": true,
+    "independent_accepted_assessment_count": 8,
+    "independent_adoption_eligible_count": 0,
+    "independent_assessment_count": 8,
+    "independent_assessment_review_completed": true,
+    "independent_audit_fingerprint": "f4709c3522e1bed851fc42a7b4a4f8c9162fa8d5755e5f9938d2fdb557d0ded9",
+    "independent_review_effect": "coverage_assessment_only_no_adoption",
+    "provider_model": "gemini-3.1-flash-lite",
+    "publisher_source_identity_count": 4,
+    "rejected_relation_count": 0,
+    "reviewed_at": "2026-08-07T11:43:10+02:00",
+    "reviewer_id": "gsus",
+    "runtime_effect": false,
+    "source_authority": false,
+    "v1_execution_mode": "persisted_relation_replay",
+    "v1_pair_count": 14,
+    "v1_result_fingerprint": "f312dd23525ed07d9b61cc32882ae01be5961e44017eef6e50e5e1d0db868115",
+    "v2_execution_mode": "live_provider",
+    "v2_pair_count": 15,
+    "v2_result_fingerprint": "5f329620915bfe591be503f92500292ab8f8676784b8787de5a4383154434447",
+    "v2_retained_relation_count": 4,
+    "v2_retained_tile_ids": [
+      "MG10"
+    ],
+    "v2_uncovered_target_tile_ids": [
+      "C7",
+      "I9",
+      "MG1",
+      "MG3",
+      "MG5",
+      "V3",
+      "VA4"
+    ],
+    "vault_adoption": {
+      "accepted_relation_count": 11,
+      "accepted_tile_ids": [
+        "MG10",
+        "P1",
+        "P3",
+        "P5",
+        "PR3"
+      ],
+      "adoption_event_id": "145f74b8-9d60-54be-9a5b-42ab5dc4aef6",
+      "adoption_sequence": 2,
+      "authority": true,
+      "authority_scope": "b3s-vault",
+      "canonical_memory_version": "b1bafe845ab85a888f71b044681eee69cd0548d0462a76d9288ecbc7074b887a",
+      "parent_canonical_memory_version": "1423ffd3fdce0e7e29d8adce16f91ad1b1f93be29a252aa6f545b809f50f78c4",
+      "production_runtime_effect": false,
+      "scanner_runtime_effect": false,
+      "score": 6,
+      "score_evaluation_identity": "f52fab50a71cbc6dad60bb39c15508bff40c557398e1ce46450391839194a5f3"
+    }
+  },
+  "created_at": "2026-08-07T07:26:10.870002+00:00",
+  "cutover_authorized": false,
+  "exact_relation_supplement": {
+    "accepted_relation_count": 5,
+    "artifact_adoption_eligible": false,
+    "artifact_authority": false,
+    "artifact_fingerprint": "13a1677eb3acfd2e51e8dd7be1c455be43e94358ad76cb79af0c88a6ce3ac795",
+    "atomic_relation_count": 3,
+    "atomic_worksheet_sha256": "a1cdc29509ae720e89289c2b4620ceb8031093bea9a0a87f30d7de4112c12c11",
+    "c7_accepted_basis_relation_count": 2,
+    "c7_decision_rule": "all_of",
+    "c7_member_relation_count": 2,
+    "composite_group_count": 1,
+    "composite_worksheet_sha256": "ed048d519004fd443007f406c7b2c1b93fc8331615290ace5d8df94e5ca26f68",
+    "cutover_authorized": false,
+    "database_restore_verified": true,
+    "fresh_exact_scope_review_completed": true,
+    "future_member_change_invalidation_implemented": false,
+    "integration_fixture_accept_all_score": 14,
+    "integration_fixture_is_human_authority": false,
+    "magnetism_accepted_tile_ids": [
+      "MG1",
+      "MG10",
+      "MG3",
+      "MG5"
+    ],
+    "mg7_accepted": false,
+    "mg8_accepted": false,
+    "parent_canonical_memory_version": "b1bafe845ab85a888f71b044681eee69cd0548d0462a76d9288ecbc7074b887a",
+    "pending_relation_count": 5,
+    "pending_relation_count_after_review": 0,
+    "production_runtime_effect": false,
+    "pure_projection_group_validation_tested": true,
+    "rejected_relation_count": 0,
+    "repository_group_preinsert_validation_tested": true,
+    "request_fingerprint": "718c88b886c110d767a767f619235046188f3ad9697ce8f6ab65b9ae197a4205",
+    "review_subject_count": 4,
+    "reviewed_at": "2026-08-07T13:21:02+02:00",
+    "reviewer_id": "gsus",
+    "runtime_effect": false,
+    "scanner_runtime_effect": false,
+    "schema_version": "evidence-vault-exact-relation-supplement-v1",
+    "selected_tile_ids": [
+      "C7",
+      "MG1",
+      "MG3",
+      "MG5"
+    ],
+    "source_authority": false,
+    "source_pending_relation_count": 5,
+    "vault_adoption": {
+      "accepted_relation_count": 16,
+      "accepted_tile_ids": [
+        "C7",
+        "MG1",
+        "MG10",
+        "MG3",
+        "MG5",
+        "P1",
+        "P3",
+        "P5",
+        "PR3"
+      ],
+      "adoption_event_id": "87d7285a-ca31-572a-98f6-c4bc9bcc7024",
+      "adoption_sequence": 3,
+      "authority": true,
+      "authority_scope": "b3s-vault",
+      "canonical_memory_version": "7b94b1062aa01b1cb259944b3cd67bef0fac614a130d90e65326b53d169b1a7f",
+      "parent_canonical_memory_version": "b1bafe845ab85a888f71b044681eee69cd0548d0462a76d9288ecbc7074b887a",
+      "previous_event_id": "145f74b8-9d60-54be-9a5b-42ab5dc4aef6",
+      "production_runtime_effect": false,
+      "scanner_runtime_effect": false,
+      "score": 14,
+      "score_before": 6,
+      "score_evaluation_identity": "fa73610bd6e66beec5d2f7fb6c51e8e4f6860c16db10817db5c7bda07c113d47"
+    }
+  },
+  "external_artifact_root": "phase0 recovery archive (supply with --external-root; not Git-distributed)",
+  "external_artifacts": [
+    {
+      "bytes": 405101,
+      "classification": "disposable_postgresql_checkpoint",
+      "path": "postgres-dumps/b3s-vault-field-human-adoption-v1.dump",
+      "sha256": "5693289167777668cbadb19b597caebea4dd31f993135645785ae8dfca894467"
+    },
+    {
+      "bytes": 431072,
+      "classification": "disposable_postgresql_coverage_adoption_checkpoint",
+      "path": "postgres-dumps/b3s-vault-causa-supplement-human-adoption-v1.dump",
+      "sha256": "422f5918b7d2b39250922e1c74717559e9f475c9b72e10813d08bd3fd9c4618b"
+    },
+    {
+      "bytes": 459248,
+      "classification": "disposable_postgresql_exact_relation_adoption_checkpoint",
+      "path": "postgres-dumps/b3s-vault-causa-exact-relation-human-adoption-v1.dump",
+      "sha256": "231c3e7f86f1221670e57c1503af9a432765b7f6cfb816b9a86043a11e5a7f56"
+    }
+  ],
+  "fixture_manifest_sha256": "096b611cc6a6708bb17c462f18782a5a22d914857b2e45ec9c54783ddc98c60b",
+  "git_base": "5de4b02f41bf8b1b0b4f2b58776693dfff181098",
+  "human_adoption": {
+    "accepted_relation_count": 14,
+    "causa_prima_score": 4,
+    "idempotent_replay": true,
+    "production_runtime_effect": false,
+    "rejected_relation_count": 5,
+    "reviewed_at": "2026-08-07T09:59:45+02:00",
+    "reviewer_id": "gsus",
+    "scanner_runtime_effect": false,
+    "scores_are_sparse_isolated_baselines": true,
+    "soccersolver_score": 6
+  },
+  "implementation_fingerprint": "b68ef856a5250fc5eba459ba659564472450859a41840f85b05741950bf211aa",
+  "implementation_state": "committed_landing_branch",
+  "implementation_tree_sha256": "1a9b25f2c5f533a693ff4335accd5a731b7b779a5232907ddb3ffd1d6811f368",
+  "legacy_lineage": {
+    "cutover_authorized": false,
+    "later_normalized_source_packs_missing": 3,
+    "legacy_preview_authority": false,
+    "legacy_preview_can_be_v2_parent": false,
+    "legacy_score_import_allowed": false,
+    "new_v2_identity_and_derived_score_tested": true,
+    "reviewed_seed_export_available": false,
+    "v2_genesis_requires_parent_none": true
+  },
+  "limitations": [
+    "not_an_original_raw_acquisition_envelope",
+    "normalized_evidence_was_recovered_from_historical_flow_candidate_artifacts",
+    "semantic_label_metadata_was_removed_before_freezing",
+    "diagnostic_scores_are_context_only_and_never_expected_canonical_scores",
+    "This is derived legacy memory/review output, not a raw capture or a Vault v2 operation result.",
+    "The null reviewer_id/event_id values are not durable human authority events and cannot be imported as operational reviews.",
+    "Scores are frozen regression context only and are never authoritative inputs to Vault v2.",
+    "The semantic shadow artifact itself predates human review; authority appears only in the separate disposable human-adoption artifacts.",
+    "One submitted model relation was rejected fail-closed and hash-audited for crossing its shortlist.",
+    "One Causa Prima evidence shortlist was deterministically capped at 24 tiles, omitting six pairs for human-visible audit.",
+    "The disposable PostgreSQL execution does not connect web/scan_runner.py or any production presentation path.",
+    "The live provider omitted an explicitly shortlisted strong MG1 literal twice; unattended proposal recall is not accepted.",
+    "The independent eight-tile audit is coverage-assessment-only and adoption_eligible=false.",
+    "The legacy preview hash and scores cannot become a v2 parent or scoring input; a reviewed seed/export and three later normalized source packs are missing.",
+    "The four MG10 relations are reviewed and adopted only in the disposable Vault; the source supplement remains non-authoritative.",
+    "The eight independent coverage assessments were reviewed but remain adoption_eligible=false and were not persisted as Vault authority.",
+    "Four MG10 publisher sources describe one economic financing event; publisher multiplicity is not event diversity or extra score.",
+    "The exact MG1/MG3/MG5 relations and C7 all-of group are reviewed and adopted only in a disposable Vault; production and scanner effects remain false.",
+    "C7 initial all-of adoption is fail-closed, but future invalidation and group reopening when an accepted member changes is not yet implemented.",
+    "MG7 and MG8 remain legacy-only context and are not accepted Vault v2 Magnetism tiles.",
+    "The clean landing tree removes the incidental untracked uv.lock, adds Git whitespace metadata for immutable CRLF review CSVs, normalizes persisted review timestamps to UTC, and completes migration-release assertions. The semantic provider field execution was not repeated; its exact source state remains preserved at recovery commit f9d22c747793447ef18a6855e96f8747f05b2b77.",
+    "The three PostgreSQL checkpoints are separately preserved local recovery artifacts, not Git-distributed fixtures. Their hashes are verifiable with the field-audit verifier on this workstation, but a fresh clone cannot restore them without the recovery archive.",
+    "The normalized real-brand corpus intentionally preserves audited public-source text and acquisition metadata, including two workstation-local source paths. Raw source envelopes are absent, so their source_report_sha256 values are historical provenance attestations rather than independently reconstructible inputs.",
+    "Pre-landing review hardening added migration 016, database-wide migration serialization, exact multi-operation source bindings, crash-safe implicit review timestamps, expired-lease recovery, legacy scanner isolation, complete semantic-label coverage, deterministic identity exclusion, and bounded literal quotes. The original provider field execution was not repeated.",
+    "The PostgreSQL history repository still packages offline field-supplement registration adapters. They remain production-unwired and side-effect-free on import; a future boundary cleanup should move them behind a dedicated offline adapter before any runtime cutover."
+  ],
+  "runtime_effect": false,
+  "schema_version": "evidence-vault-field-validation-audit-v1",
+  "semantic_execution": {
+    "artifact_cache_reused_during_retries_and_final_replay": true,
+    "final_operation_attempt_counts": {
+      "causa_prima": 1,
+      "soccersolver": 1
+    },
+    "human_review_completed": true,
+    "idempotent_rerun_result_fingerprints_equal": true,
+    "input_level": "normalized_evidence_pack_only",
+    "model": "gemini-3.1-flash-lite",
+    "provider_generated_outputs_observed": true
+  },
+  "updated_at": "2026-08-07T14:26:07.730103+00:00",
+  "validation": {
+    "audit_manifest_verifier": "passed with all 3 external checkpoints required; final CLI requires clean Git worktree",
+    "coverage_lineage_focused": "25 passed",
+    "diff_check": "passed",
+    "exact_dump_restore": "passed",
+    "final_dump_restore": "passed",
+    "full_suite": "2648 passed, 22 skipped",
+    "original_field_full_suite": "2639 passed, 19 skipped",
+    "postgres_focused": "12 passed",
+    "postgresql_16_full_suite": "2669 passed, 1 skipped",
+    "preserved_exact_checkpoint_forward_migration_016": "passed",
+    "preserved_precoverage_all_reject_gate": "passed: 0 accepted, 4 rejected, no adoption, score 4, authority false",
+    "ruff": "passed"
+  },
+  "worktree_branch": "feat/vault-incremental-memory-v2-landing"
+}

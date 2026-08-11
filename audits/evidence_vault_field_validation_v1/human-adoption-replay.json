@@ -1,0 +1,102 @@
+{
+  "authority_scope": "b3s-vault",
+  "cases": [
+    {
+      "accepted_relation_count": 7,
+      "accepted_tile_count": 6,
+      "accepted_tile_ids": [
+        "A1",
+        "I4",
+        "M1",
+        "P1",
+        "P3",
+        "PE1"
+      ],
+      "adoption_event_id": "a68ac58f-56fb-556e-b89d-cc4f4e26bbe7",
+      "adoption_replayed_on_first_call": true,
+      "authority_coverage": {
+        "accepted_no_count": 0,
+        "accepted_ok_count": 6,
+        "accepted_sin_evidencia_count": 0,
+        "accepted_tile_count": 6,
+        "canonical_score_status": "current",
+        "contradiction_count": 0,
+        "contradiction_on_accepted_count": 0,
+        "contradiction_on_unresolved_count": 0,
+        "pending_change_tile_count": 0,
+        "pending_initial_tile_count": 0,
+        "score_completeness": "partial",
+        "score_weight_authority_coverage_ratio": 0.06,
+        "tile_authority_coverage_ratio": 0.075,
+        "tile_count": 80,
+        "unresolved_tile_count": 74
+      },
+      "brand_identity": "soccersolver.com",
+      "canonical_memory_version": "c3c6a4bc534be1b8f4d473172f01b1665dd12dd0e55b8de87fd944aac6ce85ff",
+      "case_id": "soccersolver",
+      "production_runtime_effect": false,
+      "rejected_relation_count": 1,
+      "replay_adoption_replayed": true,
+      "replay_packet_replayed": true,
+      "review_event_count": 8,
+      "review_event_times": [
+        "2026-08-07T09:59:45+02:00"
+      ],
+      "scanner_runtime_effect": false,
+      "score": 6,
+      "score_evaluation_identity": "7bc28bb809450ad061c969da051040850c1332d298b25f734630799f3a8ba44e",
+      "score_replayed_on_creation_call": true
+    },
+    {
+      "accepted_relation_count": 7,
+      "accepted_tile_count": 4,
+      "accepted_tile_ids": [
+        "P1",
+        "P3",
+        "P5",
+        "PR3"
+      ],
+      "adoption_event_id": "09c7d710-2105-5240-a020-85f6076d8571",
+      "adoption_replayed_on_first_call": true,
+      "authority_coverage": {
+        "accepted_no_count": 0,
+        "accepted_ok_count": 4,
+        "accepted_sin_evidencia_count": 0,
+        "accepted_tile_count": 4,
+        "canonical_score_status": "current",
+        "contradiction_count": 0,
+        "contradiction_on_accepted_count": 0,
+        "contradiction_on_unresolved_count": 0,
+        "pending_change_tile_count": 0,
+        "pending_initial_tile_count": 0,
+        "score_completeness": "partial",
+        "score_weight_authority_coverage_ratio": 0.04,
+        "tile_authority_coverage_ratio": 0.05,
+        "tile_count": 80,
+        "unresolved_tile_count": 76
+      },
+      "brand_identity": "causaprima.ai",
+      "canonical_memory_version": "1423ffd3fdce0e7e29d8adce16f91ad1b1f93be29a252aa6f545b809f50f78c4",
+      "case_id": "causa_prima",
+      "production_runtime_effect": false,
+      "rejected_relation_count": 4,
+      "replay_adoption_replayed": true,
+      "replay_packet_replayed": true,
+      "review_event_count": 11,
+      "review_event_times": [
+        "2026-08-07T09:59:45+02:00"
+      ],
+      "scanner_runtime_effect": false,
+      "score": 4,
+      "score_evaluation_identity": "aa2efb2d739946cd608bb1a7cdf092d1e4c1f82576454cc401fea0b9b442f420",
+      "score_replayed_on_creation_call": true
+    }
+  ],
+  "cutover_authorized": false,
+  "database_classification": "disposable_local_postgresql",
+  "production_runtime_effect": false,
+  "reviewed_at": "2026-08-07T09:59:45+02:00",
+  "reviewer_id": "gsus",
+  "scanner_runtime_effect": false,
+  "schema_version": "evidence-vault-field-human-adoption-result-v1"
+}

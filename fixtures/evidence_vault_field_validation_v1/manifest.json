@@ -1,0 +1,193 @@
+{
+  "authority": false,
+  "cases": [
+    {
+      "brand_identity": "soccersolver.com",
+      "case_id": "soccersolver",
+      "expected_baseline": {
+        "classify_count": 130,
+        "context_count": 137
+      },
+      "expected_transitions": [
+        {
+          "canonical_impact": "none",
+          "classify_count": 0,
+          "from_report_id": "6a2fac4fca28",
+          "summary": {
+            "added_count": 0,
+            "affected_tile_count": 0,
+            "modified_count": 0,
+            "not_reacquired_count": 0,
+            "unchanged_count": 137
+          },
+          "to_report_id": "9540ae0d36ff"
+        },
+        {
+          "canonical_impact": "review_required",
+          "classify_count": 10,
+          "from_report_id": "9540ae0d36ff",
+          "summary": {
+            "added_count": 0,
+            "affected_tile_count": 0,
+            "modified_count": 10,
+            "not_reacquired_count": 1,
+            "superseded_count": 10,
+            "unchanged_count": 126
+          },
+          "to_report_id": "e833668cb2b0"
+        }
+      ],
+      "observations": [
+        {
+          "diagnostic_score": 57,
+          "evidence_pack_canonical_sha256": "14be80d2ca2c808672a1fd19f07d409772b80b5d49039b4b8995d5af031e324b",
+          "evidence_pack_file": "soccersolver-6a2fac4fca28-normalized-evidence-pack.json",
+          "evidence_record_count": 137,
+          "report_created_at": "2026-08-06T11:07:50.393431+00:00",
+          "report_id": "6a2fac4fca28",
+          "source_artifact_name": "scan-1-6a2fac4fca28.json",
+          "source_report_sha256": "ce2bfe3be2d8e481d199bafb414038f986153653b1af079d98bc0a9f996bd05f"
+        },
+        {
+          "diagnostic_score": 57,
+          "evidence_pack_canonical_sha256": "969f3b739cbafddb14633c725af6ca189a6d50e4e7c50d43bf56a8e976e3d096",
+          "evidence_pack_file": "soccersolver-9540ae0d36ff-normalized-evidence-pack.json",
+          "evidence_record_count": 137,
+          "report_created_at": "2026-08-06T11:14:03.597796+00:00",
+          "report_id": "9540ae0d36ff",
+          "source_artifact_name": "scan-2-9540ae0d36ff.json",
+          "source_report_sha256": "a8a5a0d7be6932675446eb767e339aad5a075deb9e5b279e9e9b0227bd6f78bd"
+        },
+        {
+          "diagnostic_score": 68,
+          "evidence_pack_canonical_sha256": "63454d0cb6d870898e6262b41356360132621d2fea6c4bcdf3ead1adf6b5f9f1",
+          "evidence_pack_file": "soccersolver-e833668cb2b0-normalized-evidence-pack.json",
+          "evidence_record_count": 136,
+          "report_created_at": "2026-08-06T11:20:47.366230+00:00",
+          "report_id": "e833668cb2b0",
+          "source_artifact_name": "scan-3-e833668cb2b0.json",
+          "source_report_sha256": "e017d056e14780bee9efb6b8754042ae3adf196aca663a6492d4aeebc578118f"
+        }
+      ],
+      "subject_url": "https://soccersolver.com"
+    },
+    {
+      "brand_identity": "causaprima.ai",
+      "case_id": "causa_prima",
+      "expected_baseline": {
+        "classify_count": 42,
+        "context_count": 47
+      },
+      "expected_transitions": [
+        {
+          "canonical_impact": "review_required",
+          "classify_count": 7,
+          "from_report_id": "a8ba05137817",
+          "summary": {
+            "added_count": 4,
+            "affected_tile_count": 0,
+            "modified_count": 3,
+            "not_reacquired_count": 4,
+            "superseded_count": 3,
+            "unchanged_count": 40
+          },
+          "to_report_id": "5bbeaa6dc58f"
+        }
+      ],
+      "observations": [
+        {
+          "diagnostic_score": 60,
+          "evidence_pack_canonical_sha256": "33a1af7c0128dc9a02a250e1b2f1d9f3ee2693a8bf0003e96b88d0d57ddc65b6",
+          "evidence_pack_file": "causa_prima-a8ba05137817-normalized-evidence-pack.json",
+          "evidence_record_count": 47,
+          "report_created_at": "2026-07-08T09:17:20.190398+00:00",
+          "report_id": "a8ba05137817",
+          "source_artifact_name": "a8ba05137817.json",
+          "source_report_sha256": "b60f847352ec58e300f2c53f84773ff8e31f300aa36feb26c672f44812cd30de"
+        },
+        {
+          "diagnostic_score": 57,
+          "evidence_pack_canonical_sha256": "b10b7b124ad7fb4bc5f66a4e7f1af536cd2d350cb0eb497c581780c74829d5fe",
+          "evidence_pack_file": "causa_prima-5bbeaa6dc58f-normalized-evidence-pack.json",
+          "evidence_record_count": 47,
+          "report_created_at": "2026-07-08T10:22:00.156717+00:00",
+          "report_id": "5bbeaa6dc58f",
+          "source_artifact_name": "5bbeaa6dc58f.json",
+          "source_report_sha256": "6f62616edf82e9d60b6a1a3a4016def9d2f5d3ad85abfd9525ff48687d40455c"
+        }
+      ],
+      "subject_url": "https://causaprima.ai"
+    }
+  ],
+  "downstream_reference": {
+    "authority": false,
+    "brand_identity": "causaprima.ai",
+    "classification": "derived_non_authoritative_legacy_reference",
+    "expected": {
+      "accepted_evidence_count": 137,
+      "accepted_evidence_occurrence_count": 250,
+      "current_score": 91,
+      "identity_review_case_count": 30,
+      "identity_review_decisions": {
+        "accepted": 30
+      },
+      "preview_score": 93,
+      "recomputed_current_score": 91,
+      "report_chronology": [
+        "a8ba05137817",
+        "5bbeaa6dc58f",
+        "76b281740607",
+        "c08a4847f063",
+        "5d713fcfb53a"
+      ],
+      "stable_latest_score": 91,
+      "stable_previous_score": 91,
+      "tile_count": 80
+    },
+    "files": [
+      {
+        "file": "causa_prima_downstream_reference/preview.json",
+        "sha256": "3f8f64e9cfba8eae6fbef0954c3ab2d430f037ef6e3a5dce07ded850a8607fc4"
+      },
+      {
+        "file": "causa_prima_downstream_reference/identity-review-manifest.json",
+        "sha256": "9c3925202d6318fd75eea7d63ae51c87bbcbca51e1b156fe017c925304d627df"
+      },
+      {
+        "file": "causa_prima_downstream_reference/identity-candidates.jsonl",
+        "sha256": "34a34f9c4e106c0281489d27c43de5ae6908beb68b37fe07d0ff5bd7ac00476e"
+      },
+      {
+        "file": "causa_prima_downstream_reference/identity-reviews.jsonl",
+        "sha256": "5321c6ce3611d22a06a8112a4400d6d685be08c6886ab393dde3b54e4501d9a2"
+      }
+    ],
+    "limitations": [
+      "This is derived legacy memory/review output, not a raw capture or a Vault v2 operation result.",
+      "The null reviewer_id/event_id values are not durable human authority events and cannot be imported as operational reviews.",
+      "Scores are frozen regression context only and are never authoritative inputs to Vault v2."
+    ],
+    "reference_id": "causa-prima-legacy-memory-preview-v1",
+    "runtime_effect": false
+  },
+  "limitations": [
+    "not_an_original_raw_acquisition_envelope",
+    "normalized_evidence_was_recovered_from_historical_flow_candidate_artifacts",
+    "semantic_label_metadata_was_removed_before_freezing",
+    "diagnostic_scores_are_context_only_and_never_expected_canonical_scores"
+  ],
+  "normalization": {
+    "canonical_json": "utf8, sort_keys=true, separators=(comma,colon)",
+    "removed_metadata_keys": [
+      "identity_match_llm",
+      "relevant_blocks",
+      "semantic_labeling_version",
+      "specificity",
+      "stance"
+    ],
+    "source_path": "raw.flow.candidate.evidence_pack"
+  },
+  "replay_level": "normalized_evidence_pack_only",
+  "runtime_effect": false,
+  "schema_version": "evidence-vault-normalized-field-replay-manifest-v1"
+}

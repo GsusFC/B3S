@@ -1,0 +1,515 @@
+{
+  "authority": false,
+  "cases": [
+    {
+      "accepted_change": false,
+      "authorized_memory_present": false,
+      "brand_identity": "soccersolver.com",
+      "case_id": "soccersolver",
+      "discarded_relation_count": 1,
+      "discarded_relations": [
+        {
+          "reason": "tile_outside_shortlist",
+          "submitted_relation_fingerprint": "9592738ea3b1621400054ad94c1bd3a8a43ea9b5d5dd92e6bb3a47e29a72912f"
+        }
+      ],
+      "execution_status": "completed",
+      "omitted_shortlist_pair_count": 0,
+      "operation_attempt_count": 1,
+      "operation_plan_fingerprint": "b8f0f3b187b0e5c6e67667d70977631a884b4cfce12cb936d9c45dcd8882fccd",
+      "operation_status": "completed",
+      "operational_candidate_packet_fingerprint": "ceaa99a0b6a5062afbccb5151c323013e155a2a7d5c154508066baecfd53f1d9",
+      "relation_count": 8,
+      "result_fingerprint": "f31845452029c0223ccdb11292287d1f0c51e6fbbef8a053cf7034791bd42c9f",
+      "review_worksheet": [
+        {
+          "evidence_fingerprint": "053229ef08c15c38856ede3de83267910ed099f2b22a29ea39949db9f4cdc100",
+          "evidence_ref": "raw_inputs.2.exa.ai_visibility_results.2",
+          "evidence_url": "https://soccersolver.com/new-way-of-signings",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "We have developed 16 algorithms in order to create a PSTO. (PreSeason Theory Optimal Solution)",
+          "polarity": "supports",
+          "rationale": "La marca identifica una característica tangible y específica de su producto: 16 algoritmos para una solución PSTO.",
+          "relation_id": "c0ae24a242fe77ed147535e3d00252510826dd23d4e5fa81eb842124b2bc31fb",
+          "semantic_labels": {
+            "identity_match_llm": "domain",
+            "relevant_blocks": [
+              "attributes"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "Características tangibles identificables.",
+          "tile_id": "A1",
+          "tile_key": "attributes.A1"
+        },
+        {
+          "evidence_fingerprint": "16ad06fccdc0fc1b0301d76e0a715d1da2e7575cea740864a69050b171f7a6ed",
+          "evidence_ref": "raw_inputs.1.chunk.6",
+          "evidence_url": "https://soccersolver.com",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "## We help clubs  _to be efficient._",
+          "polarity": "supports",
+          "rationale": "La hero define claramente el propósito y lo que ofrecen: ayudar a los clubes a ser eficientes.",
+          "relation_id": "f717bc5c44d991e81faef9ddf05444cf717279b344447597b69e5eb4c0ed6f94",
+          "semantic_labels": {
+            "identity_match_llm": "unverified",
+            "relevant_blocks": [
+              "core_purpose",
+              "value_proposition"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "La hero dice qué venden.",
+          "tile_id": "P1",
+          "tile_key": "value_proposition.P1"
+        },
+        {
+          "evidence_fingerprint": "32faf958d9b9e9309560368dfeabda1f535af4e86b8feef1c31a3daefdeeb5d6",
+          "evidence_ref": "raw_inputs.1",
+          "evidence_url": "https://soccersolver.com",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "To maximize the money they spend and convert it into wins, more money, or both.",
+          "polarity": "supports",
+          "rationale": "La propuesta de valor se centra en el resultado de negocio (maximizar dinero y victorias) más que en las características técnicas.",
+          "relation_id": "b769dfabdc0751b0d6cacb3ce733d31e2ec5e7362bd0c34598161c55cd5ba6b2",
+          "semantic_labels": {
+            "identity_match_llm": "unverified",
+            "relevant_blocks": [
+              "core_purpose",
+              "value_proposition"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "Habla de resultado, no solo de features.",
+          "tile_id": "P3",
+          "tile_key": "value_proposition.P3"
+        },
+        {
+          "evidence_fingerprint": "81a831851614cdba2d56cf4750cda94c4e063449a9eef0ad92a19e3e395ec3d5",
+          "evidence_ref": "raw_inputs.1.subpage.1.chunk.1",
+          "evidence_url": "https://soccersolver.com/aboutus.html",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "# A team defined by _impact_,  not by names.",
+          "polarity": "supports",
+          "rationale": "El tono de la marca es consistente y distintivo, enfocándose en el impacto sobre los nombres, lo cual refleja una personalidad definida.",
+          "relation_id": "95db4a112fb2ca7f81636967fcf70427f2aa7b26a73894a36878acd47b0b0527",
+          "semantic_labels": {
+            "identity_match_llm": "unverified",
+            "relevant_blocks": [
+              "personality"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "Hay un tono, no una plantilla.",
+          "tile_id": "PE1",
+          "tile_key": "personality.PE1"
+        },
+        {
+          "evidence_fingerprint": "8d7c49bcf1a4ae6dc59a1ed811f3d8126438a4688904ec8d10f125caa25c2fb2",
+          "evidence_ref": "raw_inputs.1.chunk.9",
+          "evidence_url": "https://soccersolver.com",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "In 2017, Florentino Pérez described the club as a company and its players as its defining financial assets. SoccerSolver turns that thesis into an operating system.",
+          "polarity": "supports",
+          "rationale": "Existe una idea de marca clara y declarada: convertir la tesis de los jugadores como activos financieros en un sistema operativo.",
+          "relation_id": "6c2d589bd1b64cd8fa34fd9bb09ea390cbfeb3a932d52a9747833a9a5f5a93bf",
+          "semantic_labels": {
+            "identity_match_llm": "unverified",
+            "relevant_blocks": [
+              "brand_idea"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "Hay una idea detrás, declarada o evidente.",
+          "tile_id": "I4",
+          "tile_key": "brand_idea.I4"
+        },
+        {
+          "evidence_fingerprint": "bb766aa09f7bf2820e8ccd15238dc656e00d549cef9156d9f4d706c6b0ea1999",
+          "evidence_ref": "raw_inputs.1.chunk.18",
+          "evidence_url": "https://soccersolver.com",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "SoccerSolver is the first step in a wider mission: making decision-making across sport increasingly efficient, measurable and accountable.",
+          "polarity": "supports",
+          "rationale": "La misión está explícitamente declarada en la superficie pública de la marca.",
+          "relation_id": "eb8edea743ce6b2fdee9350d85eb8bd98594477d8ac1775f8bda192394599014",
+          "semantic_labels": {
+            "identity_match_llm": "unverified",
+            "relevant_blocks": [
+              "mission",
+              "vision"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "Hay una misión identificable en superficie pública propia.",
+          "tile_id": "M1",
+          "tile_key": "mission.M1"
+        },
+        {
+          "evidence_fingerprint": "e31d0c3718188f686266a410be241d358bc0238654d23a19e946166f1e41cef1",
+          "evidence_ref": "raw_inputs.2.exa.mentions.0",
+          "evidence_url": "https://soccersolver.com/",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "The #1 AI Investment Software for soccer clubs.",
+          "polarity": "supports",
+          "rationale": "The hero section explicitly states what the product is: AI Investment Software for soccer clubs.",
+          "relation_id": "85b00470f9937a4f55844023173353caa9f12f6a8ea6405af677225bdf9d0920",
+          "semantic_labels": {
+            "identity_match_llm": "domain",
+            "relevant_blocks": [
+              "core_purpose",
+              "value_proposition"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "La hero dice qué venden.",
+          "tile_id": "P1",
+          "tile_key": "value_proposition.P1"
+        },
+        {
+          "evidence_fingerprint": "e31d0c3718188f686266a410be241d358bc0238654d23a19e946166f1e41cef1",
+          "evidence_ref": "raw_inputs.2.exa.mentions.0",
+          "evidence_url": "https://soccersolver.com/",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "We help clubs to earn more money by trading players profitably",
+          "polarity": "supports",
+          "rationale": "The statement focuses on the financial outcome for the clubs rather than just the technical features.",
+          "relation_id": "e8f694f8c8798bd7aba63373cd190710155d836358ca8ec93ecefbb979b56480",
+          "semantic_labels": {
+            "identity_match_llm": "domain",
+            "relevant_blocks": [
+              "core_purpose",
+              "value_proposition"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "Habla de resultado, no solo de features.",
+          "tile_id": "P3",
+          "tile_key": "value_proposition.P3"
+        }
+      ],
+      "score_created": false,
+      "selected_fingerprint_count": 130,
+      "semantic_candidate_count": 130,
+      "shortlist_truncation_count": 0,
+      "shortlist_truncations": {},
+      "shortlisted_pair_count": 135,
+      "source_candidate_packet_fingerprint": "c4fdbd22c8cbc9b74b97027f883bdde0668ccb3bdf9c5b874204049d7ac1d0b8",
+      "source_scan_id": "field-shadow-v1-soccersolver-6a2fac4fca28"
+    },
+    {
+      "accepted_change": false,
+      "authorized_memory_present": false,
+      "brand_identity": "causaprima.ai",
+      "case_id": "causa_prima",
+      "discarded_relation_count": 0,
+      "discarded_relations": [],
+      "execution_status": "completed",
+      "omitted_shortlist_pair_count": 6,
+      "operation_attempt_count": 1,
+      "operation_plan_fingerprint": "c47ba510d66e140accf9cd197756229bc0ba0401fc84ab0bb18ec3e0922de728",
+      "operation_status": "completed",
+      "operational_candidate_packet_fingerprint": "f90357347467548be548de6df459665c19fd361dee9aef6446ba2b3104e6bbbc",
+      "relation_count": 11,
+      "result_fingerprint": "b6e9ca38705edc984312cfd28fda0d548546aa119f6e0516f9342f5077b6c2f2",
+      "review_worksheet": [
+        {
+          "evidence_fingerprint": "7081bec9928a5506baf8ee431cc1f28c752c1fbeafcd37b64043506bd3bf85aa",
+          "evidence_ref": "raw_inputs.1.chunk.3",
+          "evidence_url": "https://causaprima.ai",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "## End the chase between companies.",
+          "polarity": "supports",
+          "rationale": "This statement defines the core purpose of why they exist (to end the chase) rather than just describing their product features.",
+          "relation_id": "e197e5a439c1b019312326209d2462e8ffd73d21349f48b3a18dec07d226c8d9",
+          "semantic_labels": {
+            "identity_match_llm": "domain",
+            "relevant_blocks": [
+              "core_purpose",
+              "value_proposition"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "Responde por qué existen, no qué hacen.",
+          "tile_id": "PR3",
+          "tile_key": "core_purpose.PR3"
+        },
+        {
+          "evidence_fingerprint": "86822991d777f80e770ac79609c44f3f2e5098dce52f4b80d4ac148e0c15a27b",
+          "evidence_ref": "raw_inputs.1",
+          "evidence_url": "https://causaprima.ai",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "# The agent-to-agent network  for finance teams.",
+          "polarity": "supports",
+          "rationale": "The hero explicitly states what they are: an agent-to-agent network for finance teams.",
+          "relation_id": "ede2fe443ec682ae91a5297331c4df100e468b94514152790bcd40571dfdf595",
+          "semantic_labels": {
+            "identity_match_llm": "domain",
+            "relevant_blocks": [
+              "core_purpose",
+              "value_proposition"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "La hero dice qué venden.",
+          "tile_id": "P1",
+          "tile_key": "value_proposition.P1"
+        },
+        {
+          "evidence_fingerprint": "86822991d777f80e770ac79609c44f3f2e5098dce52f4b80d4ac148e0c15a27b",
+          "evidence_ref": "raw_inputs.1",
+          "evidence_url": "https://causaprima.ai",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "AI agents that handle invoicing, disputes, and discounts\n\n— so you don’t have to.",
+          "polarity": "supports",
+          "rationale": "The quote describes the outcome (not having to handle manual tasks) rather than just the feature.",
+          "relation_id": "7c87c54ecd44c7ef104f8670f0ef7a66dd39a8e0724aacab4d24fde35bce1821",
+          "semantic_labels": {
+            "identity_match_llm": "domain",
+            "relevant_blocks": [
+              "core_purpose",
+              "value_proposition"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "Habla de resultado, no solo de features.",
+          "tile_id": "P3",
+          "tile_key": "value_proposition.P3"
+        },
+        {
+          "evidence_fingerprint": "86822991d777f80e770ac79609c44f3f2e5098dce52f4b80d4ac148e0c15a27b",
+          "evidence_ref": "raw_inputs.1",
+          "evidence_url": "https://causaprima.ai",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "Backed by the world's best",
+          "polarity": "supports",
+          "rationale": "The snapshot includes visual proof signals of investors in the first screen.",
+          "relation_id": "fa88fac314e53b463171e78587e41a3102d5db2083a9b26bb9c55675eef579b6",
+          "semantic_labels": {
+            "identity_match_llm": "domain",
+            "relevant_blocks": [
+              "core_purpose",
+              "value_proposition"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "Proof signals en la primera pantalla.",
+          "tile_id": "P9",
+          "tile_key": "value_proposition.P9"
+        },
+        {
+          "evidence_fingerprint": "8902685884fb6591d0d843dafd02fc437ba8fd8d7af3c9f6ab78474a965d73a0",
+          "evidence_ref": "raw_inputs.1.chunk.5",
+          "evidence_url": "https://causaprima.ai",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "One network for your entire financial operations — so your team can get back to building the business instead of chasing it.",
+          "polarity": "supports",
+          "rationale": "The hero section clearly states what they sell: a network for financial operations.",
+          "relation_id": "95a48b11721488b657ec9be6a45b4a1f4238fbf7475b3a168e9675c7c81600c5",
+          "semantic_labels": {
+            "identity_match_llm": "domain",
+            "relevant_blocks": [
+              "core_purpose",
+              "value_proposition"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "La hero dice qué venden.",
+          "tile_id": "P1",
+          "tile_key": "value_proposition.P1"
+        },
+        {
+          "evidence_fingerprint": "b92a25d0e031481580c531dad269dabe8ff5a0c5705eb4a5f3ed667a84832c37",
+          "evidence_ref": "raw_inputs.1.chunk.6",
+          "evidence_url": "https://causaprima.ai",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "Capture millions in early-payment discounts.",
+          "polarity": "supports",
+          "rationale": "Focuses on the financial outcome for the user rather than just the feature.",
+          "relation_id": "074c3c71cddccc8607f40751f775b838411375776c13764d8009b6626b9336fb",
+          "semantic_labels": {
+            "identity_match_llm": "domain",
+            "relevant_blocks": [
+              "value_proposition"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "Habla de resultado, no solo de features.",
+          "tile_id": "P3",
+          "tile_key": "value_proposition.P3"
+        },
+        {
+          "evidence_fingerprint": "d1a6ecb1380a550669d37661afb243fc6dbbf5db0a61ac3d6bb2402a0543a862",
+          "evidence_ref": "raw_inputs.2.exa.mentions.0",
+          "evidence_url": "https://causaprima.ai/",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "End the chase between companies.",
+          "polarity": "supports",
+          "rationale": "Defines the core purpose of existence: ending the chase between companies.",
+          "relation_id": "bf45fac0e60379606125321187ea7be4fa6b0585f94adf34c3aeb01c0d97ccdc",
+          "semantic_labels": {
+            "identity_match_llm": "domain",
+            "relevant_blocks": [
+              "brand_idea",
+              "core_purpose",
+              "value_proposition"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "Responde por qué existen, no qué hacen.",
+          "tile_id": "PR3",
+          "tile_key": "core_purpose.PR3"
+        },
+        {
+          "evidence_fingerprint": "d6922d43bd59f0aec70211c1a5680e311217a35a03195e9047c57461131dcefd",
+          "evidence_ref": "raw_inputs.1.chunk.4",
+          "evidence_url": "https://causaprima.ai",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "Already trusted by 3,000+ accounts.",
+          "polarity": "supports",
+          "rationale": "Provides a specific data point regarding trust and adoption as a proof signal.",
+          "relation_id": "28877f5c2ca3efb29c6f1e3f4dc8201510ce943510608af2370d0584b368d7cd",
+          "semantic_labels": {
+            "identity_match_llm": "domain",
+            "relevant_blocks": [
+              "value_proposition"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "Datos, casos o garantías irrefutables en el snapshot.",
+          "tile_id": "P10",
+          "tile_key": "value_proposition.P10"
+        },
+        {
+          "evidence_fingerprint": "d6922d43bd59f0aec70211c1a5680e311217a35a03195e9047c57461131dcefd",
+          "evidence_ref": "raw_inputs.1.chunk.4",
+          "evidence_url": "https://causaprima.ai",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "Agents do the work. You get the money. In seconds.",
+          "polarity": "supports",
+          "rationale": "Identifies the pain point of manual work and the speed of resolution.",
+          "relation_id": "85fa26800348d65cdf7498c5172458201895ecb04da50c1d54c78982140d9594",
+          "semantic_labels": {
+            "identity_match_llm": "domain",
+            "relevant_blocks": [
+              "value_proposition"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "Se sabe qué dolor, deseo, necesidad o frontera tecnológica resuelve o rompe.",
+          "tile_id": "P5",
+          "tile_key": "value_proposition.P5"
+        },
+        {
+          "evidence_fingerprint": "d6922d43bd59f0aec70211c1a5680e311217a35a03195e9047c57461131dcefd",
+          "evidence_ref": "raw_inputs.1.chunk.4",
+          "evidence_url": "https://causaprima.ai",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "Already trusted by 3,000+ accounts.",
+          "polarity": "supports",
+          "rationale": "Includes a proof signal directly in the snapshot.",
+          "relation_id": "a82f0b7dc9754559f08199239b68bd0a223b85806359ae93ec3ae25c4161166d",
+          "semantic_labels": {
+            "identity_match_llm": "domain",
+            "relevant_blocks": [
+              "value_proposition"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "Proof signals en la primera pantalla.",
+          "tile_id": "P9",
+          "tile_key": "value_proposition.P9"
+        },
+        {
+          "evidence_fingerprint": "e3b5a69fd51aec577e088bd177bb8068a105650ce95214ac969682d9ce0d25a3",
+          "evidence_ref": "raw_inputs.2.exa.ai_visibility_results.1",
+          "evidence_url": "https://www.linkedin.com/company/causa-prima",
+          "human_decision": null,
+          "human_rationale": null,
+          "literal_quote": "Causa Prima is the first agent-to-agent network designed to",
+          "polarity": "supports",
+          "rationale": "The quote explicitly states what the company is and what it offers (an agent-to-agent network).",
+          "relation_id": "1c40fbdf4485d27c6aa0303738945d2ec9f5ab3abead45962e817ee0f6a82eba",
+          "semantic_labels": {
+            "identity_match_llm": "brand_name",
+            "relevant_blocks": [
+              "core_purpose",
+              "value_proposition"
+            ],
+            "specificity": "explicit",
+            "stance": "supports"
+          },
+          "tile_condition": "La hero dice qué venden.",
+          "tile_id": "P1",
+          "tile_key": "value_proposition.P1"
+        }
+      ],
+      "score_created": false,
+      "selected_fingerprint_count": 42,
+      "semantic_candidate_count": 42,
+      "shortlist_truncation_count": 1,
+      "shortlist_truncations": {
+        "d1a6ecb1380a550669d37661afb243fc6dbbf5db0a61ac3d6bb2402a0543a862": {
+          "eligible_count": 30,
+          "omitted_tile_ids": [
+            "PR4",
+            "PR5",
+            "PR6",
+            "PR7",
+            "PR8",
+            "PR9"
+          ],
+          "selected_count": 24
+        }
+      },
+      "shortlisted_pair_count": 244,
+      "source_candidate_packet_fingerprint": "fa5369fc91863c7ae4e395f06a32b99fc0cbce609424027b7f342d0400e4b570",
+      "source_scan_id": "field-shadow-v1-causa_prima-a8ba05137817"
+    }
+  ],
+  "cutover_authorized": false,
+  "model": "gemini-3.1-flash-lite",
+  "model_output_rejection_count": 1,
+  "next_required_action": "human_review_every_pending_relation_before_any_adoption",
+  "planner_gate_fingerprint": "b47681fe1493d5f7ac8986c5a91890c3219ceae3a36995eed404198d64543fc4",
+  "replay_level": "normalized_evidence_pack_only",
+  "runtime_effect": false,
+  "schema_version": "evidence-vault-normalized-field-shadow-result-v1",
+  "semantic_gate_status": "human_review_required"
+}

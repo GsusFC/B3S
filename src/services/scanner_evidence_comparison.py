@@ -14,7 +14,7 @@ import json
 import os
 import re
 import unicodedata
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from src.services.scanner_analysis_contract import (
@@ -607,13 +607,52 @@ def canonical_evidence_records(
     pack = candidate.get("evidence_pack") if isinstance(candidate.get("evidence_pack"), dict) else {}
     rows = pack.get("evidence") if isinstance(pack.get("evidence"), list) else []
     quarantined_refs = _identity_quarantined_refs(flow)
-    subject_host = _normalized_host(str(report.get("url") or ""))
+    return _canonical_evidence_rows(
+        rows,
+        subject_url=str(report.get("url") or ""),
+        quarantined_refs=quarantined_refs,
+        deterministic_representatives=False,
+    )
+
+
+def canonical_evidence_rows(
+    rows: Iterable[dict[str, Any]],
+    *,
+    subject_url: str,
+    quarantined_refs: Iterable[str] = (),
+) -> tuple[CanonicalEvidenceRecord, ...]:
+    """Canonicalize capture-only evidence with deterministic representatives.
+
+    Incremental Vault refreshes persist acquisition before a strategic report
+    exists.  This helper deliberately stabilizes exact-duplicate selection
+    without changing the legacy scanner report-comparison projection.
+    """
+
+    return _canonical_evidence_rows(
+        rows,
+        subject_url=subject_url,
+        quarantined_refs=quarantined_refs,
+        deterministic_representatives=True,
+    )
+
+
+def _canonical_evidence_rows(
+    rows: Iterable[dict[str, Any]],
+    *,
+    subject_url: str,
+    quarantined_refs: Iterable[str],
+    deterministic_representatives: bool,
+) -> tuple[CanonicalEvidenceRecord, ...]:
+    quarantined = {
+        str(ref).strip() for ref in quarantined_refs if str(ref).strip()
+    }
+    subject_host = _normalized_host(subject_url)
     records: dict[str, CanonicalEvidenceRecord] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
         ref = str(row.get("ref") or "").strip()
-        if ref and ref in quarantined_refs:
+        if ref and ref in quarantined:
             continue
         source = str(row.get("source") or "unknown").strip().lower()
         evidence_type = str(row.get("evidence_type") or "unknown").strip().lower()
@@ -654,8 +693,44 @@ def canonical_evidence_records(
                 or ""
             ).strip().lower(),
         )
-        records[fingerprint] = record
+        existing = records.get(fingerprint)
+        if not deterministic_representatives:
+            records[fingerprint] = record
+        elif existing is None or (
+            record.source,
+            record.identity_match,
+        ) < (
+            existing.source,
+            existing.identity_match,
+        ):
+            records[fingerprint] = record
     return tuple(sorted(records.values(), key=lambda item: (item.locator, item.fingerprint)))
+
+
+def canonical_evidence_representatives(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    subject_url: str = "",
+) -> dict[str, dict[str, Any]]:
+    """Choose one deterministic raw representative per canonical fingerprint."""
+
+    selected: dict[str, tuple[str, dict[str, Any]]] = {}
+    for raw in rows:
+        if not isinstance(raw, Mapping):
+            continue
+        row = dict(raw)
+        normalized = canonical_evidence_rows([row], subject_url=subject_url)
+        if not normalized:
+            continue
+        fingerprint = normalized[0].fingerprint
+        stable_key = _stable_hash(row)
+        existing = selected.get(fingerprint)
+        if existing is None or stable_key < existing[0]:
+            selected[fingerprint] = (stable_key, row)
+    return {
+        fingerprint: selected[fingerprint][1]
+        for fingerprint in sorted(selected)
+    }
 
 
 def _records_by_locator(

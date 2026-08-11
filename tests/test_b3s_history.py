@@ -489,6 +489,144 @@ def test_recovery_supplement_migration_is_immutable_and_non_authoritative() -> N
     assert "scanner_runtime_effect = false" in sql
 
 
+def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
+    from src.history.repository import _migration_files
+
+    filenames = [filename for filename, _sql in _migration_files()]
+    operational_memory_sql = (
+        resources.files("src.history")
+        .joinpath("migrations/014_evidence_vault_operational_memory_v2.sql")
+        .read_text(encoding="utf-8")
+    )
+    operation_execution_sql = (
+        resources.files("src.history")
+        .joinpath("migrations/015_evidence_vault_operation_plan_execution.sql")
+        .read_text(encoding="utf-8")
+    )
+    source_binding_sql = (
+        resources.files("src.history")
+        .joinpath("migrations/016_evidence_vault_source_packet_bindings.sql")
+        .read_text(encoding="utf-8")
+    )
+    capture_lineage_sql = (
+        resources.files("src.history")
+        .joinpath("migrations/017_evidence_vault_capture_lineage.sql")
+        .read_text(encoding="utf-8")
+    )
+    capture_lineage_hardening_sql = (
+        resources.files("src.history")
+        .joinpath(
+            "migrations/018_evidence_vault_capture_lineage_hardening.sql"
+        )
+        .read_text(encoding="utf-8")
+    )
+    cumulative_landing_sql = (
+        resources.files("src.history")
+        .joinpath(
+            "migrations/021_evidence_vault_cumulative_landing_hardening.sql"
+        )
+        .read_text(encoding="utf-8")
+    )
+    raw_planning_sql = (
+        resources.files("src.history")
+        .joinpath(
+            "migrations/022_evidence_vault_raw_incremental_planning.sql"
+        )
+        .read_text(encoding="utf-8")
+    )
+    raw_replay_sql = (
+        resources.files("src.history")
+        .joinpath(
+            "migrations/023_evidence_vault_raw_replay_projection.sql"
+        )
+        .read_text(encoding="utf-8")
+    )
+
+    assert filenames[13:] == [
+        "014_evidence_vault_operational_memory_v2.sql",
+        "015_evidence_vault_operation_plan_execution.sql",
+        "016_evidence_vault_source_packet_bindings.sql",
+        "017_evidence_vault_capture_lineage.sql",
+        "018_evidence_vault_capture_lineage_hardening.sql",
+        "019_evidence_vault_verified_raw_provenance.sql",
+        "020_evidence_vault_c7_shadow_readiness.sql",
+        "021_evidence_vault_cumulative_landing_hardening.sql",
+        "022_evidence_vault_raw_incremental_planning.sql",
+        "023_evidence_vault_raw_replay_projection.sql",
+    ]
+    assert "packet_kind" in operational_memory_sql
+    assert "operational_source_v2" in operational_memory_sql
+    assert "operational_reviewed_v2" in operational_memory_sql
+    assert "operational_v2" in operational_memory_sql
+    assert (
+        "DROP CONSTRAINT IF EXISTS "
+        "evidence_vault_canonical_memory_brand_id_packet_fingerprint_key"
+        in source_binding_sql
+    )
+    assert "production_runtime_effect" in operation_execution_sql
+    assert "scanner_runtime_effect" in operation_execution_sql
+    assert "CHECK (authority = false)" in operation_execution_sql
+    assert "BEFORE UPDATE OR DELETE" in operation_execution_sql
+    assert "evidence_vault_capture_watermark_events" in capture_lineage_sql
+    assert "capture_sequence" in capture_lineage_sql
+    assert "append_origin = 'capture_observation_commit'" in capture_lineage_sql
+    assert "report_derived_candidate_capture_replay" not in capture_lineage_sql
+    assert "UNIQUE (brand_id, capture_sequence)" in capture_lineage_sql
+    assert "evidence_vault_operational_source_capture_lineage_bindings" in (
+        capture_lineage_sql
+    )
+    assert "evidence_vault_operational_source_capture_lineage_members" in (
+        capture_lineage_sql
+    )
+    assert capture_lineage_sql.count("BEFORE INSERT") == 2
+    assert "predecessor must be sequence N-1" in capture_lineage_sql
+    assert "first lineage checkpoint origin" in capture_lineage_sql
+    assert "lineage checkpoints must be contiguous" in capture_lineage_sql
+    assert capture_lineage_sql.count("BEFORE UPDATE OR DELETE") == 3
+    assert capture_lineage_sql.count("CHECK (authority = false)") == 3
+    assert "evidence_vault_brand_lock_key" in capture_lineage_hardening_sql
+    assert "evidence_vault_canonical_fingerprint" in (
+        capture_lineage_hardening_sql
+    )
+    assert "DEFERRABLE INITIALLY DEFERRED" in capture_lineage_hardening_sql
+    assert "BEFORE TRUNCATE" in capture_lineage_hardening_sql
+    assert "scan identity, request, and observation hash" in (
+        capture_lineage_hardening_sql
+    )
+    assert "evidence_vault_relation_review_source_identity_fk" in (
+        cumulative_landing_sql
+    )
+    assert "evidence_vault_all_operational_packet_payload_check" in (
+        cumulative_landing_sql
+    )
+    assert "terminal Evidence Vault operation plans are immutable" in (
+        cumulative_landing_sql
+    )
+    assert "evidence_vault_operation_plans_no_truncate" in cumulative_landing_sql
+    assert "read_evidence_vault_raw_planning_context" in raw_planning_sql
+    assert "LIMIT 500" in raw_planning_sql
+    assert "evidence_count > 5000" in raw_planning_sql
+    assert "raw planning replay plan exceeds bound" in raw_planning_sql
+    assert "raw planning serialized evidence exceeds bound" in raw_planning_sql
+    assert "evidence-vault-canonical-promotion" in raw_planning_sql
+    assert "accepted_evidence_tile_relations', '[]'::jsonb" in raw_planning_sql
+    assert raw_planning_sql.index("IF existing_plan IS NOT NULL") < raw_planning_sql.index(
+        "SELECT * INTO latest_event"
+    )
+    assert "REVOKE EXECUTE ON FUNCTION" in raw_planning_sql
+    assert "GRANT USAGE, CREATE ON SCHEMA b3s_history" in raw_planning_sql
+    assert "provenance owner retains forbidden schema CREATE" in raw_planning_sql
+    assert "aclexplode" in raw_planning_sql
+    assert "raw scanner function % retains an unexpected EXECUTE grant" in raw_planning_sql
+    assert "CREATE OR REPLACE FUNCTION" in raw_replay_sql
+    assert "scans.metadata - ARRAY[" in raw_replay_sql
+    assert "SET LOCAL ROLE b3s_history_vault_provenance_owner" in raw_replay_sql
+    assert "RESET ROLE" in raw_replay_sql
+    assert "scans.source_run_id" in raw_replay_sql
+    assert "scans.status" in raw_replay_sql
+    assert "scans.error_summary" in raw_replay_sql
+
+
 def test_claim_tile_review_requires_packet_fingerprint() -> None:
     from dataclasses import replace
 
@@ -696,6 +834,67 @@ def test_scoring_recovery_review_repository_is_idempotent_and_optimistic() -> No
     not os.environ.get("B3S_TEST_DATABASE_URL"),
     reason="B3S_TEST_DATABASE_URL is required for PostgreSQL integration",
 )
+def test_concurrent_release_migration_is_database_serialized() -> None:
+    import psycopg
+    from threading import Barrier
+
+    from src.history.repository import PostgresHistoryRepository
+
+    _require_schema_drop_opt_in()
+    dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+    barrier = Barrier(2)
+
+    def migrate_concurrently() -> list[str]:
+        repository = PostgresHistoryRepository(dsn)
+        barrier.wait()
+        return repository.migrate()
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _index: migrate_concurrently(), range(2)))
+        assert sorted(len(result) for result in results) == [0, 23]
+        assert sorted({filename for result in results for filename in result}) == [
+            f"{index:03d}_" + name
+            for index, name in enumerate(
+                [
+                    "history_v1.sql",
+                    "evidence_stability.sql",
+                    "evidence_ledger_shadow.sql",
+                    "evidence_memory_adjudications.sql",
+                    "evidence_claim_reconciliations.sql",
+                    "evidence_claim_tile_ledger.sql",
+                    "evidence_scoring_recovery_reviews.sql",
+                    "evidence_claim_tile_reviews.sql",
+                    "evidence_claim_tile_review_packet_fingerprint.sql",
+                    "evidence_claim_tile_review_packets.sql",
+                    "evidence_vault_canonical_memory.sql",
+                    "evidence_vault_canonical_scoring.sql",
+                    "evidence_scoring_recovery_supplements.sql",
+                    "evidence_vault_operational_memory_v2.sql",
+                    "evidence_vault_operation_plan_execution.sql",
+                    "evidence_vault_source_packet_bindings.sql",
+                    "evidence_vault_capture_lineage.sql",
+                    "evidence_vault_capture_lineage_hardening.sql",
+                    "evidence_vault_verified_raw_provenance.sql",
+                    "evidence_vault_c7_shadow_readiness.sql",
+                    "evidence_vault_cumulative_landing_hardening.sql",
+                    "evidence_vault_raw_incremental_planning.sql",
+                    "evidence_vault_raw_replay_projection.sql",
+                ],
+                start=1,
+            )
+        ]
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL"),
+    reason="B3S_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
 def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
     monkeypatch,
 ) -> None:
@@ -722,14 +921,24 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "004_evidence_memory_adjudications.sql",
             "005_evidence_claim_reconciliations.sql",
             "006_evidence_claim_tile_ledger.sql",
-                "007_evidence_scoring_recovery_reviews.sql",
-                "008_evidence_claim_tile_reviews.sql",
-                "009_evidence_claim_tile_review_packet_fingerprint.sql",
-                "010_evidence_claim_tile_review_packets.sql",
-                "011_evidence_vault_canonical_memory.sql",
-                "012_evidence_vault_canonical_scoring.sql",
-                "013_evidence_scoring_recovery_supplements.sql",
-            ]
+            "007_evidence_scoring_recovery_reviews.sql",
+            "008_evidence_claim_tile_reviews.sql",
+            "009_evidence_claim_tile_review_packet_fingerprint.sql",
+            "010_evidence_claim_tile_review_packets.sql",
+            "011_evidence_vault_canonical_memory.sql",
+            "012_evidence_vault_canonical_scoring.sql",
+            "013_evidence_scoring_recovery_supplements.sql",
+            "014_evidence_vault_operational_memory_v2.sql",
+            "015_evidence_vault_operation_plan_execution.sql",
+            "016_evidence_vault_source_packet_bindings.sql",
+            "017_evidence_vault_capture_lineage.sql",
+            "018_evidence_vault_capture_lineage_hardening.sql",
+            "019_evidence_vault_verified_raw_provenance.sql",
+            "020_evidence_vault_c7_shadow_readiness.sql",
+            "021_evidence_vault_cumulative_landing_hardening.sql",
+            "022_evidence_vault_raw_incremental_planning.sql",
+            "023_evidence_vault_raw_replay_projection.sql",
+        ]
         assert repository.migrate() == []
 
         older = _report("scan-older", "2026-07-01T08:00:00Z", score=61)
@@ -738,6 +947,12 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
         assert old_outcome.status == "imported"
         assert repository.import_report(older).status == "unchanged"
         assert repository.import_report(newer).status == "imported"
+        assert (
+            repository.get_evidence_vault_current_capture_watermark(
+                "example.com"
+            )
+            is None
+        )
 
         current = repository.get_current_brand_state("example.com")
         assert current is not None
@@ -1648,6 +1863,16 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "011_evidence_vault_canonical_memory.sql",
             "012_evidence_vault_canonical_scoring.sql",
             "013_evidence_scoring_recovery_supplements.sql",
+            "014_evidence_vault_operational_memory_v2.sql",
+            "015_evidence_vault_operation_plan_execution.sql",
+            "016_evidence_vault_source_packet_bindings.sql",
+            "017_evidence_vault_capture_lineage.sql",
+            "018_evidence_vault_capture_lineage_hardening.sql",
+            "019_evidence_vault_verified_raw_provenance.sql",
+            "020_evidence_vault_c7_shadow_readiness.sql",
+            "021_evidence_vault_cumulative_landing_hardening.sql",
+            "022_evidence_vault_raw_incremental_planning.sql",
+            "023_evidence_vault_raw_replay_projection.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0
@@ -1679,6 +1904,12 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
                 to_regclass(
                     'b3s_history.evidence_scoring_recovery_supplement_packets'
                 )::text AS recovery_supplement_packet_table,
+                to_regclass(
+                    'b3s_history.evidence_vault_operation_plans'
+                )::text AS vault_operation_plan_table,
+                to_regclass(
+                    'b3s_history.evidence_vault_operational_relation_reviews'
+                )::text AS vault_operational_review_table,
                 (
                     SELECT count(*)
                     FROM b3s_history.schema_migrations
@@ -1706,7 +1937,11 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
         assert stored[6] == (
             "b3s_history.evidence_scoring_recovery_supplement_packets"
         )
-        assert stored[7] == 13
+        assert stored[7] == "b3s_history.evidence_vault_operation_plans"
+        assert stored[8] == (
+            "b3s_history.evidence_vault_operational_relation_reviews"
+        )
+        assert stored[9] == 23
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")

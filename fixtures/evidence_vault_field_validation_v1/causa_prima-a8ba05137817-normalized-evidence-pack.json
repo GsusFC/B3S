@@ -1,0 +1,745 @@
+{
+  "brand_name": "Causa Prima",
+  "evidence": [
+    {
+      "confidence": "medium",
+      "content": "{\"ai_plugin_found\": false, \"avg_internal_links\": 7, \"avg_words\": 347, \"confidence\": 1.0, \"confidence_reason\": [\"sufficient_context_signals\"], \"context_score\": 59.0, \"coverage\": 1.0, \"error\": \"\", \"homepage_status\": 200, \"key_pages\": {\"about\": false, \"blog\": false, \"case_studies\": false, \"changelog\": false, \"docs\": false, \"faq\": true, \"pricing\": false, \"reviews\": false}, \"llms_full_found\": false, \"llms_txt_found\": true, \"opportunities\": [\"Add /about to make brand identity explicit\", \"Add reviews/case studies as proof signals\"], \"pages_crawled\": 1, \"robots_found\": true, \"schema_types\": [\"Organization\"], \"sitemap_found\": true, \"sitemap_url_count\": 34, \"url\": \"https://causaprima.ai\"}",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "acquisition_metadata"
+      },
+      "ref": "raw_inputs.0",
+      "source": "context",
+      "url": "https://causaprima.ai"
+    },
+    {
+      "confidence": "medium",
+      "content": "# The agent-to-agent network  for finance teams.\n\nAI agents that handle invoicing, disputes, and discounts\n\n— so you don’t have to.\n\n[Talk to our team](https://causaprima.ai/#start)\n\nBacked by the world's best\n\n![HelloWorld](https://causaprima.ai/logos/helloworld.svg)![K-Fund](https://causaprima.ai/logos/kfund.svg)![AngelInvest](https://causaprima.ai/logos/angelinvest.svg)![SDAC Ventures](https://causaprima.ai/logos/sdac.svg)![Creandum](https://causaprima.ai/logos/creandum.png)![Borusan Ventures](https://causaprima.ai/logos/borusan.png)![Calafia Iberia](https://causaprima.ai/logos/calafia.svg)![](https://causaprima.ai/logos/helloworld.svg)![](https://causaprima.ai/logos/kfund.svg)![](https:/",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1",
+      "source": "web",
+      "url": "https://causaprima.ai"
+    },
+    {
+      "confidence": "medium",
+      "content": ".ai/logos/creandum.png)![](https://causaprima.ai/logos/borusan.png)![](https://causaprima.ai/logos/calafia.svg)![](https://causaprima.ai/logos/helloworld.svg)![](https://causaprima.ai/logos/kfund.svg)![](https://causaprima.ai/logos/angelinvest.svg)![](https://causaprima.ai/logos/sdac.svg)![](https://causaprima.ai/logos/creandum.png)![](https://causaprima.ai/logos/borusan.png)![](https://causaprima.ai/logos/calafia.svg)![](https://causaprima.ai/logos/helloworld.svg)![](https://causaprima.ai/logos/kfund.svg)![](https://causaprima.ai/logos/angelinvest.svg)![](https://causaprima.ai/logos/sdac.svg)![](https://causaprima.ai/logos/creandum.png)![](https://causaprima.ai/logos/borusan.png)![](https:/",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.2",
+      "source": "web",
+      "url": "https://causaprima.ai"
+    },
+    {
+      "confidence": "medium",
+      "content": "## End the chase between companies.\n\nWe help finance teams handle both sides of every transaction on one network. So money moves on the right terms, at the right time, on its own.",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.3",
+      "source": "web",
+      "url": "https://causaprima.ai"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Agents do the work. You get the money. In seconds.\n\nAlready trusted by 3,000+ accounts.\n\nAcme Co.\n\nBuyer agent\n\nNegotiating · 412 invoices\n\nAtlas Freight\n\nSupplier agent\n\nReconciling · 38 POs\n\nCausa Prima\n\nINV · 8828NET 30\n\n$48,500\n\nAtlas Freight → Acme Co.\n\n● An invoice arrives",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.4",
+      "source": "web",
+      "url": "https://causaprima.ai"
+    },
+    {
+      "confidence": "medium",
+      "content": "## Where buyer and supplier finally meet.\n\nOne network for your entire financial operations — so your team can get back to building the business instead of chasing it.\n\nEnterprise",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.5",
+      "source": "web",
+      "url": "https://causaprima.ai"
+    },
+    {
+      "confidence": "medium",
+      "content": "### Start making money on every invoice.\n\n- Capture millions in early-payment discounts.\n- Scale effortlessly with less manual coordination.\n- More suppliers, same team, better outcomes.\n\n[Talk to our team](https://causaprima.ai/#start)\n\nSMB",
+      "evidence_type": "raw_input",
+      "metadata": {
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.1.chunk.6",
+      "source": "web",
+      "url": "https://causaprima.ai"
+    },
+    {
+      "confidence": "low",
+      "content": "Owned web capture did not find any strategic about/culture/values/manifesto surfaces among crawled URLs.",
+      "evidence_type": "acquisition.attempt.strategic_surfaces",
+      "metadata": {
+        "crawled_url_count": 1,
+        "intent": "strategic_surfaces",
+        "provider": "web",
+        "source_class": "acquisition_metadata",
+        "status": "none_found"
+      },
+      "ref": "raw_inputs.1.diagnostics.strategic_surfaces",
+      "source": "web",
+      "url": null
+    },
+    {
+      "confidence": "low",
+      "content": "Causa Prima Causa Prima — End the chase | Agent-to-agent network for finance teams # The agent-to-agent networkfor finance teams. AI agents that handle invoicing, disputes, and discounts— so you don’t have to. Talk to our team Backed by the world's best ## End the chase between companies. We help finance teams handle both sides of every transaction on one network. So money moves on the right terms, at the right time, on its own. ## Agents do the work. You get the money. In seconds. Already trusted by 3,000+ accounts. ● An invoice arrives ## Where buyer and supplier finally meet. One network for your entire financial operations — so your team can get back to building the business instead of c",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.0",
+      "source": "exa",
+      "url": "https://causaprima.ai/"
+    },
+    {
+      "confidence": "low",
+      "content": "Terms of Service - Causa Prima Terms of Service — Causa Prima Skip to content ... Causa Prima · Legal ... # Terms of Service ... These Terms of Service (the \"Terms\") govern the provision of the Services by Causa Prima Germany GmbH, a limited liability company incorporated under the laws of Germany, registered with the commercial register of the Local Court (Amtsgericht) of Berlin-Charlottenburg under HRB 286382 B, with registered seat in Berlin (\"Causa Prima\"), to the customer that accepts these Terms by electronic acceptance at signup (for example, by clicking \"I agree\") (the \"Customer\"). ... These Terms are standard terms that are not personalised per deal. The \"Services\" are those Causa P",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.1",
+      "source": "exa",
+      "url": "https://causaprima.ai/terms"
+    },
+    {
+      "confidence": "low",
+      "content": "Data Processing Agreement (DPA) — Causa Prima Data Processing Agreement (DPA) — Causa Prima Skip to content ... Causa Prima · Legal ... This Data Processing Agreement (\"DPA\") forms part of the agreement between the Customer identified in the underlying Terms of Service or Design Partner Agreement (the \"Principal Agreement\") and Causa Prima Germany GmbH, registered with the commercial register of the Local Court (Amtsgericht) of Berlin-Charlottenburg under HRB 286382 B, with registered seat in Berlin and business address at Leopoldstraße 31, 80802 München, Germany (\"Causa Prima\"), and governs the Processing of Personal Data by Causa Prima on behalf of the Customer in connection with the Servi",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.2",
+      "source": "exa",
+      "url": "https://causaprima.ai/dpa"
+    },
+    {
+      "confidence": "low",
+      "content": "Scribo Documentation | Scribo Scribo is a free, EN 16931-compliant e-invoicing tool. It generates invoices in the format each jurisdiction requires — today ZUGFeRD and XRechnung for Germany and a plain PDF for the United States; Factur-X (France), Facturae (Spain), and Peppol BIS UBL (Belgium and other EU countries) are coming soon. No credit card — sign in with a magic link sent to your sender email. ... It is the same engine that powers scribo.causaprima.ai, available through five surfaces. Pick one: ... | Surface | When to use | Reference | | --- | --- | --- | | Web UI | One-off invoice from a browser. | scribo.causaprima.ai | | HTTP API | Server-side integration, partner products. | API ",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "2026-05-18T12:50:37.000Z",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.3",
+      "source": "exa",
+      "url": "https://scribo.causaprima.ai/docs"
+    },
+    {
+      "confidence": "low",
+      "content": "Imprint — Causa Prima Imprint — Causa Prima Skip to content Causa Prima · Legal # Imprint ## Provider Causa Prima Germany GmbHLeopoldstraße 3180802 MunichGermany ## Represented by Managing Director: Philip Stanislaus ## Contact E-mail: security@causaprima.ai ## Commercial register Registered with the commercial register of the Local Court (Amtsgericht) of Berlin-CharlottenburgRegistration number: HRB 286382 B ## VAT identification number VAT ID pursuant to § 27 a German VAT Act: DE462730094 Imprint — Causa Prima Skip to content Causa Prima · Legal # Imprint ## Provider Causa Prima Germany GmbHLeopoldstraße 3180802 MunichGermany ## Represented by Managing Director: Philip Stanislaus ## Contac",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.4",
+      "source": "exa",
+      "url": "https://causaprima.ai/imprint"
+    },
+    {
+      "confidence": "low",
+      "content": "Scribo HTTP API | Scribo Docs Scribo HTTP API | Scribo Docs ... The`/api/v1/*` namespace is the public Scribo contract — anonymous and rate-limited. The OpenAPI 3.1 spec is canonical and lives at/api/v1/openapi.json. ... ``` Base URL (production): https://scribo.causaprima.ai Base URL (local dev): http://localhost:3200 ``` ... The internal`/internal/scribo/*` namespace is used only by the Causa Prima web app and the MCP server. It is not part of this contract — do not depend on it. ... | Method | Path | Description | | --- | --- | --- | | `POST` | `/api/v1/invoices` | Generate a compliant e-invoice. | | `GET` | `/api/v1/invoices/{id}/download` | Stream the invoice file bytes. | | `GET` | `/a",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "2026-05-18T12:51:01.000Z",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.5",
+      "source": "exa",
+      "url": "https://scribo.causaprima.ai/docs/api"
+    },
+    {
+      "confidence": "low",
+      "content": "Scribo Skill for Claude, ChatGPT & Codex | Scribo Docs Scribo Skill for Claude, ChatGPT & Codex | Scribo Docs ... The Scribo skill lets any Claude-, ChatGPT-, or Codex-powered assistant generate EN 16931-compliant e-invoices through the public Scribo API. It ships as plain`bash`+`curl`+`jq` helper scripts — no MCP server, no npm install, no Node.js. ... One`SKILL.md` package —`skills/scribo/SKILL.md` in github.com/causa-prima-ai/scribo-skill— three install methods. Pick the row that matches how you run Claude, ChatGPT, or Codex: ... | Install method | Surfaces it covers | Command | | --- | --- | --- | | `/plugin install`(Claude Code marketplace — live) | Claude Code (CLI) | `/plugin marketpl",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "2026-05-18T17:55:11.000Z",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.6",
+      "source": "exa",
+      "url": "https://scribo.causaprima.ai/docs/skill"
+    },
+    {
+      "confidence": "low",
+      "content": "Sub-processors — Causa Prima Sub-processors — Causa Prima Skip to content Causa Prima · Legal # Sub-processors Causa Prima Germany GmbH (\"Causa Prima\") uses the third-party providers (\"sub-processors\") listed below to provide its services. This list applies to all customer-facing products operated by Causa Prima — the Causa Prima Main Application, Scribo and Byll. This page is referenced from the Causa Prima Data Processing Agreement (the \"DPA\"). Under the DPA, Causa Prima publishes any intended addition or replacement of a sub-processor on this page at least 15 days in advance. Customers may subscribe to updates and may object to a new sub-processor on reasonable data-protection grounds wit",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.7",
+      "source": "exa",
+      "url": "https://causaprima.ai/sub-processors"
+    },
+    {
+      "confidence": "low",
+      "content": "Privacy policy | Scribo Last updated: 2026-05-22. Scribo is operated by Causa Prima Germany GmbH, Munich. ... This Privacy Policy explains how Causa Prima Germany GmbH (“Causa Prima”, “we”, “us”) processes personal data in connection with Scribo, a free, conversational, EN 16931-compliant e-invoicing tool operated by Causa Prima at https://scribo.causaprima.ai(the “Service”). ... Causa Prima Germany GmbHLeopoldstraße 31, 80802 München, GermanyRegistered with the Local Court Charlottenburg under HRB 286382 BManaging Director: Philip StanislausE-mail: security@causaprima.ai ... When a Scribo user uses the Service, the user is the Controller of the personal data processed within their workspace",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.8",
+      "source": "exa",
+      "url": "https://scribo.causaprima.ai/privacy"
+    },
+    {
+      "confidence": "low",
+      "content": "Scribo MCP Server | Scribo Docs Scribo MCP Server | Scribo Docs ... # #Scribo MCP Server ... The official Scribo Model Context Protocol server is a hosted endpoint at: ... ``` https://scribo.causaprima.ai/mcp ``` ... It speaks MCP over Streamable HTTP with JSON-RPC 2.0. Any MCP-aware client — Claude Desktop, Cursor, Cline, ChatGPT App, OpenAI Codex CLI, Smithery's remote registry, your own client — can call it directly. No npm install, no local process to manage. ... - Name:`Scribo` - URL:`https://scribo.causaprima.ai/mcp` ... Save. Scribo's four tools (`create_invoice`,`verify_email_code`,`get_invoice`,`list_supported_jurisdictions`) appear in the connector list for any new chat. Ask: \"draf",
+      "evidence_type": "external_proof.owned_confirmation",
+      "metadata": {
+        "identity_match": "domain",
+        "intent": "owned_confirmation",
+        "provider": "exa",
+        "published_date": "2026-05-18T14:06:33.000Z",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "owned_copy"
+      },
+      "ref": "raw_inputs.2.exa.mentions.9",
+      "source": "exa",
+      "url": "https://scribo.causaprima.ai/docs/mcp"
+    },
+    {
+      "confidence": "low",
+      "content": "Causa Prima Aims to Revolutionise Supply Chain Finance Causa Prima Aims to Revolutionise Supply Chain Finance ... # Taulia Co-Founder Ament Launches Causa Prima to Reinvent B2B Finance Causa Prima Aims to Revolutionise Supply Chain Finance # Taulia Co-Founder Ament Launches Causa Prima to Reinvent B2B Finance - My Profile - June 18, 2026 ## Registered Reader Membership Required You must be a Registered Reader member to access this content. Already a member? Log in here ## Latest news ### Ben Moshe moves into operations as Teva targets next phase June 18, 2026 ### Alan Verschoyle King to chair new AI-powered working capital fintech Nifina June 4, 2026 ### ETR Digital and Investec complete fir",
+      "evidence_type": "external_proof.external_mentions",
+      "metadata": {
+        "identity_match": "brand_name",
+        "intent": "external_mentions",
+        "provider": "exa",
+        "published_date": "2026-06-18T08:58:55.000Z",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.mentions.10",
+      "source": "exa",
+      "url": "https://www.workingcapitalforum.com/news/causa-prima-launches-with-ament-at-the-helm"
+    },
+    {
+      "confidence": "low",
+      "content": "Causa Prima raises $10M to let AI agents negotiate B2B payments Causa Prima raises $10M to let AI agents negotiate B2B payments ... - Causa Prima raises $10M to let AI agents negotiate B2B payments ... # Causa Prima raises $10M to let AI agents negotiate B2B payments ... parties on the same ... If you ever needed hard evidence that AI agents are about to take over the work of humans, this is it. German/Madrid startups Causa Prima has emerged from stealth with a $10 million pre-seed round to build a financial network where AI agents negotiate directly between corporate buyers and suppliers. ... Creandum led the round, with participation from Kfund, HelloWorld and Angel Invest. Founders and ex",
+      "evidence_type": "external_proof.external_mentions",
+      "metadata": {
+        "identity_match": "brand_name",
+        "intent": "external_mentions",
+        "provider": "exa",
+        "published_date": "2026-06-16T15:38:39.000Z",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.mentions.11",
+      "source": "exa",
+      "url": "https://pathfounders.com/p/causa-prima-raises-10m-to-let-ai-agents-negotiate"
+    },
+    {
+      "confidence": "low",
+      "content": "Causa Prima launches with €8.5 million in pre-seed funding - Munich Startup Causa Prima launches with €8.5 million in pre-seed funding - Munich Startup ... Will payment terms like Net-30, Net-60, or Net-90 soon be a thing of the past in the B2B sector? A simpler and more efficient solution is being developed. Causa Prima And the process could be accelerated even further, as the company is now receiving pre-seed funding of more than 8 million euros (10 million dollars). ... The funding round is led by Creandum, with other investors including Kfund, HelloWorld, and business angels from companies such as Qonto, Pennylane, SAP, ING, SoFi, Lidl, and DeepMind. Causa Prima plans to use the new capi",
+      "evidence_type": "external_proof.external_mentions",
+      "metadata": {
+        "identity_match": "brand_name",
+        "intent": "external_mentions",
+        "provider": "exa",
+        "published_date": "2026-06-18T07:07:00.000Z",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.mentions.12",
+      "source": "exa",
+      "url": "https://www.munich-startup.de/en/122150/causa-prima-pre-seed-financing/"
+    },
+    {
+      "confidence": "low",
+      "content": "Causa Prima Raises $10 Million Pre-Seed Round Backed by Borusan Ventures and Creandum – The Disruptor Magazine Causa Prima Raises $10 Million Pre-Seed Round Backed by Borusan Ventures and Creandum – The Disruptor Magazine ... Causa Prima, a startup building AI-powered infrastructure for B2B finance, has raised $10 million in a pre-seed funding round led by Creandum, with participation from Borusan Ventures, Kfund, HelloWorld, Angel Invest, and a group of angel investors from companies including Qonto, Pennylane, SAP, ING, SoFi, Lidl, and Google DeepMind. ... The company is tackling one of the most persistent inefficiencies in enterprise finance: the fragmented systems used by buyers and supp",
+      "evidence_type": "external_proof.external_mentions",
+      "metadata": {
+        "identity_match": "brand_name",
+        "intent": "external_mentions",
+        "provider": "exa",
+        "published_date": "2026-06-23T22:33:16.000Z",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.mentions.13",
+      "source": "exa",
+      "url": "https://thedisruptormag.com/causa-prima-raises-10-million-pre-seed-round-backed-by-borusan-ventures-and-creandum/"
+    },
+    {
+      "confidence": "low",
+      "content": "Causa Prima Raises $10M Pre-seed Causa Prima Raises $10M Pre-seed Causa Prima Raises $10M Pre-seed ... Causa Prima, based in Madrid and Munich, is a fintech startup that provides a shared network for B2B payments where AI agents for buyers and suppliers automatically handle invoices, disputes, and payment terms. The company has raised $10 million in pre-seed funding to advance its two-sided network platform. ... The round was led by Creandum, a venture firm known for backing Klarna and Spotify. Additional participating investors include Kfund, HelloWorld, Angel Invest, and angel investors from Qonto, Pennylane, SAP, ING, SoFi, LIDL, and DeepMind. ... Causa Prima ... The new capital will be u",
+      "evidence_type": "external_proof.external_mentions",
+      "metadata": {
+        "identity_match": "brand_name",
+        "intent": "external_mentions",
+        "provider": "exa",
+        "published_date": "2026-06-16T04:37:10.000Z",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.mentions.14",
+      "source": "exa",
+      "url": "https://www.thesaasnews.com/news/causa-prima-raises-10m-pre-seed/"
+    },
+    {
+      "confidence": "low",
+      "content": "Causa Prima raises $10M pre-seed led by Creandum for agent-to-agent B2B payments | Dealroom.co Causa Prima raises $10M pre-seed led by Creandum for agent-to-agent B2B payments | Dealroom.co ... # Causa Prima raises $10M pre-seed led by Creandum for agent-to-agent B2B payments ... What's the deal? Madrid- and Munich-based Causa Prima has raised $10M in pre-seed funding to build a shared network where AI agents for buyers and suppliers automatically handle invoices, disputes, and payment-term negotiations. Creandum— the firm behind Klarna, Spotify, and Trade Republic — led the round, with support from Kfund, HelloWorld, Angel Invest, and angels from Qonto, Pennylane, SAP, ING, SoFi, LIDL, and ",
+      "evidence_type": "external_proof.external_mentions",
+      "metadata": {
+        "identity_match": "brand_name",
+        "intent": "external_mentions",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.mentions.15",
+      "source": "exa",
+      "url": "https://app.dealroom.co/news/note/causa-prima-raises-10m-pre-seed-led-by-creandum-for-agent-to-agent-b2b-payments"
+    },
+    {
+      "confidence": "low",
+      "content": "Causa Prima: KI-Agenten verhandeln B2B-Zahlungen direkt gegen SAP Causa Prima: KI-Agenten verhandeln B2B-Zahlungen direkt gegen SAP ... WALDORF / LONDON (IT BOLTWISE) – Causa Prima will mit KI-Agenten B2B-Zahlungsziele und Rabatte in Echtzeit optimieren und dabei ohne klassische Lizenzkosten auskommen. Das Start-up wird mit 10 Millionen US-Dollar von Creandum unterstützt und setzt auf eine schnelle, komplementäre Integration in bestehende ERP-Landschaften. Im Wettbewerb mit anderen Agenten-Start-ups wie Plato entsteht damit ein neues Angriffsmuster gegen SAP s lukrative Randbereiche der Prozessautomatisierung. Für Unternehmen bedeutet das vor allem: weniger manuelle Verhandlungen, aber neue ",
+      "evidence_type": "external_proof.external_mentions",
+      "metadata": {
+        "identity_match": "brand_name",
+        "intent": "external_mentions",
+        "provider": "exa",
+        "published_date": "2026-06-18T09:22:34.000Z",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.mentions.16",
+      "source": "exa",
+      "url": "https://www.it-boltwise.de/causa-prima-ki-agenten-verhandeln-b2b-zahlungen-direkt-gegen-sap.html"
+    },
+    {
+      "confidence": "low",
+      "content": "Neues KI-Fintech Causa Prima erhält 10 Millionen Dollar – Creandum steigt ein | FinanceFWD Neues KI-Fintech Causa Prima erhält 10 Millionen Dollar – Creandum steigt ein | FinanceFWD ... Die Causa ... # Neues KI-Fintech Causa Prima erhält 10 Millionen Dollar – Creandum steigt ein ... Für fast eine Milliarde Dollar verkaufte Maex Ament sein Unternehmen Taulia einst an SAP. Nun bekommt er Kapital für das nächste Finanz-Start-up – was wieder eine auffällige Nähe zu den Produkten des Softwarekonzerns hat. ... erfolgreichsten deutschen ... sein Name weitgehend ... Und zwar mit einem neuen Fintech-Projekt. Mit Causa Prima will er die Zahlungen zwischen Firmen per Agenten vereinfachen. „Wenn ein Lie",
+      "evidence_type": "external_proof.external_mentions",
+      "metadata": {
+        "identity_match": "brand_name",
+        "intent": "external_mentions",
+        "provider": "exa",
+        "published_date": "2026-06-16T04:00:36.000Z",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.mentions.17",
+      "source": "exa",
+      "url": "https://financefwd.com/de/neues-ki-fintech-causa-prima-erhaelt-10-millionen-dollar-creandum-steigt-ein/"
+    },
+    {
+      "confidence": "low",
+      "content": "Causa Prima elige Madrid y levanta 8,6 millones para crear la infraestructura financiera de los agentes de IA Causa Prima elige Madrid y levanta 8,6 millones para crear la infraestructura financiera de los agentes de IA ... La alemana Causa Prima ha escogido Madrid como una de sus sedes para levantar su nuevo proyecto tecnológico: una infraestructura financiera pensada para que los agentes de inteligencia artificial puedan operar dentro de procesos empresariales reales. La startup nace con una ronda de 10 millones de dólares, unos 8,6 millones de euros, liderada por el fondo sueco Creandum. ... Causa Prima no quiere limitarse a crear otro software financiero. Su objetivo es construir una red",
+      "evidence_type": "external_proof.external_mentions",
+      "metadata": {
+        "identity_match": "brand_name",
+        "intent": "external_mentions",
+        "provider": "exa",
+        "published_date": "2026-06-16T08:53:15.000Z",
+        "result_group": "mentions",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.mentions.18",
+      "source": "exa",
+      "url": "https://elcapitaldigital.com/causa-prima-elige-madrid-y-levanta-86-millones-para-crear-la-infraestructura-financiera-de-los-agentes-de-ia/"
+    },
+    {
+      "confidence": "low",
+      "content": "Causa Prima capta 8,6 millones en una ronda ‘pre-seed’ para su IA financiera con Creandum, Kfund, HelloWorld y Angel Invest | Empresas | Cinco Días Causa Prima capta 8,6 millones en una ronda ‘pre-seed’ para su IA financiera con Creandum, Kfund, HelloWorld y Angel Invest | Empresas | Cinco DíasIr al contenido ... Causa Prima, start-up española que ha desarrollado una de las primeras redes de inteligencia artificial (IA) agente a agente para las finanzas B2B, ha cerrado una ronda pre-seed de 10 millones de dólares (unos 8,61 millones de euros). La transacción ha estado liderada por Creandum, con la participación de Kfund, HelloWorld y Angel Invest, además de distintos business angels proceden",
+      "evidence_type": "external_proof.news",
+      "metadata": {
+        "identity_match": "brand_name",
+        "intent": "news",
+        "provider": "exa",
+        "published_date": "2026-06-16T04:00:00.000Z",
+        "result_group": "news",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.news.3",
+      "source": "exa",
+      "url": "https://cincodias.elpais.com/companias/2026-06-16/causa-prima-capta-86-millones-en-una-ronda-pre-seed-para-su-ia-financiera-con-creandum-kfund-helloworld-y-angel-invest.html"
+    },
+    {
+      "confidence": "low",
+      "content": "Causa Prima levanta 8,6 millones para automatizar facturas Causa Prima levanta 8,6 millones para automatizar facturas ... Causa Prima acaba de levantar 8,6 millones de euros para automatizar facturas, disputas y condiciones de pago entre empresas. La noticia no afecta mañana a todos los autónomos, pero sí marca hacia dónde se mueve la gestión financiera B2B en España. ... Causa Prima levanta 8 6 millones y confirma el avance de la IA financiera B2B. ... - Jubilación - Publicada 17 junio 2026 16:50h ... ## Causa Prima pone el foco en el punto más incómodo: cobrar y pagar entre empresas ... La startup Causa Prima ha cerrado una ronda pre-seed de 10 millones de dólares, unos 8,6 millones de eur",
+      "evidence_type": "external_proof.news",
+      "metadata": {
+        "identity_match": "brand_name",
+        "intent": "news",
+        "provider": "exa",
+        "published_date": "2026-06-17T14:50:00.000Z",
+        "result_group": "news",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.news.7",
+      "source": "exa",
+      "url": "https://finantresnoticias.com/negocios-y-autonomos/causa-prima-levanta-86-millones-para-automatizar-facturas/"
+    },
+    {
+      "confidence": "low",
+      "content": "Causa Prima Causa Prima is a Technology, Information and Internet company. Causa Prima employs 15 people. Headquartered in Munich, Bayern, Germany, operates in 6 countries (including Spain, United States, United Kingdom, United Arab Emirates, and France). ... Causa Prima is the first agent-to-agent network designed to stop the endless chase for money between companies. Unlike existing finance tools built to serve one side of a transaction, Causa Prima puts buyers and suppliers on the same network. AI agents handle invoicing, disputes, and discounts — so finance teams don't have to. Built by the team behind Taulia and Finoa, Causa Prima already serves 3,000+ accounts. ... - Industry: Technolo",
+      "evidence_type": "external_proof.ai_visibility",
+      "metadata": {
+        "identity_match": "brand_name",
+        "intent": "ai_visibility",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "ai_visibility_results",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.ai_visibility_results.1",
+      "source": "exa",
+      "url": "https://www.linkedin.com/company/causa-prima"
+    },
+    {
+      "confidence": "low",
+      "content": "Causa Prima An AI-driven fintech platform deploying autonomous agents to model, negotiate, and manage financial relationships with causal-graph technology, providing transparent, explainable insights for smarter, automated finance operations. ... ## About Causa Prima ... Causaprima.ai ist ein innovatives Fintech-Startup, das sich auf die Entwicklung einer AI-gestützten Plattform spezialisiert hat, welche autonome Agenten verwendet, um Finanztransaktionen und -beziehungen in Unternehmen intelligent zu steuern. Das Unternehmen wurde von Experten mit jahrzehntelanger Erfahrung im Payment-Sektor und im Aufbau großer Fintech-Lösungen gegründet, darunter die Köpfe hinter Taulia und Finoa. Die Plat",
+      "evidence_type": "external_proof.ai_visibility",
+      "metadata": {
+        "identity_match": "brand_name",
+        "intent": "ai_visibility",
+        "provider": "exa",
+        "published_date": "None",
+        "result_group": "ai_visibility_results",
+        "score": 0.0,
+        "source_class": "external_proof"
+      },
+      "ref": "raw_inputs.2.exa.ai_visibility_results.2",
+      "source": "exa",
+      "url": "https://www.startbase.com/organization/causa-prima/"
+    },
+    {
+      "confidence": "low",
+      "content": "Exa no_results for external proof intent 'external_profiles'. Query: \"Causa Prima\" \"causaprima.ai\" company profile linkedin crunchbase business directory services.",
+      "evidence_type": "acquisition.no_results",
+      "metadata": {
+        "intent": "external_profiles",
+        "provider": "exa",
+        "source_class": "acquisition_metadata",
+        "status": "no_results"
+      },
+      "ref": "raw_inputs.2.exa.diagnostics.no_results.0",
+      "source": "exa",
+      "url": null
+    },
+    {
+      "confidence": "low",
+      "content": "github acquisition attempt for 'repository_proof' ended with status 'skipped'. Query: no GitHub repository links observed on owned capture.",
+      "evidence_type": "acquisition.attempt.repository_proof",
+      "metadata": {
+        "error": "",
+        "intent": "repository_proof",
+        "provider": "github",
+        "query": "no GitHub repository links observed on owned capture",
+        "source_class": "acquisition_metadata",
+        "status": "skipped"
+      },
+      "ref": "acquisition_steps.github",
+      "source": "github",
+      "url": null
+    },
+    {
+      "confidence": "low",
+      "content": "searchapi acquisition attempt for 'external_proof' ended with status 'skipped'. Query: no failed or empty Exa intents eligible for SearchAPI fallback.",
+      "evidence_type": "acquisition.attempt.external_proof",
+      "metadata": {
+        "error": "",
+        "intent": "external_proof",
+        "provider": "searchapi",
+        "query": "no failed or empty Exa intents eligible for SearchAPI fallback",
+        "source_class": "acquisition_metadata",
+        "status": "skipped"
+      },
+      "ref": "acquisition_steps.searchapi",
+      "source": "searchapi",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "capture_status=usable; first_fold_evaluable=True",
+      "evidence_type": "visual_capture",
+      "metadata": {
+        "capture": {
+          "available": true,
+          "capture_variant": "viewport",
+          "captured_at": "2026-07-08T11:16:44.793622",
+          "first_fold_evaluable": true,
+          "obstruction": {
+            "confidence": 0.67,
+            "coverage_ratio": 0.161,
+            "first_impression_valid": true,
+            "present": true,
+            "severity": "moderate",
+            "signals": [
+              "dom_keyword:cookie",
+              "dom_keyword:consent",
+              "dom_keyword:discount",
+              "viewport_bottom_bar_pattern"
+            ],
+            "type": "unknown_overlay"
+          },
+          "path": "/Users/gsus/Antigravity/B3S/data/screenshots/brand3-screenshot-nlfb1o_f.png",
+          "quality": "usable",
+          "status": "usable",
+          "url_final": "https://causaprima.ai",
+          "url_requested": "https://causaprima.ai",
+          "viewport": {
+            "height": 1200,
+            "width": 1440
+          }
+        },
+        "source_class": "visual_signal"
+      },
+      "ref": "visual_signature.capture",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "multimodal_semantics_unavailable copy_visual_alignment:unknown consistency:0.563",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "coherencia.C6"
+      },
+      "ref": "visual_signature.tile_signals.0",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "low",
+      "content": "visual_signal_score:0.5 logo_detected:true text_brand_mark:true confidence:0.5",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "brand_idea.I1"
+      },
+      "ref": "visual_signature.tile_signals.1",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "visual_signal_score:0.563 visual_tone:functional consistency:0.563",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "brand_idea.I2"
+      },
+      "ref": "visual_signature.tile_signals.2",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "multimodal_semantics_unavailable first_impression:unknown polish:0.0",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "brand_idea.I3"
+      },
+      "ref": "visual_signature.tile_signals.3",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "visual_signal_score:0.72 layout_patterns:grid",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "supports",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "brand_idea.I6"
+      },
+      "ref": "visual_signature.tile_signals.4",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "visual_signal_score:0.7 visual_density:sparse",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "supports",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "brand_idea.I7"
+      },
+      "ref": "visual_signature.tile_signals.5",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "visual_signal_score:0.563 palette_complexity:low",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "brand_idea.I8"
+      },
+      "ref": "visual_signature.tile_signals.6",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "visual_signal_score:0.43 distinctiveness:low score:0.43",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "brand_idea.I9"
+      },
+      "ref": "visual_signature.tile_signals.7",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "multimodal_semantics_unavailable copy_visual_alignment:unknown",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "core_purpose.PR8"
+      },
+      "ref": "visual_signature.tile_signals.8",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "multimodal_semantics_unavailable visual_polish:0.0",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "magnetism.MG1"
+      },
+      "ref": "visual_signature.tile_signals.9",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "visual_signal_score:0.43 category_fit:structured_marketing distinctiveness:0.43",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "magnetism.MG5"
+      },
+      "ref": "visual_signature.tile_signals.10",
+      "source": "visual_signature",
+      "url": null
+    },
+    {
+      "confidence": "medium",
+      "content": "multimodal_semantics_unavailable copy_alignment_present:false",
+      "evidence_type": "visual_tile_signal",
+      "metadata": {
+        "effect": "insufficient_evidence",
+        "source": "heuristic",
+        "source_class": "visual_signal",
+        "tile": "magnetism.MG7"
+      },
+      "ref": "visual_signature.tile_signals.11",
+      "source": "visual_signature",
+      "url": null
+    }
+  ],
+  "limitations": [],
+  "schema_version": "brand-evidence-pack-v1",
+  "url": "https://causaprima.ai"
+}

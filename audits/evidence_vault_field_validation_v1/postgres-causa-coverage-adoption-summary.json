@@ -1,0 +1,99 @@
+{
+  "accepted_relation_count": 11,
+  "accepted_tile_ids": [
+    "MG10",
+    "P1",
+    "P3",
+    "P5",
+    "PR3"
+  ],
+  "adoption_counts": [
+    {
+      "adoption_kind": "operational_v2",
+      "max_sequence": 2,
+      "n": 2
+    }
+  ],
+  "adoption_event_id": "145f74b8-9d60-54be-9a5b-42ab5dc4aef6",
+  "adoption_sequence": 2,
+  "assessment_adoption_eligible_count": 0,
+  "assessment_review_persisted_to_vault": false,
+  "authority": true,
+  "authority_coverage": {
+    "accepted_no_count": 0,
+    "accepted_ok_count": 5,
+    "accepted_sin_evidencia_count": 0,
+    "accepted_tile_count": 5,
+    "canonical_score_status": "current",
+    "contradiction_count": 0,
+    "contradiction_on_accepted_count": 0,
+    "contradiction_on_unresolved_count": 0,
+    "pending_change_tile_count": 0,
+    "pending_initial_tile_count": 0,
+    "score_completeness": "partial",
+    "score_weight_authority_coverage_ratio": 0.06,
+    "tile_authority_coverage_ratio": 0.0625,
+    "tile_count": 80,
+    "unresolved_tile_count": 75
+  },
+  "authority_scope": "b3s-vault",
+  "brand_identity": "causaprima.ai",
+  "canonical_memory_version": "b1bafe845ab85a888f71b044681eee69cd0548d0462a76d9288ecbc7074b887a",
+  "coverage_request_fingerprint": "f1259a9cf30fc28da07e85a0f4367ffeea6552cd83f864b4c32528e6cab0ffe7",
+  "coverage_result_fingerprint": "5f329620915bfe591be503f92500292ab8f8676784b8787de5a4383154434447",
+  "coverage_source_authority": false,
+  "coverage_source_count": 1,
+  "coverage_source_runtime_effect": false,
+  "cutover_authorized": false,
+  "database_classification": "disposable_local_postgresql",
+  "database_stopped_after_dump": true,
+  "dump": {
+    "bytes": 431072,
+    "path": "/private/tmp/b3s-vault-causa-supplement-human-adoption-v1.dump",
+    "sha256": "422f5918b7d2b39250922e1c74717559e9f475c9b72e10813d08bd3fd9c4618b"
+  },
+  "economic_event_count": 1,
+  "evaluation_counts": [
+    {
+      "evaluation_kind": "operational_v2",
+      "n": 2
+    }
+  ],
+  "new_relation_count": 4,
+  "packet_counts": [
+    {
+      "n": 2,
+      "packet_kind": "operational_reviewed_v2"
+    },
+    {
+      "n": 2,
+      "packet_kind": "operational_source_v2"
+    },
+    {
+      "n": 3,
+      "packet_kind": "operational_v2"
+    }
+  ],
+  "parent_canonical_memory_version": "1423ffd3fdce0e7e29d8adce16f91ad1b1f93be29a252aa6f545b809f50f78c4",
+  "previous_event_id": "09c7d710-2105-5240-a020-85f6076d8571",
+  "production_runtime_effect": false,
+  "publisher_source_identity_count": 4,
+  "review_counts": [
+    {
+      "decision": "accept",
+      "n": 11
+    },
+    {
+      "decision": "reject",
+      "n": 4
+    }
+  ],
+  "reviewed_at": "2026-08-07T11:43:10+02:00",
+  "reviewer_id": "gsus",
+  "scanner_runtime_effect": false,
+  "schema_version": "evidence-vault-postgres-coverage-adoption-summary-v1",
+  "score": 6,
+  "score_evaluation_identity": "f52fab50a71cbc6dad60bb39c15508bff40c557398e1ce46450391839194a5f3",
+  "source_candidate_packet_fingerprint": "8cb9534d94bf50786122b64c553ff5fc7ab36a5a534a568632c29d8ce1572738",
+  "source_evidence_pack_sha256": "33a1af7c0128dc9a02a250e1b2f1d9f3ee2693a8bf0003e96b88d0d57ddc65b6"
+}

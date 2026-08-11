@@ -1,0 +1,247 @@
+{
+  "audit_fingerprint": "f4709c3522e1bed851fc42a7b4a4f8c9162fa8d5755e5f9938d2fdb557d0ded9",
+  "authority": false,
+  "brand_identity": "causaprima.ai",
+  "cutover_authorized": false,
+  "limitations": [
+    "The independent audit is a semantic candidate source, not authority.",
+    "Quotes absent from the normalized pack cannot enter the supplement.",
+    "Composite candidates require joint human review; their rows must not be authorized independently."
+  ],
+  "production_runtime_effect": false,
+  "provider_relation_supplement_v2_result_fingerprint": "5f329620915bfe591be503f92500292ab8f8676784b8787de5a4383154434447",
+  "provider_relation_uncovered_target_tile_ids": [
+    "C7",
+    "I9",
+    "MG1",
+    "MG3",
+    "MG5",
+    "V3",
+    "VA4"
+  ],
+  "review_effect": "coverage_assessment_only_no_adoption",
+  "review_instructions": {
+    "allowed_human_decisions": [
+      "accept",
+      "reject"
+    ],
+    "decision_meaning": "accept or reject the proposed_disposition; this never authorizes relations or adoption",
+    "effect": "coverage_assessment_only_no_adoption",
+    "required_fields": [
+      "human_decision",
+      "human_rationale",
+      "reviewer_id",
+      "reviewed_at"
+    ]
+  },
+  "runtime_effect": false,
+  "scanner_runtime_effect": false,
+  "schema_version": "evidence-vault-independent-contract-audit-v1",
+  "source_evidence_pack_canonical_sha256": "33a1af7c0128dc9a02a250e1b2f1d9f3ee2693a8bf0003e96b88d0d57ddc65b6",
+  "source_pack_scope": "normalized_evidence_pack_only",
+  "subject_url": "https://causaprima.ai",
+  "target_tile_ids": [
+    "C7",
+    "I9",
+    "MG1",
+    "MG10",
+    "MG3",
+    "MG5",
+    "V3",
+    "VA4"
+  ],
+  "tile_assessments": [
+    {
+      "adoption_eligible": false,
+      "candidate_id": "9354910c3567cd45bc22818809aa287d042afee7de40c8e9f9b12eb39a91bee7",
+      "contract_reason": "A concrete compressed promise combines work removal, money and speed; no page-position inference is needed.",
+      "decision_event_id": null,
+      "evidence": [
+        {
+          "evidence_fingerprint": "d6922d43bd59f0aec70211c1a5680e311217a35a03195e9047c57461131dcefd",
+          "evidence_id": "9aa92553f2378e8c223636f10569d35d50fcf0cc82134acdc35ac61abea6f3ed",
+          "literal_quote": "Agents do the work. You get the money. In seconds.",
+          "ref": "raw_inputs.1.chunk.4",
+          "source_class": "owned_copy",
+          "source_identity_id": "13c2ae2cd3f6dc69b9716a511671a7f7f2a60374e4a1653e7bb03ab9c28f7a65",
+          "url": "https://causaprima.ai"
+        }
+      ],
+      "limitation": "The provider relation pass omitted this pair, so unattended proposal recall is not yet acceptable.",
+      "proposed_disposition": "accept",
+      "review_status": "unreviewed",
+      "source_evidence_pack_canonical_sha256": "33a1af7c0128dc9a02a250e1b2f1d9f3ee2693a8bf0003e96b88d0d57ddc65b6",
+      "status": "candidate",
+      "tile_id": "MG1"
+    },
+    {
+      "adoption_eligible": false,
+      "candidate_id": "2cca8534f2d08094c683d38edc0d816d4ad0a6b097d4d45abb0869d46ca5482d",
+      "contract_reason": "The literal names the audience and a conflict/tension rather than only the category.",
+      "decision_event_id": null,
+      "evidence": [
+        {
+          "evidence_fingerprint": "7081bec9928a5506baf8ee431cc1f28c752c1fbeafcd37b64043506bd3bf85aa",
+          "evidence_id": "e0f34077e493f4e44d02ea04b4406a55a84ed60ff75a998d48a0a201a138bd43",
+          "literal_quote": "End the chase between companies.\n\nWe help finance teams handle both sides of every transaction on one network.",
+          "ref": "raw_inputs.1.chunk.3",
+          "source_class": "owned_copy",
+          "source_identity_id": "13c2ae2cd3f6dc69b9716a511671a7f7f2a60374e4a1653e7bb03ab9c28f7a65",
+          "url": "https://causaprima.ai"
+        }
+      ],
+      "limitation": "The provider relation pass omitted this pair; human contract review is required.",
+      "proposed_disposition": "accept",
+      "review_status": "unreviewed",
+      "source_evidence_pack_canonical_sha256": "33a1af7c0128dc9a02a250e1b2f1d9f3ee2693a8bf0003e96b88d0d57ddc65b6",
+      "status": "candidate",
+      "tile_id": "MG3"
+    },
+    {
+      "adoption_eligible": false,
+      "candidate_id": "c39997c373830e01da3e7ff899918fa9c06f7cf7a39ba95ec064f541e6825348",
+      "contract_reason": "A short self-contained verbal unit carries conflict and repeatable narrative utility.",
+      "decision_event_id": null,
+      "evidence": [
+        {
+          "evidence_fingerprint": "7081bec9928a5506baf8ee431cc1f28c752c1fbeafcd37b64043506bd3bf85aa",
+          "evidence_id": "e0f34077e493f4e44d02ea04b4406a55a84ed60ff75a998d48a0a201a138bd43",
+          "literal_quote": "End the chase between companies.",
+          "ref": "raw_inputs.1.chunk.3",
+          "source_class": "owned_copy",
+          "source_identity_id": "13c2ae2cd3f6dc69b9716a511671a7f7f2a60374e4a1653e7bb03ab9c28f7a65",
+          "url": "https://causaprima.ai"
+        }
+      ],
+      "limitation": "The provider relation pass omitted this pair; memorability remains a human judgment.",
+      "proposed_disposition": "accept",
+      "review_status": "unreviewed",
+      "source_evidence_pack_canonical_sha256": "33a1af7c0128dc9a02a250e1b2f1d9f3ee2693a8bf0003e96b88d0d57ddc65b6",
+      "status": "candidate",
+      "tile_id": "MG5"
+    },
+    {
+      "adoption_eligible": false,
+      "candidate_id": "6d41fd9dcf48015f2c04ddaa5e30bad663774a3d43a2f9dd9448b693462199cd",
+      "contract_reason": "Named third-party press reports an investment round; no owned traction claim is used.",
+      "decision_event_id": null,
+      "evidence": [
+        {
+          "evidence_fingerprint": "0756a96d217efea9ba8a257e2c17125fbcbf959da58f08c7d410fb753143db37",
+          "evidence_id": "fd33d15bf5964e0844145094302a3a6dd21be985689a95e723fba83a726103ca",
+          "literal_quote": "Causa Prima, start-up española que ha desarrollado una de las primeras redes de inteligencia artificial (IA) agente a agente para las finanzas B2B, ha cerrado una ronda pre-seed de 10 millones de dólares (unos 8,61 millones de euros).",
+          "ref": "raw_inputs.2.exa.news.3",
+          "source_class": "external_proof",
+          "source_identity_id": "5a56d43129599cadedcb6278c651544872527b5da560335240585879c56310c1",
+          "url": "https://cincodias.elpais.com/companias/2026-06-16/causa-prima-capta-86-millones-en-una-ronda-pre-seed-para-su-ia-financiera-con-creandum-kfund-helloworld-y-angel-invest.html"
+        }
+      ],
+      "limitation": "Publisher identity and literal claim still require human verification.",
+      "proposed_disposition": "accept",
+      "review_status": "unreviewed",
+      "source_evidence_pack_canonical_sha256": "33a1af7c0128dc9a02a250e1b2f1d9f3ee2693a8bf0003e96b88d0d57ddc65b6",
+      "status": "candidate",
+      "tile_id": "MG10"
+    },
+    {
+      "adoption_eligible": false,
+      "candidate_id": "58edb0c13ee405afd8378d1a5fe3fbaf8131affbff8e7dd7cdccad052d4faad8",
+      "contract_reason": "The owned web and captured LinkedIn company profile repeat the A2A/two-sided/finance-team discourse across two channels.",
+      "decision_event_id": null,
+      "evidence": [
+        {
+          "evidence_fingerprint": "86822991d777f80e770ac79609c44f3f2e5098dce52f4b80d4ac148e0c15a27b",
+          "evidence_id": "20a6941b38a56232a72717cc0e046945741f1ff9c0ad7df4b5ef5efa9797b0b5",
+          "literal_quote": "The agent-to-agent network  for finance teams.",
+          "ref": "raw_inputs.1",
+          "source_class": "owned_copy",
+          "source_identity_id": "13c2ae2cd3f6dc69b9716a511671a7f7f2a60374e4a1653e7bb03ab9c28f7a65",
+          "url": "https://causaprima.ai"
+        },
+        {
+          "evidence_fingerprint": "e3b5a69fd51aec577e088bd177bb8068a105650ce95214ac969682d9ce0d25a3",
+          "evidence_id": "e6bcd86a88e3da9e6b14d35bc9a13f94aed4e268f8afd864c57a5c385687cfb1",
+          "literal_quote": "Causa Prima is the first agent-to-agent network designed to stop the endless chase for money between companies. Unlike existing finance tools built to serve one side of a transaction, Causa Prima puts buyers and suppliers on the same network. AI agents handle invoicing, disputes, and discounts — so finance teams don't have to.",
+          "ref": "raw_inputs.2.exa.ai_visibility_results.1",
+          "source_class": "external_proof",
+          "source_identity_id": "5c7f4e63e4d2b29eadc4e3cf3fcd8c4b2554f87c8d7cc071bd1bf5dc458b4ce6",
+          "url": "https://www.linkedin.com/company/causa-prima"
+        }
+      ],
+      "limitation": "This is a composite cross-source judgment and cannot be authorized from either row alone; the LinkedIn capture is identity_match=brand_name.",
+      "proposed_disposition": "accept",
+      "review_status": "unreviewed",
+      "source_evidence_pack_canonical_sha256": "33a1af7c0128dc9a02a250e1b2f1d9f3ee2693a8bf0003e96b88d0d57ddc65b6",
+      "status": "composite_candidate",
+      "tile_id": "C7"
+    },
+    {
+      "adoption_eligible": false,
+      "candidate_id": "d0996a5e9e559cc3c190e84d99d214634a70deaafe134c461a38ecefcf652280",
+      "contract_reason": "The normalized pack has competitor context but no literal future proposition sufficient for V3.",
+      "decision_event_id": null,
+      "evidence": [
+        {
+          "evidence_fingerprint": "7ab196e30e93f139847be23c7b5af31623328d08c3155b12aad1bb8e1048e7c2",
+          "evidence_id": "b80a9f9cc373b7b4d9819438df3e1b3ed9693863021cee74a87247b109341b5c",
+          "literal_quote": "Im Wettbewerb mit anderen Agenten-Start-ups wie Plato entsteht damit ein neues Angriffsmuster gegen SAP s lukrative Randbereiche der Prozessautomatisierung.",
+          "ref": "raw_inputs.2.exa.mentions.16",
+          "source_class": "external_proof",
+          "source_identity_id": "7cd4aabc8ea353ad5079b5ef1f2e7aafd50c4779f76aa6046f87efeaeaa8f013",
+          "url": "https://www.it-boltwise.de/causa-prima-ki-agenten-verhandeln-b2b-zahlungen-direkt-gegen-sap.html"
+        }
+      ],
+      "limitation": "The legacy downstream bundle contains a possible future quote, but it is a non-authoritative derived reference and its later source pack is not frozen.",
+      "proposed_disposition": "sin_evidencia",
+      "review_status": "unreviewed",
+      "source_evidence_pack_canonical_sha256": "33a1af7c0128dc9a02a250e1b2f1d9f3ee2693a8bf0003e96b88d0d57ddc65b6",
+      "status": "insufficient",
+      "tile_id": "V3"
+    },
+    {
+      "adoption_eligible": false,
+      "candidate_id": "8b9be5ecec91148bdff3ce01f8e37a94e9505002a32d6501eb70373295b865e8",
+      "contract_reason": "No captured case, product behavior or decision proves the stated value in action.",
+      "decision_event_id": null,
+      "evidence": [],
+      "limitation": "Owned outcome promises are explicitly insufficient under the VA4 contract.",
+      "proposed_disposition": "sin_evidencia",
+      "review_status": "unreviewed",
+      "source_evidence_pack_canonical_sha256": "33a1af7c0128dc9a02a250e1b2f1d9f3ee2693a8bf0003e96b88d0d57ddc65b6",
+      "status": "insufficient",
+      "tile_id": "VA4"
+    },
+    {
+      "adoption_eligible": false,
+      "candidate_id": "f0e9719c1ab085289b4f36ce54833598d6bea3b569d99e0a2d3be742be9cc37e",
+      "contract_reason": "The normalized pack shows verbal mechanics on one owned homepage but not enough independent breadth to prove a distinct universe.",
+      "decision_event_id": null,
+      "evidence": [
+        {
+          "evidence_fingerprint": "7081bec9928a5506baf8ee431cc1f28c752c1fbeafcd37b64043506bd3bf85aa",
+          "evidence_id": "e0f34077e493f4e44d02ea04b4406a55a84ed60ff75a998d48a0a201a138bd43",
+          "literal_quote": "End the chase between companies.",
+          "ref": "raw_inputs.1.chunk.3",
+          "source_class": "owned_copy",
+          "source_identity_id": "13c2ae2cd3f6dc69b9716a511671a7f7f2a60374e4a1653e7bb03ab9c28f7a65",
+          "url": "https://causaprima.ai"
+        },
+        {
+          "evidence_fingerprint": "d6922d43bd59f0aec70211c1a5680e311217a35a03195e9047c57461131dcefd",
+          "evidence_id": "9aa92553f2378e8c223636f10569d35d50fcf0cc82134acdc35ac61abea6f3ed",
+          "literal_quote": "Buyer agent\n\nNegotiating · 412 invoices\n\nAtlas Freight\n\nSupplier agent\n\nReconciling · 38 POs",
+          "ref": "raw_inputs.1.chunk.4",
+          "source_class": "owned_copy",
+          "source_identity_id": "13c2ae2cd3f6dc69b9716a511671a7f7f2a60374e4a1653e7bb03ab9c28f7a65",
+          "url": "https://causaprima.ai"
+        }
+      ],
+      "limitation": "The stronger multi-surface set proposed by the independent audit depends on later derived references whose normalized source packs are missing.",
+      "proposed_disposition": "sin_evidencia",
+      "review_status": "unreviewed",
+      "source_evidence_pack_canonical_sha256": "33a1af7c0128dc9a02a250e1b2f1d9f3ee2693a8bf0003e96b88d0d57ddc65b6",
+      "status": "insufficient",
+      "tile_id": "I9"
+    }
+  ]
+}

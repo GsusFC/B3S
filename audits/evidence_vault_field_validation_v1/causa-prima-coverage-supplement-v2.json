@@ -1,0 +1,410 @@
+{
+  "authority": false,
+  "cutover_authorized": false,
+  "execution_mode": "live_provider",
+  "explicit_no_candidate_tile_ids": [
+    "I9",
+    "VA4"
+  ],
+  "limitations": [
+    "normalized evidence pack only",
+    "C7 requires cross-channel human synthesis",
+    "V3 requires category-context human review",
+    "I9 lacks usable visual breadth",
+    "VA4 lacks acted value evidence"
+  ],
+  "model": "gemini-3.1-flash-lite",
+  "replay_source_file": null,
+  "replay_source_file_sha256": null,
+  "replay_source_result_fingerprint": null,
+  "request": {
+    "authority": false,
+    "brand_identity": "causaprima.ai",
+    "evidence_workset": [
+      {
+        "evidence_fingerprint": "0756a96d217efea9ba8a257e2c17125fbcbf959da58f08c7d410fb753143db37",
+        "evidence_snapshot_fingerprint": "bd12075ef26ecb58ce0b86173f2eb2d8959bc73c851dd68dfdfba4f2e4838b3c",
+        "evidence_type": "external_proof.news",
+        "ref": "raw_inputs.2.exa.news.3",
+        "source": "exa",
+        "source_class": "external_proof",
+        "tile_ids": [
+          "MG10"
+        ],
+        "url": "https://cincodias.elpais.com/companias/2026-06-16/causa-prima-capta-86-millones-en-una-ronda-pre-seed-para-su-ia-financiera-con-creandum-kfund-helloworld-y-angel-invest.html"
+      },
+      {
+        "evidence_fingerprint": "3adda18dd7a94af6fb0ef881994078b1f7aed21704a971ad25c7253785974843",
+        "evidence_snapshot_fingerprint": "aace3a1d40c99f2292fc68efadc6a0448a252137c1267a448916a9cb3a6e8367",
+        "evidence_type": "external_proof.external_mentions",
+        "ref": "raw_inputs.2.exa.mentions.15",
+        "source": "exa",
+        "source_class": "external_proof",
+        "tile_ids": [
+          "MG10"
+        ],
+        "url": "https://app.dealroom.co/news/note/causa-prima-raises-10m-pre-seed-led-by-creandum-for-agent-to-agent-b2b-payments"
+      },
+      {
+        "evidence_fingerprint": "7081bec9928a5506baf8ee431cc1f28c752c1fbeafcd37b64043506bd3bf85aa",
+        "evidence_snapshot_fingerprint": "b681cb2e0628523848900ca1e4c266688c756f4e1445c4e4938451148c6a35b5",
+        "evidence_type": "raw_input",
+        "ref": "raw_inputs.1.chunk.3",
+        "source": "web",
+        "source_class": "owned_copy",
+        "tile_ids": [
+          "C7",
+          "MG1",
+          "MG3",
+          "MG5"
+        ],
+        "url": "https://causaprima.ai"
+      },
+      {
+        "evidence_fingerprint": "86822991d777f80e770ac79609c44f3f2e5098dce52f4b80d4ac148e0c15a27b",
+        "evidence_snapshot_fingerprint": "0c5f3c6a138ad1d5e0cb21b2e3c5bb39d7221fb3e26a747461f764e7208eb7d5",
+        "evidence_type": "raw_input",
+        "ref": "raw_inputs.1",
+        "source": "web",
+        "source_class": "owned_copy",
+        "tile_ids": [
+          "C7",
+          "MG1",
+          "MG5",
+          "V3"
+        ],
+        "url": "https://causaprima.ai"
+      },
+      {
+        "evidence_fingerprint": "905f14e6b5960254c97089c22bce723979d8cc138d0838f559251ee9a4bc7b7d",
+        "evidence_snapshot_fingerprint": "a9ec31047ef19511df4873658754152bca94d3d1fdebbab3a922a7f944158be2",
+        "evidence_type": "external_proof.external_mentions",
+        "ref": "raw_inputs.2.exa.mentions.14",
+        "source": "exa",
+        "source_class": "external_proof",
+        "tile_ids": [
+          "MG10"
+        ],
+        "url": "https://www.thesaasnews.com/news/causa-prima-raises-10m-pre-seed/"
+      },
+      {
+        "evidence_fingerprint": "aebc5f6f73a50a6a170fa78d25c3a31c1c3c1b8ba08ff436a42553c676dd00ef",
+        "evidence_snapshot_fingerprint": "2c3e151dd41c58072fe9a51462712d525e3b6ceb8db7da1bac05d3060cd31bcc",
+        "evidence_type": "external_proof.external_mentions",
+        "ref": "raw_inputs.2.exa.mentions.12",
+        "source": "exa",
+        "source_class": "external_proof",
+        "tile_ids": [
+          "MG10"
+        ],
+        "url": "https://www.munich-startup.de/en/122150/causa-prima-pre-seed-financing/"
+      },
+      {
+        "evidence_fingerprint": "d6922d43bd59f0aec70211c1a5680e311217a35a03195e9047c57461131dcefd",
+        "evidence_snapshot_fingerprint": "773ebfb52b7731f60b6c5c06b235d3aff130579a915a73ee1711587b70c37c80",
+        "evidence_type": "raw_input",
+        "ref": "raw_inputs.1.chunk.4",
+        "source": "web",
+        "source_class": "owned_copy",
+        "tile_ids": [
+          "MG1"
+        ],
+        "url": "https://causaprima.ai"
+      },
+      {
+        "evidence_fingerprint": "e3b5a69fd51aec577e088bd177bb8068a105650ce95214ac969682d9ce0d25a3",
+        "evidence_snapshot_fingerprint": "b8b08f523275f8e04bec85794462a882de31835a4c08e3abadb9f99dd8642367",
+        "evidence_type": "external_proof.ai_visibility",
+        "ref": "raw_inputs.2.exa.ai_visibility_results.1",
+        "source": "exa",
+        "source_class": "external_proof",
+        "tile_ids": [
+          "C7",
+          "V3"
+        ],
+        "url": "https://www.linkedin.com/company/causa-prima"
+      }
+    ],
+    "pair_count": 15,
+    "parent_canonical_memory_version": "1423ffd3fdce0e7e29d8adce16f91ad1b1f93be29a252aa6f545b809f50f78c4",
+    "production_runtime_effect": false,
+    "rationale": "Narrow non-authoritative coverage supplement expanded after independent contract audit identified a stronger literal MG1 candidate; no acquisition or score authority.",
+    "request_fingerprint": "f1259a9cf30fc28da07e85a0f4367ffeea6552cd83f864b4c32528e6cab0ffe7",
+    "runtime_effect": false,
+    "scanner_runtime_effect": false,
+    "schema_version": "evidence-vault-coverage-supplement-request-v1",
+    "source_evidence_pack_sha256": "33a1af7c0128dc9a02a250e1b2f1d9f3ee2693a8bf0003e96b88d0d57ddc65b6",
+    "subject_url": "https://causaprima.ai",
+    "target_tile_ids": [
+      "C7",
+      "I9",
+      "MG1",
+      "MG10",
+      "MG3",
+      "MG5",
+      "V3",
+      "VA4"
+    ]
+  },
+  "result": {
+    "authority": false,
+    "basis_relations": [
+      {
+        "claim_id": null,
+        "decision_event_id": null,
+        "evidence_fingerprint": "3adda18dd7a94af6fb0ef881994078b1f7aed21704a971ad25c7253785974843",
+        "evidence_id": "1c25bcf4b7e69625abfbb2093f99bfe6b52181c9c2397b0f0f3821cb289734d3",
+        "literal_quote": "Causa Prima raises $10M pre-seed led by Creandum for agent-to-agent B2B payments | Dealroom.co Causa Prima raises $10M pre-seed led by Creandum for agent-to-agent B2B payments | Dealroom.co ... # Causa Prima raises $10M pre-seed led by Creandum for agent-to-agent B2B payments ... What's the deal? Madrid- and Munich-bas",
+        "polarity": "supports",
+        "rationale": "La mención en Dealroom.co confirma el interés de la prensa y el ecosistema inversor.",
+        "relation_id": "2fbebd797aba4f307907c33d1ef5cd34596d6a957413ed5d3eaaee15e7228270",
+        "review_status": "unreviewed",
+        "source_identity_id": "45024efb6dff1c46205b8d34145db4cd83ba32f990600ea935426295a9647527",
+        "tile_id": "MG10"
+      },
+      {
+        "claim_id": null,
+        "decision_event_id": null,
+        "evidence_fingerprint": "0756a96d217efea9ba8a257e2c17125fbcbf959da58f08c7d410fb753143db37",
+        "evidence_id": "fd33d15bf5964e0844145094302a3a6dd21be985689a95e723fba83a726103ca",
+        "literal_quote": "Causa Prima capta 8,6 millones en una ronda ‘pre-seed’ para su IA financiera con Creandum, Kfund, HelloWorld y Angel Invest | Empresas | Cinco Días Causa Prima capta 8,6 millones en una ronda ‘pre-seed’ para su IA financiera con Creandum, Kfund, HelloWorld y Angel Invest | Empresas | Cinco DíasIr al contenido ... Causa",
+        "polarity": "supports",
+        "rationale": "La cobertura mediática en Cinco Días demuestra que la marca atrae prensa sin necesidad de empujar.",
+        "relation_id": "51702a566d5739036ae6bd46141395c5ba39734bd94e9f11c38af2e3e5c4d60b",
+        "review_status": "unreviewed",
+        "source_identity_id": "5a56d43129599cadedcb6278c651544872527b5da560335240585879c56310c1",
+        "tile_id": "MG10"
+      },
+      {
+        "claim_id": null,
+        "decision_event_id": null,
+        "evidence_fingerprint": "aebc5f6f73a50a6a170fa78d25c3a31c1c3c1b8ba08ff436a42553c676dd00ef",
+        "evidence_id": "8321ac9bf5026ac028eee795d20e64d41f4c395d98eee8e04100ad7af8c80a58",
+        "literal_quote": "Causa Prima launches with €8.5 million in pre-seed funding - Munich Startup Causa Prima launches with €8.5 million in pre-seed funding - Munich Startup ... Will payment terms like Net-30, Net-60, or Net-90 soon be a thing of the past in the B2B sector? A simpler and more efficient solution is being developed. Causa Pri",
+        "polarity": "supports",
+        "rationale": "La cobertura en Munich Startup confirma la tracción mediática de la marca.",
+        "relation_id": "958dadec8905301b0c8646066b3c7711d7aecd3a33cd50805a1fbaa268d1db37",
+        "review_status": "unreviewed",
+        "source_identity_id": "6c0304bf7e4ab64dbb7df59de5078445539c4fba14d34ffef8c67fb3ee2ec4fa",
+        "tile_id": "MG10"
+      },
+      {
+        "claim_id": null,
+        "decision_event_id": null,
+        "evidence_fingerprint": "905f14e6b5960254c97089c22bce723979d8cc138d0838f559251ee9a4bc7b7d",
+        "evidence_id": "cde6d0f6c8d7e68af7b50d9c54ef484ca3b9ee3800e3b76827907ec38db79408",
+        "literal_quote": "Causa Prima Raises $10M Pre-seed Causa Prima Raises $10M Pre-seed Causa Prima Raises $10M Pre-seed ... Causa Prima, based in Madrid and Munich, is a fintech startup that provides a shared network for B2B payments where AI agents for buyers and suppliers automatically handle invoices, disputes, and payment terms. The co",
+        "polarity": "supports",
+        "rationale": "La publicación en The SaaS News evidencia la atracción de prensa especializada.",
+        "relation_id": "d8ace70040c6e75dabde42be693b27141eb5f8a2883f68cf6b54b562f0c4093c",
+        "review_status": "unreviewed",
+        "source_identity_id": "400df24d6ea6176da8a9fa8c297a7f826c4a16e0bf3ac075be362cffd28b49d2",
+        "tile_id": "MG10"
+      }
+    ],
+    "evidence_snapshot": [
+      {
+        "confidence": "low",
+        "content": "Causa Prima capta 8,6 millones en una ronda ‘pre-seed’ para su IA financiera con Creandum, Kfund, HelloWorld y Angel Invest | Empresas | Cinco Días Causa Prima capta 8,6 millones en una ronda ‘pre-seed’ para su IA financiera con Creandum, Kfund, HelloWorld y Angel Invest | Empresas | Cinco DíasIr al contenido ... Causa Prima, start-up española que ha desarrollado una de las primeras redes de inteligencia artificial (IA) agente a agente para las finanzas B2B, ha cerrado una ronda pre-seed de 10 millones de dólares (unos 8,61 millones de euros). La transacción ha estado liderada por Creandum, con la participación de Kfund, HelloWorld y Angel Invest, además de distintos business angels proceden",
+        "evidence_fingerprint": "0756a96d217efea9ba8a257e2c17125fbcbf959da58f08c7d410fb753143db37",
+        "evidence_type": "external_proof.news",
+        "metadata": {
+          "identity_match": "brand_name",
+          "intent": "news",
+          "provider": "exa",
+          "published_date": "2026-06-16T04:00:00.000Z",
+          "result_group": "news",
+          "score": 0.0,
+          "source_class": "external_proof"
+        },
+        "ref": "raw_inputs.2.exa.news.3",
+        "source": "exa",
+        "url": "https://cincodias.elpais.com/companias/2026-06-16/causa-prima-capta-86-millones-en-una-ronda-pre-seed-para-su-ia-financiera-con-creandum-kfund-helloworld-y-angel-invest.html"
+      },
+      {
+        "confidence": "low",
+        "content": "Causa Prima raises $10M pre-seed led by Creandum for agent-to-agent B2B payments | Dealroom.co Causa Prima raises $10M pre-seed led by Creandum for agent-to-agent B2B payments | Dealroom.co ... # Causa Prima raises $10M pre-seed led by Creandum for agent-to-agent B2B payments ... What's the deal? Madrid- and Munich-based Causa Prima has raised $10M in pre-seed funding to build a shared network where AI agents for buyers and suppliers automatically handle invoices, disputes, and payment-term negotiations. Creandum— the firm behind Klarna, Spotify, and Trade Republic — led the round, with support from Kfund, HelloWorld, Angel Invest, and angels from Qonto, Pennylane, SAP, ING, SoFi, LIDL, and ",
+        "evidence_fingerprint": "3adda18dd7a94af6fb0ef881994078b1f7aed21704a971ad25c7253785974843",
+        "evidence_type": "external_proof.external_mentions",
+        "metadata": {
+          "identity_match": "brand_name",
+          "intent": "external_mentions",
+          "provider": "exa",
+          "published_date": "None",
+          "result_group": "mentions",
+          "score": 0.0,
+          "source_class": "external_proof"
+        },
+        "ref": "raw_inputs.2.exa.mentions.15",
+        "source": "exa",
+        "url": "https://app.dealroom.co/news/note/causa-prima-raises-10m-pre-seed-led-by-creandum-for-agent-to-agent-b2b-payments"
+      },
+      {
+        "confidence": "medium",
+        "content": "## End the chase between companies.\n\nWe help finance teams handle both sides of every transaction on one network. So money moves on the right terms, at the right time, on its own.",
+        "evidence_fingerprint": "7081bec9928a5506baf8ee431cc1f28c752c1fbeafcd37b64043506bd3bf85aa",
+        "evidence_type": "raw_input",
+        "metadata": {
+          "source_class": "owned_copy"
+        },
+        "ref": "raw_inputs.1.chunk.3",
+        "source": "web",
+        "url": "https://causaprima.ai"
+      },
+      {
+        "confidence": "medium",
+        "content": "# The agent-to-agent network  for finance teams.\n\nAI agents that handle invoicing, disputes, and discounts\n\n— so you don’t have to.\n\n[Talk to our team](https://causaprima.ai/#start)\n\nBacked by the world's best\n\n![HelloWorld](https://causaprima.ai/logos/helloworld.svg)![K-Fund](https://causaprima.ai/logos/kfund.svg)![AngelInvest](https://causaprima.ai/logos/angelinvest.svg)![SDAC Ventures](https://causaprima.ai/logos/sdac.svg)![Creandum](https://causaprima.ai/logos/creandum.png)![Borusan Ventures](https://causaprima.ai/logos/borusan.png)![Calafia Iberia](https://causaprima.ai/logos/calafia.svg)![](https://causaprima.ai/logos/helloworld.svg)![](https://causaprima.ai/logos/kfund.svg)![](https:/",
+        "evidence_fingerprint": "86822991d777f80e770ac79609c44f3f2e5098dce52f4b80d4ac148e0c15a27b",
+        "evidence_type": "raw_input",
+        "metadata": {
+          "source_class": "owned_copy"
+        },
+        "ref": "raw_inputs.1",
+        "source": "web",
+        "url": "https://causaprima.ai"
+      },
+      {
+        "confidence": "low",
+        "content": "Causa Prima Raises $10M Pre-seed Causa Prima Raises $10M Pre-seed Causa Prima Raises $10M Pre-seed ... Causa Prima, based in Madrid and Munich, is a fintech startup that provides a shared network for B2B payments where AI agents for buyers and suppliers automatically handle invoices, disputes, and payment terms. The company has raised $10 million in pre-seed funding to advance its two-sided network platform. ... The round was led by Creandum, a venture firm known for backing Klarna and Spotify. Additional participating investors include Kfund, HelloWorld, Angel Invest, and angel investors from Qonto, Pennylane, SAP, ING, SoFi, LIDL, and DeepMind. ... Causa Prima ... The new capital will be u",
+        "evidence_fingerprint": "905f14e6b5960254c97089c22bce723979d8cc138d0838f559251ee9a4bc7b7d",
+        "evidence_type": "external_proof.external_mentions",
+        "metadata": {
+          "identity_match": "brand_name",
+          "intent": "external_mentions",
+          "provider": "exa",
+          "published_date": "2026-06-16T04:37:10.000Z",
+          "result_group": "mentions",
+          "score": 0.0,
+          "source_class": "external_proof"
+        },
+        "ref": "raw_inputs.2.exa.mentions.14",
+        "source": "exa",
+        "url": "https://www.thesaasnews.com/news/causa-prima-raises-10m-pre-seed/"
+      },
+      {
+        "confidence": "low",
+        "content": "Causa Prima launches with €8.5 million in pre-seed funding - Munich Startup Causa Prima launches with €8.5 million in pre-seed funding - Munich Startup ... Will payment terms like Net-30, Net-60, or Net-90 soon be a thing of the past in the B2B sector? A simpler and more efficient solution is being developed. Causa Prima And the process could be accelerated even further, as the company is now receiving pre-seed funding of more than 8 million euros (10 million dollars). ... The funding round is led by Creandum, with other investors including Kfund, HelloWorld, and business angels from companies such as Qonto, Pennylane, SAP, ING, SoFi, Lidl, and DeepMind. Causa Prima plans to use the new capi",
+        "evidence_fingerprint": "aebc5f6f73a50a6a170fa78d25c3a31c1c3c1b8ba08ff436a42553c676dd00ef",
+        "evidence_type": "external_proof.external_mentions",
+        "metadata": {
+          "identity_match": "brand_name",
+          "intent": "external_mentions",
+          "provider": "exa",
+          "published_date": "2026-06-18T07:07:00.000Z",
+          "result_group": "mentions",
+          "score": 0.0,
+          "source_class": "external_proof"
+        },
+        "ref": "raw_inputs.2.exa.mentions.12",
+        "source": "exa",
+        "url": "https://www.munich-startup.de/en/122150/causa-prima-pre-seed-financing/"
+      },
+      {
+        "confidence": "medium",
+        "content": "## Agents do the work. You get the money. In seconds.\n\nAlready trusted by 3,000+ accounts.\n\nAcme Co.\n\nBuyer agent\n\nNegotiating · 412 invoices\n\nAtlas Freight\n\nSupplier agent\n\nReconciling · 38 POs\n\nCausa Prima\n\nINV · 8828NET 30\n\n$48,500\n\nAtlas Freight → Acme Co.\n\n● An invoice arrives",
+        "evidence_fingerprint": "d6922d43bd59f0aec70211c1a5680e311217a35a03195e9047c57461131dcefd",
+        "evidence_type": "raw_input",
+        "metadata": {
+          "source_class": "owned_copy"
+        },
+        "ref": "raw_inputs.1.chunk.4",
+        "source": "web",
+        "url": "https://causaprima.ai"
+      },
+      {
+        "confidence": "low",
+        "content": "Causa Prima Causa Prima is a Technology, Information and Internet company. Causa Prima employs 15 people. Headquartered in Munich, Bayern, Germany, operates in 6 countries (including Spain, United States, United Kingdom, United Arab Emirates, and France). ... Causa Prima is the first agent-to-agent network designed to stop the endless chase for money between companies. Unlike existing finance tools built to serve one side of a transaction, Causa Prima puts buyers and suppliers on the same network. AI agents handle invoicing, disputes, and discounts — so finance teams don't have to. Built by the team behind Taulia and Finoa, Causa Prima already serves 3,000+ accounts. ... - Industry: Technolo",
+        "evidence_fingerprint": "e3b5a69fd51aec577e088bd177bb8068a105650ce95214ac969682d9ce0d25a3",
+        "evidence_type": "external_proof.ai_visibility",
+        "metadata": {
+          "identity_match": "brand_name",
+          "intent": "ai_visibility",
+          "provider": "exa",
+          "published_date": "None",
+          "result_group": "ai_visibility_results",
+          "score": 0.0,
+          "source_class": "external_proof"
+        },
+        "ref": "raw_inputs.2.exa.ai_visibility_results.1",
+        "source": "exa",
+        "url": "https://www.linkedin.com/company/causa-prima"
+      }
+    ],
+    "parent_canonical_memory_version": "1423ffd3fdce0e7e29d8adce16f91ad1b1f93be29a252aa6f545b809f50f78c4",
+    "production_runtime_effect": false,
+    "relation_proposal": {
+      "discarded_relations": [],
+      "relations": [
+        {
+          "evidence_fingerprint": "0756a96d217efea9ba8a257e2c17125fbcbf959da58f08c7d410fb753143db37",
+          "literal_quote": "Causa Prima capta 8,6 millones en una ronda ‘pre-seed’ para su IA financiera con Creandum, Kfund, HelloWorld y Angel Invest | Empresas | Cinco Días Causa Prima capta 8,6 millones en una ronda ‘pre-seed’ para su IA financiera con Creandum, Kfund, HelloWorld y Angel Invest | Empresas | Cinco DíasIr al contenido ... Causa",
+          "polarity": "supports",
+          "rationale": "La cobertura mediática en Cinco Días demuestra que la marca atrae prensa sin necesidad de empujar.",
+          "tile_id": "MG10"
+        },
+        {
+          "evidence_fingerprint": "3adda18dd7a94af6fb0ef881994078b1f7aed21704a971ad25c7253785974843",
+          "literal_quote": "Causa Prima raises $10M pre-seed led by Creandum for agent-to-agent B2B payments | Dealroom.co Causa Prima raises $10M pre-seed led by Creandum for agent-to-agent B2B payments | Dealroom.co ... # Causa Prima raises $10M pre-seed led by Creandum for agent-to-agent B2B payments ... What's the deal? Madrid- and Munich-bas",
+          "polarity": "supports",
+          "rationale": "La mención en Dealroom.co confirma el interés de la prensa y el ecosistema inversor.",
+          "tile_id": "MG10"
+        },
+        {
+          "evidence_fingerprint": "905f14e6b5960254c97089c22bce723979d8cc138d0838f559251ee9a4bc7b7d",
+          "literal_quote": "Causa Prima Raises $10M Pre-seed Causa Prima Raises $10M Pre-seed Causa Prima Raises $10M Pre-seed ... Causa Prima, based in Madrid and Munich, is a fintech startup that provides a shared network for B2B payments where AI agents for buyers and suppliers automatically handle invoices, disputes, and payment terms. The co",
+          "polarity": "supports",
+          "rationale": "La publicación en The SaaS News evidencia la atracción de prensa especializada.",
+          "tile_id": "MG10"
+        },
+        {
+          "evidence_fingerprint": "aebc5f6f73a50a6a170fa78d25c3a31c1c3c1b8ba08ff436a42553c676dd00ef",
+          "literal_quote": "Causa Prima launches with €8.5 million in pre-seed funding - Munich Startup Causa Prima launches with €8.5 million in pre-seed funding - Munich Startup ... Will payment terms like Net-30, Net-60, or Net-90 soon be a thing of the past in the B2B sector? A simpler and more efficient solution is being developed. Causa Pri",
+          "polarity": "supports",
+          "rationale": "La cobertura en Munich Startup confirma la tracción mediática de la marca.",
+          "tile_id": "MG10"
+        }
+      ],
+      "schema_version": "evidence-tile-relation-proposal-v2"
+    },
+    "request_fingerprint": "f1259a9cf30fc28da07e85a0f4367ffeea6552cd83f864b4c32528e6cab0ffe7",
+    "result_fingerprint": "5f329620915bfe591be503f92500292ab8f8676784b8787de5a4383154434447",
+    "runtime_effect": false,
+    "scanner_runtime_effect": false,
+    "schema_version": "evidence-vault-coverage-supplement-result-v1",
+    "target_tile_ids": [
+      "C7",
+      "I9",
+      "MG1",
+      "MG10",
+      "MG3",
+      "MG5",
+      "V3",
+      "VA4"
+    ],
+    "uncovered_target_tile_ids": [
+      "C7",
+      "I9",
+      "MG1",
+      "MG3",
+      "MG5",
+      "V3",
+      "VA4"
+    ]
+  },
+  "review_instructions": {
+    "allowed_human_decisions": [
+      "accept",
+      "reject"
+    ],
+    "effect": "relation_decision_only_no_runtime_effect",
+    "required_fields": [
+      "human_decision",
+      "human_rationale",
+      "reviewer_id",
+      "reviewed_at"
+    ]
+  },
+  "runtime_effect": false,
+  "schema_version": "evidence-vault-field-coverage-supplement-artifact-v1",
+  "worksheet_relation_count": 4
+}

@@ -1,0 +1,13 @@
+{
+  "authority": false,
+  "brand_identity": "causaprima.ai",
+  "candidate_packet_fingerprint": "ef6f3be1361c07aaf853c0077cc50944f8e1c0123ee18acc2626528dfc47042f",
+  "identity_policy_version": "evidence-memory-identity-policy-v4",
+  "identity_state_fingerprint": "ae8f1926d4f5ab898ee606f7d06ab7622d176ff48762e456db655e681613876d",
+  "production_runtime_effect": false,
+  "review_case_count": 30,
+  "review_packet_fingerprint": "58d59dba7358bddd0ea404b9e68bea50e9fbf6d5e4c5facfa916af6321563b8f",
+  "runtime_effect": false,
+  "scanner_runtime_effect": false,
+  "schema_version": "evidence-memory-identity-review-export-v1"
+}

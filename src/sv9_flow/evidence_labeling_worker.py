@@ -9,7 +9,7 @@ deterministic identity gate.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Iterable
 
 from src.sv9_flow.calibration_terms import block_evidence_policy
 from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
@@ -71,6 +71,7 @@ def label_evidence_pack(
     *,
     llm: Any | None,
     max_records: int = _MAX_RECORDS,
+    selected_refs: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Annotate evidence records with semantic labels, returning debug info."""
 
@@ -88,7 +89,15 @@ def label_evidence_pack(
     if not _llm_available(llm):
         debug["reason"] = "missing_llm_api_key"
         return debug
-    records = canonical_evidence_records(_candidate_records(evidence_pack))[:max_records]
+    candidates = _candidate_records(evidence_pack)
+    if selected_refs is not None:
+        selected = {
+            str(ref).strip()
+            for ref in selected_refs
+            if str(ref).strip()
+        }
+        candidates = [record for record in candidates if record.ref in selected]
+    records = canonical_evidence_records(candidates)[:max_records]
     debug["records_considered"] = len(records)
     if not records:
         debug["reason"] = "no_candidate_records"
@@ -162,10 +171,19 @@ def _labels_with_artifact_cache(
             record = evidence_record_for_ref(label.get("ref") or "", evidence_pack)
             if record is not None:
                 returned_by_id[canonical_evidence_ref(record)] = label
+        missing_refs = [
+            canonical_evidence_ref(record)
+            for record in missing
+            if canonical_evidence_ref(record) not in returned_by_id
+        ]
+        if missing_refs:
+            raise RuntimeError(
+                "evidence_labeling_provider_incomplete:"
+                + ",".join(sorted(missing_refs))
+            )
         for record in missing:
             canonical_ref = canonical_evidence_ref(record)
-            label = returned_by_id.get(canonical_ref) or _neutral_label(canonical_ref)
-            normalized = _normalize_label(label)
+            normalized = _normalize_label(returned_by_id[canonical_ref])
             _artifact_cache_save(
                 llm,
                 _record_label_cache_key(evidence_pack=evidence_pack, record=record, llm=llm),
@@ -282,16 +300,6 @@ def _normalize_label(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _neutral_label(ref: str) -> dict[str, Any]:
-    return {
-        "ref": ref,
-        "relevant_blocks": [],
-        "stance": "neutral",
-        "identity_match": "unverified",
-        "specificity": "incidental",
-    }
-
-
 def _record_label_cache_key(
     *,
     evidence_pack: BrandEvidencePack,
@@ -350,17 +358,19 @@ def _valid_enum(raw: Any, allowed: set[str], *, default: str) -> str:
     return value if value in allowed else default
 
 
+def is_evidence_record_labelable(record: EvidenceRecord) -> bool:
+    """Return whether one record belongs to the semantic labeling workset."""
+
+    return bool(
+        record.content.strip()
+        and not record.evidence_type.startswith("acquisition.")
+        and source_class_for_record(record)
+        != SOURCE_CLASS_ACQUISITION_METADATA
+    )
+
+
 def _candidate_records(pack: BrandEvidencePack) -> list[EvidenceRecord]:
-    records: list[EvidenceRecord] = []
-    for record in pack.evidence:
-        if not record.content.strip():
-            continue
-        if record.evidence_type.startswith("acquisition."):
-            continue
-        if source_class_for_record(record) == SOURCE_CLASS_ACQUISITION_METADATA:
-            continue
-        records.append(record)
-    return records
+    return [record for record in pack.evidence if is_evidence_record_labelable(record)]
 
 
 def _llm_available(llm: Any | None) -> bool:

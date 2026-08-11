@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Brand evidence lab"
 requires-python = ">=3.11"
 dependencies = [
+  "cryptography>=44.0",
   "exa-py>=1.8.8",
   "fastapi>=0.115.0",
   "firecrawl-py>=4.0,<5",

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 Language = Literal["es"]
@@ -161,6 +161,126 @@ class ScanResultResponse(StrictModel):
     stability: dict[str, Any] = Field(default_factory=dict)
     metadata: ResultMetadata
     links: ScanLinks
+
+
+Sha256Text = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+UuidText = Annotated[
+    str,
+    Field(
+        pattern=(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+            r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        )
+    ),
+]
+
+
+class OperationalC7StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class OperationalC7AcceptedGroupIdentity(OperationalC7StrictModel):
+    group_id: Sha256Text
+    group_contract_fingerprint: Sha256Text
+    member_relation_ids: list[Sha256Text] = Field(min_length=2, max_length=2)
+    member_channel_roles: list[
+        Literal["external_social_profile", "owned_web"]
+    ] = Field(min_length=2, max_length=2)
+    attestation_fingerprint: Sha256Text
+
+    @field_validator("member_relation_ids")
+    @classmethod
+    def distinct_member_relations(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != 2:
+            raise ValueError("C7 member relation ids must be distinct")
+        return value
+
+    @field_validator("member_channel_roles")
+    @classmethod
+    def exact_member_roles(cls, value: list[str]) -> list[str]:
+        if value != ["external_social_profile", "owned_web"]:
+            raise ValueError("C7 member channel roles must match the frozen contract")
+        return value
+
+
+class OperationalC7PendingGroupIdentity(OperationalC7StrictModel):
+    group_id: Sha256Text
+    reopen_policy_fingerprint: Sha256Text
+    trigger_fingerprint: Sha256Text
+
+
+class OperationalC7Projection(OperationalC7StrictModel):
+    schema_version: Literal["evidence-vault-c7-runtime-projection-v1"]
+    brand_identity: str = Field(min_length=3, max_length=253)
+    canonical_memory_version: Sha256Text
+    adoption_event_id: UuidText
+    evaluation_identity: Sha256Text
+    score_input_fingerprint: Sha256Text
+    tile_id: Literal["C7"]
+    component_key: Literal["coherencia"]
+    status: Literal["accepted", "pending_reassessment", "unresolved"]
+    semantic_state: Literal["ok", "no", "sin_evidencia"]
+    effective_points: int = Field(ge=0, le=2)
+    score_eligible: bool
+    group_identity: (
+        OperationalC7AcceptedGroupIdentity
+        | OperationalC7PendingGroupIdentity
+        | None
+    )
+    authority: bool
+    authority_scope: Literal["b3s-vault"]
+    vault_runtime_effect: Literal[True]
+    operational_c7_effect: Literal[True]
+    legacy_c7_unchanged: Literal[True]
+    production_runtime_effect: Literal[False]
+    scanner_runtime_effect: Literal[False]
+    projection_fingerprint: Sha256Text
+
+    @model_validator(mode="after")
+    def validate_status_invariants(self) -> Self:
+        if self.status == "accepted":
+            if not isinstance(
+                self.group_identity,
+                OperationalC7AcceptedGroupIdentity,
+            ) or self.authority is not True:
+                raise ValueError("accepted C7 requires exact group authority")
+            if self.semantic_state not in {"ok", "no"}:
+                raise ValueError("accepted C7 semantic state is invalid")
+            expected_eligible = self.semantic_state == "ok"
+            expected_points = 2 if expected_eligible else 0
+            if (
+                self.score_eligible is not expected_eligible
+                or self.effective_points != expected_points
+            ):
+                raise ValueError("accepted C7 score projection is inconsistent")
+        elif self.status == "pending_reassessment":
+            if not isinstance(
+                self.group_identity,
+                OperationalC7PendingGroupIdentity,
+            ):
+                raise ValueError("pending C7 requires its reopen identity")
+            if (
+                self.authority is not False
+                or self.score_eligible is not False
+                or self.effective_points != 0
+                or self.semantic_state != "sin_evidencia"
+            ):
+                raise ValueError("pending C7 authority projection is inconsistent")
+        elif (
+            self.group_identity is not None
+            or self.authority is not False
+            or self.score_eligible is not False
+            or self.effective_points != 0
+            or self.semantic_state != "sin_evidencia"
+        ):
+            raise ValueError("unresolved C7 projection is inconsistent")
+        return self
+
+
+class OperationalC7RuntimeResponse(OperationalC7StrictModel):
+    object: Literal["operational_c7_runtime"] = "operational_c7_runtime"
+    api_version: Literal["v1"] = "v1"
+    projection: OperationalC7Projection
 
 
 class ScanEvidenceResponse(StrictModel):

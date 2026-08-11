@@ -19,7 +19,7 @@ import hashlib
 import json
 import math
 import re
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from src.sv9.rubric import (
     COMPONENTS,
@@ -716,6 +716,7 @@ def validate_candidate_packet(packet: dict[str, Any]) -> None:
     if manifest.get("unresolved_items") != unresolved:
         raise EvidenceVaultCanonicalCoreError("unresolved items are not canonically normalized")
     normalized_tiles = _normalized_candidate_tiles(tiles)
+    _validate_global_relation_id_uniqueness(normalized_tiles)
     if tiles != normalized_tiles:
         raise EvidenceVaultCanonicalCoreError("candidate tiles are not canonically normalized")
     if manifest.get("candidate_count") != len(normalized_tiles):
@@ -737,6 +738,23 @@ def validate_candidate_packet(packet: dict[str, Any]) -> None:
     )
     if packet.get("candidate_packet_fingerprint") != expected_packet:
         raise EvidenceVaultCanonicalCoreError("candidate packet fingerprint mismatch")
+
+
+def _validate_global_relation_id_uniqueness(
+    tiles: Iterable[Mapping[str, Any]],
+) -> None:
+    seen: dict[str, str] = {}
+    for tile in tiles:
+        tile_id = str(tile["tile_id"])
+        for relation in tile.get("basis") or []:
+            relation_id = str(relation["relation_id"])
+            previous_tile_id = seen.get(relation_id)
+            if previous_tile_id is not None:
+                raise EvidenceVaultCanonicalCoreError(
+                    "candidate packet repeats relation id across tiles: "
+                    f"{previous_tile_id}, {tile_id}"
+                )
+            seen[relation_id] = tile_id
 
 
 def _canonical_json_value(value: Any, *, path: str) -> Any:

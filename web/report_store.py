@@ -50,6 +50,10 @@ from src.services.evidence_ledger_shadow import (
 from src.services.evidence_memory_identity_v2 import (
     build_evidence_memory_identity_v2,
 )
+from src.services.evidence_vault_c7_cutover import (
+    current_c7_cutover_decision,
+    load_c7_runtime_projection,
+)
 from src.services.evidence_scoring_recovery_review import (
     EvidenceScoringRecoveryJournalError,
     EvidenceScoringRecoveryReviewCommand,
@@ -72,6 +76,26 @@ def reports_dir() -> Path:
     return Path(os.environ.get("B3S_REPORTS_DIR", "data/reports"))
 
 
+def verify_postgres_runtime_ready() -> None:
+    """Fail startup when an explicitly required PostgreSQL head is unavailable."""
+
+    required = os.environ.get("B3S_POSTGRES_REQUIRED", "").strip().lower()
+    if required in {"", "false"}:
+        return
+    if required != "true":
+        raise RuntimeError("B3S_POSTGRES_REQUIRED must be true or false")
+    database_url = os.environ.get("B3S_DATABASE_URL", "").strip()
+    if not database_url:
+        raise RuntimeError("required PostgreSQL history is not configured")
+    try:
+        repository = _postgres_repository_for_url(database_url)
+        repository.verify_migration_head()
+    except Exception:
+        raise RuntimeError(
+            "required PostgreSQL history failed schema verification"
+        ) from None
+
+
 def _postgres_repository():
     # Tests and local tooling may point the file store at a temporary directory;
     # keep that explicit override authoritative even when a .env has a DSN.
@@ -92,7 +116,27 @@ def _postgres_repository():
 def _postgres_repository_for_url(database_url: str):
     from src.history.repository import PostgresHistoryRepository
 
-    return PostgresHistoryRepository(database_url)
+    return PostgresHistoryRepository(database_url, schema_policy="verify_head")
+
+
+def operational_c7_runtime_projection_for_domain(
+    domain_or_url: str,
+) -> dict[str, Any] | None:
+    """Return the effective Vault-only C7 envelope, never raw allowlist state."""
+
+    if not current_c7_cutover_decision(domain_or_url).enabled:
+        return None
+    repository = _postgres_repository()
+    if repository is None:
+        return None
+    try:
+        return load_c7_runtime_projection(repository, domain_or_url)
+    except Exception:
+        _LOG.exception(
+            "failed to load operational C7 runtime projection",
+            extra={"domain": domain_key(domain_or_url)},
+        )
+        return None
 
 
 def new_scan_id() -> str:

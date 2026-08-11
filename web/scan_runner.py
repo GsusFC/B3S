@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import copy
+import hashlib
 import logging
 import os
 import threading
@@ -20,6 +21,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 from src.build_info import current_build_sha
+from src.services.evidence_vault_acquisition_outcome import (
+    trusted_acquisition_report_metadata,
+)
 from src.services.scanner_evidence_comparison import (
     EVIDENCE_COMPARISON_VERSION,
     annotate_candidate_report,
@@ -30,6 +34,7 @@ from web.report_store import list_reports_for_domain, new_scan_id, save_report
 
 _SCANS: dict[str, dict[str, Any]] = {}
 _SCAN_EVENTS: dict[str, threading.Event] = {}
+_VAULT_ACTIVATIONS: set[str] = set()
 _LOCK = threading.Lock()
 _LOG = logging.getLogger(__name__)
 
@@ -155,6 +160,19 @@ def cancel_scan(scan_id: str) -> dict[str, Any] | None:
         status = _SCANS.get(scan_id)
         if status is None:
             return None
+        if scan_id in _VAULT_ACTIVATIONS:
+            return {
+                "state": str(status.get("state") or "running"),
+                "cancelled": False,
+                "reason": "vault_activation_in_progress",
+                "acquisition_gate": status.get("acquisition_gate") or {},
+            }
+        if status.get("state") in {"cancelled", "error", "done"}:
+            return {
+                "state": str(status.get("state") or ""),
+                "cancelled": status.get("state") == "cancelled",
+                "acquisition_gate": status.get("acquisition_gate") or {},
+            }
         gate = status.get("acquisition_gate") if isinstance(status.get("acquisition_gate"), dict) else {}
         if isinstance(gate, dict):
             gate = dict(gate)
@@ -176,13 +194,23 @@ def cancel_scan(scan_id: str) -> dict[str, Any] | None:
 def _set_phase(scan_id: str, key: str, state: str) -> None:
     with _LOCK:
         status = _SCANS.get(scan_id)
-        if not status:
+        if not status or status.get("state") in {"cancelled", "error", "done"}:
             return
         if state == "running":
             status["phase"] = key
         _set_phase_locked(status, key, state)
         persisted_status = _status_copy_locked(status)
     _persist_scan_status(persisted_status)
+    with _LOCK:
+        current = _SCANS.get(scan_id)
+        terminal_status = (
+            _status_copy_locked(current)
+            if current is not None
+            and current.get("state") in {"cancelled", "error", "done"}
+            else None
+        )
+    if terminal_status is not None:
+        _persist_scan_status(terminal_status)
 
 
 def _set_phase_locked(status: dict[str, Any], key: str, state: str) -> None:
@@ -221,6 +249,54 @@ def _persist_scan_status(
         store.close()
 
 
+def _activate_vault_result_unless_cancelled(
+    scan_id: str,
+    repository: Any,
+    url: str,
+    *,
+    operation_plan_fingerprint: str,
+) -> dict[str, Any] | None:
+    """Guard cancellation from activation entry through report publication."""
+
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        if status is None or status.get("state") in {
+            "cancelled",
+            "error",
+            "done",
+        }:
+            return None
+        _VAULT_ACTIVATIONS.add(scan_id)
+    # Activation can commit more than once before raising.  Keep the guard on
+    # both success and failure; only _run may publish a terminal state and
+    # remove it while holding the same lock used by cancellation.
+    return repository.activate_evidence_vault_operational_scanner_result(
+        url,
+        source_scan_id=scan_id,
+        operation_plan_fingerprint=operation_plan_fingerprint,
+        workspace_slug="b3s",
+    )
+
+
+def _publish_completed_report(scan_id: str, report: dict[str, Any]) -> bool:
+    """Publish one immutable report with the same cancellation boundary."""
+
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        if status is None or status.get("state") == "cancelled":
+            return False
+        save_report(report)
+        _set_phase_locked(status, "report", "done")
+        status["state"] = "done"
+        status["phase"] = "done"
+        status["completed_at"] = datetime.now(timezone.utc).isoformat()
+        _SCAN_EVENTS.pop(scan_id, None)
+        _VAULT_ACTIVATIONS.discard(scan_id)
+        persisted_status = _status_copy_locked(status)
+    _persist_scan_status(persisted_status)
+    return True
+
+
 def _load_persisted_scan_status(scan_id: str) -> dict[str, Any] | None:
     from src.config import BRAND3_DB_PATH
     from src.storage.sqlite_store import SQLiteStore
@@ -238,16 +314,50 @@ def _scan_cancelled(scan_id: str) -> bool:
         return status is None or status.get("state") == "cancelled"
 
 
+def _vault_operational_pipeline_enabled() -> bool:
+    return (
+        os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault"
+        and os.environ.get(
+            "BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED",
+            "false",
+        ).strip().lower()
+        == "true"
+    )
+
+
 def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool) -> None:
     try:
+        vault_repository = None
+        vault_preparation: dict[str, Any] | None = None
+        vault_execution: dict[str, Any] | None = None
+        vault_activation: dict[str, Any] | None = None
+        vault_enabled = False
+        vault_interpretation_completed = False
         _set_phase(scan_id, "capture", "running")
-        snapshot = _capture_snapshot(scan_id, url, brand_name)
+        from src.config import (
+            BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED,
+            BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS,
+        )
+
+        if BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED:
+            snapshot = _capture_verified_raw_shadow(
+                scan_id=scan_id,
+                url=url,
+                brand_name=brand_name,
+            )
+        else:
+            # Normal Vault memory uses the unchanged B3S acquisition contract:
+            # owned web plus independent Exa acquisition.
+            snapshot = _capture_snapshot(scan_id, url, brand_name)
         if _scan_cancelled(scan_id):
             return
         _set_phase(scan_id, "capture", "done")
         gate = _build_acquisition_gate(
             snapshot.get("acquisition_steps") if isinstance(snapshot, dict) else {},
             allow_degraded_fallback=allow_degraded_fallback,
+            allow_owned_only_analysis=(
+                BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS
+            ),
         )
         if gate["state"] == "blocked" and allow_degraded_fallback and gate.get("can_continue"):
             gate = _approve_acquisition_gate(gate, decision_source="preapproved")
@@ -265,12 +375,251 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
 
         if _scan_cancelled(scan_id):
             return
+
+        vault_enabled = _vault_operational_pipeline_enabled()
+        if vault_enabled:
+            from src.services.evidence_vault_scan_orchestration import (
+                prepare_vault_scan_after_capture,
+            )
+            from web.report_store import _postgres_repository
+
+            vault_repository = _postgres_repository()
+            if vault_repository is None:
+                raise RuntimeError("vault_persistence_repository_unavailable")
+            vault_preparation = prepare_vault_scan_after_capture(
+                repository=vault_repository,
+                snapshot=snapshot,
+                scan_id=scan_id,
+                url=url,
+                brand_name=brand_name,
+                environment="vault",
+                incremental_enabled=True,
+                workspace_slug="b3s",
+                artifacts=_acquisition_artifacts_from_snapshot(snapshot),
+            )
+            vault_resume = (
+                dict(vault_preparation.get("resume") or {})
+                if isinstance(vault_preparation.get("resume"), dict)
+                else {}
+            )
+            vault_interpretation_completed = bool(
+                vault_resume.get("semantic_work_completed") is True
+            )
+            operation_plan = vault_preparation.get("operation_plan")
+            if operation_plan is not None:
+                from src.services.evidence_vault_incremental_executor import (
+                    execute_vault_operation_plan,
+                )
+
+                operation_requires_llm = bool(
+                    operation_plan.get("operations", {}).get("llm_required")
+                    and vault_resume.get("materialization_required") is not True
+                )
+                operation_llm = None
+                if operation_requires_llm:
+                    from src.config import SV9_FLOW_MODEL
+                    from src.features.llm_analyzer import LLMAnalyzer
+
+                    operation_llm = LLMAnalyzer(
+                        model=(
+                            os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL")
+                            or SV9_FLOW_MODEL
+                        )
+                    )
+                vault_execution = execute_vault_operation_plan(
+                    repository=vault_repository,
+                    source_scan_id=scan_id,
+                    worker_id=f"vault-scan-{scan_id}",
+                    llm=operation_llm,
+                    workspace_slug="b3s",
+                )
+                if vault_execution.get("execution_status") != "completed":
+                    raise RuntimeError(
+                        "vault_operation_not_completed:" + str(
+                            vault_execution.get("execution_status") or "unknown"
+                        )
+                    )
+                vault_interpretation_completed = bool(
+                    vault_interpretation_completed or operation_requires_llm
+                )
+                if _scan_cancelled(scan_id):
+                    return
+                vault_activation = _activate_vault_result_unless_cancelled(
+                    scan_id,
+                    vault_repository,
+                    url,
+                    operation_plan_fingerprint=str(
+                        operation_plan["operation_plan_fingerprint"]
+                    ),
+                )
+                if vault_activation is None:
+                    return
+            elif (
+                vault_interpretation_completed
+                and vault_resume.get("analysis_status") == "completed"
+            ):
+                if _scan_cancelled(scan_id):
+                    return
+                operation_plan_fingerprint = str(
+                    vault_resume.get("operation_plan_fingerprint") or ""
+                )
+                if not operation_plan_fingerprint:
+                    raise RuntimeError(
+                        "vault_completed_operation_missing_plan_fingerprint"
+                    )
+                vault_activation = _activate_vault_result_unless_cancelled(
+                    scan_id,
+                    vault_repository,
+                    url,
+                    operation_plan_fingerprint=operation_plan_fingerprint,
+                )
+                if vault_activation is None:
+                    return
+            elif vault_repository is not None:
+                memory = vault_repository.get_evidence_vault_operational_memory(
+                    url,
+                    workspace_slug="b3s",
+                )
+                score, score_replayed = (
+                    vault_repository.get_or_create_evidence_vault_operational_score_evaluation(
+                        url,
+                        workspace_slug="b3s",
+                    )
+                )
+                vault_activation = {
+                    "created": False,
+                    "reason": "persisted_operation_resume",
+                    "memory": memory,
+                    "score": score,
+                    "score_replayed": score_replayed,
+                }
+            with _LOCK:
+                status = _SCANS.get(scan_id)
+                if status is not None:
+                    status["vault"] = {
+                        "mode": vault_preparation.get("mode"),
+                        "execution_status": (
+                            vault_execution or {}
+                        ).get("execution_status"),
+                        "memory_version": (
+                            (vault_activation or {}).get("memory") or {}
+                        ).get("canonical_memory_version"),
+                        "score": ((vault_activation or {}).get("score") or {}).get(
+                            "score"
+                        ),
+                    }
+                    persisted_status = _status_copy_locked(status)
+                else:
+                    persisted_status = None
+            if persisted_status is not None:
+                _persist_scan_status(persisted_status)
+
+        if vault_enabled and isinstance(vault_activation, dict):
+            activated_score = vault_activation.get("score")
+            activated_memory = vault_activation.get("memory")
+            expected_candidate_packet_fingerprint = None
+            if vault_activation.get("created") is True:
+                expected_candidate_packet_fingerprint = str(
+                    vault_activation.get("candidate_packet_fingerprint") or ""
+                )
+                if not expected_candidate_packet_fingerprint:
+                    raise RuntimeError(
+                        "vault_activation_missing_candidate_packet_fingerprint"
+                    )
+            if isinstance(activated_score, dict) and isinstance(activated_memory, dict):
+                projection = (
+                    vault_repository.get_evidence_vault_operational_report_projection(
+                        url,
+                        expected_canonical_memory_version=str(
+                            activated_memory.get("canonical_memory_version") or ""
+                        ),
+                        expected_evaluation_identity=str(
+                            activated_score.get("evaluation_identity") or ""
+                        ),
+                        expected_adoption_event_id=str(
+                            activated_memory.get("adoption_event_id") or ""
+                        ),
+                        expected_candidate_packet_fingerprint=(
+                            expected_candidate_packet_fingerprint
+                        ),
+                        workspace_slug="b3s",
+                    )
+                )
+                if not isinstance(projection, dict):
+                    raise RuntimeError("vault_report_projection_unavailable")
+                persisted_memory = projection.get("memory")
+                promotion_event = projection.get("promotion_event")
+                persisted_score = projection.get("score_evaluation")
+                score_authority_witness = projection.get(
+                    "score_authority_witness"
+                )
+                if not all(
+                    isinstance(value, dict)
+                    for value in (
+                        persisted_memory,
+                        promotion_event,
+                        persisted_score,
+                        score_authority_witness,
+                    )
+                ):
+                    raise RuntimeError("vault_report_projection_invalid")
+                report_observation = vault_preparation.get("report_observation")
+                if not isinstance(report_observation, dict):
+                    raise RuntimeError("vault_report_observation_unavailable")
+                report = _compose_vault_memory_report(
+                    scan_id=scan_id,
+                    url=url,
+                    brand_name=brand_name,
+                    capture_observation=report_observation,
+                    memory=persisted_memory,
+                    promotion_event=promotion_event,
+                    score=persisted_score,
+                    score_authority_witness=score_authority_witness,
+                )
+                report = _attach_evidence_stability(report)
+                if _scan_cancelled(scan_id):
+                    return
+                _set_phase(scan_id, "capture", "done")
+                _set_phase(scan_id, "interpret", "done")
+                _set_phase(scan_id, "score", "done")
+                _set_phase(scan_id, "report", "running")
+                _publish_completed_report(scan_id, report)
+                return
+
+        if vault_interpretation_completed:
+            raise RuntimeError("vault_interpretation_missing_memory_score")
+
         _set_phase(scan_id, "interpret", "running")
         from scripts.sv9_flow_sv9_shadow_eval import build_flow_sv9_shadow_eval
 
         envelope = {"snapshot": snapshot, "source_run_id": snapshot["run"]["id"]}
         payload = build_flow_sv9_shadow_eval(envelope, include_full=True)
         payload = _attach_sv9_editorial(payload)
+        if BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED:
+            flow_payload = payload.get("flow") if isinstance(payload.get("flow"), dict) else {}
+            candidate_payload = (
+                flow_payload.get("candidate")
+                if isinstance(flow_payload.get("candidate"), dict)
+                else None
+            )
+            if candidate_payload is not None:
+                # Labeling enriches the in-memory evidence pack for analysis.
+                # The report must persist the exact worker evidence rows, so
+                # strip those advisory annotations at this trust boundary.
+                from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
+
+                candidate_payload["evidence_pack"] = (
+                    build_evidence_pack_from_snapshot(
+                        snapshot,
+                        # Raw capture persistence owns the exact evidence set;
+                        # acquisition warnings are report metadata, not extra
+                        # evidence rows that could break the capture binding.
+                        include_acquisition_steps=False,
+                    ).to_dict()
+                )
+        source_capture = snapshot.get("source_capture")
+        if isinstance(source_capture, dict):
+            payload["source_capture"] = dict(source_capture)
         payload["acquisition_gate"] = snapshot.get("acquisition_gate") or gate
         payload["acquisition_artifacts"] = _acquisition_artifacts_from_snapshot(snapshot)
         if _scan_cancelled(scan_id):
@@ -280,23 +629,28 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
 
         _set_phase(scan_id, "report", "running")
         report = _compose_report(scan_id, url, brand_name, payload)
+        if vault_enabled and isinstance(vault_activation, dict):
+            vault_score = vault_activation.get("score")
+            vault_memory = vault_activation.get("memory")
+            if isinstance(vault_score, dict) and isinstance(vault_memory, dict):
+                # The public B3S report remains immutable evidence output, but
+                # its score is sourced from the Vault evaluation that was
+                # persisted above, never from the in-memory scan payload.
+                report["score"] = vault_score.get("score")
+                report["base_average"] = vault_score.get("base_average")
+                report["vault_memory_version"] = vault_memory.get(
+                    "canonical_memory_version"
+                )
+                report["vault_score_evaluation_identity"] = vault_score.get(
+                    "evaluation_identity"
+                )
+                report["raw"]["vault"] = {
+                    "memory_version": vault_memory.get("canonical_memory_version"),
+                    "score_evaluation": vault_score,
+                }
         report = _attach_evidence_stability(report)
-        with _LOCK:
-            status = _SCANS.get(scan_id)
-            if status is None or status.get("state") == "cancelled":
-                return
-            # Keep the final cancellation check, immutable report write, and
-            # terminal transition in one critical section. A concurrent cancel
-            # therefore wins before publication or receives an already-terminal
-            # scan after publication; it can never be overwritten silently.
-            save_report(report)
-            _set_phase_locked(status, "report", "done")
-            status["state"] = "done"
-            status["phase"] = "done"
-            status["completed_at"] = datetime.now(timezone.utc).isoformat()
-            _SCAN_EVENTS.pop(scan_id, None)
-            persisted_status = _status_copy_locked(status)
-        _persist_scan_status(persisted_status)
+        if not _publish_completed_report(scan_id, report):
+            return
     except Exception as exc:  # surface the failure to the UI, never die silently
         traceback.print_exc()
         persisted_status = None
@@ -311,11 +665,217 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 _mark_pending_phases_locked(status, "error")
                 persisted_status = _status_copy_locked(status)
             _SCAN_EVENTS.pop(scan_id, None)
+            _VAULT_ACTIVATIONS.discard(scan_id)
         if persisted_status is not None:
             try:
                 _persist_scan_status(persisted_status)
             except Exception:
                 _LOG.exception("failed to persist terminal scanner error", extra={"scan_id": scan_id})
+
+
+def _capture_verified_raw_shadow(
+    *,
+    scan_id: str,
+    url: str,
+    brand_name: str,
+) -> dict[str, Any]:
+    """Persist and project the exact verified documents before interpretation."""
+
+    from src.config import (
+        BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED,
+        BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH,
+    )
+
+    if not BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED:
+        raise RuntimeError("verified_raw_acquisition_disabled")
+    if os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() != "vault":
+        raise RuntimeError("verified_raw_acquisition_invalid_environment")
+    if not BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH:
+        raise RuntimeError("verified_raw_acquisition_unconfigured")
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    canonical_url = f"https://{host}"
+    try:
+        from src.services.evidence_vault_acquisition_contract import (
+            TrustedAcquisitionCommand,
+        )
+        from src.services.evidence_vault_acquisition_ipc import (
+            UnixTrustedAcquisitionClient,
+        )
+
+        result = UnixTrustedAcquisitionClient(
+            BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH,
+        ).capture(
+            TrustedAcquisitionCommand(
+                workspace_slug="b3s",
+                source_scan_id=scan_id,
+                brand_url=canonical_url,
+            )
+        )
+        documents = list(result.documents)
+        valid_result = bool(
+            documents
+            and any(document.role == "owned_web" for document in documents)
+        )
+    except Exception:
+        result = None
+        documents = []
+        valid_result = False
+    if result is None or not valid_result:
+        raise RuntimeError("verified_raw_acquisition_failed")
+
+    safe_status = {
+        "state": "persisted_shadow",
+        "capture_id": result.capture_id,
+        "capture_content_hash": result.capture_content_hash,
+        "capture_observation_hash": result.capture_observation_hash,
+        "receipt_set_fingerprint": result.receipt_set_fingerprint,
+        "receipt_count": len(result.receipt_rows),
+    }
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        if status is None or status.get("state") == "cancelled":
+            raise RuntimeError("verified_raw_acquisition_cancelled")
+        status["verified_raw_acquisition"] = safe_status
+        persisted_status = _status_copy_locked(status)
+    _persist_scan_status(persisted_status)
+    return _verified_raw_pre_analysis_snapshot(
+        scan_id=scan_id,
+        brand_name=brand_name,
+        canonical_url=canonical_url,
+        capture_content_hash=result.capture_content_hash,
+        capture_observation_hash=result.capture_observation_hash,
+        documents=documents,
+    )
+
+
+def _verified_raw_pre_analysis_snapshot(
+    *,
+    scan_id: str,
+    brand_name: str,
+    canonical_url: str,
+    capture_content_hash: str,
+    capture_observation_hash: str,
+    documents: list[Any],
+) -> dict[str, Any]:
+    source_by_role = {
+        "owned_web": "web",
+        "external_social_profile": "exa",
+    }
+    raw_inputs: list[dict[str, Any]] = []
+    acquisition_steps: dict[str, Any] = {}
+    acquisition_rows: list[dict[str, str]] = []
+    for document in documents:
+        source = source_by_role.get(document.role)
+        if source is None:
+            raise RuntimeError("verified_raw_acquisition_failed")
+        raw_inputs.append(
+            {
+                "source": "verified_raw_document",
+                "payload": {
+                    "role": document.role,
+                    "url": document.source_url,
+                    "content": document.extracted_document,
+                    "extracted_document_sha256": (
+                        document.extracted_document_sha256
+                    ),
+                    "extractor_version": str(
+                        getattr(
+                            document,
+                            "extractor_version",
+                            "evidence-vault-deterministic-extractor-v1",
+                        )
+                    ),
+                    "receipt_fingerprint": document.receipt_fingerprint,
+                },
+            }
+        )
+        acquisition_steps[source] = {
+            "source": source,
+            "status": "success",
+            "details": {
+                "reason": "verified_raw_document_persisted",
+                "verified_raw": True,
+            },
+        }
+        acquisition_rows.append(
+            {
+                "source": source,
+                "status": "success",
+                "detail": "verified_raw_document_persisted",
+            }
+        )
+    if "exa" not in acquisition_steps:
+        acquisition_steps["exa"] = {
+            "source": "exa",
+            "status": "error",
+            "error": "verified_external_document_unavailable",
+            "details": {
+                "reason": "verified_external_document_unavailable",
+                "verified_raw": True,
+            },
+        }
+        acquisition_rows.append(
+            {
+                "source": "exa",
+                "status": "error",
+                "detail": "verified_external_document_unavailable",
+            }
+        )
+    for source in ("searchapi", "github", "context", "visual_acquisition"):
+        acquisition_steps[source] = {
+            "source": source,
+            "status": "disabled",
+            "details": {
+                "reason": "not_executed_in_verified_raw_mode",
+                "verified_raw": True,
+            },
+        }
+        acquisition_rows.append(
+            {
+                "source": source,
+                "status": "disabled",
+                "detail": "not_executed_in_verified_raw_mode",
+            }
+        )
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        if status is not None:
+            status["acquisition"] = sorted(
+                acquisition_rows,
+                key=lambda row: row["source"],
+            )
+            persisted_status = _status_copy_locked(status)
+        else:
+            persisted_status = None
+    if persisted_status is not None:
+        _persist_scan_status(persisted_status)
+    return {
+        "run": {
+            "brand_name": brand_name,
+            "id": _stable_verified_source_run_id(scan_id),
+            "url": canonical_url,
+        },
+        # Hash-only binding metadata lets the later report prove it evaluates
+        # the exact worker-persisted capture without exposing raw payloads to
+        # FastAPI or reconstructing the worker's private observation.
+        "source_capture": {
+            "source_scan_id": scan_id,
+            "observation_hash": capture_observation_hash,
+            "capture_hash": capture_content_hash,
+        },
+        "raw_inputs": raw_inputs,
+        "acquisition_steps": acquisition_steps,
+        "features": [],
+    }
+
+
+def _stable_verified_source_run_id(scan_id: str) -> int:
+    value = int.from_bytes(
+        hashlib.sha256(scan_id.encode("utf-8")).digest()[:8],
+        "big",
+    ) & ((1 << 63) - 1)
+    return value or 1
 
 
 def _attach_evidence_stability(report: dict[str, Any]) -> dict[str, Any]:
@@ -375,6 +935,7 @@ def _build_acquisition_gate(
     acquisition_steps: Any,
     *,
     allow_degraded_fallback: bool = False,
+    allow_owned_only_analysis: bool = False,
 ) -> dict[str, Any]:
     steps = acquisition_steps if isinstance(acquisition_steps, dict) else {}
     normalized = {str(source): _step_payload(step) for source, step in steps.items()}
@@ -424,17 +985,21 @@ def _build_acquisition_gate(
             "reason": "vertical external-proof fallback for Exa failure",
         }
         fallbacks.append(fallback)
-        issues.append(
-            _issue(
-                source="exa",
-                code="exa_failed",
-                severity="blocker",
-                message="Exa failed; external proof acquisition is incomplete.",
-                step=exa_step,
-                fallback="searchapi" if searchapi_available else "",
-                can_fallback=searchapi_available,
-            )
+        exa_issue = _issue(
+            source="exa",
+            code="exa_failed",
+            severity="warning" if allow_owned_only_analysis else "blocker",
+            message=(
+                "Exa failed; continuing with owned-web analysis only. "
+                "This result is not C7 qualifying proof."
+                if allow_owned_only_analysis
+                else "Exa failed; external proof acquisition is incomplete."
+            ),
+            step=exa_step,
+            fallback="searchapi" if searchapi_available else "",
+            can_fallback=searchapi_available,
         )
+        (warnings if allow_owned_only_analysis else issues).append(exa_issue)
     elif exa_status in {"empty", "partial"}:
         warnings.append(
             _issue(
@@ -518,7 +1083,7 @@ def _build_acquisition_gate(
         )
 
     blocking = [item for item in issues if item.get("severity") == "blocker"]
-    can_continue = bool(blocking) and all(bool(item.get("can_fallback")) for item in blocking)
+    can_continue = not blocking or all(bool(item.get("can_fallback")) for item in blocking)
     state = "blocked" if blocking else ("warning" if warnings else "pass")
     return {
         "version": "b3s-acquisition-gate-v2",
@@ -1450,6 +2015,438 @@ def _attach_sv9_editorial(
         "structured_components": sorted(str(key) for key in structured_components.keys()),
     }
     return payload
+
+
+def _trusted_persisted_acquisition_gate(
+    *,
+    acquisition_attempts: list[dict[str, Any]],
+    persisted_limitations: list[str],
+    observed_at: str,
+) -> dict[str, Any]:
+    attempts: dict[str, dict[str, Any]] = {}
+    for raw_attempt in acquisition_attempts:
+        attempt = dict(raw_attempt)
+        provider = str(attempt.get("provider") or "")
+        if provider not in {"web", "exa"} or provider in attempts:
+            raise RuntimeError("vault_trusted_acquisition_attempts_invalid")
+        attempts[provider] = attempt
+    web_attempt = attempts.get("web")
+    if attempts and (
+        web_attempt is None
+        or str(web_attempt.get("intent") or "") != "owned_web"
+        or str(web_attempt.get("status") or "") != "success"
+        or str(web_attempt.get("detail") or "")
+        != "verified_raw_document_persisted"
+    ):
+        raise RuntimeError("vault_trusted_web_attempt_invalid")
+
+    warning: dict[str, Any] | None = None
+    fallbacks: list[dict[str, Any]] = []
+    gate_limitation = ""
+    exa_attempt = attempts.get("exa")
+    limitation_set = set(persisted_limitations)
+    if exa_attempt is not None:
+        if str(exa_attempt.get("intent") or "") != "external_social_profile":
+            raise RuntimeError("vault_trusted_external_attempt_invalid")
+        status = str(exa_attempt.get("status") or "")
+        detail = str(exa_attempt.get("detail") or "")
+        if status == "success":
+            if detail != "verified_raw_document_persisted" or any(
+                item.startswith("external_acquisition:")
+                for item in limitation_set
+            ):
+                raise RuntimeError("vault_trusted_external_attempt_invalid")
+        elif status == "error":
+            if detail not in {
+                "provider_not_configured",
+                "provider_unavailable",
+                "provider_result_ineligible",
+            } or f"external_acquisition:{detail}" not in limitation_set:
+                raise RuntimeError("vault_trusted_external_attempt_invalid")
+            warning = {
+                "source": "exa",
+                "code": "exa_failed",
+                "severity": "warning",
+                "message": (
+                    "Exa failed; continuing with owned-web analysis only. "
+                    "This result is not C7 qualifying proof."
+                ),
+                "status": "error",
+                "detail": detail,
+                "can_fallback": False,
+            }
+            fallbacks = [
+                {
+                    "source": "searchapi",
+                    "for_source": "exa",
+                    "available": False,
+                    "approved": False,
+                    "status": "disabled",
+                    "reason": "vertical external-proof fallback for Exa failure",
+                }
+            ]
+            gate_limitation = "acquisition_gate:exa_failed"
+        else:
+            raise RuntimeError("vault_trusted_external_attempt_invalid")
+    elif "external_acquisition:not_discovered" in limitation_set:
+        warning = {
+            "source": "external_identity",
+            "code": "external_identity_not_discovered",
+            "severity": "warning",
+            "message": (
+                "No independent external identity was discovered; continuing "
+                "with owned-web analysis only. This result is not C7 qualifying proof."
+            ),
+            "status": "not_discovered",
+            "detail": "external_acquisition:not_discovered",
+            "can_fallback": False,
+        }
+        gate_limitation = "acquisition_gate:external_identity_not_discovered"
+    else:
+        warning = {
+            "source": "trusted_acquisition",
+            "code": "trusted_acquisition_metadata_unavailable",
+            "severity": "warning",
+            "message": "Persisted external acquisition metadata is unavailable.",
+            "status": "unknown",
+            "detail": "legacy_trusted_capture_without_external_outcome",
+            "can_fallback": False,
+        }
+        gate_limitation = "acquisition_gate:trusted_metadata_unavailable"
+
+    warnings = [warning] if warning is not None else []
+    return {
+        "version": "b3s-acquisition-gate-v2",
+        "state": "warning" if warnings else "pass",
+        "can_continue": True,
+        "allow_degraded_fallback": False,
+        "issues": [],
+        "warnings": warnings,
+        "fallbacks": fallbacks,
+        "limitations": [gate_limitation] if gate_limitation else [],
+        "user_decision": None,
+        "evaluated_at": observed_at,
+    }
+
+
+def _compose_vault_memory_report(
+    *,
+    scan_id: str,
+    url: str,
+    brand_name: str,
+    capture_observation: dict[str, Any],
+    memory: dict[str, Any],
+    promotion_event: dict[str, Any],
+    score: dict[str, Any],
+    score_authority_witness: dict[str, Any],
+) -> dict[str, Any]:
+    """Project the persisted Vault memory into the existing report shape.
+
+    This is intentionally model-free.  Vault operation execution is the only
+    interpretation step; the report and score are reconstructed from durable
+    memory/score rows rather than the capture snapshot.
+    """
+
+    from src.history.capture_observation import parse_capture_observation
+    from src.history.report_parser import normalize_domain
+    from src.services.evidence_vault_canonical_core import build_tile_contract_registry
+    from src.services.evidence_vault_operational_scoring import (
+        validate_operational_score_authority_witness,
+    )
+    from src.sv9.rubric import (
+        COMPONENTS as RUBRIC_COMPONENTS,
+        PRESENTATION_ORDER,
+        confidence_from_blind_spots,
+    )
+
+    validate_operational_score_authority_witness(
+        score_authority_witness,
+        canonical_memory=memory,
+        promotion_event=promotion_event,
+        evaluation=score,
+    )
+    memory_version = str(memory.get("canonical_memory_version") or "")
+    score_memory_version = str(score.get("canonical_memory_version") or "")
+    if not memory_version or score_memory_version != memory_version:
+        raise RuntimeError("vault_memory_score_version_mismatch")
+    parsed_capture = parse_capture_observation(capture_observation)
+    if parsed_capture.source_scan_id != scan_id:
+        raise RuntimeError("vault_report_capture_scan_mismatch")
+    if (
+        urlparse(parsed_capture.canonical_url).hostname
+        != urlparse(url).hostname
+    ):
+        raise RuntimeError("vault_report_capture_domain_mismatch")
+    memory_content = (
+        dict(memory.get("content") or {})
+        if isinstance(memory.get("content"), dict)
+        else {}
+    )
+    memory_brand_identity = str(
+        memory.get("brand_identity")
+        or memory_content.get("brand_identity")
+        or ""
+    )
+    if normalize_domain(memory_brand_identity) != parsed_capture.canonical_domain:
+        raise RuntimeError("vault_report_memory_brand_mismatch")
+
+    registry = build_tile_contract_registry()
+    accepted = {
+        str(row.get("tile_id") or ""): row
+        for row in (memory.get("content", {}).get("accepted_tiles") or [])
+        if isinstance(row, dict)
+    }
+    breakdown = {
+        str(row.get("component_key") or ""): row
+        for row in score.get("component_breakdown") or []
+        if isinstance(row, dict)
+    }
+    coverage = score.get("authority_coverage") or {}
+    total_blind_spots = sum(
+        int(row.get("sin_evidencia_count") or 0)
+        for row in breakdown.values()
+    )
+    reliability_status = (
+        "reliable"
+        if coverage.get("score_completeness") == "complete"
+        and coverage.get("canonical_score_status") == "current"
+        and total_blind_spots == 0
+        else "shadow"
+    )
+    reliability_reason_codes: list[str] = []
+    if coverage.get("score_completeness") != "complete":
+        reliability_reason_codes.append("vault_authority_coverage_partial")
+    if coverage.get("canonical_score_status") != "current":
+        reliability_reason_codes.append("vault_canonical_score_not_current")
+    if total_blind_spots > 2:
+        reliability_reason_codes.append("blind_spots_above_usable_threshold")
+    elif total_blind_spots > 0:
+        reliability_reason_codes.append("blind_spots_present")
+    profiles_by_component: dict[str, list[dict[str, Any]]] = {}
+    for tile in registry["tiles"]:
+        tile_id = str(tile["tile_id"])
+        component_key = str(tile["component_key"])
+        accepted_row = accepted.get(tile_id) or {}
+        state = str(accepted_row.get("semantic_state") or "sin_evidencia")
+        if state not in {"ok", "no", "sin_evidencia"}:
+            state = "sin_evidencia"
+        basis_rows = [
+            dict(row)
+            for row in accepted_row.get("basis") or []
+            if isinstance(row, dict)
+        ]
+        profiles_by_component.setdefault(component_key, []).append(
+            {
+                "id": tile_id,
+                "tile_id": tile_id,
+                "estado": state,
+                "evidencia": "",
+                "vault_authority_state": (
+                    "accepted" if tile_id in accepted else "unresolved"
+                ),
+                "vault_authority_profile_id": str(
+                    accepted_row.get("authority_profile_id") or ""
+                ),
+                "vault_decision_event_id": str(
+                    accepted_row.get("decision_event_id") or ""
+                ),
+                "vault_basis_relation_count": len(basis_rows),
+                "vault_basis": basis_rows,
+                "motivo": "Sin evidencia persistida" if state == "sin_evidencia" else "",
+            }
+        )
+    components: list[dict[str, Any]] = []
+    result_components: dict[str, dict[str, Any]] = {}
+    for component_key, profiles in profiles_by_component.items():
+        component_score = breakdown.get(component_key) or {}
+        component_meta = RUBRIC_COMPONENTS.get(component_key) or {}
+        lit_tiles = [row["tile_id"] for row in profiles if row["estado"] == "ok"]
+        off_tiles = [row["tile_id"] for row in profiles if row["estado"] == "no"]
+        blind_spot_tiles = [
+            row["tile_id"]
+            for row in profiles
+            if row["estado"] == "sin_evidencia"
+        ]
+        detail = {
+            "key": component_key,
+            "component": component_key,
+            "label": str(component_meta.get("label") or component_key),
+            "question": str(component_meta.get("question") or ""),
+            "level_zero": str(component_meta.get("level_zero") or ""),
+            "status": "scored",
+            "score": component_score.get("effective_score", 0),
+            "scale": component_score.get(
+                "tile_count",
+                component_meta.get("scale", 0),
+            ),
+            "points": component_score.get("points", 0),
+            "lit": component_score.get("ok_count", 0),
+            "off": component_score.get("no_count", 0),
+            "blind": component_score.get("sin_evidencia_count", 0),
+            "blind_spot_count": len(blind_spot_tiles),
+            "confidence": confidence_from_blind_spots(len(blind_spot_tiles)),
+            "lit_tiles": lit_tiles,
+            "off_tiles": off_tiles,
+            "blind_spot_tiles": blind_spot_tiles,
+            "tile_profile": profiles,
+            "veredicto": "Proyección de memoria Vault",
+        }
+        components.append(detail)
+        result_components[component_key] = dict(detail)
+    gap_key: str | None = None
+    gap_rank: tuple[int, int, int] | None = None
+    immediate_margin = 0
+    for position, component_key in enumerate(PRESENTATION_ORDER):
+        component_score = breakdown.get(component_key) or {}
+        max_points = int(component_score.get("max_points") or 0)
+        points = int(component_score.get("points") or 0)
+        gap = max_points - points
+        rank = (-gap, -max_points, position)
+        if gap > 0 and (gap_rank is None or rank < gap_rank):
+            gap_rank = rank
+            gap_key = component_key
+        if (
+            int(component_score.get("effective_score") or 0)
+            < int(component_score.get("tile_count") or 0)
+            and not (
+                component_key == "magnetism"
+                and score.get("magnetism_capped") is True
+            )
+        ):
+            immediate_margin += int(component_score.get("multiplier") or 0)
+    gap_label = str(
+        (RUBRIC_COMPONENTS.get(str(gap_key)) or {}).get("label") or gap_key or ""
+    )
+    evidence_pack = {
+        "schema_version": "brand-evidence-pack-v1",
+        "brand_name": parsed_capture.brand_name,
+        "url": parsed_capture.canonical_url,
+        "evidence": [dict(row) for row in parsed_capture.evidence_records],
+        "limitations": list(parsed_capture.limitations),
+    }
+    capture_payload = parsed_capture.capture_payload
+    report_attempts = [dict(row) for row in parsed_capture.acquisition_attempts]
+    report_capture_limitations = list(parsed_capture.limitations)
+    if (
+        parsed_capture.pipeline_version
+        == "evidence-vault-trusted-acquisition-v1"
+    ):
+        try:
+            (
+                report_capture_limitations,
+                report_attempts,
+            ) = trusted_acquisition_report_metadata(capture_payload)
+        except ValueError:
+            raise RuntimeError("vault_trusted_acquisition_outcome_invalid") from None
+        acquisition_gate = _trusted_persisted_acquisition_gate(
+            acquisition_attempts=report_attempts,
+            persisted_limitations=report_capture_limitations,
+            observed_at=parsed_capture.observed_at.isoformat(),
+        )
+    else:
+        acquisition_gate = (
+            dict(capture_payload.get("acquisition_gate") or {})
+            if isinstance(capture_payload.get("acquisition_gate"), dict)
+            else {}
+        )
+    evidence_pack["limitations"] = list(report_capture_limitations)
+    limitations = ["score_projected_from_persisted_vault_memory"]
+    for item in [
+        *report_capture_limitations,
+        *(acquisition_gate.get("limitations") or []),
+    ]:
+        value = str(item)
+        if value and value not in limitations:
+            limitations.append(value)
+    attempts = list(report_attempts)
+    absences = [
+        {
+            "block": str(row.get("evidence_type") or "").rsplit(".", 1)[-1],
+            "url": str(row.get("url") or ""),
+            "content": str(row.get("content") or ""),
+        }
+        for row in parsed_capture.evidence_records
+        if str(row.get("evidence_type") or "").startswith(
+            "acquisition.absence."
+        )
+    ]
+    acquisition_artifacts = [dict(row) for row in parsed_capture.artifacts]
+    created_at = datetime.now(timezone.utc).isoformat()
+    observed_at = parsed_capture.observed_at.isoformat()
+    evaluated_at = str(score.get("created_at") or created_at)
+    raw = {
+        "schema_version": "b3s-vault-memory-report-v1",
+        "source_run_id": parsed_capture.source_run_id,
+        "vault_memory_projection": True,
+        "source_capture": {
+            "source_scan_id": parsed_capture.source_scan_id,
+            "observation_hash": parsed_capture.observation_hash,
+            "capture_hash": parsed_capture.capture_hash,
+        },
+        "flow": {
+            "candidate": {"evidence_pack": evidence_pack, "interpretation": {}},
+            "interpretation_debug": {"mode": "persisted_vault_memory"},
+        },
+        "sv9": {
+            "brand3_score": score.get("score"),
+            "base_average": score.get("base_average"),
+            "reliability_status": reliability_status,
+            "components": result_components,
+            "result": {
+                "components": result_components,
+                "brand3_score": score.get("score"),
+                "base_average": score.get("base_average"),
+                "rubric_version": score.get("rubric_version"),
+                "evaluator_model": "vault-deterministic-memory",
+                "magnetism_capped": score.get("magnetism_capped") is True,
+                "most_painful_gap": gap_key,
+                "immediate_margin": immediate_margin,
+                "total_blind_spots": total_blind_spots,
+                "reliability_status": reliability_status,
+                "reliability_reason_codes": reliability_reason_codes,
+            },
+        },
+        "vault": {
+            "memory_version": memory_version,
+            "score_evaluation": score,
+            "score_authority_witness": score_authority_witness,
+        },
+    }
+    return {
+        "id": scan_id,
+        "brand_name": brand_name,
+        "url": url,
+        "created_at": created_at,
+        "observed_at": observed_at,
+        "recorded_at": created_at,
+        "evaluated_at": evaluated_at,
+        "pipeline_commit_sha": current_build_sha(),
+        "score": score.get("score"),
+        "base_average": score.get("base_average"),
+        "reliability_status": raw["sv9"]["reliability_status"],
+        "reliability_reason_codes": reliability_reason_codes,
+        "magnetism_capped": score.get("magnetism_capped") is True,
+        "not_detected": [],
+        "most_painful_gap": gap_key,
+        "most_painful_gap_label": gap_label,
+        "immediate_margin": immediate_margin,
+        "total_blind_spots": total_blind_spots,
+        "executive_reading": "Memoria de marca reconstruida desde Vault.",
+        "editorial": {},
+        "detected_count": 0,
+        "block_count": 0,
+        "components": components,
+        "blocks": [],
+        "acquisition_gate": acquisition_gate,
+        "acquisition_artifacts": acquisition_artifacts,
+        "coverage_acquisition": dict(parsed_capture.acquisition_summary),
+        "absences": absences,
+        "attempts": attempts,
+        "limitations": limitations,
+        "vault_memory_version": memory_version,
+        "vault_score_evaluation_identity": score.get("evaluation_identity"),
+        "raw": raw,
+    }
 
 
 def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, Any]) -> dict[str, Any]:

@@ -1,0 +1,43 @@
+{
+  "authority": false,
+  "database_classification": "disposable_local_postgresql",
+  "human_relation_review_event_count": 0,
+  "operational_adoption_event_count": 0,
+  "operational_score_evaluation_count": 0,
+  "operations": [
+    {
+      "attempt_count": 1,
+      "authority": false,
+      "brand_identity": "causaprima.ai",
+      "candidate_packet_fingerprint": "f90357347467548be548de6df459665c19fd361dee9aef6446ba2b3104e6bbbc",
+      "lease_generation": 1,
+      "production_runtime_effect": false,
+      "result_fingerprint": "b6e9ca38705edc984312cfd28fda0d548546aa119f6e0516f9342f5077b6c2f2",
+      "scanner_runtime_effect": false,
+      "status": "completed"
+    },
+    {
+      "attempt_count": 1,
+      "authority": false,
+      "brand_identity": "soccersolver.com",
+      "candidate_packet_fingerprint": "ceaa99a0b6a5062afbccb5151c323013e155a2a7d5c154508066baecfd53f1d9",
+      "lease_generation": 1,
+      "production_runtime_effect": false,
+      "result_fingerprint": "f31845452029c0223ccdb11292287d1f0c51e6fbbef8a053cf7034791bd42c9f",
+      "scanner_runtime_effect": false,
+      "status": "completed"
+    }
+  ],
+  "packet_counts": {
+    "causaprima.ai": {
+      "operational_source_v2": 1,
+      "operational_v2": 1
+    },
+    "soccersolver.com": {
+      "operational_source_v2": 1,
+      "operational_v2": 1
+    }
+  },
+  "runtime_effect": false,
+  "schema_version": "evidence-vault-field-shadow-postgres-summary-v1"
+}

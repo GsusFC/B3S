@@ -1,0 +1,100 @@
+{
+  "accepted_relation_count": 16,
+  "accepted_tile_ids": [
+    "C7",
+    "MG1",
+    "MG10",
+    "MG3",
+    "MG5",
+    "P1",
+    "P3",
+    "P5",
+    "PR3"
+  ],
+  "adoption_sequence": 3,
+  "authority": true,
+  "authority_coverage": {
+    "accepted_no_count": 0,
+    "accepted_ok_count": 9,
+    "accepted_sin_evidencia_count": 0,
+    "accepted_tile_count": 9,
+    "canonical_score_status": "current",
+    "contradiction_count": 0,
+    "contradiction_on_accepted_count": 0,
+    "contradiction_on_unresolved_count": 0,
+    "pending_change_tile_count": 0,
+    "pending_initial_tile_count": 0,
+    "score_completeness": "partial",
+    "score_weight_authority_coverage_ratio": 0.14,
+    "tile_authority_coverage_ratio": 0.1125,
+    "tile_count": 80,
+    "unresolved_tile_count": 71
+  },
+  "authority_scope": "b3s-vault",
+  "brand_identity": "causaprima.ai",
+  "c7": {
+    "basis_relation_count": 2,
+    "claim_ids": [
+      "dd50f2aa1a6f82cf702471721e3d9ee187839bd1cadae40c2f01867ab64a48f2"
+    ],
+    "decision_rule": "all_of",
+    "distinct_source_identity_count": 2
+  },
+  "canonical_memory_version": "7b94b1062aa01b1cb259944b3cd67bef0fac614a130d90e65326b53d169b1a7f",
+  "coherencia_breakdown": {
+    "component_key": "coherencia",
+    "effective_score": 1,
+    "max_points": 20,
+    "multiplier": 2,
+    "no_count": 0,
+    "ok_count": 1,
+    "points": 2,
+    "raw_score": 1,
+    "sin_evidencia_count": 9,
+    "tile_count": 10
+  },
+  "cutover_authorized": false,
+  "database_classification": "disposable_local_postgresql",
+  "exact_review_decisions": [
+    "accept"
+  ],
+  "exact_review_event_count": 5,
+  "magnetism_accepted_tile_ids": [
+    "MG1",
+    "MG10",
+    "MG3",
+    "MG5"
+  ],
+  "magnetism_breakdown": {
+    "component_key": "magnetism",
+    "effective_score": 4,
+    "max_points": 20,
+    "multiplier": 2,
+    "no_count": 0,
+    "ok_count": 4,
+    "points": 8,
+    "raw_score": 4,
+    "sin_evidencia_count": 6,
+    "tile_count": 10
+  },
+  "mg7_accepted": false,
+  "mg8_accepted": false,
+  "parent_canonical_memory_version": "b1bafe845ab85a888f71b044681eee69cd0548d0462a76d9288ecbc7074b887a",
+  "production_runtime_effect": false,
+  "reviewer_ids": [
+    "gsus"
+  ],
+  "row_counts": {
+    "adoption_events": 3,
+    "operational_packets": 4,
+    "relation_reviews": 20,
+    "reviewed_packets": 3,
+    "score_evaluations": 3,
+    "source_packets": 3
+  },
+  "scanner_runtime_effect": false,
+  "schema_version": "evidence-vault-postgres-exact-relation-adoption-summary-v1",
+  "score": 14,
+  "score_evaluation_identity": "fa73610bd6e66beec5d2f7fb6c51e8e4f6860c16db10817db5c7bda07c113d47",
+  "score_lookup_replayed": true
+}

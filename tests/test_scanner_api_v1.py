@@ -105,6 +105,123 @@ def _report(scan_id: str = "scan123") -> dict:
     }
 
 
+def _operational_c7_projection() -> dict:
+    return {
+        "schema_version": "evidence-vault-c7-runtime-projection-v1",
+        "brand_identity": "example.com",
+        "canonical_memory_version": "a" * 64,
+        "adoption_event_id": "55ad9724-e936-59bf-a4ba-b6b69f8f70ef",
+        "evaluation_identity": "b" * 64,
+        "score_input_fingerprint": "c" * 64,
+        "tile_id": "C7",
+        "component_key": "coherencia",
+        "status": "accepted",
+        "semantic_state": "ok",
+        "effective_points": 2,
+        "score_eligible": True,
+        "group_identity": {
+            "group_id": "d" * 64,
+            "group_contract_fingerprint": "e" * 64,
+            "member_relation_ids": ["2" * 64, "3" * 64],
+            "member_channel_roles": [
+                "external_social_profile",
+                "owned_web",
+            ],
+            "attestation_fingerprint": "4" * 64,
+        },
+        "authority": True,
+        "authority_scope": "b3s-vault",
+        "vault_runtime_effect": True,
+        "operational_c7_effect": True,
+        "legacy_c7_unchanged": True,
+        "production_runtime_effect": False,
+        "scanner_runtime_effect": False,
+        "projection_fingerprint": "1" * 64,
+    }
+
+
+def test_operational_c7_api_uses_uniform_not_available_shape(monkeypatch) -> None:
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    monkeypatch.setattr(
+        "web.api_v1.router.operational_c7_runtime_projection_for_domain",
+        lambda _domain: None,
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/operational-c7",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "operational_c7_not_available"
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["vary"] == "Authorization"
+    assert "allowlist" not in response.text
+
+
+def test_operational_c7_api_is_typed_separate_and_never_cached(monkeypatch) -> None:
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    projection = _operational_c7_projection()
+    monkeypatch.setattr(
+        "web.api_v1.router.operational_c7_runtime_projection_for_domain",
+        lambda _domain: projection,
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/operational-c7",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["vary"] == "Authorization"
+    assert response.json() == {
+        "object": "operational_c7_runtime",
+        "api_version": "v1",
+        "projection": projection,
+    }
+
+
+def test_operational_c7_api_rejects_malformed_projection_uniformly(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    malformed = _operational_c7_projection()
+    malformed["score_eligible"] = "true"
+    malformed["group_identity"]["unexpected"] = "field"
+    monkeypatch.setattr(
+        "web.api_v1.router.operational_c7_runtime_projection_for_domain",
+        lambda _domain: malformed,
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/operational-c7",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "operational_c7_not_available"
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["vary"] == "Authorization"
+    assert "unexpected" not in response.text
+
+
+def test_operational_c7_api_auth_failure_is_never_cached(monkeypatch) -> None:
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/operational-c7"
+    )
+
+    assert response.status_code == 401
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["vary"] == "Authorization"
+
+
 def test_api_health_is_public(monkeypatch):
     monkeypatch.setenv("B3S_BUILD_SHA", "b" * 40)
 
@@ -2449,3 +2566,120 @@ def test_scanner_job_store_persists_idempotency_and_marks_restart_interruption()
     assert interrupted_count == 1
     assert persisted["state"] == "error"
     assert persisted["error_code"] == "process_restarted"
+
+
+def test_scanner_job_terminal_status_wins_over_stale_nonterminal_upserts():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = str(Path(tmpdir) / "scanner-monotonic.sqlite3")
+        stale_writer = SQLiteStore(db_path)
+        terminal_writer = SQLiteStore(db_path)
+        try:
+            for terminal_state in ("cancelled", "error", "done"):
+                scan_id = f"monotonic-{terminal_state}"
+                stale_snapshot = _running_scan(scan_id)
+                stale_writer.save_scanner_job_status(stale_snapshot)
+
+                terminal_snapshot = {
+                    **stale_snapshot,
+                    "state": terminal_state,
+                    "phase": terminal_state,
+                    "completed_at": "2026-07-20T10:05:00+00:00",
+                }
+                terminal_writer.save_scanner_job_status(terminal_snapshot)
+
+                stale_snapshot["phase"] = "interpret"
+                stale_writer.save_scanner_job_status(stale_snapshot)
+                persisted = terminal_writer.get_scanner_job_status(scan_id)
+                assert persisted is not None
+                assert persisted["state"] == terminal_state
+                assert persisted["phase"] == terminal_state
+                assert persisted["completed_at"] == terminal_snapshot["completed_at"]
+
+                terminal_reassertion = {
+                    **terminal_snapshot,
+                    "phase": f"{terminal_state}-reasserted",
+                    "terminal_reasserted": True,
+                }
+                terminal_writer.save_scanner_job_status(terminal_reassertion)
+                persisted = stale_writer.get_scanner_job_status(scan_id)
+                assert persisted is not None
+                assert persisted["state"] == terminal_state
+                assert persisted["phase"] == f"{terminal_state}-reasserted"
+                assert persisted["terminal_reasserted"] is True
+        finally:
+            stale_writer.close()
+            terminal_writer.close()
+
+
+def test_restart_interruption_cas_preserves_jobs_terminalized_after_select():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = str(Path(tmpdir) / "scanner-restart-cas.sqlite3")
+        restart_writer = SQLiteStore(db_path)
+        terminal_writer = SQLiteStore(db_path)
+        terminal_states = {
+            "restart-race-done": "done",
+            "restart-race-error": "error",
+            "restart-race-cancelled": "cancelled",
+        }
+        interruptible_scan_id = "restart-still-running"
+        try:
+            snapshots = {
+                scan_id: _running_scan(scan_id) for scan_id in terminal_states
+            }
+            snapshots[interruptible_scan_id] = _running_scan(interruptible_scan_id)
+            for snapshot in snapshots.values():
+                restart_writer.save_scanner_job_status(snapshot)
+
+            def terminalize_selected_jobs() -> None:
+                for scan_id, terminal_state in terminal_states.items():
+                    terminal_writer.save_scanner_job_status(
+                        {
+                            **snapshots[scan_id],
+                            "state": terminal_state,
+                            "phase": terminal_state,
+                            "completed_at": "2026-07-20T10:05:00+00:00",
+                        }
+                    )
+
+            class RaceBeforeRestartUpdate:
+                def __init__(self, connection):
+                    self.connection = connection
+                    self.raced = False
+
+                def execute(self, statement, parameters=()):
+                    normalized = " ".join(statement.split())
+                    if (
+                        not self.raced
+                        and normalized.startswith("UPDATE b3s_scanner_jobs")
+                        and "phase='interrupted'" in normalized
+                    ):
+                        self.raced = True
+                        terminalize_selected_jobs()
+                    return self.connection.execute(statement, parameters)
+
+                def __getattr__(self, name):
+                    return getattr(self.connection, name)
+
+            raced_connection = RaceBeforeRestartUpdate(restart_writer.conn)
+            restart_writer.conn = raced_connection
+            interrupted_count = restart_writer.interrupt_incomplete_scanner_jobs()
+
+            assert raced_connection.raced is True
+            assert interrupted_count == 1
+            for scan_id, terminal_state in terminal_states.items():
+                persisted = terminal_writer.get_scanner_job_status(scan_id)
+                assert persisted is not None
+                assert persisted["state"] == terminal_state
+                assert persisted["phase"] == terminal_state
+                assert persisted.get("error_code") != "process_restarted"
+
+            interrupted = terminal_writer.get_scanner_job_status(
+                interruptible_scan_id
+            )
+            assert interrupted is not None
+            assert interrupted["state"] == "error"
+            assert interrupted["phase"] == "interrupted"
+            assert interrupted["error_code"] == "process_restarted"
+        finally:
+            restart_writer.close()
+            terminal_writer.close()
