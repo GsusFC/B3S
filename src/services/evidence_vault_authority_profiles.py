@@ -1,12 +1,14 @@
 """Versioned authority profiles for automatic operational-memory adoption.
 
-The initial matrix makes a narrow distinction:
+The matrix distinguishes two Vault-only adoption paths:
 
 * reducing already reviewed evidence-to-tile relations is deterministic and
   may be automated;
-* proposing a new semantic relation is not calibrated with the two-brand
-  corpus and remains shadow-only;
-* Coherencia C8 is explicitly human-required for new relations.
+* the scanner-compatibility path may adopt the exact model-derived tile
+  proposal produced from the persisted B3S capture.  This is the normal brand
+  memory path; it is not operational C7 authority and never affects production.
+* the older semantic-mapping and human-review profiles remain available for
+  their explicit review lanes.
 
 This is authority for a relation/reduction path, not a confidence threshold for
 an LLM.  Upgrade and downgrade direction is intentionally absent.
@@ -36,6 +38,7 @@ AUTHORITY_LABEL_POLICY_VERSION = "evidence-tile-human-label-policy-v1"
 REVIEWED_BASIS_PROFILE_ID = "reviewed-basis-reducer-v1"
 SEMANTIC_MAPPING_PROFILE_ID = "semantic-mapping-shadow-v1"
 C8_PROFILE_ID = "coherencia-c8-human-v1"
+SCANNER_SEMANTIC_PROFILE_ID = "scanner-semantic-v1"
 
 
 class EvidenceVaultAuthorityProfileError(ValueError):
@@ -44,6 +47,7 @@ class EvidenceVaultAuthorityProfileError(ValueError):
 
 class CalibrationStatus(StrEnum):
     DETERMINISTIC = "deterministic"
+    SCANNER_COMPATIBILITY = "scanner_compatibility"
     CALIBRATED_POLICY_GUARDED = "calibrated_policy_guarded"
     SHADOW_INSUFFICIENT_DATA = "shadow_insufficient_data"
     KNOWN_FALSE_POSITIVE = "known_false_positive"
@@ -69,6 +73,23 @@ def build_initial_authority_profile_matrix() -> dict[str, Any]:
                 "candidate_state_matches_versioned_reducer",
                 "absence_evidence_passes_registered_tile_contract",
                 "candidate_is_not_contradiction",
+            ],
+            "statistical_calibration_required": False,
+            "direction_policy": "neutral",
+            "known_false_positive_count": 0,
+        },
+        {
+            "profile_id": SCANNER_SEMANTIC_PROFILE_ID,
+            "profile_version": "v1",
+            "auto_adoption_mode": "scanner_compatibility",
+            "calibration_status": CalibrationStatus.SCANNER_COMPATIBILITY.value,
+            "automatic_authority_enabled": True,
+            "scope": "exact_persisted_b3s_scan_tile_proposal",
+            "predicates": [
+                "candidate_state_matches_versioned_reducer",
+                "candidate_is_not_contradiction",
+                "model_relations_are_bound_to_persisted_scan_evidence",
+                "operational_c7_is_not_runtime_authority",
             ],
             "statistical_calibration_required": False,
             "direction_policy": "neutral",
@@ -119,17 +140,9 @@ def build_initial_authority_profile_matrix() -> dict[str, Any]:
             "tile_id": str(tile["tile_id"]),
             "tile_key": str(tile["tile_key"]),
             "accepted_basis_reduction_profile_id": REVIEWED_BASIS_PROFILE_ID,
-            "new_semantic_mapping_profile_id": (
-                C8_PROFILE_ID
-                if str(tile["tile_key"]) == "coherencia.C8"
-                else SEMANTIC_MAPPING_PROFILE_ID
-            ),
-            "automatic_new_mapping_enabled": False,
-            "tile_guardrails": (
-                ["human_review_for_every_new_relation"]
-                if str(tile["tile_key"]) == "coherencia.C8"
-                else []
-            ),
+            "new_semantic_mapping_profile_id": SCANNER_SEMANTIC_PROFILE_ID,
+            "automatic_new_mapping_enabled": True,
+            "tile_guardrails": [],
         }
         for tile in registry["tiles"]
     ]
@@ -171,9 +184,9 @@ def build_initial_authority_profile_matrix() -> dict[str, Any]:
         "tile_profiles": tile_profiles,
         "summary": {
             "tile_count": len(tile_profiles),
-            "automatic_new_mapping_tile_count": 0,
-            "shadow_insufficient_data_tile_count": 79,
-            "human_required_tile_count": 1,
+            "automatic_new_mapping_tile_count": 80,
+            "shadow_insufficient_data_tile_count": 0,
+            "human_required_tile_count": 0,
             "deterministic_reviewed_basis_tile_count": 80,
         },
     }
@@ -258,6 +271,81 @@ def evaluate_reviewed_basis_authority(
     }
 
 
+def evaluate_scanner_semantic_authority(
+    *,
+    candidate_tile: Mapping[str, Any],
+    authority_matrix: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Authorize one exact scanner proposal for Vault brand memory.
+
+    This policy is deliberately scoped to the isolated Vault.  The operation
+    executor has already bound each new relation to the persisted capture and
+    the storage layer rechecks that binding.  Contradictions remain pending;
+    the ordinary rubric C7 tile is not an operational C7 runtime decision.
+    """
+
+    matrix = dict(authority_matrix or build_initial_authority_profile_matrix())
+    validate_authority_profile_matrix(matrix)
+    _validate_candidate_reduction(candidate_tile)
+    registry_by_id = {
+        str(row["tile_id"]): row for row in build_tile_contract_registry()["tiles"]
+    }
+    tile_id = str(candidate_tile.get("tile_id") or "").strip()
+    registry_tile = registry_by_id.get(tile_id)
+    if registry_tile is None:
+        raise EvidenceVaultAuthorityProfileError(f"unknown candidate tile: {tile_id}")
+    try:
+        state = TileState(str(candidate_tile.get("candidate_state") or "").strip())
+    except ValueError as exc:
+        raise EvidenceVaultAuthorityProfileError(
+            f"invalid candidate state for {tile_id}"
+        ) from exc
+    effective = [
+        row
+        for row in candidate_tile.get("basis") or []
+        if isinstance(row, Mapping)
+        and str(row.get("polarity") or "")
+        in {"supports", "contradicts", "demonstrates_absence"}
+    ]
+    failures: list[str] = []
+    if state is TileState.CONTRADICTION:
+        failures.append("contradiction_requires_review")
+    for row in effective:
+        if str(row.get("review_status") or "") not in {"unreviewed", "accepted"}:
+            failures.append("effective_relation_status_invalid")
+        if not str(row.get("relation_id") or "").strip():
+            failures.append("effective_relation_missing_relation_id")
+        if not str(row.get("evidence_id") or "").strip():
+            failures.append("effective_relation_missing_evidence_id")
+        if not str(row.get("source_identity_id") or "").strip():
+            failures.append("effective_relation_missing_source_identity_id")
+    unsigned = {
+        "schema_version": EVIDENCE_VAULT_AUTHORITY_DECISION_VERSION,
+        "authority_scope": "b3s-vault",
+        "authority_matrix_fingerprint": str(matrix["authority_matrix_fingerprint"]),
+        "authority_profile_id": SCANNER_SEMANTIC_PROFILE_ID,
+        "tile_id": tile_id,
+        "tile_key": str(registry_tile["tile_key"]),
+        "candidate_state": state.value,
+        "eligible": not failures,
+        "decision": "accept" if not failures else "remain_pending",
+        "reason_codes": sorted(set(failures)) or [
+            "persisted_scanner_candidate_reduced_in_vault"
+        ],
+        "direction_policy": "neutral",
+        "effective_relation_ids": sorted(
+            str(row.get("relation_id") or "") for row in effective
+        ),
+    }
+    return {
+        **unsigned,
+        "authority_decision_fingerprint": canonical_fingerprint(
+            EVIDENCE_VAULT_AUTHORITY_DECISION_VERSION,
+            unsigned,
+        ),
+    }
+
+
 def validate_authority_profile_matrix(matrix: Mapping[str, Any]) -> None:
     if matrix.get("schema_version") != EVIDENCE_VAULT_AUTHORITY_MATRIX_VERSION:
         raise EvidenceVaultAuthorityProfileError("authority matrix schema mismatch")
@@ -315,15 +403,19 @@ def validate_authority_decision(
         unsigned,
     ):
         raise EvidenceVaultAuthorityProfileError("authority decision fingerprint mismatch")
-    expected = evaluate_reviewed_basis_authority(candidate_tile=candidate_tile)
+    profile_id = str(decision.get("authority_profile_id") or "")
+    if profile_id == SCANNER_SEMANTIC_PROFILE_ID:
+        expected = evaluate_scanner_semantic_authority(candidate_tile=candidate_tile)
+    elif profile_id == REVIEWED_BASIS_PROFILE_ID:
+        expected = evaluate_reviewed_basis_authority(candidate_tile=candidate_tile)
+    else:
+        raise EvidenceVaultAuthorityProfileError("unsupported automatic authority profile")
     if dict(decision) != expected:
         raise EvidenceVaultAuthorityProfileError(
             "authority decision does not match the current deterministic policy"
         )
     if decision.get("eligible") is not True or decision.get("decision") != "accept":
         raise EvidenceVaultAuthorityProfileError("authority decision is not eligible")
-    if decision.get("authority_profile_id") != REVIEWED_BASIS_PROFILE_ID:
-        raise EvidenceVaultAuthorityProfileError("unsupported automatic authority profile")
     if str(decision.get("tile_id") or "") != str(candidate_tile.get("tile_id") or ""):
         raise EvidenceVaultAuthorityProfileError("authority decision tile mismatch")
     if str(decision.get("candidate_state") or "") != str(
@@ -384,9 +476,11 @@ __all__ = [
     "EVIDENCE_VAULT_AUTHORITY_MATRIX_VERSION",
     "EvidenceVaultAuthorityProfileError",
     "REVIEWED_BASIS_PROFILE_ID",
+    "SCANNER_SEMANTIC_PROFILE_ID",
     "SEMANTIC_MAPPING_PROFILE_ID",
     "build_initial_authority_profile_matrix",
     "evaluate_reviewed_basis_authority",
+    "evaluate_scanner_semantic_authority",
     "validate_authority_decision",
     "validate_authority_profile_matrix",
 ]

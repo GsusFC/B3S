@@ -12,8 +12,10 @@ from typing import Any, Mapping
 
 from src.services.evidence_vault_authority_profiles import (
     REVIEWED_BASIS_PROFILE_ID,
+    SCANNER_SEMANTIC_PROFILE_ID,
     build_initial_authority_profile_matrix,
     evaluate_reviewed_basis_authority,
+    evaluate_scanner_semantic_authority,
 )
 from src.services.evidence_vault_canonical_core import (
     TileState,
@@ -92,6 +94,68 @@ def build_operational_packet_from_reviewed_candidate(
             ),
             "authority_source": "none",
         }
+
+    current = dict(current_operational_memory or {})
+    return build_operational_memory_packet(
+        brand_identity=str(manifest["brand_identity"]),
+        source_candidate_packet_fingerprint=str(
+            packet["candidate_packet_fingerprint"]
+        ),
+        aggregation_policy_fingerprint=str(
+            manifest["aggregation_policy_fingerprint"]
+        ),
+        candidate_tiles=packet["candidate_tiles"],
+        dispositions=dispositions,
+        current_accepted_tiles=(
+            current.get("content", {}).get("accepted_tiles") or []
+        ),
+        parent_canonical_memory_version=(
+            str(current["canonical_memory_version"])
+            if current.get("canonical_memory_version")
+            else None
+        ),
+        current_pending_reassessments=(
+            current.get("content", {}).get("pending_reassessments") or []
+        ),
+    )
+
+
+def build_operational_packet_from_scanner_candidate(
+    candidate_packet: Mapping[str, Any],
+    *,
+    current_operational_memory: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Materialize the normal Vault brand-memory path from one scan result.
+
+    The candidate remains immutable and its evidence bindings are rechecked by
+    the repository.  Non-contradictory scanner states become the Vault policy
+    projection; contradictions stay pending and therefore cannot silently
+    change a tile or score.  This policy is Vault-only and does not grant the
+    disabled operational C7 cutover any authority.
+    """
+
+    packet = dict(candidate_packet)
+    validate_candidate_packet(packet)
+    manifest = packet["manifest"]
+    dispositions: dict[str, dict[str, Any]] = {}
+    for candidate in packet["candidate_tiles"]:
+        tile_id = str(candidate["tile_id"])
+        decision = evaluate_scanner_semantic_authority(candidate_tile=candidate)
+        if decision["eligible"] is True:
+            dispositions[tile_id] = {
+                "authority_state": "accepted",
+                "review_state": "none",
+                "authority_profile_id": SCANNER_SEMANTIC_PROFILE_ID,
+                "authority_source": "policy",
+                "policy_decision": decision,
+            }
+        else:
+            dispositions[tile_id] = {
+                "authority_state": "pending",
+                "review_state": "required",
+                "authority_profile_id": SCANNER_SEMANTIC_PROFILE_ID,
+                "authority_source": "none",
+            }
 
     current = dict(current_operational_memory or {})
     return build_operational_memory_packet(
@@ -206,5 +270,6 @@ def _report_brand_identity(report: Mapping[str, Any]) -> str:
 
 __all__ = [
     "build_operational_packet_from_reviewed_candidate",
+    "build_operational_packet_from_scanner_candidate",
     "build_provisional_operational_packet_from_report",
 ]

@@ -222,6 +222,24 @@ def _persist_scan_status(
         store.close()
 
 
+def _publish_completed_report(scan_id: str, report: dict[str, Any]) -> bool:
+    """Publish one immutable report with the same cancellation boundary."""
+
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        if status is None or status.get("state") == "cancelled":
+            return False
+        save_report(report)
+        _set_phase_locked(status, "report", "done")
+        status["state"] = "done"
+        status["phase"] = "done"
+        status["completed_at"] = datetime.now(timezone.utc).isoformat()
+        _SCAN_EVENTS.pop(scan_id, None)
+        persisted_status = _status_copy_locked(status)
+    _persist_scan_status(persisted_status)
+    return True
+
+
 def _load_persisted_scan_status(scan_id: str) -> dict[str, Any] | None:
     from src.config import BRAND3_DB_PATH
     from src.storage.sqlite_store import SQLiteStore
@@ -241,6 +259,11 @@ def _scan_cancelled(scan_id: str) -> bool:
 
 def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool) -> None:
     try:
+        vault_repository = None
+        vault_preparation: dict[str, Any] | None = None
+        vault_execution: dict[str, Any] | None = None
+        vault_activation: dict[str, Any] | None = None
+        vault_enabled = False
         _set_phase(scan_id, "capture", "running")
         from src.config import (
             BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED,
@@ -254,6 +277,8 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 brand_name=brand_name,
             )
         else:
+            # Normal Vault memory uses the unchanged B3S acquisition contract:
+            # owned web plus independent Exa acquisition.
             snapshot = _capture_snapshot(scan_id, url, brand_name)
         if _scan_cancelled(scan_id):
             return
@@ -281,6 +306,160 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
 
         if _scan_cancelled(scan_id):
             return
+
+        vault_enabled = (
+            os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault"
+        )
+        if vault_enabled:
+            from src.services.evidence_vault_scan_orchestration import (
+                prepare_vault_scan_after_capture,
+            )
+            from web.report_store import _postgres_repository
+
+            vault_repository = _postgres_repository()
+            if vault_repository is None:
+                raise RuntimeError("vault_persistence_repository_unavailable")
+            vault_preparation = prepare_vault_scan_after_capture(
+                repository=vault_repository,
+                snapshot=snapshot,
+                scan_id=scan_id,
+                url=url,
+                brand_name=brand_name,
+                environment="vault",
+                incremental_enabled=True,
+                workspace_slug="b3s",
+            )
+            operation_plan = vault_preparation.get("operation_plan")
+            if operation_plan is not None:
+                from src.services.evidence_vault_incremental_executor import (
+                    execute_vault_operation_plan,
+                )
+
+                operation_llm = None
+                if operation_plan.get("operations", {}).get("llm_required"):
+                    from src.config import SV9_FLOW_MODEL
+                    from src.features.llm_analyzer import LLMAnalyzer
+
+                    operation_llm = LLMAnalyzer(
+                        model=(
+                            os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL")
+                            or SV9_FLOW_MODEL
+                        )
+                    )
+                vault_execution = execute_vault_operation_plan(
+                    repository=vault_repository,
+                    source_scan_id=scan_id,
+                    worker_id=f"vault-scan-{scan_id}",
+                    llm=operation_llm,
+                    workspace_slug="b3s",
+                )
+                if vault_execution.get("execution_status") != "completed":
+                    raise RuntimeError(
+                        "vault_operation_not_completed:" + str(
+                            vault_execution.get("execution_status") or "unknown"
+                        )
+                    )
+                vault_activation = (
+                    vault_repository.activate_evidence_vault_operational_scanner_result(
+                        url,
+                        source_scan_id=scan_id,
+                        operation_plan_fingerprint=str(
+                            operation_plan["operation_plan_fingerprint"]
+                        ),
+                        workspace_slug="b3s",
+                    )
+                )
+            elif vault_repository is not None:
+                memory = vault_repository.get_evidence_vault_operational_memory(
+                    url,
+                    workspace_slug="b3s",
+                )
+                score, score_replayed = (
+                    vault_repository.get_or_create_evidence_vault_operational_score_evaluation(
+                        url,
+                        workspace_slug="b3s",
+                    )
+                )
+                vault_activation = {
+                    "created": False,
+                    "reason": "persisted_operation_resume",
+                    "memory": memory,
+                    "score": score,
+                    "score_replayed": score_replayed,
+                }
+            with _LOCK:
+                status = _SCANS.get(scan_id)
+                if status is not None:
+                    status["vault"] = {
+                        "mode": vault_preparation.get("mode"),
+                        "execution_status": (
+                            vault_execution or {}
+                        ).get("execution_status"),
+                        "memory_version": (
+                            (vault_activation or {}).get("memory") or {}
+                        ).get("canonical_memory_version"),
+                        "score": ((vault_activation or {}).get("score") or {}).get(
+                            "score"
+                        ),
+                    }
+                    persisted_status = _status_copy_locked(status)
+                else:
+                    persisted_status = None
+            if persisted_status is not None:
+                _persist_scan_status(persisted_status)
+
+        if (
+            vault_enabled
+            and isinstance(vault_activation, dict)
+            and vault_activation.get("reason") in {
+                "no_candidate_delta",
+                "persisted_operation_resume",
+                "scanner_candidate_has_no_accepted_change",
+            }
+        ):
+            prior_reports = list_reports_for_domain(url)
+            prior = prior_reports[0] if prior_reports else None
+            persisted_score = vault_activation.get("score")
+            persisted_memory = vault_activation.get("memory")
+            if (
+                isinstance(prior, dict)
+                and isinstance(persisted_score, dict)
+                and isinstance(persisted_memory, dict)
+            ):
+                reused_report = copy.deepcopy(prior)
+                reused_report.update(
+                    {
+                        "id": scan_id,
+                        "brand_name": brand_name,
+                        "url": url,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "score": persisted_score.get("score"),
+                        "base_average": persisted_score.get("base_average"),
+                        "vault_memory_version": persisted_memory.get(
+                            "canonical_memory_version"
+                        ),
+                        "vault_score_evaluation_identity": persisted_score.get(
+                            "evaluation_identity"
+                        ),
+                    }
+                )
+                raw = reused_report.get("raw")
+                if isinstance(raw, dict):
+                    raw["source_capture"] = snapshot.get("source_capture")
+                    raw["vault"] = {
+                        "memory_version": persisted_memory.get(
+                            "canonical_memory_version"
+                        ),
+                        "score_evaluation": persisted_score,
+                        "reused": True,
+                    }
+                _set_phase(scan_id, "capture", "done")
+                _set_phase(scan_id, "interpret", "done")
+                _set_phase(scan_id, "score", "done")
+                _set_phase(scan_id, "report", "running")
+                _publish_completed_report(scan_id, reused_report)
+                return
+
         _set_phase(scan_id, "interpret", "running")
         from scripts.sv9_flow_sv9_shadow_eval import build_flow_sv9_shadow_eval
 
@@ -321,23 +500,28 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
 
         _set_phase(scan_id, "report", "running")
         report = _compose_report(scan_id, url, brand_name, payload)
+        if vault_enabled and isinstance(vault_activation, dict):
+            vault_score = vault_activation.get("score")
+            vault_memory = vault_activation.get("memory")
+            if isinstance(vault_score, dict) and isinstance(vault_memory, dict):
+                # The public B3S report remains immutable evidence output, but
+                # its score is sourced from the Vault evaluation that was
+                # persisted above, never from the in-memory scan payload.
+                report["score"] = vault_score.get("score")
+                report["base_average"] = vault_score.get("base_average")
+                report["vault_memory_version"] = vault_memory.get(
+                    "canonical_memory_version"
+                )
+                report["vault_score_evaluation_identity"] = vault_score.get(
+                    "evaluation_identity"
+                )
+                report["raw"]["vault"] = {
+                    "memory_version": vault_memory.get("canonical_memory_version"),
+                    "score_evaluation": vault_score,
+                }
         report = _attach_evidence_stability(report)
-        with _LOCK:
-            status = _SCANS.get(scan_id)
-            if status is None or status.get("state") == "cancelled":
-                return
-            # Keep the final cancellation check, immutable report write, and
-            # terminal transition in one critical section. A concurrent cancel
-            # therefore wins before publication or receives an already-terminal
-            # scan after publication; it can never be overwritten silently.
-            save_report(report)
-            _set_phase_locked(status, "report", "done")
-            status["state"] = "done"
-            status["phase"] = "done"
-            status["completed_at"] = datetime.now(timezone.utc).isoformat()
-            _SCAN_EVENTS.pop(scan_id, None)
-            persisted_status = _status_copy_locked(status)
-        _persist_scan_status(persisted_status)
+        if not _publish_completed_report(scan_id, report):
+            return
     except Exception as exc:  # surface the failure to the UI, never die silently
         traceback.print_exc()
         persisted_status = None

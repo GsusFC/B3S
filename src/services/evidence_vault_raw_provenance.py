@@ -471,6 +471,7 @@ class ExternalIdentityProvenance(StrictContractModel):
     association_method: Literal[
         "owned_raw_links_external_profile",
         "external_raw_declares_owned_domain",
+        "exa_independent_discovery",
     ]
     canonical_brand_domain: str = Field(min_length=3, max_length=253)
     owned_source_url: str = Field(min_length=8, max_length=2048)
@@ -507,7 +508,9 @@ class ExternalIdentityProvenance(StrictContractModel):
             field="owned_source_url",
         )
         expected_role = (
-            "owned_web" if self.association_method == "owned_raw_links_external_profile" else "external_social_profile"
+            "owned_web"
+            if self.association_method == "owned_raw_links_external_profile"
+            else "external_social_profile"
         )
         if self.raw_fact_role != expected_role:
             raise ValueError("raw_fact_role does not match association_method")
@@ -672,7 +675,8 @@ def validate_external_identity_provenance(
 
     expected_fact = (
         model.external_source_url
-        if model.association_method == "owned_raw_links_external_profile"
+        if model.association_method
+        in {"owned_raw_links_external_profile", "exa_independent_discovery"}
         else model.owned_source_url
     )
     if not isinstance(raw_fact, str) or raw_fact != expected_fact:
