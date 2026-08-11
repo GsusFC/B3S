@@ -156,7 +156,12 @@ def _fixture(
                 "url": "https://example.com",
                 "content": document,
             }
-        }
+        },
+        "acquisition_outcome": {
+            "schema_version": "evidence-vault-acquisition-outcome-v1",
+            "external": "owned_only_downgrade",
+            "failure_reason": "provider_result_ineligible",
+        },
     }
     snapshot = PreReceiptSnapshot(
         schema_version=PRE_RECEIPT_SNAPSHOT_VERSION,
@@ -254,6 +259,20 @@ def test_repository_prepares_exact_atomic_pre_interpretation_envelope() -> None:
     assert len(prepared.envelope["receipts"]) == 1
     assert len(prepared.envelope["evidence_records"]) == 1
     assert len(prepared.envelope["evidence_bindings"]) == 1
+    assert prepared.observation.limitations == ()
+    assert prepared.observation.acquisition_attempts == ()
+    assert set(prepared.observation.acquisition_summary) == {
+        "receipt_count",
+        "receipt_set_fingerprint",
+    }
+    limitations, attempts = raw_repository._trusted_acquisition_report_metadata(
+        prepared.observation.capture_payload,
+    )
+    assert limitations == [
+        "verified_external_document_unavailable",
+        "external_acquisition:provider_result_ineligible",
+    ]
+    assert [attempt["provider"] for attempt in attempts] == ["web", "exa"]
     binding = prepared.envelope["evidence_bindings"][0]
     assert binding["passage_text"] == "Durable raw owned evidence document."
     assert binding["passage_locator"] == {
@@ -263,6 +282,137 @@ def test_repository_prepares_exact_atomic_pre_interpretation_envelope() -> None:
         "evidence_start": 0,
         "evidence_end": 36,
     }
+
+
+def test_trusted_acquisition_report_metadata_marks_external_not_discovered() -> None:
+    limitations, attempts = raw_repository._trusted_acquisition_report_metadata(
+        {
+            "acquisition_outcome": {
+                "schema_version": "evidence-vault-acquisition-outcome-v1",
+                "external": "not_discovered",
+                "failure_reason": None,
+            }
+        },
+        external_captured=False,
+    )
+
+    assert limitations == [
+        "verified_external_document_unavailable",
+        "external_acquisition:not_discovered",
+    ]
+    assert [attempt["provider"] for attempt in attempts] == ["web"]
+
+
+def test_trusted_acquisition_report_metadata_accepts_exact_external_capture() -> None:
+    limitations, attempts = raw_repository._trusted_acquisition_report_metadata(
+        {
+            "acquisition_outcome": {
+                "schema_version": "evidence-vault-acquisition-outcome-v1",
+                "external": "captured",
+                "failure_reason": None,
+            }
+        },
+        external_captured=True,
+    )
+
+    assert limitations == []
+    assert [attempt["provider"] for attempt in attempts] == ["web", "exa"]
+    assert all(attempt["status"] == "success" for attempt in attempts)
+
+
+def test_trusted_acquisition_outcome_absence_has_explicit_legacy_behavior() -> None:
+    limitations, attempts = raw_repository._trusted_acquisition_report_metadata(
+        {},
+        external_captured=False,
+    )
+
+    assert limitations == []
+    assert [attempt["provider"] for attempt in attempts] == ["web"]
+    with pytest.raises(ValueError, match="outcome must be an object"):
+        raw_repository._trusted_acquisition_report_metadata(
+            {"acquisition_outcome": []},
+            external_captured=False,
+        )
+
+
+def test_trusted_acquisition_rejects_embedded_report_gate() -> None:
+    with pytest.raises(ValueError, match="may not embed acquisition gate"):
+        raw_repository._trusted_acquisition_report_metadata(
+            {
+                "acquisition_gate": {"state": "pass"},
+                "acquisition_outcome": {
+                    "schema_version": "evidence-vault-acquisition-outcome-v1",
+                    "external": "owned_only_downgrade",
+                    "failure_reason": "provider_result_ineligible",
+                },
+            },
+            external_captured=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "outcome, error",
+    [
+        (
+            {
+                "schema_version": "evidence-vault-acquisition-outcome-v1",
+                "external": "captured",
+                "failure_reason": None,
+            },
+            "captured outcome is invalid",
+        ),
+        (
+            {
+                "schema_version": "evidence-vault-acquisition-outcome-v1",
+                "external": "owned_only_downgrade",
+                "failure_reason": "untrusted_reason",
+            },
+            "failure reason is invalid",
+        ),
+        (
+            {
+                "schema_version": "evidence-vault-acquisition-outcome-v1",
+                "external": "owned_only_downgrade",
+                "failure_reason": None,
+            },
+            "failure reason is invalid",
+        ),
+        (
+            {
+                "schema_version": "evidence-vault-acquisition-outcome-v1",
+                "external": "not_discovered",
+                "failure_reason": "provider_unavailable",
+            },
+            "not-discovered outcome is invalid",
+        ),
+        (
+            {
+                "schema_version": "wrong",
+                "external": "not_discovered",
+                "failure_reason": None,
+            },
+            "outcome schema is invalid",
+        ),
+        (
+            {
+                "schema_version": "evidence-vault-acquisition-outcome-v1",
+                "external": "not_discovered",
+                "failure_reason": None,
+                "extra": True,
+            },
+            "outcome fields are invalid",
+        ),
+    ],
+)
+def test_trusted_acquisition_report_metadata_fails_closed(
+    outcome: dict[str, Any],
+    error: str,
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        raw_repository._trusted_acquisition_report_metadata(
+            {"acquisition_outcome": outcome},
+            external_captured=False,
+        )
 
 
 def test_repository_keeps_large_unicode_document_and_binds_utf8_safe_passage() -> None:

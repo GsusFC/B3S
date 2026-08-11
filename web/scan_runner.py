@@ -21,6 +21,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 from src.build_info import current_build_sha
+from src.services.evidence_vault_acquisition_outcome import (
+    trusted_acquisition_report_metadata,
+)
 from src.services.scanner_evidence_comparison import (
     EVIDENCE_COMPARISON_VERSION,
     annotate_candidate_report,
@@ -1958,6 +1961,118 @@ def _attach_sv9_editorial(
     return payload
 
 
+def _trusted_persisted_acquisition_gate(
+    *,
+    acquisition_attempts: list[dict[str, Any]],
+    persisted_limitations: list[str],
+    observed_at: str,
+) -> dict[str, Any]:
+    attempts: dict[str, dict[str, Any]] = {}
+    for raw_attempt in acquisition_attempts:
+        attempt = dict(raw_attempt)
+        provider = str(attempt.get("provider") or "")
+        if provider not in {"web", "exa"} or provider in attempts:
+            raise RuntimeError("vault_trusted_acquisition_attempts_invalid")
+        attempts[provider] = attempt
+    web_attempt = attempts.get("web")
+    if attempts and (
+        web_attempt is None
+        or str(web_attempt.get("intent") or "") != "owned_web"
+        or str(web_attempt.get("status") or "") != "success"
+        or str(web_attempt.get("detail") or "")
+        != "verified_raw_document_persisted"
+    ):
+        raise RuntimeError("vault_trusted_web_attempt_invalid")
+
+    warning: dict[str, Any] | None = None
+    fallbacks: list[dict[str, Any]] = []
+    gate_limitation = ""
+    exa_attempt = attempts.get("exa")
+    limitation_set = set(persisted_limitations)
+    if exa_attempt is not None:
+        if str(exa_attempt.get("intent") or "") != "external_social_profile":
+            raise RuntimeError("vault_trusted_external_attempt_invalid")
+        status = str(exa_attempt.get("status") or "")
+        detail = str(exa_attempt.get("detail") or "")
+        if status == "success":
+            if detail != "verified_raw_document_persisted" or any(
+                item.startswith("external_acquisition:")
+                for item in limitation_set
+            ):
+                raise RuntimeError("vault_trusted_external_attempt_invalid")
+        elif status == "error":
+            if detail not in {
+                "provider_not_configured",
+                "provider_unavailable",
+                "provider_result_ineligible",
+            } or f"external_acquisition:{detail}" not in limitation_set:
+                raise RuntimeError("vault_trusted_external_attempt_invalid")
+            warning = {
+                "source": "exa",
+                "code": "exa_failed",
+                "severity": "warning",
+                "message": (
+                    "Exa failed; continuing with owned-web analysis only. "
+                    "This result is not C7 qualifying proof."
+                ),
+                "status": "error",
+                "detail": detail,
+                "can_fallback": False,
+            }
+            fallbacks = [
+                {
+                    "source": "searchapi",
+                    "for_source": "exa",
+                    "available": False,
+                    "approved": False,
+                    "status": "disabled",
+                    "reason": "vertical external-proof fallback for Exa failure",
+                }
+            ]
+            gate_limitation = "acquisition_gate:exa_failed"
+        else:
+            raise RuntimeError("vault_trusted_external_attempt_invalid")
+    elif "external_acquisition:not_discovered" in limitation_set:
+        warning = {
+            "source": "external_identity",
+            "code": "external_identity_not_discovered",
+            "severity": "warning",
+            "message": (
+                "No independent external identity was discovered; continuing "
+                "with owned-web analysis only. This result is not C7 qualifying proof."
+            ),
+            "status": "not_discovered",
+            "detail": "external_acquisition:not_discovered",
+            "can_fallback": False,
+        }
+        gate_limitation = "acquisition_gate:external_identity_not_discovered"
+    else:
+        warning = {
+            "source": "trusted_acquisition",
+            "code": "trusted_acquisition_metadata_unavailable",
+            "severity": "warning",
+            "message": "Persisted external acquisition metadata is unavailable.",
+            "status": "unknown",
+            "detail": "legacy_trusted_capture_without_external_outcome",
+            "can_fallback": False,
+        }
+        gate_limitation = "acquisition_gate:trusted_metadata_unavailable"
+
+    warnings = [warning] if warning is not None else []
+    return {
+        "version": "b3s-acquisition-gate-v2",
+        "state": "warning" if warnings else "pass",
+        "can_continue": True,
+        "allow_degraded_fallback": False,
+        "issues": [],
+        "warnings": warnings,
+        "fallbacks": fallbacks,
+        "limitations": [gate_limitation] if gate_limitation else [],
+        "user_decision": None,
+        "evaluated_at": observed_at,
+    }
+
+
 def _compose_vault_memory_report(
     *,
     scan_id: str,
@@ -2143,20 +2258,40 @@ def _compose_vault_memory_report(
         "limitations": list(parsed_capture.limitations),
     }
     capture_payload = parsed_capture.capture_payload
-    acquisition_gate = (
-        dict(capture_payload.get("acquisition_gate") or {})
-        if isinstance(capture_payload.get("acquisition_gate"), dict)
-        else {}
-    )
+    report_attempts = [dict(row) for row in parsed_capture.acquisition_attempts]
+    report_capture_limitations = list(parsed_capture.limitations)
+    if (
+        parsed_capture.pipeline_version
+        == "evidence-vault-trusted-acquisition-v1"
+    ):
+        try:
+            (
+                report_capture_limitations,
+                report_attempts,
+            ) = trusted_acquisition_report_metadata(capture_payload)
+        except ValueError:
+            raise RuntimeError("vault_trusted_acquisition_outcome_invalid") from None
+        acquisition_gate = _trusted_persisted_acquisition_gate(
+            acquisition_attempts=report_attempts,
+            persisted_limitations=report_capture_limitations,
+            observed_at=parsed_capture.observed_at.isoformat(),
+        )
+    else:
+        acquisition_gate = (
+            dict(capture_payload.get("acquisition_gate") or {})
+            if isinstance(capture_payload.get("acquisition_gate"), dict)
+            else {}
+        )
+    evidence_pack["limitations"] = list(report_capture_limitations)
     limitations = ["score_projected_from_persisted_vault_memory"]
     for item in [
-        *parsed_capture.limitations,
+        *report_capture_limitations,
         *(acquisition_gate.get("limitations") or []),
     ]:
         value = str(item)
         if value and value not in limitations:
             limitations.append(value)
-    attempts = [dict(row) for row in parsed_capture.acquisition_attempts]
+    attempts = list(report_attempts)
     absences = [
         {
             "block": str(row.get("evidence_type") or "").rsplit(".", 1)[-1],

@@ -24,6 +24,9 @@ from src.history.capture_observation import (
     CAPTURE_OBSERVATION_SCHEMA_VERSION,
     parse_capture_observation,
 )
+from src.services.evidence_vault_acquisition_outcome import (
+    trusted_acquisition_report_metadata as _trusted_acquisition_report_metadata,
+)
 from src.services.evidence_vault_acquisition_worker import (
     DurableAcquisitionReadback,
     DurableReceiptReadback,
@@ -652,6 +655,14 @@ class EvidenceVaultRawRepository:
         )
         observed_at = _latest_fetched_at_text(verified)
         plan_status = _pre_interpretation_status(plan)
+        capture_payload = _durable_payload(verified)
+        _trusted_acquisition_report_metadata(
+            capture_payload,
+            external_captured=any(
+                receipt.claims.channel_role == "external_social_profile"
+                for receipt in verified.receipts
+            ),
+        )
         observation_payload = {
             "schema_version": CAPTURE_OBSERVATION_SCHEMA_VERSION,
             "source_scan_id": command.source_scan_id,
@@ -667,7 +678,7 @@ class EvidenceVaultRawRepository:
                 "receipt_set_fingerprint": verified.envelope.receipt_set_fingerprint,
             },
             "limitations": [],
-            "capture_payload": _durable_payload(verified),
+            "capture_payload": capture_payload,
             "evidence_records": deepcopy(evidence),
             "acquisition_attempts": [],
             "artifacts": [],

@@ -304,6 +304,117 @@ def test_vault_report_binds_exact_persisted_observation_without_snapshot_hint() 
         parsed_observation.evidence_records
     )
     assert report["acquisition_artifacts"] == list(artifacts)
+    assert report["attempts"] == list(parsed_observation.acquisition_attempts)
+    assert report["coverage_acquisition"] == parsed_observation.acquisition_summary
+    assert report["acquisition_gate"] == {"state": "pass"}
+
+
+def test_trusted_vault_report_rebuilds_gate_from_persisted_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory, score = _memory_and_score({"M1", "M2"}, {"M1", "M2"})
+    observation = _observation("scan-trusted-attempts")
+    observation["pipeline_version"] = "evidence-vault-trusted-acquisition-v1"
+    observation["capture_payload"]["acquisition_gate"] = {"state": "pass"}
+    observation["limitations"] = [
+        "verified_external_document_unavailable",
+        "external_acquisition:provider_result_ineligible",
+    ]
+    observation["acquisition_attempts"] = [
+        {
+            "provider": "web",
+            "intent": "owned_web",
+            "status": "success",
+            "detail": "verified_raw_document_persisted",
+        },
+        {
+            "provider": "exa",
+            "intent": "external_social_profile",
+            "status": "error",
+            "detail": "provider_result_ineligible",
+        },
+    ]
+    monkeypatch.setattr(
+        scan_runner,
+        "trusted_acquisition_report_metadata",
+        lambda _payload: (
+            list(observation["limitations"]),
+            list(observation["acquisition_attempts"]),
+        ),
+    )
+
+    report = scan_runner._compose_vault_memory_report(
+        scan_id="scan-trusted-attempts",
+        url="https://example.com",
+        brand_name="Example",
+        capture_observation=observation,
+        memory=memory,
+        score=score,
+    )
+
+    assert report["attempts"] == observation["acquisition_attempts"]
+    assert report["acquisition_gate"]["state"] == "warning"
+    assert report["acquisition_gate"]["limitations"] == [
+        "acquisition_gate:exa_failed"
+    ]
+    assert report["acquisition_gate"]["warnings"][0]["detail"] == (
+        "provider_result_ineligible"
+    )
+    assert report["acquisition_gate"]["evaluated_at"] == (
+        "2026-08-11T05:00:00+00:00"
+    )
+    assert {
+        "score_projected_from_persisted_vault_memory",
+        "verified_external_document_unavailable",
+        "external_acquisition:provider_result_ineligible",
+        "acquisition_gate:exa_failed",
+    }.issubset(report["limitations"])
+
+
+def test_trusted_not_discovered_gate_does_not_invent_exa_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory, score = _memory_and_score({"M1", "M2"}, {"M1", "M2"})
+    observation = _observation("scan-trusted-not-discovered")
+    observation["pipeline_version"] = "evidence-vault-trusted-acquisition-v1"
+    observation["capture_payload"]["acquisition_gate"] = {"state": "pass"}
+    observation["limitations"] = [
+        "verified_external_document_unavailable",
+        "external_acquisition:not_discovered",
+    ]
+    observation["acquisition_attempts"] = [
+        {
+            "provider": "web",
+            "intent": "owned_web",
+            "status": "success",
+            "detail": "verified_raw_document_persisted",
+        }
+    ]
+    monkeypatch.setattr(
+        scan_runner,
+        "trusted_acquisition_report_metadata",
+        lambda _payload: (
+            list(observation["limitations"]),
+            list(observation["acquisition_attempts"]),
+        ),
+    )
+
+    report = scan_runner._compose_vault_memory_report(
+        scan_id="scan-trusted-not-discovered",
+        url="https://example.com",
+        brand_name="Example",
+        capture_observation=observation,
+        memory=memory,
+        score=score,
+    )
+
+    warning = report["acquisition_gate"]["warnings"][0]
+    assert warning["code"] == "external_identity_not_discovered"
+    assert warning["status"] == "not_discovered"
+    assert "exa_failed" not in report["acquisition_gate"]["limitations"]
+    assert report["acquisition_gate"]["limitations"] == [
+        "acquisition_gate:external_identity_not_discovered"
+    ]
 
 
 def test_partial_vault_memory_report_stays_shadow_and_counts_unresolved_tiles() -> None:
