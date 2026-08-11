@@ -58,6 +58,7 @@ class _Connection:
         self.info = SimpleNamespace(
             host=runtime_role.pr71_vault_migration_target().host
         )
+        self.pgconn = SimpleNamespace(ssl_in_use=True)
 
     def __enter__(self):
         return self
@@ -86,7 +87,6 @@ class _Connection:
                     "user_name": "neondb_owner",
                     "project_id": "jolly-river-32467750",
                     "branch_id": self.branch_id,
-                    "tls_in_use": True,
                 }
             )
         if "SELECT version, filename, checksum" in normalized:

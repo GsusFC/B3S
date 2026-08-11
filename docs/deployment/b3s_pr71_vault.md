@@ -70,9 +70,13 @@ migration identity. It must contain a password and use either
 `sslmode=require&channel_binding=require` contract, and
 must never be installed with `fly secrets`; it exists only for the controlled
 external migration invocation. Before its first advisory lock or DDL, the
-migrator validates the URL and then, on the **same connection**, SELECTs and
-requires exact TLS, host, database, `current_user`, Neon project, and Neon branch
-identity. A mismatch performs no migration DDL. Run migrations before deploy
+migrator validates the authenticated URL, requires
+`connection.pgconn.ssl_in_use is True` from libpq on the **same connection**,
+requires its exact connected host, and then SELECTs the exact database,
+`current_user`, Neon project, and Neon branch identity. Missing or inactive client TLS and any identity mismatch
+perform no migration DDL. Neon terminates client TLS at its proxy, so the
+backend-facing `pg_stat_ssl.ssl` value is not evidence of the client connection's
+TLS state and is not part of this target attestation. Run migrations before deploy
 only from a clean operator environment where the approved secret manager has
 already injected `B3S_MIGRATION_DATABASE_URL`. Do not paste, assign, or export
 the DSN inline in a command that can enter shell history:
@@ -135,10 +139,16 @@ The `pr71-vault` environment now contains exactly
 `B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN`, provisioned only after the
 owner authorized the isolated deployment. The first dispatch (`31507333105`)
 failed closed in pre-checkout attestation, before either secret expression or
-any database/Fly mutation. Retain those secrets only for an explicitly
-authorized retry of the exact hotfix/current-main SHA; remove them if that
-retry is abandoned. Secret expressions occur only in steps after the complete
-attestation, checkout, and package installation.
+any database/Fly mutation. Authorized retry `31526043212` passed the complete
+workflow attestation, checkout, and installation, then failed closed in the
+migration target preflight before any DDL, role grants, or Fly mutation. A
+read-only diagnostic on that same target proved the exact database, user,
+project, and branch plus `connection.pgconn.ssl_in_use is True`; Neon reported
+`pg_stat_ssl.ssl=false` because its proxy terminates the client TLS connection.
+Retain those secrets only for an explicitly authorized retry of the exact
+hotfix/current-main SHA; remove them if that retry is abandoned. Secret
+expressions occur only in steps after the complete attestation, checkout, and
+package installation.
 
 Before checkout, dependency installation, or deployment-secret use,
 runner-owned code fetches PR #71 through the GitHub REST API and requires
@@ -154,11 +164,15 @@ current deployment SHA. Each response must return the exact `base_commit.sha`
 and `merge_base_commit.sha`, `behind_by=0`, an ancestral `status`, a complete
 bounded commit page, and the exact final commit. The cumulative
 PR71-merge-to-deployment `files` array must be untruncated and exactly these
-three existing, `modified`, non-renamed paths:
+seven existing, `modified`, non-renamed paths:
 
 - `.github/workflows/fly-deploy-pr71-vault.yml`
-- `tests/test_deploy_provenance.py`
 - `docs/deployment/b3s_pr71_vault.md`
+- `scripts/pr71_vault_database_target.py`
+- `tests/test_configure_b3s_runtime_role.py`
+- `tests/test_deploy_provenance.py`
+- `tests/test_pr71_vault_deploy_target.py`
+- `tests/test_pr71_vault_migration_target.py`
 
 Any runtime, database, CI-workflow, config, or other source change after the PR
 #71 merge is outside the hotfix allowlist and fails closed.
