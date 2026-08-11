@@ -12,6 +12,7 @@ from scripts.pr71_vault_database_target import (
     pr71_vault_migration_target,
     require_pr71_vault_connection,
     validate_pr71_vault_dsn,
+    without_libpq_environment,
 )
 from src.history import repository as repository_module
 
@@ -32,9 +33,11 @@ class _Result:
 
 
 class _Connection:
-    def __init__(self, row):
+    def __init__(self, row, *, ssl_in_use=True, expose_pgconn=True):
         self.row = row
         self.info = SimpleNamespace(host=_TARGET.host)
+        if expose_pgconn:
+            self.pgconn = SimpleNamespace(ssl_in_use=ssl_in_use)
         self.statements: list[str] = []
 
     def __enter__(self):
@@ -57,7 +60,6 @@ def _target_row(*, branch_id: str = "br-divine-star-aspobuer"):
         "user_name": "neondb_owner",
         "project_id": "jolly-river-32467750",
         "branch_id": branch_id,
-        "tls_in_use": True,
     }
 
 
@@ -123,6 +125,57 @@ def test_pr71_target_accepts_only_the_two_authenticated_tls_contracts(
     )
 
     validate_pr71_vault_dsn(dsn, target=_TARGET)
+
+
+def test_pr71_live_identity_uses_same_connection_libpq_tls_state() -> None:
+    connection = _Connection(_target_row())
+
+    require_pr71_vault_connection(connection, target=_TARGET)
+
+    assert connection.pgconn.ssl_in_use is True
+    assert len(connection.statements) == 1
+    assert "pg_stat_ssl" not in connection.statements[0]
+
+
+@pytest.mark.parametrize(
+    ("expose_pgconn", "ssl_in_use"),
+    [
+        (False, True),
+        (True, False),
+        (True, None),
+    ],
+)
+def test_pr71_live_identity_rejects_missing_or_inactive_client_tls(
+    expose_pgconn,
+    ssl_in_use,
+) -> None:
+    connection = _Connection(
+        _target_row(),
+        expose_pgconn=expose_pgconn,
+        ssl_in_use=ssl_in_use,
+    )
+
+    with pytest.raises(PR71VaultTargetError, match="not using TLS"):
+        require_pr71_vault_connection(connection, target=_TARGET)
+
+    assert connection.statements == []
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_PR71_MIGRATION_DATABASE_URL"),
+    reason="B3S_TEST_PR71_MIGRATION_DATABASE_URL is required for live SELECT-only attestation",
+)
+def test_pr71_live_neon_target_attestation_is_select_only() -> None:
+    import psycopg
+
+    dsn = os.environ["B3S_TEST_PR71_MIGRATION_DATABASE_URL"]
+    validate_pr71_vault_dsn(dsn, target=_TARGET)
+    with without_libpq_environment():
+        connection = psycopg.connect(dsn)
+    try:
+        require_pr71_vault_connection(connection, target=_TARGET)
+    finally:
+        connection.close()
 
 
 def test_wrong_pr71_url_fails_before_migrate(monkeypatch, capsys) -> None:

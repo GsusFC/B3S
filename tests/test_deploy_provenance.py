@@ -34,7 +34,11 @@ FIXTURE_DEPLOY_SHA = "a" * 40
 HOTFIX_FILES = {
     ".github/workflows/fly-deploy-pr71-vault.yml",
     "docs/deployment/b3s_pr71_vault.md",
+    "scripts/pr71_vault_database_target.py",
+    "tests/test_configure_b3s_runtime_role.py",
     "tests/test_deploy_provenance.py",
+    "tests/test_pr71_vault_deploy_target.py",
+    "tests/test_pr71_vault_migration_target.py",
 }
 
 

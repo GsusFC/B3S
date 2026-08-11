@@ -157,20 +157,16 @@ def require_pr71_vault_connection(
     if connected_host != target.host:
         raise PR71VaultTargetError("connected host does not match PR71 Vault")
 
+    pgconn = getattr(connection, "pgconn", None)
+    if pgconn is None or getattr(pgconn, "ssl_in_use", None) is not True:
+        raise PR71VaultTargetError("PostgreSQL connection is not using TLS")
+
     row = connection.execute(
         """
         SELECT current_database() AS database_name,
                current_user AS user_name,
                current_setting('neon.project_id', true) AS project_id,
-               current_setting('neon.branch_id', true) AS branch_id,
-               COALESCE(
-                   (
-                       SELECT ssl
-                       FROM pg_catalog.pg_stat_ssl
-                       WHERE pid = pg_catalog.pg_backend_pid()
-                   ),
-                   false
-               ) AS tls_in_use
+               current_setting('neon.branch_id', true) AS branch_id
         """
     ).fetchone()
     if isinstance(row, Mapping):
@@ -179,7 +175,6 @@ def require_pr71_vault_connection(
             row.get("user_name"),
             row.get("project_id"),
             row.get("branch_id"),
-            row.get("tls_in_use"),
         )
     else:
         actual = tuple(row or ())
@@ -188,7 +183,6 @@ def require_pr71_vault_connection(
         target.user,
         target.project_id,
         target.branch_id,
-        True,
     )
     if actual != expected:
         raise PR71VaultTargetError("connected session does not match PR71 Vault")

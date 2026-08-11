@@ -18,12 +18,13 @@ class _Cursor:
 
 
 class _Connection:
-    def __init__(self, row):
+    def __init__(self, row, *, ssl_in_use=True):
         self.row = row
         self.statements: list[str] = []
         self.info = SimpleNamespace(
             host=target._EXPECTED["B3S_EXPECTED_NEON_ENDPOINT_HOST"]
         )
+        self.pgconn = SimpleNamespace(ssl_in_use=ssl_in_use)
 
     def __enter__(self):
         return self
@@ -60,7 +61,6 @@ def test_exact_isolated_target_passes_read_only(monkeypatch, capsys):
             "b3s_pr71_app_runtime",
             "jolly-river-32467750",
             "br-divine-star-aspobuer",
-            True,
         )
     )
     monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: connection)
@@ -98,7 +98,6 @@ def test_wrong_branch_fails_without_leaking_dsn(monkeypatch):
             "b3s_pr71_app_runtime",
             "jolly-river-32467750",
             "br-wrong",
-            True,
         )
     )
     monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: connection)
@@ -162,7 +161,6 @@ def test_wrong_runtime_role_fails_after_database_connection(monkeypatch):
             "neondb_owner",
             "jolly-river-32467750",
             "br-divine-star-aspobuer",
-            True,
         )
     )
     monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: connection)
@@ -180,7 +178,6 @@ def test_ambient_libpq_overrides_are_absent_during_target_connection(monkeypatch
             "b3s_pr71_app_runtime",
             "jolly-river-32467750",
             "br-divine-star-aspobuer",
-            True,
         )
     )
     observed = {}
@@ -203,8 +200,8 @@ def test_plaintext_live_session_fails_closed(monkeypatch) -> None:
             "b3s_pr71_app_runtime",
             "jolly-river-32467750",
             "br-divine-star-aspobuer",
-            False,
-        )
+        ),
+        ssl_in_use=False,
     )
     monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: connection)
 
@@ -220,7 +217,6 @@ def test_connected_host_must_be_observable_and_exact(monkeypatch) -> None:
             "b3s_pr71_app_runtime",
             "jolly-river-32467750",
             "br-divine-star-aspobuer",
-            True,
         )
     )
     connection.info.host = "wrong.example"
