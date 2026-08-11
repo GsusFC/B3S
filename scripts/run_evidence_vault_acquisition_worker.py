@@ -20,7 +20,10 @@ from urllib.parse import parse_qsl, urlsplit
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import httpx
 
-from src.history.evidence_vault_raw_repository import EvidenceVaultRawRepository
+from src.history.evidence_vault_raw_repository import (
+    EvidenceVaultRawPlanningContext,
+    EvidenceVaultRawRepository,
+)
 from src.services.evidence_vault_acquisition_ipc_server import (
     serve_unix_trusted_acquisition,
 )
@@ -129,15 +132,38 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
-def _operation_plan(command: Any, evidence_records: Any) -> dict[str, Any]:
+def _operation_plan(
+    command: Any,
+    evidence_records: Any,
+    planning_context: EvidenceVaultRawPlanningContext,
+) -> dict[str, Any]:
     canonical_domain = urlsplit(command.brand_url).hostname
     if not isinstance(canonical_domain, str) or not canonical_domain:
         raise ValueError("canonical brand domain is absent")
+    mode = (
+        "incremental_refresh"
+        if planning_context.canonical_memory_version is not None
+        else "baseline"
+    )
+    # The isolated worker receives no ambient cutover configuration.  C7 is
+    # therefore excluded fail-closed; a later reviewed extension may inject an
+    # explicit safe cutover decision rather than inheriting process state.
+    relations = [
+        dict(row)
+        for row in planning_context.accepted_evidence_tile_relations
+        if str(row.get("tile_id") or "") != "C7"
+    ]
     return build_vault_scan_plan(
         brand_identity=canonical_domain,
         subject_url=command.brand_url,
-        mode="baseline",
+        mode=mode,
         current_evidence_records=evidence_records,
+        previous_capture_evidence_records=(
+            planning_context.previous_capture_evidence_records
+        ),
+        known_evidence_records=planning_context.known_evidence_records,
+        accepted_evidence_tile_relations=relations,
+        canonical_memory_version=planning_context.canonical_memory_version,
     )
 
 

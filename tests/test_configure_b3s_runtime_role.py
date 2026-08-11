@@ -57,8 +57,8 @@ class _Connection:
             return _Result(
                 rows=[
                     {
-                        "version": "021",
-                        "filename": "021_evidence_vault_cumulative_landing_hardening.sql",
+                        "version": "022",
+                        "filename": "022_evidence_vault_raw_incremental_planning.sql",
                         "checksum": "a" * 64,
                     }
                 ]
@@ -177,8 +177,8 @@ def _effective_relation_privileges(relations):
 def _install_contract(monkeypatch):
     manifest = [
         (
-            "021",
-            "021_evidence_vault_cumulative_landing_hardening.sql",
+            "022",
+            "022_evidence_vault_raw_incremental_planning.sql",
             "a" * 64,
             "SELECT 1",
         )
@@ -188,8 +188,8 @@ def _install_contract(monkeypatch):
         assert expected == manifest
         assert actual == [
             {
-                "version": "021",
-                "filename": "021_evidence_vault_cumulative_landing_hardening.sql",
+                "version": "022",
+                "filename": "022_evidence_vault_raw_incremental_planning.sql",
                 "checksum": "a" * 64,
             }
         ]
@@ -215,7 +215,7 @@ def test_configures_exact_runtime_contract_in_one_transaction(monkeypatch, capsy
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
         "status": "ok",
-        "head": "021_evidence_vault_cumulative_landing_hardening.sql",
+        "head": "022_evidence_vault_raw_incremental_planning.sql",
     }
     assert dsn not in json.dumps(payload)
     assert connected[0][0] == dsn
@@ -306,7 +306,7 @@ def test_requires_only_migration_database_url(monkeypatch, capsys) -> None:
 
 
 def test_raw_relation_and_journal_contract_is_pinned() -> None:
-    assert runtime_role.EXPECTED_HEAD_VERSION == "021"
+    assert runtime_role.EXPECTED_HEAD_VERSION == "022"
     assert runtime_role.MIGRATION_JOURNAL == "schema_migrations"
     assert runtime_role.WATERMARK_TABLE not in runtime_role.RAW_MIGRATION_019_RELATIONS
     assert runtime_role.RAW_MIGRATION_019_RELATIONS == {

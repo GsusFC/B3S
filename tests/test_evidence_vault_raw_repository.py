@@ -61,8 +61,15 @@ class _Cursor:
 
 
 class _Connection:
-    def __init__(self, *, lookup: Any = None, fail_append: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        lookup: Any = None,
+        planning_context: Any = None,
+        fail_append: bool = False,
+    ) -> None:
         self.lookup = lookup
+        self.planning_context = planning_context
         self.fail_append = fail_append
         self.calls: list[tuple[str, Any]] = []
         self.exit_exception: type[BaseException] | None = None
@@ -92,6 +99,27 @@ class _Connection:
                     "target_identity": True,
                 }
             )
+        if "read_evidence_vault_raw_planning_context" in sql:
+            workspace_slug, source_scan_id, canonical_domain, *_ids = params
+            value = self.planning_context or {
+                "schema_version": "evidence-vault-raw-planning-context-v1",
+                "workspace_slug": workspace_slug,
+                "source_scan_id": source_scan_id,
+                "canonical_domain": canonical_domain,
+                "canonical_memory_version": None,
+                "previous_capture_evidence_records": [],
+                "known_evidence_records": [],
+                "accepted_evidence_tile_relations": [],
+                "operational_authority_context": {
+                    "database_time": "2026-08-09T02:00:00+00:00",
+                    "operational_adoption_count": 0,
+                    "operational_adoptions": [],
+                    "operational_packet_count": 0,
+                    "operational_packets": [],
+                },
+                "existing_operation_plan": None,
+            }
+            return _Cursor({"planning_context": value})
         if "append_evidence_vault_raw_acquisition" in sql:
             if self.fail_append:
                 raise RuntimeError("postgresql://secret@internal")
@@ -218,7 +246,11 @@ def _fixture(
     return command, signed, registry
 
 
-def _plan(command: TrustedAcquisitionCommand, evidence: Any) -> dict[str, Any]:
+def _plan(
+    command: TrustedAcquisitionCommand,
+    evidence: Any,
+    _planning_context: raw_repository.EvidenceVaultRawPlanningContext,
+) -> dict[str, Any]:
     return build_vault_scan_plan(
         brand_identity="example.com",
         subject_url=command.brand_url,
@@ -226,6 +258,155 @@ def _plan(command: TrustedAcquisitionCommand, evidence: Any) -> dict[str, Any]:
         current_evidence_records=evidence,
     )
 
+
+
+def test_planning_context_is_strict_and_never_accepts_operational_evidence_id_as_fingerprint() -> None:
+    command, _signed, _registry = _fixture()
+    base = {
+        "schema_version": "evidence-vault-raw-planning-context-v1",
+        "workspace_slug": command.workspace_slug,
+        "source_scan_id": command.source_scan_id,
+        "canonical_domain": "example.com",
+        "canonical_memory_version": None,
+        "previous_capture_evidence_records": [],
+        "known_evidence_records": [],
+        "accepted_evidence_tile_relations": [],
+        "operational_authority_context": {
+            "database_time": "2026-08-09T02:00:00+00:00",
+            "operational_adoption_count": 0,
+            "operational_adoptions": [],
+            "operational_packet_count": 0,
+            "operational_packets": [],
+        },
+        "existing_operation_plan": None,
+    }
+    parsed = raw_repository._validate_planning_context(base, command=command)
+    assert parsed.canonical_memory_version is None
+
+    contaminated = dict(base)
+    contaminated["accepted_evidence_tile_relations"] = [
+        {"tile_id": "M1", "evidence_id": "b" * 64}
+    ]
+    with pytest.raises(ValueError, match="fields diverged"):
+        raw_repository._validate_planning_context(contaminated, command=command)
+
+
+def test_contextual_plan_is_bound_to_the_frozen_parent_and_exact_history() -> None:
+    command, signed, registry = _fixture("New mission evidence")
+    previous = {
+        "ref": "previous",
+        "source": "owned_web",
+        "evidence_type": "text",
+        "url": command.brand_url,
+        "content": "Old mission evidence",
+        "confidence": "high",
+        "metadata": {"source_class": "owned_copy"},
+    }
+    context = raw_repository.EvidenceVaultRawPlanningContext(
+        canonical_memory_version="a" * 64,
+        previous_capture_evidence_records=(previous,),
+        known_evidence_records=(previous,),
+        accepted_evidence_tile_relations=(),
+    )
+    seen: list[raw_repository.EvidenceVaultRawPlanningContext] = []
+
+    def contextual_plan(plan_command, evidence, planning_context):
+        seen.append(planning_context)
+        return build_vault_scan_plan(
+            brand_identity="example.com",
+            subject_url=plan_command.brand_url,
+            mode="incremental_refresh",
+            current_evidence_records=evidence,
+            previous_capture_evidence_records=(
+                planning_context.previous_capture_evidence_records
+            ),
+            known_evidence_records=planning_context.known_evidence_records,
+            canonical_memory_version=planning_context.canonical_memory_version,
+        )
+
+    repository = EvidenceVaultRawRepository(
+        "postgresql://scanner-ingest",
+        public_key_registry=registry,
+        operation_plan_builder=contextual_plan,
+        **_UNIT_TARGET,
+        connect=_Connector(_Connection()),
+    )
+    built = build_signed_raw_capture(
+        signed.pre_receipt_snapshot,
+        signed.receipts,
+        public_key_registry=registry,
+        external_identity_provenance=None,
+    )
+    verified = validate_signed_raw_capture(
+        built.durable_raw_capture_payload,
+        capture_content_hash=built.capture_content_hash,
+        public_key_registry=registry,
+    )
+    prepared = repository._EvidenceVaultRawRepository__prepare(
+        command,
+        verified,
+        planning_context=context,
+    )
+
+    assert seen == [context]
+    assert prepared.envelope["operation_plan"]["mode"] == "incremental_refresh"
+    assert prepared.envelope["operation_plan"]["canonical_memory_version"] == "a" * 64
+    assert prepared.envelope["operation_plan"]["plan_payload"]["delta"][
+        "modified_evidence_fingerprints"
+    ]
+
+
+def test_contextual_plan_rejects_a_self_consistent_forged_delta() -> None:
+    command, signed, registry = _fixture("New mission evidence")
+    previous = {
+        "ref": "previous",
+        "source": "owned_web",
+        "evidence_type": "text",
+        "url": command.brand_url,
+        "content": "Old mission evidence",
+        "confidence": "high",
+        "metadata": {"source_class": "owned_copy"},
+    }
+    context = raw_repository.EvidenceVaultRawPlanningContext(
+        canonical_memory_version="a" * 64,
+        previous_capture_evidence_records=(previous,),
+        known_evidence_records=(previous,),
+        accepted_evidence_tile_relations=(),
+    )
+    built = build_signed_raw_capture(
+        signed.pre_receipt_snapshot,
+        signed.receipts,
+        public_key_registry=registry,
+        external_identity_provenance=None,
+    )
+    verified = validate_signed_raw_capture(
+        built.durable_raw_capture_payload,
+        capture_content_hash=built.capture_content_hash,
+        public_key_registry=registry,
+    )
+    evidence = raw_repository._deterministic_evidence_records(verified)
+
+    def forged_plan(plan_command, current, planning_context):
+        del planning_context
+        # This plan is internally valid and bound to the exact current evidence,
+        # but falsely calls the changed capture already known and unchanged.
+        return build_vault_scan_plan(
+            brand_identity="example.com",
+            subject_url=plan_command.brand_url,
+            mode="incremental_refresh",
+            current_evidence_records=current,
+            previous_capture_evidence_records=current,
+            known_evidence_records=current,
+            canonical_memory_version="a" * 64,
+        )
+
+    with pytest.raises(ValueError, match="frozen planning context"):
+        raw_repository._build_and_validate_plan(
+            forged_plan,
+            command=command,
+            evidence_records=evidence,
+            planning_context=context,
+        )
 
 def test_repository_prepares_exact_atomic_pre_interpretation_envelope() -> None:
     command, signed, registry = _fixture()
@@ -472,6 +653,18 @@ def test_lookup_is_read_only_uses_only_definer_read_and_null_is_none() -> None:
 
 
 
+
+def test_scanner_preflight_allows_exactly_the_three_worker_functions() -> None:
+    sql = raw_repository._ROLE_PREFLIGHT_SQL
+    signature = (
+        "b3s_history.read_evidence_vault_raw_planning_context("
+        "text,text,text,uuid,uuid,uuid)"
+    )
+    assert signature in sql
+    assert sql.count(signature) == 2
+    assert "forbidden_security_definer_execute" in sql
+    assert "forbidden_direct_function_grant" in sql
+
 def test_verify_ingest_capability_connects_read_only_and_checks_exact_role() -> None:
     _command, _signed, registry = _fixture()
     connection = _Connection()
@@ -563,6 +756,17 @@ def test_persist_calls_append_once_and_returns_only_verified_readback(monkeypatc
         if sql.startswith("SELECT b3s_history.append_evidence")
     ]
     assert len(append_calls) == 1
+    planning_index = next(
+        index
+        for index, (sql, _params) in enumerate(connection.calls)
+        if "read_evidence_vault_raw_planning_context" in sql
+    )
+    append_index = next(
+        index
+        for index, (sql, _params) in enumerate(connection.calls)
+        if sql.startswith("SELECT b3s_history.append_evidence")
+    )
+    assert planning_index < append_index
     assert connection.exit_exception is None
 
 
@@ -583,6 +787,88 @@ def test_database_failure_is_redacted_and_transaction_receives_exception() -> No
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
     assert connection.exit_exception is RuntimeError
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL")
+    or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1",
+    reason="requires disposable PostgreSQL",
+)
+def test_postgres_migration_sanitizes_poisoned_default_scanner_function_acls() -> None:
+    import psycopg
+    from psycopg import sql
+
+    from src.history.repository import PostgresHistoryRepository
+
+    admin_dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    attacker = "b3s_raw_default_acl_attacker_test"
+    public_schema_create_was_granted = False
+    with psycopg.connect(admin_dsn, autocommit=True) as connection:
+        public_schema_create_was_granted = bool(
+            connection.execute(
+                "SELECT has_schema_privilege('public', 'public', 'CREATE')"
+            ).fetchone()[0]
+        )
+        connection.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
+        connection.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+        if connection.execute(
+            "SELECT 1 FROM pg_roles WHERE rolname = %s", (attacker,)
+        ).fetchone():
+            connection.execute(
+                sql.SQL("DROP OWNED BY {}").format(sql.Identifier(attacker))
+            )
+            connection.execute(
+                sql.SQL("DROP ROLE {}").format(sql.Identifier(attacker))
+            )
+        connection.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(
+            sql.Identifier(attacker)
+        ))
+        connection.execute(sql.SQL(
+            "ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO {}"
+        ).format(sql.Identifier(attacker)))
+        connection.execute(
+            """DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_roles
+                    WHERE rolname = 'b3s_history_vault_provenance_owner'
+                ) THEN
+                    CREATE ROLE b3s_history_vault_provenance_owner NOLOGIN;
+                END IF;
+            END $$"""
+        )
+    try:
+        PostgresHistoryRepository(admin_dsn).migrate()
+        signatures = (
+            "b3s_history.append_evidence_vault_raw_acquisition(jsonb)",
+            "b3s_history.read_evidence_vault_raw_acquisition(text,text)",
+            "b3s_history.read_evidence_vault_raw_planning_context("
+            "text,text,text,uuid,uuid,uuid)",
+        )
+        with psycopg.connect(admin_dsn) as connection:
+            assert [
+                connection.execute(
+                    "SELECT has_function_privilege(%s, %s, 'EXECUTE')",
+                    (attacker, signature),
+                ).fetchone()[0]
+                for signature in signatures
+            ] == [False, False, False]
+    finally:
+        with psycopg.connect(admin_dsn, autocommit=True) as connection:
+            connection.execute(sql.SQL(
+                "ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM {}"
+            ).format(sql.Identifier(attacker)))
+            connection.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+            if connection.execute(
+                "SELECT 1 FROM pg_roles WHERE rolname = %s", (attacker,)
+            ).fetchone():
+                connection.execute(
+                    sql.SQL("DROP OWNED BY {}").format(sql.Identifier(attacker))
+                )
+                connection.execute(
+                    sql.SQL("DROP ROLE {}").format(sql.Identifier(attacker))
+                )
+            if public_schema_create_was_granted:
+                connection.execute("GRANT CREATE ON SCHEMA public TO PUBLIC")
 
 
 @pytest.mark.skipif(
@@ -643,7 +929,9 @@ def test_postgres_scanner_execute_role_persists_looks_up_and_replays() -> None:
             sql.SQL(
                 "GRANT EXECUTE ON FUNCTION "
                 "b3s_history.append_evidence_vault_raw_acquisition(jsonb), "
-                "b3s_history.read_evidence_vault_raw_acquisition(text, text) TO {}"
+                "b3s_history.read_evidence_vault_raw_acquisition(text, text), "
+                "b3s_history.read_evidence_vault_raw_planning_context("
+                "text, text, text, uuid, uuid, uuid) TO {}"
             ).format(sql.Identifier(role))
         )
     connection_values = conninfo_to_dict(admin_dsn)
@@ -662,10 +950,11 @@ def test_postgres_scanner_execute_role_persists_looks_up_and_replays() -> None:
     def counted_plan(
         plan_command: TrustedAcquisitionCommand,
         evidence: Any,
+        planning_context: raw_repository.EvidenceVaultRawPlanningContext,
     ) -> dict[str, Any]:
         nonlocal planner_calls
         planner_calls += 1
-        return _plan(plan_command, evidence)
+        return _plan(plan_command, evidence, planning_context)
 
     try:
         repository = EvidenceVaultRawRepository(
@@ -698,7 +987,7 @@ def test_postgres_scanner_execute_role_persists_looks_up_and_replays() -> None:
         looked_up = repository.lookup(command)
         assert planner_calls == 1
         replayed = repository.persist(command, signed)
-        assert planner_calls == 2
+        assert planner_calls == 1
         assert looked_up is not None
         assert first.capture_id == looked_up.capture_id == replayed.capture_id
         assert first.capture_content_hash == looked_up.capture_content_hash

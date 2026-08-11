@@ -1,7 +1,7 @@
 """Worker-only PostgreSQL ingest for signed Evidence Vault acquisitions.
 
 The repository intentionally has no migration or general table-DML surface.  Its
-only durable capabilities are the scanner role's two SECURITY DEFINER functions.
+only durable capabilities are the scanner role's three bounded SECURITY DEFINER functions.
 Every successful write is read back and reverified before its transaction commits.
 """
 
@@ -33,8 +33,12 @@ from src.services.evidence_vault_acquisition_worker import (
     SignedAcquisition,
     TrustedAcquisitionCommand,
 )
+from src.services.evidence_vault_c7_shadow_readiness import _current_memory
 from src.services.evidence_vault_canonical_core import canonical_fingerprint, canonical_json
-from src.services.evidence_vault_incremental_refresh import validate_vault_scan_plan
+from src.services.evidence_vault_incremental_refresh import (
+    build_vault_scan_plan,
+    validate_vault_scan_plan,
+)
 from src.services.evidence_vault_raw_capture import (
     DETERMINISTIC_EXTRACTOR_VERSION,
     VerifiedRawCapture,
@@ -71,7 +75,12 @@ _READ_SQL = (
     "SELECT b3s_history.read_evidence_vault_raw_acquisition(%s, %s) "
     "AS acquisition, clock_timestamp() AS database_time"
 )
+_PLANNING_CONTEXT_SQL = (
+    "SELECT b3s_history.read_evidence_vault_raw_planning_context("
+    "%s, %s, %s, %s, %s, %s) AS planning_context"
+)
 _READ_ONLY_SQL = "SET TRANSACTION READ ONLY"
+_PLANNING_CONTEXT_VERSION = "evidence-vault-raw-planning-context-v1"
 _ROLE_PREFLIGHT_SQL = """
 WITH role_row AS (
     SELECT * FROM pg_catalog.pg_roles WHERE rolname = current_user
@@ -80,7 +89,8 @@ WITH role_row AS (
     FROM pg_catalog.pg_proc AS routines
     WHERE routines.oid = ANY(ARRAY[
         'b3s_history.append_evidence_vault_raw_acquisition(jsonb)'::regprocedure::oid,
-        'b3s_history.read_evidence_vault_raw_acquisition(text,text)'::regprocedure::oid
+        'b3s_history.read_evidence_vault_raw_acquisition(text,text)'::regprocedure::oid,
+        'b3s_history.read_evidence_vault_raw_planning_context(text,text,text,uuid,uuid,uuid)'::regprocedure::oid
     ])
 ), allowed_function_acl_invalid AS (
     SELECT 1
@@ -229,6 +239,10 @@ SELECT
     ) AND pg_catalog.has_function_privilege(
         current_user,
         'b3s_history.read_evidence_vault_raw_acquisition(text,text)'::regprocedure,
+        'EXECUTE'
+    ) AND pg_catalog.has_function_privilege(
+        current_user,
+        'b3s_history.read_evidence_vault_raw_planning_context(text,text,text,uuid,uuid,uuid)'::regprocedure,
         'EXECUTE'
     ) AND NOT EXISTS (SELECT 1 FROM allowed_function_acl_invalid)
         AS required_execute,
@@ -435,13 +449,25 @@ class EvidenceVaultRawRepositoryError(RuntimeError):
     """A scanner-ingest failure that never exposes database or signed raw data."""
 
 
+@dataclass(frozen=True)
+class EvidenceVaultRawPlanningContext:
+    """Exact bounded DB context frozen before one atomic raw append."""
+
+    canonical_memory_version: str | None
+    previous_capture_evidence_records: tuple[dict[str, Any], ...]
+    known_evidence_records: tuple[dict[str, Any], ...]
+    accepted_evidence_tile_relations: tuple[dict[str, Any], ...]
+    existing_operation_plan: dict[str, Any] | None = None
+
+
 class OperationPlanBuilder(Protocol):
-    """Worker-local planner over the repository's exact deterministic evidence."""
+    """Worker-local planner over exact current evidence and frozen DB history."""
 
     def __call__(
         self,
         command: TrustedAcquisitionCommand,
         evidence_records: Sequence[Mapping[str, Any]],
+        planning_context: EvidenceVaultRawPlanningContext,
     ) -> Mapping[str, Any]: ...
 
 
@@ -552,9 +578,20 @@ class EvidenceVaultRawRepository:
                 signed_acquisition,
                 registry=registry,
             )
-            prepared = self.__prepare(validated_command, verified)
             with self.__connect() as connection:
                 self.__assert_scanner_session(connection)
+                planning_context = self.__read_planning_context(
+                    connection,
+                    validated_command,
+                )
+                prepared = self.__prepare(
+                    validated_command,
+                    verified,
+                    planning_context=planning_context,
+                    frozen_operation_plan=(
+                        planning_context.existing_operation_plan
+                    ),
+                )
                 append_row = connection.execute(
                     _APPEND_SQL,
                     (Jsonb(deepcopy(prepared.envelope)),),
@@ -610,6 +647,36 @@ class EvidenceVaultRawRepository:
             pass
         raise EvidenceVaultRawRepositoryError(_ERROR)
 
+    def __read_planning_context(
+        self,
+        connection: Any,
+        command: TrustedAcquisitionCommand,
+    ) -> EvidenceVaultRawPlanningContext:
+        workspace_id = str(_stable_uuid("workspace", command.workspace_slug))
+        brand_id = str(
+            _stable_uuid(workspace_id, "brand", _command_domain(command))
+        )
+        scan_id = str(
+            _stable_uuid(workspace_id, "scan", command.source_scan_id)
+        )
+        row = connection.execute(
+            _PLANNING_CONTEXT_SQL,
+            (
+                command.workspace_slug,
+                command.source_scan_id,
+                _command_domain(command),
+                workspace_id,
+                brand_id,
+                scan_id,
+            ),
+        ).fetchone()
+        if not isinstance(row, Mapping):
+            raise ValueError("raw planning context row is absent")
+        return _validate_planning_context(
+            row.get("planning_context"),
+            command=command,
+        )
+
     def __assert_scanner_session(self, connection: Any) -> None:
         _assert_scanner_session(
             connection,
@@ -637,14 +704,22 @@ class EvidenceVaultRawRepository:
         command: TrustedAcquisitionCommand,
         verified: VerifiedRawCapture,
         *,
+        planning_context: EvidenceVaultRawPlanningContext | None = None,
         frozen_operation_plan: Mapping[str, Any] | None = None,
     ) -> _PreparedAcquisition:
         evidence = _deterministic_evidence_records(verified)
+        context = planning_context or EvidenceVaultRawPlanningContext(
+            canonical_memory_version=None,
+            previous_capture_evidence_records=(),
+            known_evidence_records=(),
+            accepted_evidence_tile_relations=(),
+        )
         plan = (
             _build_and_validate_plan(
                 self.__operation_plan_builder,
                 command=command,
                 evidence_records=evidence,
+                planning_context=context,
             )
             if frozen_operation_plan is None
             else _validate_plan_for_evidence(
@@ -994,19 +1069,209 @@ def _receipt_source_url(acquisition: Any, *, role: str) -> str:
     raise ValueError("receipt role has no safe exact source URL")
 
 
+def _validate_planning_context(
+    value: Any,
+    *,
+    command: TrustedAcquisitionCommand,
+) -> EvidenceVaultRawPlanningContext:
+    expected_fields = {
+        "schema_version",
+        "workspace_slug",
+        "source_scan_id",
+        "canonical_domain",
+        "canonical_memory_version",
+        "previous_capture_evidence_records",
+        "known_evidence_records",
+        "accepted_evidence_tile_relations",
+        "operational_authority_context",
+        "existing_operation_plan",
+    }
+    context = _mapping(value, fields=expected_fields)
+    if (
+        context["schema_version"] != _PLANNING_CONTEXT_VERSION
+        or context["workspace_slug"] != command.workspace_slug
+        or context["source_scan_id"] != command.source_scan_id
+        or context["canonical_domain"] != _command_domain(command)
+    ):
+        raise ValueError("raw planning context identity diverged")
+    canonical_version = context["canonical_memory_version"]
+    if canonical_version is not None and (
+        not isinstance(canonical_version, str)
+        or len(canonical_version) != 64
+        or any(character not in "0123456789abcdef" for character in canonical_version)
+    ):
+        raise ValueError("raw planning canonical version is invalid")
+    authority = _mapping(
+        context["operational_authority_context"],
+        fields={
+            "database_time",
+            "operational_adoption_count",
+            "operational_adoptions",
+            "operational_packet_count",
+            "operational_packets",
+        },
+    )
+    adoption_count = authority["operational_adoption_count"]
+    packet_count = authority["operational_packet_count"]
+    adoptions = authority["operational_adoptions"]
+    packets = authority["operational_packets"]
+    if (
+        not isinstance(adoption_count, int)
+        or isinstance(adoption_count, bool)
+        or not isinstance(packet_count, int)
+        or isinstance(packet_count, bool)
+        or not isinstance(adoptions, list)
+        or not isinstance(packets, list)
+        or not 0 <= adoption_count <= 128
+        or not 0 <= packet_count <= 128
+        or len(adoptions) > 128
+        or len(packets) > 128
+    ):
+        raise ValueError("raw planning operational authority is invalid")
+    database_time = _database_datetime(authority["database_time"])
+    if canonical_version is None:
+        if adoption_count != 0 or packet_count != 0 or adoptions or packets:
+            raise ValueError("raw planning absent authority is contaminated")
+    else:
+        workspace_id = str(_stable_uuid("workspace", command.workspace_slug))
+        brand_id = str(
+            _stable_uuid(workspace_id, "brand", _command_domain(command))
+        )
+        current_memory, _event, _identity = _current_memory(
+            authority,
+            brand=_command_domain(command),
+            brand_id=brand_id,
+            database_time=database_time,
+        )
+        if current_memory.get("canonical_memory_version") != canonical_version:
+            raise ValueError("raw planning canonical authority diverged")
+
+    def evidence_rows(field: str, *, maximum: int) -> tuple[dict[str, Any], ...]:
+        raw_rows = context[field]
+        if not isinstance(raw_rows, list) or len(raw_rows) > maximum:
+            raise ValueError(f"raw planning {field} is invalid")
+        rows: list[dict[str, Any]] = []
+        fields = {
+            "ref", "source", "evidence_type", "url", "content",
+            "confidence", "metadata",
+        }
+        for raw in raw_rows:
+            row = _mapping(raw, fields=fields)
+            if not all(
+                isinstance(row[name], str)
+                for name in (
+                    "ref", "source", "evidence_type", "url", "content",
+                    "confidence",
+                )
+            ) or not isinstance(row["metadata"], Mapping):
+                raise ValueError(f"raw planning {field} row is invalid")
+            rows.append(_canonical_detach(row))
+        return tuple(rows)
+
+    previous = evidence_rows(
+        "previous_capture_evidence_records",
+        maximum=5000,
+    )
+    known = evidence_rows("known_evidence_records", maximum=5000)
+    if sum(
+        len(row["content"].encode("utf-8"))
+        for row in (*previous, *known)
+    ) > 70 * 1024 * 1024:
+        raise ValueError("raw planning evidence content exceeds bound")
+    raw_relations = context["accepted_evidence_tile_relations"]
+    if not isinstance(raw_relations, list) or len(raw_relations) > 5000:
+        raise ValueError("raw planning accepted relations are invalid")
+    relations: list[dict[str, Any]] = []
+    for raw in raw_relations:
+        relation = _mapping(
+            raw,
+            fields={"tile_id", "evidence_fingerprint", "evidence_locator"},
+        )
+        if not isinstance(relation["tile_id"], str):
+            raise ValueError("raw planning accepted relation is invalid")
+        fingerprint = relation["evidence_fingerprint"]
+        locator = relation["evidence_locator"]
+        if bool(fingerprint) == bool(locator):
+            raise ValueError("raw planning accepted relation identity is invalid")
+        if fingerprint is not None and (
+            not isinstance(fingerprint, str)
+            or len(fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in fingerprint)
+        ):
+            raise ValueError("raw planning accepted fingerprint is invalid")
+        if locator is not None and not isinstance(locator, str):
+            raise ValueError("raw planning accepted locator is invalid")
+        relations.append(_canonical_detach(relation))
+    existing = context["existing_operation_plan"]
+    if existing is not None and not isinstance(existing, Mapping):
+        raise ValueError("raw planning existing operation is invalid")
+    return EvidenceVaultRawPlanningContext(
+        canonical_memory_version=canonical_version,
+        previous_capture_evidence_records=previous,
+        known_evidence_records=known,
+        accepted_evidence_tile_relations=tuple(relations),
+        existing_operation_plan=(
+            _canonical_detach(existing) if existing is not None else None
+        ),
+    )
+
 def _build_and_validate_plan(
     builder: OperationPlanBuilder,
     *,
     command: TrustedAcquisitionCommand,
     evidence_records: Sequence[Mapping[str, Any]],
+    planning_context: EvidenceVaultRawPlanningContext,
 ) -> dict[str, Any]:
     detached_rows = tuple(deepcopy(dict(row)) for row in evidence_records)
-    value = builder(command, detached_rows)
-    return _validate_plan_for_evidence(
+    builder_context = EvidenceVaultRawPlanningContext(
+        canonical_memory_version=planning_context.canonical_memory_version,
+        previous_capture_evidence_records=tuple(
+            deepcopy(row)
+            for row in planning_context.previous_capture_evidence_records
+        ),
+        known_evidence_records=tuple(
+            deepcopy(row) for row in planning_context.known_evidence_records
+        ),
+        accepted_evidence_tile_relations=tuple(
+            deepcopy(row)
+            for row in planning_context.accepted_evidence_tile_relations
+        ),
+        existing_operation_plan=(
+            deepcopy(planning_context.existing_operation_plan)
+            if planning_context.existing_operation_plan is not None
+            else None
+        ),
+    )
+    value = builder(command, detached_rows, builder_context)
+    plan = _validate_plan_for_evidence(
         value,
         command=command,
         evidence_records=evidence_records,
     )
+    expected_mode = (
+        "incremental_refresh"
+        if planning_context.canonical_memory_version is not None
+        else "baseline"
+    )
+    expected = build_vault_scan_plan(
+        brand_identity=_command_domain(command),
+        subject_url=command.brand_url,
+        mode=expected_mode,
+        current_evidence_records=evidence_records,
+        previous_capture_evidence_records=(
+            planning_context.previous_capture_evidence_records
+        ),
+        known_evidence_records=planning_context.known_evidence_records,
+        accepted_evidence_tile_relations=[
+            deepcopy(row)
+            for row in planning_context.accepted_evidence_tile_relations
+            if str(row.get("tile_id") or "") != "C7"
+        ],
+        canonical_memory_version=planning_context.canonical_memory_version,
+    )
+    if plan != expected:
+        raise ValueError("operation plan differs from its frozen planning context")
+    return plan
 
 
 def _validate_plan_for_evidence(
@@ -1855,6 +2120,7 @@ def _single_result(row: Any, field: str) -> Any:
 
 
 __all__ = [
+    "EvidenceVaultRawPlanningContext",
     "EvidenceVaultRawRepository",
     "EvidenceVaultRawRepositoryError",
     "OperationPlanBuilder",

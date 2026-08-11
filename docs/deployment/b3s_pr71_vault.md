@@ -50,7 +50,7 @@ credential on the same branch is rejected before the Machine update.
 The isolated L2 logins are fixed and distinct:
 
 - `b3s_pr71_app_runtime` — FastAPI/report runtime login
-- `b3s_pr71_scanner_ingest` — worker-only execute-only raw append/read login;
+- `b3s_pr71_scanner_ingest` — worker-only execute-only raw append, exact replay, and bounded planning-context login;
   the worker preflight binds the session to this exact role
 - `b3s_pr71_c7_runtime_read` — external private readiness login
 - `b3s_pr71_c7_governance` — external governance/adoption capability

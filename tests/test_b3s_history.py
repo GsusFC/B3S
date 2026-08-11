@@ -527,6 +527,13 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
         )
         .read_text(encoding="utf-8")
     )
+    raw_planning_sql = (
+        resources.files("src.history")
+        .joinpath(
+            "migrations/022_evidence_vault_raw_incremental_planning.sql"
+        )
+        .read_text(encoding="utf-8")
+    )
 
     assert filenames[13:] == [
         "014_evidence_vault_operational_memory_v2.sql",
@@ -537,6 +544,7 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
         "019_evidence_vault_verified_raw_provenance.sql",
         "020_evidence_vault_c7_shadow_readiness.sql",
         "021_evidence_vault_cumulative_landing_hardening.sql",
+        "022_evidence_vault_raw_incremental_planning.sql",
     ]
     assert "packet_kind" in operational_memory_sql
     assert "operational_source_v2" in operational_memory_sql
@@ -587,6 +595,21 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
         cumulative_landing_sql
     )
     assert "evidence_vault_operation_plans_no_truncate" in cumulative_landing_sql
+    assert "read_evidence_vault_raw_planning_context" in raw_planning_sql
+    assert "LIMIT 500" in raw_planning_sql
+    assert "evidence_count > 5000" in raw_planning_sql
+    assert "raw planning replay plan exceeds bound" in raw_planning_sql
+    assert "raw planning serialized evidence exceeds bound" in raw_planning_sql
+    assert "evidence-vault-canonical-promotion" in raw_planning_sql
+    assert "accepted_evidence_tile_relations', '[]'::jsonb" in raw_planning_sql
+    assert raw_planning_sql.index("IF existing_plan IS NOT NULL") < raw_planning_sql.index(
+        "SELECT * INTO latest_event"
+    )
+    assert "REVOKE EXECUTE ON FUNCTION" in raw_planning_sql
+    assert "GRANT USAGE, CREATE ON SCHEMA b3s_history" in raw_planning_sql
+    assert "provenance owner retains forbidden schema CREATE" in raw_planning_sql
+    assert "aclexplode" in raw_planning_sql
+    assert "raw scanner function % retains an unexpected EXECUTE grant" in raw_planning_sql
 
 
 def test_claim_tile_review_requires_packet_fingerprint() -> None:
@@ -896,6 +919,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "019_evidence_vault_verified_raw_provenance.sql",
             "020_evidence_vault_c7_shadow_readiness.sql",
             "021_evidence_vault_cumulative_landing_hardening.sql",
+            "022_evidence_vault_raw_incremental_planning.sql",
         ]
         assert repository.migrate() == []
 
@@ -1829,6 +1853,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "019_evidence_vault_verified_raw_provenance.sql",
             "020_evidence_vault_c7_shadow_readiness.sql",
             "021_evidence_vault_cumulative_landing_hardening.sql",
+            "022_evidence_vault_raw_incremental_planning.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0
