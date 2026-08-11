@@ -130,6 +130,8 @@ class ScannerApiJobsStoreMixin:
                 END,
                 updated_at = excluded.updated_at,
                 completed_at = excluded.completed_at
+            WHERE b3s_scanner_jobs.state NOT IN ('done', 'error', 'cancelled')
+                OR b3s_scanner_jobs.state = excluded.state
             """,
             (
                 scan_id,
@@ -178,6 +180,7 @@ class ScannerApiJobsStoreMixin:
         if not rows:
             return 0
         now = _utc_now()
+        interrupted_count = 0
         for row in rows:
             payload, _error = safe_json_loads(
                 row["status_json"],
@@ -196,19 +199,25 @@ class ScannerApiJobsStoreMixin:
                 }
             )
             for phase in status.get("phases") or []:
-                if isinstance(phase, dict) and phase.get("state") in {"pending", "running", "blocked"}:
+                if isinstance(phase, dict) and phase.get("state") in {
+                    "pending",
+                    "running",
+                    "blocked",
+                }:
                     phase["state"] = "interrupted"
-            self.conn.execute(
+            cursor = self.conn.execute(
                 """
                 UPDATE b3s_scanner_jobs
                 SET state='error', phase='interrupted', status_json=?,
                     updated_at=?, completed_at=?
                 WHERE scan_id=?
+                    AND state IN ('accepted', 'running', 'blocked')
                 """,
                 (json_dumps(status), now, now, str(row["scan_id"])),
             )
+            interrupted_count += cursor.rowcount
         self.conn.commit()
-        return len(rows)
+        return interrupted_count
 
 
 def _utc_now() -> str:

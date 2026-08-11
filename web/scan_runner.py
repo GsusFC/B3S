@@ -256,7 +256,7 @@ def _activate_vault_result_unless_cancelled(
     *,
     operation_plan_fingerprint: str,
 ) -> dict[str, Any] | None:
-    """Order cancellation before activation without holding the global lock."""
+    """Guard cancellation from activation entry through report publication."""
 
     with _LOCK:
         status = _SCANS.get(scan_id)
@@ -267,17 +267,15 @@ def _activate_vault_result_unless_cancelled(
         }:
             return None
         _VAULT_ACTIVATIONS.add(scan_id)
-    try:
-        return repository.activate_evidence_vault_operational_scanner_result(
-            url,
-            source_scan_id=scan_id,
-            operation_plan_fingerprint=operation_plan_fingerprint,
-            workspace_slug="b3s",
-        )
-    finally:
-        with _LOCK:
-            _VAULT_ACTIVATIONS.discard(scan_id)
-
+    # Activation can commit more than once before raising.  Keep the guard on
+    # both success and failure; only _run may publish a terminal state and
+    # remove it while holding the same lock used by cancellation.
+    return repository.activate_evidence_vault_operational_scanner_result(
+        url,
+        source_scan_id=scan_id,
+        operation_plan_fingerprint=operation_plan_fingerprint,
+        workspace_slug="b3s",
+    )
 
 
 def _publish_completed_report(scan_id: str, report: dict[str, Any]) -> bool:
@@ -293,6 +291,7 @@ def _publish_completed_report(scan_id: str, report: dict[str, Any]) -> bool:
         status["phase"] = "done"
         status["completed_at"] = datetime.now(timezone.utc).isoformat()
         _SCAN_EVENTS.pop(scan_id, None)
+        _VAULT_ACTIVATIONS.discard(scan_id)
         persisted_status = _status_copy_locked(status)
     _persist_scan_status(persisted_status)
     return True
@@ -313,6 +312,17 @@ def _scan_cancelled(scan_id: str) -> bool:
     with _LOCK:
         status = _SCANS.get(scan_id)
         return status is None or status.get("state") == "cancelled"
+
+
+def _vault_operational_pipeline_enabled() -> bool:
+    return (
+        os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault"
+        and os.environ.get(
+            "BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED",
+            "false",
+        ).strip().lower()
+        == "true"
+    )
 
 
 def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool) -> None:
@@ -366,9 +376,7 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
         if _scan_cancelled(scan_id):
             return
 
-        vault_enabled = (
-            os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault"
-        )
+        vault_enabled = _vault_operational_pipeline_enabled()
         if vault_enabled:
             from src.services.evidence_vault_scan_orchestration import (
                 prepare_vault_scan_after_capture,
@@ -507,9 +515,54 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 _persist_scan_status(persisted_status)
 
         if vault_enabled and isinstance(vault_activation, dict):
-            persisted_score = vault_activation.get("score")
-            persisted_memory = vault_activation.get("memory")
-            if isinstance(persisted_score, dict) and isinstance(persisted_memory, dict):
+            activated_score = vault_activation.get("score")
+            activated_memory = vault_activation.get("memory")
+            expected_candidate_packet_fingerprint = None
+            if vault_activation.get("created") is True:
+                expected_candidate_packet_fingerprint = str(
+                    vault_activation.get("candidate_packet_fingerprint") or ""
+                )
+                if not expected_candidate_packet_fingerprint:
+                    raise RuntimeError(
+                        "vault_activation_missing_candidate_packet_fingerprint"
+                    )
+            if isinstance(activated_score, dict) and isinstance(activated_memory, dict):
+                projection = (
+                    vault_repository.get_evidence_vault_operational_report_projection(
+                        url,
+                        expected_canonical_memory_version=str(
+                            activated_memory.get("canonical_memory_version") or ""
+                        ),
+                        expected_evaluation_identity=str(
+                            activated_score.get("evaluation_identity") or ""
+                        ),
+                        expected_adoption_event_id=str(
+                            activated_memory.get("adoption_event_id") or ""
+                        ),
+                        expected_candidate_packet_fingerprint=(
+                            expected_candidate_packet_fingerprint
+                        ),
+                        workspace_slug="b3s",
+                    )
+                )
+                if not isinstance(projection, dict):
+                    raise RuntimeError("vault_report_projection_unavailable")
+                persisted_memory = projection.get("memory")
+                promotion_event = projection.get("promotion_event")
+                persisted_score = projection.get("score_evaluation")
+                score_authority_witness = projection.get(
+                    "score_authority_witness"
+                )
+                if not all(
+                    isinstance(value, dict)
+                    for value in (
+                        persisted_memory,
+                        promotion_event,
+                        persisted_score,
+                        score_authority_witness,
+                    )
+                ):
+                    raise RuntimeError("vault_report_projection_invalid")
                 report_observation = vault_preparation.get("report_observation")
                 if not isinstance(report_observation, dict):
                     raise RuntimeError("vault_report_observation_unavailable")
@@ -519,7 +572,9 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                     brand_name=brand_name,
                     capture_observation=report_observation,
                     memory=persisted_memory,
+                    promotion_event=promotion_event,
                     score=persisted_score,
+                    score_authority_witness=score_authority_witness,
                 )
                 report = _attach_evidence_stability(report)
                 if _scan_cancelled(scan_id):
@@ -610,6 +665,7 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 _mark_pending_phases_locked(status, "error")
                 persisted_status = _status_copy_locked(status)
             _SCAN_EVENTS.pop(scan_id, None)
+            _VAULT_ACTIVATIONS.discard(scan_id)
         if persisted_status is not None:
             try:
                 _persist_scan_status(persisted_status)
@@ -2080,7 +2136,9 @@ def _compose_vault_memory_report(
     brand_name: str,
     capture_observation: dict[str, Any],
     memory: dict[str, Any],
+    promotion_event: dict[str, Any],
     score: dict[str, Any],
+    score_authority_witness: dict[str, Any],
 ) -> dict[str, Any]:
     """Project the persisted Vault memory into the existing report shape.
 
@@ -2092,12 +2150,21 @@ def _compose_vault_memory_report(
     from src.history.capture_observation import parse_capture_observation
     from src.history.report_parser import normalize_domain
     from src.services.evidence_vault_canonical_core import build_tile_contract_registry
+    from src.services.evidence_vault_operational_scoring import (
+        validate_operational_score_authority_witness,
+    )
     from src.sv9.rubric import (
         COMPONENTS as RUBRIC_COMPONENTS,
         PRESENTATION_ORDER,
         confidence_from_blind_spots,
     )
 
+    validate_operational_score_authority_witness(
+        score_authority_witness,
+        canonical_memory=memory,
+        promotion_event=promotion_event,
+        evaluation=score,
+    )
     memory_version = str(memory.get("canonical_memory_version") or "")
     score_memory_version = str(score.get("canonical_memory_version") or "")
     if not memory_version or score_memory_version != memory_version:
@@ -2342,6 +2409,7 @@ def _compose_vault_memory_report(
         "vault": {
             "memory_version": memory_version,
             "score_evaluation": score,
+            "score_authority_witness": score_authority_witness,
         },
     }
     return {

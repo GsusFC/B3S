@@ -24,7 +24,10 @@ from src.services.evidence_vault_canonical_scoring import (
     calculate_score_from_tile_states,
 )
 from src.services.evidence_vault_operational_authority import (
+    EVIDENCE_VAULT_OPERATIONAL_ADOPTION_EVENT_VERSION,
     EVIDENCE_VAULT_OPERATIONAL_MEMORY_PROJECTION_VERSION,
+    EvidenceVaultOperationalAuthorityError,
+    validate_operational_adoption_event,
 )
 from src.services.evidence_vault_operational_memory import (
     EVIDENCE_VAULT_ACCEPTED_MEMORY_VERSION,
@@ -41,6 +44,25 @@ EVIDENCE_VAULT_OPERATIONAL_SCORE_INPUT_VERSION = (
 )
 EVIDENCE_VAULT_OPERATIONAL_EVALUATION_IDENTITY_VERSION = (
     "evidence-vault-operational-evaluation-identity-v2"
+)
+EVIDENCE_VAULT_OPERATIONAL_SCORE_AUTHORITY_WITNESS_VERSION = (
+    "evidence-vault-operational-score-authority-witness-v1"
+)
+EVIDENCE_VAULT_OPERATIONAL_SCORE_DERIVATION_VERSION = (
+    "evidence-vault-operational-score-derivation-v1"
+)
+_SCORE_AUTHORITY_WITNESS_FIELDS = frozenset(
+    {
+        "schema_version",
+        "canonical_memory_projection_fingerprint",
+        "promotion_event_fingerprint",
+        "canonical_memory_version",
+        "adoption_event_id",
+        "evaluation_identity",
+        "score_input_fingerprint",
+        "score_derivation_fingerprint",
+        "witness_fingerprint",
+    }
 )
 _EVALUATION_FIELDS = frozenset(
     {
@@ -67,6 +89,8 @@ _EVALUATION_FIELDS = frozenset(
         "scanner_runtime_effect",
     }
 )
+
+
 class EvidenceVaultOperationalScoringError(ValueError):
     """The adopted memory cannot be scored deterministically."""
 
@@ -233,6 +257,182 @@ def validate_operational_score_evaluation(evaluation: Mapping[str, Any]) -> None
         ]:
             raise EvidenceVaultOperationalScoringError("evaluation cannot reuse itself")
     _timestamp(evaluation.get("created_at"))
+
+
+def build_operational_score_authority_witness(
+    canonical_memory: Mapping[str, Any],
+    *,
+    promotion_event: Mapping[str, Any],
+    evaluation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind one rederived evaluation to its exact memory and adoption event."""
+
+    expected = _rederive_evaluation_against_authority(
+        canonical_memory,
+        promotion_event=promotion_event,
+        evaluation=evaluation,
+    )
+    witness = _score_authority_witness_payload(
+        canonical_memory,
+        promotion_event=promotion_event,
+        evaluation=expected,
+    )
+    witness["witness_fingerprint"] = canonical_fingerprint(
+        EVIDENCE_VAULT_OPERATIONAL_SCORE_AUTHORITY_WITNESS_VERSION,
+        witness,
+    )
+    validate_operational_score_authority_witness(
+        witness,
+        canonical_memory=canonical_memory,
+        promotion_event=promotion_event,
+        evaluation=evaluation,
+    )
+    return witness
+
+
+def validate_operational_score_authority_witness(
+    witness: Mapping[str, Any],
+    *,
+    canonical_memory: Mapping[str, Any],
+    promotion_event: Mapping[str, Any],
+    evaluation: Mapping[str, Any],
+) -> None:
+    """Independently rederive and bind an evaluation before report projection."""
+
+    if not isinstance(witness, Mapping):
+        raise EvidenceVaultOperationalScoringError(
+            "score authority witness must be an object"
+        )
+    if set(witness) != _SCORE_AUTHORITY_WITNESS_FIELDS:
+        raise EvidenceVaultOperationalScoringError(
+            "score authority witness schema fields mismatch"
+        )
+    if (
+        witness.get("schema_version")
+        != EVIDENCE_VAULT_OPERATIONAL_SCORE_AUTHORITY_WITNESS_VERSION
+    ):
+        raise EvidenceVaultOperationalScoringError(
+            "unsupported score authority witness schema"
+        )
+    expected_evaluation = _rederive_evaluation_against_authority(
+        canonical_memory,
+        promotion_event=promotion_event,
+        evaluation=evaluation,
+    )
+    expected = _score_authority_witness_payload(
+        canonical_memory,
+        promotion_event=promotion_event,
+        evaluation=expected_evaluation,
+    )
+    expected["witness_fingerprint"] = canonical_fingerprint(
+        EVIDENCE_VAULT_OPERATIONAL_SCORE_AUTHORITY_WITNESS_VERSION,
+        expected,
+    )
+    if dict(witness) != expected:
+        raise EvidenceVaultOperationalScoringError(
+            "score authority witness does not match exact operational authority"
+        )
+
+
+def _rederive_evaluation_against_authority(
+    canonical_memory: Mapping[str, Any],
+    *,
+    promotion_event: Mapping[str, Any],
+    evaluation: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        validate_operational_adoption_event(promotion_event)
+    except EvidenceVaultOperationalAuthorityError as exc:
+        raise EvidenceVaultOperationalScoringError(
+            "promotion event is not valid operational authority"
+        ) from exc
+    validate_operational_score_evaluation(evaluation)
+    expected_bindings = {
+        "event_id": canonical_memory.get("adoption_event_id"),
+        "sequence": canonical_memory.get("adoption_sequence"),
+        "brand_identity": canonical_memory.get("brand_identity"),
+        "parent_canonical_memory_version": canonical_memory.get(
+            "parent_canonical_memory_version"
+        ),
+        "promoted_canonical_memory_version": canonical_memory.get(
+            "canonical_memory_version"
+        ),
+    }
+    actual_bindings = {
+        key: promotion_event.get(key)
+        for key in expected_bindings
+    }
+    if actual_bindings != expected_bindings:
+        raise EvidenceVaultOperationalScoringError(
+            "promotion event does not promote the exact canonical memory"
+        )
+    if evaluation.get("adoption_event_id") != promotion_event.get("event_id"):
+        raise EvidenceVaultOperationalScoringError(
+            "evaluation adoption event does not match canonical authority"
+        )
+    if (
+        datetime.fromisoformat(_timestamp(evaluation.get("created_at")))
+        < datetime.fromisoformat(_timestamp(promotion_event.get("created_at")))
+    ):
+        raise EvidenceVaultOperationalScoringError(
+            "evaluation predates its promotion event"
+        )
+    expected = build_operational_score_evaluation(
+        canonical_memory,
+        created_at=str(evaluation.get("created_at") or ""),
+    )
+    expected["reused_from_evaluation_identity"] = evaluation.get(
+        "reused_from_evaluation_identity"
+    )
+    if dict(evaluation) != expected:
+        raise EvidenceVaultOperationalScoringError(
+            "evaluation does not match score rederived from exact canonical memory"
+        )
+    return expected
+
+
+def _score_authority_witness_payload(
+    canonical_memory: Mapping[str, Any],
+    *,
+    promotion_event: Mapping[str, Any],
+    evaluation: Mapping[str, Any],
+) -> dict[str, Any]:
+    derivation = {
+        key: evaluation[key]
+        for key in (
+            "evaluation_identity",
+            "score_input_fingerprint",
+            "derived_tile_state_fingerprint",
+            "rubric_version",
+            "tile_contract_registry_fingerprint",
+            "reducer_policy_fingerprint",
+            "aggregation_policy_fingerprint",
+            "score",
+            "component_breakdown",
+            "base_average",
+            "magnetism_capped",
+            "authority_coverage",
+        )
+    }
+    return {
+        "schema_version": EVIDENCE_VAULT_OPERATIONAL_SCORE_AUTHORITY_WITNESS_VERSION,
+        "canonical_memory_projection_fingerprint": canonical_fingerprint(
+            EVIDENCE_VAULT_OPERATIONAL_MEMORY_PROJECTION_VERSION,
+            dict(canonical_memory),
+        ),
+        "promotion_event_fingerprint": canonical_fingerprint(
+            EVIDENCE_VAULT_OPERATIONAL_ADOPTION_EVENT_VERSION,
+            dict(promotion_event),
+        ),
+        "canonical_memory_version": evaluation["canonical_memory_version"],
+        "adoption_event_id": evaluation["adoption_event_id"],
+        "evaluation_identity": evaluation["evaluation_identity"],
+        "score_input_fingerprint": evaluation["score_input_fingerprint"],
+        "score_derivation_fingerprint": canonical_fingerprint(
+            EVIDENCE_VAULT_OPERATIONAL_SCORE_DERIVATION_VERSION,
+            derivation,
+        ),
+    }
 
 
 def _validate_authority_coverage(value: Any) -> None:
@@ -710,9 +910,13 @@ def _sha256(value: Any, *, field: str) -> str:
 __all__ = [
     "EVIDENCE_VAULT_OPERATIONAL_DERIVED_TILE_STATE_VERSION",
     "EVIDENCE_VAULT_OPERATIONAL_EVALUATION_IDENTITY_VERSION",
+    "EVIDENCE_VAULT_OPERATIONAL_SCORE_AUTHORITY_WITNESS_VERSION",
+    "EVIDENCE_VAULT_OPERATIONAL_SCORE_DERIVATION_VERSION",
     "EVIDENCE_VAULT_OPERATIONAL_SCORE_EVALUATION_VERSION",
     "EVIDENCE_VAULT_OPERATIONAL_SCORE_INPUT_VERSION",
     "EvidenceVaultOperationalScoringError",
+    "build_operational_score_authority_witness",
     "build_operational_score_evaluation",
+    "validate_operational_score_authority_witness",
     "validate_operational_score_evaluation",
 ]

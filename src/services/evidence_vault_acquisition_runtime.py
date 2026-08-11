@@ -209,10 +209,11 @@ class TrustedAcquisitionRuntime:
         if owned is None:
             raise EvidenceVaultAcquisitionRuntimeError("owned_collection_failed")
         linkedin_url = _owned_linkedin_fact(owned.raw_fragment)
-        independent_external = bool(
-            getattr(self.__external_fetch, "supports_independent_discovery", False)
-        )
-        external_attempted = linkedin_url is not None or independent_external
+        # An independently discovered LinkedIn URL proves only that the URL
+        # exists; it does not prove that the profile belongs to this brand.
+        # The current Exa adapter does not retain a structured canonical
+        # website fact, so v1 remains owned-link-only at this runtime boundary.
+        external_attempted = linkedin_url is not None
         external: ExternalProviderObservation | None = None
         outcome: Literal[
             "not_discovered",
@@ -242,8 +243,12 @@ class TrustedAcquisitionRuntime:
                             candidate_value,
                             ExternalProviderObservation,
                         )
+                        if linkedin_url is None:
+                            raise ValueError(
+                                "external profile lacks an owned association fact"
+                            )
                         _validate_external_observation(
-                            candidate.reported_source_url,
+                            linkedin_url,
                             candidate,
                         )
                     except (ValidationError, ValueError):
@@ -275,22 +280,17 @@ class TrustedAcquisitionRuntime:
             _validate_owned_observation(validated, frozen.owned)
             linkedin_url = _owned_linkedin_fact(frozen.owned.raw_fragment)
             if frozen.external is not None:
+                if linkedin_url is None:
+                    raise ValueError(
+                        "external profile lacks an owned association fact"
+                    )
                 _validate_external_observation(
-                    frozen.external.reported_source_url,
+                    linkedin_url,
                     frozen.external,
                 )
             _validate_external_outcome(
                 frozen,
-                external_attempted=(
-                    linkedin_url is not None
-                    or bool(
-                        getattr(
-                            self.__external_fetch,
-                            "supports_independent_discovery",
-                            False,
-                        )
-                    )
-                ),
+                external_attempted=linkedin_url is not None,
                 allow_owned_only_downgrade=self.__allow_owned_only_downgrade,
             )
             registry = PublicKeyRegistry.model_validate_json(
@@ -511,9 +511,9 @@ class HttpxOwnedFetcher:
 
 
 class HttpxExaExactUrlFetcher:
-    """Acquire an exact external profile, discovering it independently via Exa."""
+    """Acquire only an exact LinkedIn profile proved by an owned raw link."""
 
-    supports_independent_discovery = True
+    supports_independent_discovery = False
     __slots__ = ("_api_key", "_client")
 
     def __init__(self, client: Any, *, api_key: str) -> None:
@@ -523,48 +523,13 @@ class HttpxExaExactUrlFetcher:
         self._api_key = api_key.strip()
 
     def __call__(self, source_url: str) -> ExternalProviderObservation:
-        discovery_fingerprint: str | None = None
         try:
             _strict_linkedin_company_url(source_url)
-            target_url = source_url
-            discovery_ordinal = None
         except ValueError:
-            discovery_body = {
-                "query": f"{source_url} company LinkedIn profile",
-                "type": "auto",
-                "numResults": 10,
-            }
-            discovery_fingerprint = canonical_fingerprint(
-                "evidence-vault-exa-independent-discovery-request-v1",
-                discovery_body,
-            )
-            discovery_payload, _status, _headers, _body_size = self._post_json(
-                "https://api.exa.ai/search",
-                discovery_body,
-            )
-            results = (
-                discovery_payload.get("results")
-                if isinstance(discovery_payload, Mapping)
-                else None
-            )
-            if not isinstance(results, list):
-                raise _ExternalProviderResultError("exa_discovery_results_invalid")
-            matches: list[tuple[int, str]] = []
-            for ordinal, item in enumerate(results):
-                candidate = item.get("url") if isinstance(item, Mapping) else None
-                if not isinstance(candidate, str):
-                    continue
-                try:
-                    _strict_linkedin_company_url(candidate)
-                except ValueError:
-                    continue
-                matches.append((ordinal, candidate))
-            if len(matches) != 1:
-                raise _ExternalProviderResultError(
-                    "exa_independent_profile_not_unique"
-                )
-            discovery_ordinal, target_url = matches[0]
-
+            raise _ExternalProviderResultError(
+                "exa_external_source_url_ineligible"
+            ) from None
+        target_url = source_url
         request_body = {
             "ids": [target_url],
             "text": {"maxCharacters": 20_000},
@@ -574,10 +539,7 @@ class HttpxExaExactUrlFetcher:
         }
         request_fingerprint = canonical_fingerprint(
             "evidence-vault-exa-exact-url-request-v1",
-            {
-                "discovery_request_fingerprint": discovery_fingerprint,
-                "contents_request": request_body,
-            },
+            {"contents_request": request_body},
         )
         payload, status, selected_headers, body_size = self._post_json(
             "https://api.exa.ai/contents",
@@ -611,8 +573,6 @@ class HttpxExaExactUrlFetcher:
             "highlights": list(highlights),
             "text": text,
         }
-        if discovery_ordinal is not None:
-            fragment["discovery_result_ordinal"] = discovery_ordinal
         return ExternalProviderObservation(
             provider_request_fingerprint=request_fingerprint,
             result_ordinal=ordinal,
@@ -704,29 +664,20 @@ def _sign_collected(
     if collected.external is not None:
         external_url = collected.external.reported_source_url
         owned_linkedin_url = _owned_linkedin_fact(collected.owned.raw_fragment)
-        association_method = (
-            "owned_raw_links_external_profile"
-            if owned_linkedin_url is not None
-            else "exa_independent_discovery"
-        )
+        if owned_linkedin_url != external_url:
+            raise EvidenceVaultAcquisitionRuntimeError(
+                "external_association_fact_unavailable"
+            )
         association = ExternalIdentityProvenance(
             schema_version="external-identity-provenance-v1",
             policy_version="evidence-vault-external-identity-association-policy-v1",
-            association_method=association_method,
+            association_method="owned_raw_links_external_profile",
             canonical_brand_domain=snapshot.canonical_brand_domain,
             owned_source_url=snapshot.canonical_brand_url,
             external_source_url=external_url,
             proof_receipt_fingerprint=owned_receipt.receipt_fingerprint,
-            raw_fact_role=(
-                "owned_web"
-                if owned_linkedin_url is not None
-                else "external_social_profile"
-            ),
-            raw_fact_json_pointer=(
-                "/sources/owned/linkedin"
-                if owned_linkedin_url is not None
-                else "/sources/external/url"
-            ),
+            raw_fact_role="owned_web",
+            raw_fact_json_pointer="/sources/owned/linkedin",
             raw_fact_sha256=_json_fragment_sha256(external_url),
             source_identity_schema_version="evidence-memory-document-v2",
             owned_source_identity_id=evidence_memory_source_identity_id(

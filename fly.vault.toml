@@ -7,13 +7,15 @@ kill_timeout = "30s"
   dockerfile = "Dockerfile"
 
 [deploy]
-  release_command = "sh -lc 'python scripts/verify_release_build.py && python scripts/import_b3s_reports_postgres.py --migrate-only'"
+  release_command = "sh -lc 'python scripts/verify_release_build.py && python scripts/verify_b3s_history_postgres.py'"
   release_command_timeout = "5m"
 
 [env]
   BRAND3_BASE_URL = "https://b3s-vault.fly.dev"
   BRAND3_DB_PATH = "/data/brand3.sqlite3"
   BRAND3_ENVIRONMENT = "vault"
+  # Dormant legacy Vault: its name alone must not activate operational scans.
+  BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED = "false"
   BRAND3_SCREENSHOT_DIR = "/data/screenshots"
   B3S_REPORTS_DIR = "/data/reports"
   B3S_SCORING_DB_PATH = "/data/b3s_scoring.sqlite3"

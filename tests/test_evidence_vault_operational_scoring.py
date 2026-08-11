@@ -15,6 +15,7 @@ from src.services.evidence_vault_authority_profiles import (
 from src.services.evidence_vault_canonical_core import (
     build_candidate_tile,
     build_tile_contract_registry,
+    canonical_fingerprint,
 )
 from src.services.evidence_vault_operational_authority import (
     build_operational_adoption_event,
@@ -24,8 +25,11 @@ from src.services.evidence_vault_operational_memory import (
     build_operational_memory_packet,
 )
 from src.services.evidence_vault_operational_scoring import (
+    EVIDENCE_VAULT_OPERATIONAL_EVALUATION_IDENTITY_VERSION,
     EvidenceVaultOperationalScoringError,
+    build_operational_score_authority_witness,
     build_operational_score_evaluation,
+    validate_operational_score_authority_witness,
     validate_operational_score_evaluation,
 )
 
@@ -122,6 +126,84 @@ def test_scoring_ignores_a_tampered_stored_projection() -> None:
     )
     assert evaluation["score"] == 1
 
+
+def test_authority_witness_rederives_score_from_exact_memory_and_event() -> None:
+    packet = _packet(_candidates({"M1"}), accepted={"M1"})
+    event = _event(packet, sequence=1)
+    memory = project_adopted_operational_memory(packet, event)
+    evaluation = build_operational_score_evaluation(
+        memory,
+        created_at="2026-08-06T13:00:00+02:00",
+    )
+
+    witness = build_operational_score_authority_witness(
+        memory,
+        promotion_event=event,
+        evaluation=evaluation,
+    )
+
+    validate_operational_score_authority_witness(
+        witness,
+        canonical_memory=memory,
+        promotion_event=event,
+        evaluation=evaluation,
+    )
+    assert witness["canonical_memory_version"] == memory["canonical_memory_version"]
+    assert witness["adoption_event_id"] == event["event_id"]
+    assert len(witness["witness_fingerprint"]) == 64
+
+
+def test_authority_witness_rejects_self_consistent_wrong_score_row() -> None:
+    packet = _packet(_candidates({"M1"}), accepted={"M1"})
+    event = _event(packet, sequence=1)
+    memory = project_adopted_operational_memory(packet, event)
+    wrong = build_operational_score_evaluation(
+        _baseline({"M1", "M2"}),
+        created_at="2026-08-06T13:00:00+02:00",
+    )
+    wrong["canonical_memory_version"] = memory["canonical_memory_version"]
+    wrong["adoption_event_id"] = event["event_id"]
+    wrong["evaluation_identity"] = canonical_fingerprint(
+        EVIDENCE_VAULT_OPERATIONAL_EVALUATION_IDENTITY_VERSION,
+        {
+            "canonical_memory_version": wrong["canonical_memory_version"],
+            "score_input_fingerprint": wrong["score_input_fingerprint"],
+        },
+    )
+    validate_operational_score_evaluation(wrong)
+    assert wrong["score"] == 2
+
+    with pytest.raises(
+        EvidenceVaultOperationalScoringError,
+        match="rederived from exact canonical memory",
+    ):
+        build_operational_score_authority_witness(
+            memory,
+            promotion_event=event,
+            evaluation=wrong,
+        )
+
+
+def test_authority_witness_rejects_self_consistent_wrong_event_row() -> None:
+    packet = _packet(_candidates({"M1"}), accepted={"M1"})
+    event = _event(packet, sequence=1)
+    memory = project_adopted_operational_memory(packet, event)
+    wrong = build_operational_score_evaluation(
+        memory,
+        created_at="2026-08-06T13:00:00+02:00",
+    )
+    wrong["adoption_event_id"] = str(uuid4())
+    validate_operational_score_evaluation(wrong)
+
+    with pytest.raises(
+        EvidenceVaultOperationalScoringError,
+        match="adoption event does not match",
+    ):
+        build_operational_score_authority_witness(
+            memory,
+            promotion_event=event,
+            evaluation=wrong,
+        )
 
 
 def _baseline(accepted: set[str]) -> dict:

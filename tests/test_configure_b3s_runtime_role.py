@@ -3,10 +3,25 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 import os
+from types import SimpleNamespace
 
 import pytest
 
 from scripts import configure_b3s_runtime_role as runtime_role
+
+
+_TARGET_DSN = (
+    "postgresql://neondb_owner:do-not-print@"
+    f"{runtime_role.pr71_vault_migration_target().host}/neondb?sslmode=require&channel_binding=require"
+)
+_TARGET_ARGS = [
+    "--target-profile",
+    "pr71-vault",
+    "--role",
+    "b3s_pr71_app_runtime",
+    "--database-name",
+    "neondb",
+]
 
 
 class _Result:
@@ -26,12 +41,23 @@ class _Result:
 
 
 class _Connection:
-    def __init__(self, *, unsafe_role: bool = False):
+    def __init__(
+        self,
+        *,
+        unsafe_role: bool = False,
+        branch_id: str = "br-divine-star-aspobuer",
+        effective_temporary: bool = False,
+    ):
         self.unsafe_role = unsafe_role
+        self.branch_id = branch_id
+        self.effective_temporary = effective_temporary
         self.statements: list[tuple[str, object]] = []
         self.transaction_count = 0
         self.rolled_back = False
         self.relations = _relations()
+        self.info = SimpleNamespace(
+            host=runtime_role.pr71_vault_migration_target().host
+        )
 
     def __enter__(self):
         return self
@@ -53,6 +79,16 @@ class _Connection:
         normalized = " ".join(rendered.split())
         self.statements.append((normalized, params))
 
+        if "current_user AS user_name" in normalized:
+            return _Result(
+                row={
+                    "database_name": "neondb",
+                    "user_name": "neondb_owner",
+                    "project_id": "jolly-river-32467750",
+                    "branch_id": self.branch_id,
+                    "tls_in_use": True,
+                }
+            )
         if "SELECT version, filename, checksum" in normalized:
             return _Result(
                 rows=[
@@ -80,7 +116,7 @@ class _Connection:
         if "FROM pg_catalog.pg_shdepend" in normalized:
             return _Result()
         if normalized == "SELECT current_database() AS database_name":
-            return _Result(row={"database_name": "b3s"})
+            return _Result(row={"database_name": "neondb"})
         if "array_agg(attributes.attname" in normalized:
             return _Result(rows=self.relations)
         if "JOIN pg_catalog.pg_depend AS dependencies" in normalized:
@@ -101,6 +137,7 @@ class _Connection:
                 row={
                     "can_connect": True,
                     "can_create_schema": False,
+                    "can_create_temporary": self.effective_temporary,
                     "can_use_schema": True,
                     "can_create_in_schema": False,
                 }
@@ -198,7 +235,7 @@ def _install_contract(monkeypatch):
 
 
 def test_configures_exact_runtime_contract_in_one_transaction(monkeypatch, capsys) -> None:
-    dsn = "postgresql://migrator:do-not-print@example.test/b3s"
+    dsn = _TARGET_DSN
     connection = _Connection()
     connected = []
     _install_contract(monkeypatch)
@@ -210,7 +247,7 @@ def test_configures_exact_runtime_contract_in_one_transaction(monkeypatch, capsy
     monkeypatch.setenv("B3S_MIGRATION_DATABASE_URL", dsn)
     monkeypatch.setenv("DATABASE_URL", "postgresql://wrong:also-secret@example.test/wrong")
 
-    assert runtime_role.main(["--role", 'runtime "web"', "--database-name", "b3s"]) == 0
+    assert runtime_role.main(_TARGET_ARGS) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
@@ -224,23 +261,43 @@ def test_configures_exact_runtime_contract_in_one_transaction(monkeypatch, capsy
 
     statements = [statement for statement, _params in connection.statements]
     assert sum("SELECT version, filename, checksum" in statement for statement in statements) == 2
-    assert statements[0] == "SELECT pg_catalog.pg_advisory_xact_lock(%s)"
+    assert "current_user AS user_name" in statements[0]
+    assert statements[1] == "SELECT pg_catalog.pg_advisory_xact_lock(%s)"
     assert any(
-        statement == 'REVOKE ALL PRIVILEGES ON DATABASE "b3s" FROM "runtime ""web"""'
+        statement == 'REVOKE ALL PRIVILEGES ON DATABASE "neondb" FROM "b3s_pr71_app_runtime"'
+        for statement in statements
+    )
+    public_temporary_revoke = statements.index(
+        'REVOKE TEMPORARY ON DATABASE "neondb" FROM PUBLIC'
+    )
+    first_grant = next(
+        index for index, statement in enumerate(statements) if statement.startswith("GRANT ")
+    )
+    assert public_temporary_revoke < first_grant
+    assert any(
+        statement == 'GRANT CONNECT ON DATABASE "neondb" TO "b3s_pr71_app_runtime"'
+        for statement in statements
+    )
+    boundary_query = next(
+        statement
+        for statement in statements
+        if "has_database_privilege" in statement
+    )
+    assert "'CONNECT'" in boundary_query
+    assert "'CREATE'" in boundary_query
+    assert "'TEMPORARY'" in boundary_query
+    assert any(
+        statement == 'REVOKE ALL PRIVILEGES ON SCHEMA "b3s_history" FROM "b3s_pr71_app_runtime"'
         for statement in statements
     )
     assert any(
-        statement == 'REVOKE ALL PRIVILEGES ON SCHEMA "b3s_history" FROM "runtime ""web"""'
-        for statement in statements
-    )
-    assert any(
-        statement == 'REVOKE CREATE ON SCHEMA "b3s_history" FROM "runtime ""web"""'
+        statement == 'REVOKE CREATE ON SCHEMA "b3s_history" FROM "b3s_pr71_app_runtime"'
         for statement in statements
     )
     assert sum(statement.startswith("REVOKE ALL PRIVILEGES (") for statement in statements) == len(_relations())
     assert any(
         statement
-        == 'REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA "b3s_history" FROM "runtime ""web"""'
+        == 'REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA "b3s_history" FROM "b3s_pr71_app_runtime"'
         for statement in statements
     )
 
@@ -256,7 +313,7 @@ def test_configures_exact_runtime_contract_in_one_transaction(monkeypatch, capsy
     assert "INSERT" not in journal_and_views
     assert any(
         statement
-        == 'REVOKE INSERT, UPDATE, DELETE ON TABLE "b3s_history"."schema_migrations" FROM "runtime ""web"""'
+        == 'REVOKE INSERT, UPDATE, DELETE ON TABLE "b3s_history"."schema_migrations" FROM "b3s_pr71_app_runtime"'
         for statement in statements
     )
     assert any(
@@ -275,13 +332,13 @@ def test_configures_exact_runtime_contract_in_one_transaction(monkeypatch, capsy
 
 
 def test_rejects_unsafe_role_and_never_prints_driver_or_dsn(monkeypatch, capsys) -> None:
-    dsn = "postgresql://migrator:do-not-print@example.test/b3s"
+    dsn = _TARGET_DSN
     connection = _Connection(unsafe_role=True)
     _install_contract(monkeypatch)
     monkeypatch.setattr(runtime_role.psycopg, "connect", lambda *_args, **_kwargs: connection)
     monkeypatch.setenv("B3S_MIGRATION_DATABASE_URL", dsn)
 
-    assert runtime_role.main(["--role", "unsafe_runtime"]) == 1
+    assert runtime_role.main(_TARGET_ARGS) == 1
 
     payload = json.loads(capsys.readouterr().out)
     assert payload == {"status": "error", "error": "runtime role configuration failed"}
@@ -290,12 +347,67 @@ def test_rejects_unsafe_role_and_never_prints_driver_or_dsn(monkeypatch, capsys)
     assert not any(statement.startswith("GRANT ") for statement, _params in connection.statements)
 
 
+def test_effective_database_temporary_privilege_fails_closed(
+    monkeypatch,
+    capsys,
+) -> None:
+    connection = _Connection(effective_temporary=True)
+    _install_contract(monkeypatch)
+    monkeypatch.setattr(
+        runtime_role.psycopg,
+        "connect",
+        lambda *_args, **_kwargs: connection,
+    )
+    monkeypatch.setenv("B3S_MIGRATION_DATABASE_URL", _TARGET_DSN)
+
+    assert runtime_role.main(_TARGET_ARGS) == 1
+
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "error",
+        "error": "runtime role configuration failed",
+    }
+    assert connection.rolled_back
+    assert any(
+        statement == 'REVOKE TEMPORARY ON DATABASE "neondb" FROM PUBLIC'
+        for statement, _params in connection.statements
+    )
+
+
+def test_wrong_target_fails_before_any_runtime_privilege_change(
+    monkeypatch,
+    capsys,
+) -> None:
+    connection = _Connection(branch_id="br-wrong")
+    _install_contract(monkeypatch)
+    monkeypatch.setattr(
+        runtime_role.psycopg,
+        "connect",
+        lambda *_args, **_kwargs: connection,
+    )
+    monkeypatch.setenv("B3S_MIGRATION_DATABASE_URL", _TARGET_DSN)
+
+    assert runtime_role.main(_TARGET_ARGS) == 1
+
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "error",
+        "error": "runtime role configuration failed",
+    }
+    assert connection.rolled_back
+    statements = [statement for statement, _params in connection.statements]
+    assert len(statements) == 1
+    assert "current_user AS user_name" in statements[0]
+    assert not any(
+        statement.startswith(("GRANT ", "REVOKE ", "CREATE ", "ALTER ", "DROP "))
+        for statement in statements
+    )
+
+
 def test_requires_only_migration_database_url(monkeypatch, capsys) -> None:
     monkeypatch.delenv("B3S_MIGRATION_DATABASE_URL", raising=False)
     monkeypatch.setenv("B3S_DATABASE_URL", "postgresql://runtime:secret@example.test/b3s")
     monkeypatch.setenv("DATABASE_URL", "postgresql://fallback:secret@example.test/b3s")
 
-    assert runtime_role.main(["--role", "b3s_runtime"]) == 2
+    assert runtime_role.main(_TARGET_ARGS) == 2
 
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
@@ -337,9 +449,9 @@ def test_unexpected_relation_fails_before_any_privilege_change(monkeypatch) -> N
 
     try:
         runtime_role.configure_runtime_role(
-            "postgresql://migrator:secret@example.test/b3s",
+            "postgresql://migrator:secret@example.test/neondb",
             role="runtime",
-            database_name="b3s",
+            database_name="neondb",
         )
     except runtime_role.RuntimeRoleConfigurationError as exc:
         assert str(exc) == "migration-head relation set is not exact"
@@ -381,8 +493,25 @@ def test_postgres_runtime_configuration_rejects_unjournaled_escape_surfaces() ->
     admin_dsn = os.environ["B3S_TEST_DATABASE_URL"]
     role = "b3s_runtime_config_integration"
     public_schema_create_was_granted = False
+    public_database_temporary_was_granted = False
     with psycopg.connect(admin_dsn, autocommit=True) as conn:
         database_name = conn.execute("SELECT current_database()").fetchone()[0]
+        public_database_temporary_was_granted = bool(
+            conn.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.aclexplode(
+                        COALESCE(datacl, pg_catalog.acldefault('d', datdba))
+                    )
+                    WHERE grantee = 0
+                      AND privilege_type = 'TEMPORARY'
+                )
+                FROM pg_catalog.pg_database
+                WHERE datname = current_database()
+                """
+            ).fetchone()[0]
+        )
         public_schema_create_was_granted = bool(
             conn.execute(
                 "SELECT has_schema_privilege('public', 'public', 'CREATE')"
@@ -425,6 +554,28 @@ def test_postgres_runtime_configuration_rejects_unjournaled_escape_surfaces() ->
         )
 
         with psycopg.connect(admin_dsn, autocommit=True) as conn:
+            can_connect, can_create, can_create_temporary = conn.execute(
+                """
+                SELECT pg_catalog.has_database_privilege(%s, current_database(), 'CONNECT'),
+                       pg_catalog.has_database_privilege(%s, current_database(), 'CREATE'),
+                       pg_catalog.has_database_privilege(%s, current_database(), 'TEMPORARY')
+                """,
+                (role, role, role),
+            ).fetchone()
+            assert can_connect
+            assert not can_create
+            assert not can_create_temporary
+            database_owner = conn.execute(
+                """
+                SELECT pg_catalog.pg_get_userbyid(datdba)
+                FROM pg_catalog.pg_database
+                WHERE datname = current_database()
+                """
+            ).fetchone()[0]
+            assert conn.execute(
+                "SELECT pg_catalog.has_database_privilege(%s, current_database(), 'TEMPORARY')",
+                (database_owner,),
+            ).fetchone()[0]
             conn.execute(
                 "CREATE VIEW b3s_history.unjournaled_raw_leak AS "
                 "SELECT claims FROM "
@@ -498,6 +649,12 @@ def test_postgres_runtime_configuration_rejects_unjournaled_escape_surfaces() ->
                 )
                 conn.execute(
                     sql.SQL("DROP ROLE {}").format(sql.Identifier(role))
+                )
+            if public_database_temporary_was_granted:
+                conn.execute(
+                    sql.SQL("GRANT TEMPORARY ON DATABASE {} TO PUBLIC").format(
+                        sql.Identifier(database_name)
+                    )
                 )
             if public_schema_create_was_granted:
                 conn.execute("GRANT CREATE ON SCHEMA public TO PUBLIC")

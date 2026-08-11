@@ -77,6 +77,23 @@ Migration 023 leaves collection, signing, and plan selection unchanged. It makes
 - the persisted `external-identity-provenance-v1` reproduces strongly and requires no human-review fallback;
 - brand association is proved by at least one signed raw fact: the owned capture links to the exact LinkedIn company URL, or the external payload exposes a canonical website whose domain exactly matches the brand. Name similarity alone is insufficient.
 
+The cumulative PR #71 Exa adapter is deliberately **owned-link-only**. Its
+current response projection preserves the external profile URL and unstructured
+content, but not a typed canonical-website field. Therefore an Exa search result,
+even a unique exact LinkedIn URL, cannot satisfy brand association and is not
+collected or signed when the owned capture lacks the exact link. The
+`external_raw_declares_owned_domain` method remains part of the v1 verifier for
+a future adapter that freezes that structured signed fact; it is not inferred
+from title, name, summary, highlights or free text.
+
+The Python `external-identity-provenance-v1` structural reader also recognizes
+the historical application shape named `exa_independent_discovery`, solely so a
+detached value can be parsed and fingerprinted. The central authority validator
+rejects that method explicitly, so signature replay/trust fails closed and the
+current worker never emits it. This is not a PostgreSQL durable-data migration:
+migration 019 already limits persisted association methods to the two
+raw-fact-proving methods above and never admitted `exa_independent_discovery`.
+
 ### 3.3 Time policy
 
 Version `evidence-vault-c7-live-freshness-policy-v1`:

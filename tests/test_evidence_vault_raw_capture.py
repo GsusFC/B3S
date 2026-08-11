@@ -34,6 +34,7 @@ from src.services.evidence_vault_raw_provenance import (
     evidence_memory_source_identity_id,
     external_identity_provenance_fingerprint,
     pre_receipt_snapshot_sha256,
+    receipt_set_fingerprint,
     sign_raw_acquisition_receipt,
 )
 from src.sv9_flow.evidence_worker import _external_result_content, _summarize_payload
@@ -392,6 +393,70 @@ def test_external_capture_requires_and_replays_exact_signed_association() -> Non
             [owned, external],
             public_key_registry=_registry(_key()),
             external_identity_provenance=tampered,
+        )
+
+
+def test_historical_exa_discovery_replays_structurally_but_is_not_trusted() -> None:
+    snapshot = _snapshot()
+    owned = _receipt(snapshot, "owned_web")
+    association = _association(snapshot, owned)
+    association.update(
+        {
+            "association_method": "exa_independent_discovery",
+            "raw_fact_role": "external_social_profile",
+            "raw_fact_json_pointer": "/sources/external/url",
+            "raw_fact_sha256": _sha_json(
+                snapshot.raw_payload["sources"]["external"]["url"]
+            ),
+        }
+    )
+    external = _receipt(
+        snapshot,
+        "external_social_profile",
+        external_provenance_fingerprint=external_identity_provenance_fingerprint(
+            association
+        ),
+    )
+    receipts = sorted(
+        [owned, external],
+        key=lambda receipt: receipt.receipt_fingerprint,
+    )
+    envelope = RawProvenanceEnvelope(
+        schema_version=RAW_PROVENANCE_ENVELOPE_VERSION,
+        workspace_slug=snapshot.workspace_slug,
+        source_scan_id=snapshot.source_scan_id,
+        acquisition_session_id=snapshot.acquisition_session_id,
+        canonical_brand_domain=snapshot.canonical_brand_domain,
+        canonical_brand_url=snapshot.canonical_brand_url,
+        pre_receipt_snapshot_sha256=pre_receipt_snapshot_sha256(snapshot),
+        signed_receipts=receipts,
+        receipt_set_fingerprint=receipt_set_fingerprint(receipts),
+        external_identity_provenance=association,
+    )
+    durable = deepcopy(snapshot.raw_payload)
+    durable[RESERVED_KEY] = envelope.model_dump(mode="json")
+    capture_hash = raw_capture_content_hash(durable)
+
+    parsed = parse_signed_raw_capture(
+        durable,
+        capture_content_hash=capture_hash,
+    )
+    assert (
+        parsed.envelope.external_identity_provenance.association_method
+        == "exa_independent_discovery"
+    )
+
+    with pytest.raises(
+        EvidenceVaultRawCaptureError,
+        match=(
+            "association_method exa_independent_discovery is structurally "
+            "readable but authority-ineligible"
+        ),
+    ):
+        parse_and_validate_signed_raw_capture(
+            durable,
+            capture_content_hash=capture_hash,
+            public_key_registry=_registry(_key()),
         )
 
 

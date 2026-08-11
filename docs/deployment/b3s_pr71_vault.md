@@ -11,13 +11,17 @@ not authorize either existing app, production migration, or C7 cutover.
 - Fly volume: `b3s_pr71_vault_data` in `cdg`
 - Neon project: `jolly-river-32467750`
 - Neon branch: `br-divine-star-aspobuer` (`b3s-pr71-vault`)
+- Database: `neondb`
+- Release migrator `current_user`: `neondb_owner`
 - Parent: `br-misty-sky-asfp14gb` (`b3s-vault`)
 - Public hostname: `b3s-pr71-vault.fly.dev`
 
 The release command runs `verify_release_build.py`, the SELECT-only exact schema
-head verifier, and `verify_pr71_vault_target.py`. The final verifier checks the
-Fly app, base URL, database/project/branch identity, access gate, and denied C7
-controls. A mismatch aborts before an app Machine is updated.
+head-023 verifier, and `verify_pr71_vault_target.py`. The final verifier checks
+the Fly app, base URL, authenticated TLS session, exact host/database/runtime
+role/project/branch identity, the operational-pipeline capability, access gate,
+and denied C7 controls. A mismatch aborts before an app Machine is updated. The
+release command never applies DDL with the runtime `B3S_DATABASE_URL`.
 
 ## Access boundary
 
@@ -60,23 +64,96 @@ The isolated L2 logins are fixed and distinct:
 Provision these names in the isolated Neon branch only. Never substitute the
 legacy generic role names from the reusable role runbook in this PR71 app.
 
-`B3S_MIGRATION_DATABASE_URL` is a separately controlled migration identity. It
-must never be installed with `fly secrets`; it exists only in the named operator
-or protected GitHub `pr71-vault` release context. Run migrations before deploy:
+`B3S_MIGRATION_DATABASE_URL` is the separately controlled `neondb_owner`
+migration identity. It must contain a password and use either
+`sslmode=verify-full` or the deployed
+`sslmode=require&channel_binding=require` contract, and
+must never be installed with `fly secrets`; it exists only for the controlled
+external migration invocation. Before its first advisory lock or DDL, the
+migrator validates the URL and then, on the **same connection**, SELECTs and
+requires exact TLS, host, database, `current_user`, Neon project, and Neon branch
+identity. A mismatch performs no migration DDL. Run migrations before deploy
+only from a clean operator environment where the approved secret manager has
+already injected `B3S_MIGRATION_DATABASE_URL`. Do not paste, assign, or export
+the DSN inline in a command that can enter shell history:
 
 ```bash
-B3S_MIGRATION_DATABASE_URL='...'   python scripts/migrate_b3s_history_postgres.py
-B3S_MIGRATION_DATABASE_URL='...'   python scripts/configure_b3s_runtime_role.py --role b3s_pr71_app_runtime --database-name neondb
+test -n "${B3S_MIGRATION_DATABASE_URL:-}" || {
+  echo "B3S_MIGRATION_DATABASE_URL is not loaded" >&2
+  exit 1
+}
+python scripts/migrate_b3s_history_postgres.py --target-profile pr71-vault
+python scripts/configure_b3s_runtime_role.py \
+  --target-profile pr71-vault \
+  --role b3s_pr71_app_runtime \
+  --database-name neondb
 fly config validate -a b3s-pr71-vault -c fly.pr71-vault.toml
-fly deploy --remote-only   -a b3s-pr71-vault   -c fly.pr71-vault.toml   --build-arg B3S_BUILD_SHA="$(git rev-parse HEAD)"
+fly deploy --remote-only \
+  -a b3s-pr71-vault \
+  -c fly.pr71-vault.toml \
+  --build-arg B3S_BUILD_SHA="$(git rev-parse HEAD)"
 ```
 
-The role command is idempotent and only accepts the privileged URL through
-`B3S_MIGRATION_DATABASE_URL`; it never prints that URL or a password.
+The role command repeats the same target assertion on its own grant connection
+before any `REVOKE`/`GRANT`, is idempotent, and only accepts the privileged URL
+through `B3S_MIGRATION_DATABASE_URL`. Before its positive grants it revokes the
+PostgreSQL default `TEMPORARY` database privilege from `PUBLIC`, then verifies
+the runtime's effective database boundary as `CONNECT=true`, `CREATE=false`, and
+`TEMPORARY=false`. The database owner retains its implicit owner capabilities,
+so this database-wide `PUBLIC` revocation does not disable the controlled
+`neondb_owner` migrator. The exact runtime role must already exist as a
+password-bearing `LOGIN`; the command never creates it, receives or changes its
+password, or prints a DSN/driver error.
+
+## Post-merge deployment gate
 
 Do not use `fly.toml`, `fly.vault.toml`, `b3s`, `b3s-vault`, their volumes, or
-their database branches in this workflow. The manual GitHub workflow requires
-the operator to type `b3s-pr71-vault` and provide the exact deployment SHA.
+their database branches in this workflow. The manual GitHub workflow is a
+**post-merge-only** deployment mechanism: the workflow file is not registered
+on the default branch before PR #71 lands. It requires the operator to type
+`b3s-pr71-vault` and provide the full 40-character PR #71 merge commit SHA.
+Neither merging PR #71, the presence of `workflow_dispatch`, the confirmation
+input, nor a successful attestation authorizes a merge or a deployment. Merge
+approval and the deployment GO remain separate operator decisions.
+
+Dispatch only from the exact Git ref `refs/heads/main` and only through the
+GitHub environment `pr71-vault`. The job condition and the pre-checkout
+attestation both require `github.ref == refs/heads/main`. The environment has a
+custom deployment branch policy configured to allow only `main`; retaining and
+verifying that external policy immediately before dispatch is mandatory. A
+caller can request `workflow_dispatch` with another `ref`, and code loaded from
+that mutable ref could remove an in-workflow check, so the environment policy is
+part of the boundary rather than optional duplication.
+
+The `pr71-vault` environment currently has no deployment secrets. Do not
+provision secrets merely because PR #71 merged. A separately authorized
+deployment GO must provision and verify `B3S_MIGRATION_DATABASE_URL` and
+`FLY_API_TOKEN` in an approved Actions secret scope before dispatch; without
+that separate step the deployment remains NO-GO. Secret expressions occur only
+in steps after attestation, checkout, and package installation.
+
+Before checkout, dependency installation, or deployment-secret use,
+runner-owned code fetches PR #71 through the GitHub REST API and requires
+`state=closed`, `merged=true`, and `draft=false`. It requires base ref `main`,
+head ref `fix/vault-v2-cumulative-landing`, and exact same-repository
+`base.repo.full_name` and `head.repo.full_name`. The input must equal
+`merge_commit_sha`, while `refs/heads/main` must resolve to a commit whose SHA
+is that same deployment SHA. This deliberately permits deployment only while
+the PR #71 merge commit is still current `main`.
+
+The attestation resolves the registered Actions workflow by `ci.yml`, requires
+its numeric workflow ID, active state, and exact path
+`.github/workflows/ci.yml`. It compares the Git blob of that path at the
+trusted PR `base.sha` with the blob at the deployment merge SHA. It then queries
+runs through that exact workflow ID—not through a check-run name—with
+`event=push`, `branch=main`, and the exact merge `head_sha`, without filtering
+away non-successful runs. Exactly one run may exist, and its returned
+`workflow_id`, `path`, `event`, `head_branch`, `head_sha`, `status=completed`,
+`conclusion=success`, `repository.full_name`, and
+`head_repository.full_name` must all be exact. GitHub push runs do not need a
+PR linkage and their `pull_requests` array may be empty, so it is intentionally
+not an acceptance condition. Missing, pending, failed, foreign, stale,
+workflow-modified, or ambiguous objects fail closed.
 
 ## Required app secrets
 
@@ -126,6 +203,7 @@ analysis may continue when no external identity is available; its explicit
 warning is non-qualifying and can never satisfy C7.
 
 ```text
+BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true
 B3S_VAULT_WORKER_ENABLED=true
 BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED=true
 BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS=true
@@ -141,11 +219,22 @@ two live captures 5 minutes–24 hours apart, review/adoption, governance bindin
 and a private readiness probe. C7 runtime remains a later independent gate even
 if readiness becomes true.
 
-## Rollback
+## Rollback and NO-GO
 
-Engage the access/C7 holds first, stop new scans, and drain the single active
-scan before changing the Machine. Roll back to an exact recorded Fly image that
-was verified against schema 021. Database rollback is never an in-place down
-migration. Preserve both database states and reconcile deltas if any write
-occurred after a Neon rollback anchor. The encrypted Fly volume and Neon branch
-must be retained together for the declared incident window.
+Deployment is **NO-GO** unless PR #71 is merged and the requested SHA is both
+its `merge_commit_sha` and current `main`, the separate deployment GO and secret
+provisioning are complete, the external migration target assertion passes
+before DDL, head `023` verifies exactly, the idempotent runtime-role contract
+passes, and C7 remains denied.
+`b3s` and `b3s-vault` must remain on their SELECT-only release verifiers and may
+not be used as fallback migration targets.
+
+No older application image is assumed compatible with schema head `023`, and
+this runbook pre-authorizes no image rollback. Engage the access/C7 holds first,
+stop new scans, and drain the single active scan. Prefer a reviewed forward fix;
+any coordinated image-plus-Neon-restore plan requires separate authorization and
+proof against a preserved restore anchor. A release verifier mismatch is a hard
+stop, not permission to run an older migrator. Database rollback is never an
+in-place down migration. Preserve both database states and reconcile deltas if
+any write occurred after a Neon rollback anchor. The encrypted Fly volume and
+Neon branch must be retained together for the declared incident window.

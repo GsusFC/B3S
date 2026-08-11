@@ -260,6 +260,14 @@ BRAND3_SCREENSHOT_DIR = os.environ.get(
 )
 
 
+# The operational Vault planning/execution pipeline requires a second explicit
+# deployment capability. Merely naming an environment "vault" must not change
+# scanner persistence, interpretation, scoring, or report projection.
+BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED = os.environ.get(
+    "BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED",
+    "false",
+).strip().lower() == "true"
+
 # Verified raw acquisition remains a Vault-only shadow path.  The web process
 # receives only this public Unix-socket location; worker private-key and ingest
 # DSN configuration deliberately do not exist in this module.

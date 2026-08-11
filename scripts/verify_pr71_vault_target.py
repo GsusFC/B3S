@@ -3,60 +3,42 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import json
 import os
-from collections.abc import Iterator
-from urllib.parse import parse_qsl, urlsplit
+from pathlib import Path
+import sys
 
 import psycopg
 
-_LIBPQ_ENV_NAMES = (
-    "PGOPTIONS",
-    "PGSERVICE",
-    "PGHOST",
-    "PGPORT",
-    "PGHOSTADDR",
-    "PGDATABASE",
-    "PGUSER",
-    "PGPASSWORD",
-    "PGSSLMODE",
-    "PGCHANNELBINDING",
-    "PGSERVICEFILE",
-    "PGSYSCONFDIR",
-    "PGREQUIRESSL",
-    "PGTARGETSESSIONATTRS",
-    "PGAPPNAME",
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.pr71_vault_database_target import (  # noqa: E402
+    PR71_VAULT_BRANCH_ID,
+    PR71_VAULT_DATABASE,
+    PR71_VAULT_HOST,
+    PR71_VAULT_PROJECT_ID,
+    PR71_VAULT_RUNTIME_ROLE,
+    pr71_vault_runtime_target,
+    require_pr71_vault_connection,
+    validate_pr71_vault_dsn,
+    without_libpq_environment,
 )
-
-
-@contextmanager
-def _without_libpq_environment() -> Iterator[None]:
-    saved = {
-        name: os.environ.pop(name)
-        for name in _LIBPQ_ENV_NAMES
-        if name in os.environ
-    }
-    try:
-        yield
-    finally:
-        os.environ.update(saved)
-
 
 _EXPECTED = {
     "FLY_APP_NAME": "b3s-pr71-vault",
     "BRAND3_BASE_URL": "https://b3s-pr71-vault.fly.dev",
     "BRAND3_ENVIRONMENT": "vault",
+    "BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED": "true",
     "B3S_POSTGRES_REQUIRED": "true",
     "B3S_SITE_BASIC_AUTH_ENABLED": "true",
     "B3S_SITE_BASIC_AUTH_USERNAME": "vault",
-    "B3S_EXPECTED_NEON_PROJECT_ID": "jolly-river-32467750",
-    "B3S_EXPECTED_NEON_BRANCH_ID": "br-divine-star-aspobuer",
-    "B3S_EXPECTED_NEON_ENDPOINT_HOST": (
-        "ep-broad-river-as71uv9y.c-4.eu-central-1.aws.neon.tech"
-    ),
-    "B3S_EXPECTED_DATABASE_NAME": "neondb",
-    "B3S_EXPECTED_RUNTIME_ROLE": "b3s_pr71_app_runtime",
+    "B3S_EXPECTED_NEON_PROJECT_ID": PR71_VAULT_PROJECT_ID,
+    "B3S_EXPECTED_NEON_BRANCH_ID": PR71_VAULT_BRANCH_ID,
+    "B3S_EXPECTED_NEON_ENDPOINT_HOST": PR71_VAULT_HOST,
+    "B3S_EXPECTED_DATABASE_NAME": PR71_VAULT_DATABASE,
+    "B3S_EXPECTED_RUNTIME_ROLE": PR71_VAULT_RUNTIME_ROLE,
     "B3S_VAULT_WORKER_ENABLED": "true",
     "BRAND3_VAULT_C7_CUTOVER_ENABLED": "false",
     "BRAND3_VAULT_C7_EMERGENCY_DENY": "true",
@@ -67,43 +49,11 @@ _EXPECTED = {
 
 
 def _validate_target_dsn(value: str, *, expected_host: str) -> None:
-    parsed = urlsplit(value)
-    if (
-        parsed.scheme not in {"postgres", "postgresql"}
-        or not parsed.hostname
-        or not parsed.username
-        or not parsed.password
-        or not parsed.path
-        or parsed.path == "/"
-        or parsed.fragment
-    ):
-        raise ValueError("invalid PostgreSQL DSN")
-    if parsed.hostname.lower() != expected_host:
+    """Backward-compatible test boundary around the immutable runtime profile."""
+
+    if expected_host != PR71_VAULT_HOST:
         raise ValueError("unexpected PostgreSQL host")
-    _ = parsed.port
-    pairs = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
-    keys = [key for key, _item in pairs]
-    if len(keys) != len(set(keys)):
-        raise ValueError("duplicate PostgreSQL DSN parameter")
-    if {
-        "host",
-        "hostaddr",
-        "service",
-        "servicefile",
-        "user",
-        "password",
-        "dbname",
-        "port",
-        "options",
-    }.intersection(keys):
-        raise ValueError("PostgreSQL DSN authority override is forbidden")
-    ssl_modes = [item for key, item in pairs if key == "sslmode"]
-    channel_bindings = [item for key, item in pairs if key == "channel_binding"]
-    authenticated_tls = ssl_modes == ["verify-full"] or (
-        ssl_modes == ["require"] and channel_bindings == ["require"]
-    )
-    if not authenticated_tls:
-        raise ValueError("PostgreSQL DSN must authenticate TLS")
+    validate_pr71_vault_dsn(value, target=pr71_vault_runtime_target())
 
 
 def main() -> int:
@@ -111,36 +61,15 @@ def main() -> int:
         if os.environ.get(name, "") != expected:
             raise SystemExit("isolated Vault deployment target verification failed")
     dsn = os.environ.get("B3S_DATABASE_URL", "").strip()
-    expected_host = _EXPECTED["B3S_EXPECTED_NEON_ENDPOINT_HOST"]
-    expected_database = _EXPECTED["B3S_EXPECTED_DATABASE_NAME"]
+    target = pr71_vault_runtime_target()
     try:
-        _validate_target_dsn(dsn, expected_host=expected_host)
-    except Exception:
-        raise SystemExit("isolated Vault deployment target verification failed") from None
-    try:
-        with _without_libpq_environment():
+        validate_pr71_vault_dsn(dsn, target=target)
+        with without_libpq_environment():
             with psycopg.connect(dsn, connect_timeout=5) as connection:
-                connection_host = getattr(getattr(connection, "info", None), "host", None)
-                if connection_host is not None and connection_host.lower() != expected_host:
-                    raise ValueError("connected host does not match isolated target")
                 connection.execute("SET TRANSACTION READ ONLY")
-                row = connection.execute(
-                    """
-                    SELECT current_database(),
-                           current_user,
-                           current_setting('neon.project_id', true),
-                           current_setting('neon.branch_id', true)
-                    """
-                ).fetchone()
+                require_pr71_vault_connection(connection, target=target)
     except Exception:
         raise SystemExit("isolated Vault deployment target verification failed") from None
-    if row != (
-        expected_database,
-        _EXPECTED["B3S_EXPECTED_RUNTIME_ROLE"],
-        _EXPECTED["B3S_EXPECTED_NEON_PROJECT_ID"],
-        _EXPECTED["B3S_EXPECTED_NEON_BRANCH_ID"],
-    ):
-        raise SystemExit("isolated Vault deployment target verification failed")
     print(
         json.dumps(
             {

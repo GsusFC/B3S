@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,9 @@ class _Connection:
     def __init__(self, row):
         self.row = row
         self.statements: list[str] = []
+        self.info = SimpleNamespace(
+            host=target._EXPECTED["B3S_EXPECTED_NEON_ENDPOINT_HOST"]
+        )
 
     def __enter__(self):
         return self
@@ -41,7 +45,7 @@ def _environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
         "B3S_DATABASE_URL",
         (
-            "postgresql://runtime:secret@"
+            "postgresql://b3s_pr71_app_runtime:secret@"
             f"{target._EXPECTED['B3S_EXPECTED_NEON_ENDPOINT_HOST']}/neondb"
             "?sslmode=require&channel_binding=require"
         ),
@@ -56,6 +60,7 @@ def test_exact_isolated_target_passes_read_only(monkeypatch, capsys):
             "b3s_pr71_app_runtime",
             "jolly-river-32467750",
             "br-divine-star-aspobuer",
+            True,
         )
     )
     monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: connection)
@@ -88,7 +93,13 @@ def test_wrong_app_fails_before_database_connection(monkeypatch):
 def test_wrong_branch_fails_without_leaking_dsn(monkeypatch):
     _environment(monkeypatch)
     connection = _Connection(
-        ("neondb", "b3s_pr71_app_runtime", "jolly-river-32467750", "br-wrong")
+        (
+            "neondb",
+            "b3s_pr71_app_runtime",
+            "jolly-river-32467750",
+            "br-wrong",
+            True,
+        )
     )
     monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: connection)
 
@@ -129,7 +140,7 @@ def test_effective_target_overrides_fail_before_connection(monkeypatch, query):
     monkeypatch.setenv(
         "B3S_DATABASE_URL",
         (
-            "postgresql://runtime:secret@"
+            "postgresql://b3s_pr71_app_runtime:secret@"
             f"{target._EXPECTED['B3S_EXPECTED_NEON_ENDPOINT_HOST']}/neondb?{query}"
         ),
     )
@@ -146,7 +157,13 @@ def test_effective_target_overrides_fail_before_connection(monkeypatch, query):
 def test_wrong_runtime_role_fails_after_database_connection(monkeypatch):
     _environment(monkeypatch)
     connection = _Connection(
-        ("neondb", "neondb_owner", "jolly-river-32467750", "br-divine-star-aspobuer")
+        (
+            "neondb",
+            "neondb_owner",
+            "jolly-river-32467750",
+            "br-divine-star-aspobuer",
+            True,
+        )
     )
     monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: connection)
 
@@ -158,7 +175,13 @@ def test_ambient_libpq_overrides_are_absent_during_target_connection(monkeypatch
     _environment(monkeypatch)
     monkeypatch.setenv("PGOPTIONS", "-c neon.project_id=wrong")
     connection = _Connection(
-        ("neondb", "b3s_pr71_app_runtime", "jolly-river-32467750", "br-divine-star-aspobuer")
+        (
+            "neondb",
+            "b3s_pr71_app_runtime",
+            "jolly-river-32467750",
+            "br-divine-star-aspobuer",
+            True,
+        )
     )
     observed = {}
 
@@ -170,3 +193,38 @@ def test_ambient_libpq_overrides_are_absent_during_target_connection(monkeypatch
     assert target.main() == 0
     assert observed["PGOPTIONS"] is None
     assert os.environ["PGOPTIONS"] == "-c neon.project_id=wrong"
+
+
+def test_plaintext_live_session_fails_closed(monkeypatch) -> None:
+    _environment(monkeypatch)
+    connection = _Connection(
+        (
+            "neondb",
+            "b3s_pr71_app_runtime",
+            "jolly-river-32467750",
+            "br-divine-star-aspobuer",
+            False,
+        )
+    )
+    monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: connection)
+
+    with pytest.raises(SystemExit, match="target verification failed"):
+        target.main()
+
+
+def test_connected_host_must_be_observable_and_exact(monkeypatch) -> None:
+    _environment(monkeypatch)
+    connection = _Connection(
+        (
+            "neondb",
+            "b3s_pr71_app_runtime",
+            "jolly-river-32467750",
+            "br-divine-star-aspobuer",
+            True,
+        )
+    )
+    connection.info.host = "wrong.example"
+    monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: connection)
+
+    with pytest.raises(SystemExit, match="target verification failed"):
+        target.main()

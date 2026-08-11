@@ -195,7 +195,9 @@ from src.services.evidence_vault_operational_review import (
 )
 from src.services.evidence_vault_operational_scoring import (
     EvidenceVaultOperationalScoringError,
+    build_operational_score_authority_witness,
     build_operational_score_evaluation,
+    validate_operational_score_authority_witness,
     validate_operational_score_evaluation,
 )
 from src.services.scanner_evidence_comparison import (
@@ -238,14 +240,26 @@ class PostgresHistoryRepository:
         self._migrated = False
         self._migration_lock = Lock()
 
-    def migrate(self) -> list[str]:
-        """Apply immutable SQL migrations and reject manifest drift."""
+    def migrate(
+        self,
+        *,
+        connection_preflight: Callable[[Any], None] | None = None,
+    ) -> list[str]:
+        """Apply immutable SQL migrations and reject manifest drift.
+
+        A deployment-specific preflight, when supplied, runs on the exact
+        connection and transaction that will execute DDL. It must use only
+        read-only assertions and raises before the advisory lock or schema DDL
+        when the physical target is not authorized.
+        """
 
         if self.schema_policy != "migrate":
             raise RuntimeError("schema policy verify_head does not permit migrations")
         manifest = _migration_manifest()
         applied: list[str] = []
         with self._connect() as conn:
+            if connection_preflight is not None:
+                connection_preflight(conn)
             conn.execute(
                 "SELECT pg_advisory_xact_lock(%s)",
                 (_advisory_lock_key(_SCHEMA, "schema-migrations-v1"),),
@@ -3220,10 +3234,12 @@ class PostgresHistoryRepository:
             ),
             request_fingerprint=request_fingerprint,
         )
-        _, adoption_replayed = self.append_evidence_vault_operational_adoption(
-            domain,
-            command,
-            workspace_slug=workspace_slug,
+        adoption_event, adoption_replayed = (
+            self.append_evidence_vault_operational_adoption(
+                domain,
+                command,
+                workspace_slug=workspace_slug,
+            )
         )
         memory = self.get_evidence_vault_operational_memory(
             domain,
@@ -3235,8 +3251,41 @@ class PostgresHistoryRepository:
                 workspace_slug=workspace_slug,
             )
         )
+        expected_event_id = str(adoption_event["event_id"])
+        expected_memory_version = str(
+            adoption_event["promoted_canonical_memory_version"]
+        )
+        candidate_packet_fingerprint = str(
+            adoption_event["candidate_packet_fingerprint"]
+        )
+        if (
+            candidate_packet_fingerprint
+            != str(packet["candidate_packet_fingerprint"])
+            or not isinstance(memory, Mapping)
+            or memory.get("canonical_memory_version")
+            != expected_memory_version
+            or memory.get("adoption_event_id") != expected_event_id
+            or not isinstance(score, Mapping)
+            or score.get("canonical_memory_version")
+            != expected_memory_version
+            or score.get("adoption_event_id") != expected_event_id
+        ):
+            raise EvidenceVaultOperationalAdoptionConflictError(
+                "The scanner adoption was superseded before activation completed."
+            )
+        try:
+            build_operational_score_authority_witness(
+                memory,
+                promotion_event=adoption_event,
+                evaluation=score,
+            )
+        except EvidenceVaultOperationalScoringError as exc:
+            raise EvidenceVaultOperationalAdoptionConflictError(
+                "The scanner activation does not match its exact adoption event."
+            ) from exc
         return {
             "created": True,
+            "candidate_packet_fingerprint": candidate_packet_fingerprint,
             "packet_replayed": packet_replayed,
             "adoption_replayed": adoption_replayed,
             "score_replayed": score_replayed,
@@ -6117,9 +6166,13 @@ class PostgresHistoryRepository:
                 "SELECT pg_advisory_xact_lock(%s)",
                 (_advisory_lock_key(brand_id, "evidence-vault-canonical-promotion"),),
             )
-            memory = _project_vault_operational_memory(conn, brand_id)
-            if memory is None:
+            authority_chain = _project_vault_operational_memory_authority_chain(
+                conn,
+                brand_id,
+            )
+            if not authority_chain:
                 return None, False
+            memory, promotion_event = authority_chain[-1]
             existing = conn.execute(
                 f"""
                 SELECT *
@@ -6131,7 +6184,13 @@ class PostgresHistoryRepository:
                 (brand_id, memory["canonical_memory_version"]),
             ).fetchone()
             if existing is not None:
-                return _vault_operational_score_record(existing), True
+                stored = _vault_operational_score_record(existing)
+                build_operational_score_authority_witness(
+                    memory,
+                    promotion_event=promotion_event,
+                    evaluation=stored,
+                )
+                return stored, True
 
             database_time = conn.execute(
                 "SELECT clock_timestamp() AS database_time"
@@ -6153,11 +6212,38 @@ class PostgresHistoryRepository:
                 (brand_id, evaluation["score_input_fingerprint"]),
             ).fetchone()
             if reusable_row is not None:
+                reusable_evaluation = _vault_operational_score_record(
+                    reusable_row
+                )
+                reusable_authority = next(
+                    (
+                        (historical_memory, historical_event)
+                        for historical_memory, historical_event in authority_chain
+                        if historical_memory["canonical_memory_version"]
+                        == reusable_evaluation["canonical_memory_version"]
+                    ),
+                    None,
+                )
+                if reusable_authority is None:
+                    raise EvidenceVaultOperationalScoringError(
+                        "Reusable operational evaluation has no exact canonical authority."
+                    )
+                reusable_memory, reusable_event = reusable_authority
+                build_operational_score_authority_witness(
+                    reusable_memory,
+                    promotion_event=reusable_event,
+                    evaluation=reusable_evaluation,
+                )
                 evaluation = build_operational_score_evaluation(
                     memory,
                     created_at=evaluation["created_at"],
-                    reusable_evaluation=_vault_operational_score_record(reusable_row),
+                    reusable_evaluation=reusable_evaluation,
                 )
+            build_operational_score_authority_witness(
+                memory,
+                promotion_event=promotion_event,
+                evaluation=evaluation,
+            )
             evaluation_id = _stable_uuid(
                 brand_id,
                 "evidence-vault-operational-score",
@@ -6224,11 +6310,129 @@ class PostgresHistoryRepository:
                     "The operational score evaluation could not be persisted."
                 )
             stored = _vault_operational_score_record(row)
+            build_operational_score_authority_witness(
+                memory,
+                promotion_event=promotion_event,
+                evaluation=stored,
+            )
             if stored != evaluation:
                 raise EvidenceVaultOperationalScoringError(
                     "The operational evaluation identity resolves to different content."
                 )
             return stored, replayed
+
+    def get_evidence_vault_operational_report_projection(
+        self,
+        domain_or_url: str,
+        *,
+        expected_canonical_memory_version: str,
+        expected_evaluation_identity: str,
+        expected_adoption_event_id: str,
+        expected_candidate_packet_fingerprint: str | None = None,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        """Load the exact activated report projection or fail closed on drift."""
+
+        self._ensure_migrated()
+        domain = normalize_domain(domain_or_url)
+        expected_memory = str(expected_canonical_memory_version or "")
+        expected_evaluation = str(expected_evaluation_identity or "")
+        expected_event = str(expected_adoption_event_id or "")
+        expected_candidate = str(expected_candidate_packet_fingerprint or "")
+        if not domain:
+            return None
+        if not all(
+            (
+                expected_memory,
+                expected_evaluation,
+                expected_event,
+            )
+        ):
+            raise EvidenceVaultOperationalScoringError(
+                "Report projection requires exact activated authority identities."
+            )
+        with self._connect() as conn:
+            brand = conn.execute(
+                f"""
+                SELECT brands.id
+                FROM {_SCHEMA}.brands
+                JOIN {_SCHEMA}.workspaces ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s AND brands.canonical_domain = %s
+                """,
+                (workspace_slug, domain),
+            ).fetchone()
+            if brand is None:
+                return None
+            brand_id = brand["id"]
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        "evidence-vault-canonical-promotion",
+                    ),
+                ),
+            )
+            authority_chain = _project_vault_operational_memory_authority_chain(
+                conn,
+                brand_id,
+            )
+            if not authority_chain:
+                return None
+            memory, promotion_event = authority_chain[-1]
+            if (
+                memory["canonical_memory_version"] != expected_memory
+                or promotion_event["event_id"] != expected_event
+                or memory["adoption_event_id"] != expected_event
+                or (
+                    expected_candidate
+                    and promotion_event["candidate_packet_fingerprint"]
+                    != expected_candidate
+                )
+            ):
+                raise EvidenceVaultOperationalScoringError(
+                    "Activated operational authority changed before report projection."
+                )
+            row = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_canonical_score_evaluations
+                WHERE brand_id = %s
+                  AND canonical_memory_version = %s
+                  AND evaluation_kind = 'operational_v2'
+                """,
+                (brand_id, expected_memory),
+            ).fetchone()
+            if row is None:
+                raise EvidenceVaultOperationalScoringError(
+                    "Activated operational memory has no persisted score evaluation."
+                )
+            evaluation = _vault_operational_score_record(row)
+            if (
+                evaluation["evaluation_identity"] != expected_evaluation
+                or evaluation["adoption_event_id"] != expected_event
+            ):
+                raise EvidenceVaultOperationalScoringError(
+                    "Activated score identity changed before report projection."
+                )
+            witness = build_operational_score_authority_witness(
+                memory,
+                promotion_event=promotion_event,
+                evaluation=evaluation,
+            )
+            validate_operational_score_authority_witness(
+                witness,
+                canonical_memory=memory,
+                promotion_event=promotion_event,
+                evaluation=evaluation,
+            )
+            return {
+                "schema_version": "evidence-vault-operational-report-projection-v1",
+                "memory": memory,
+                "promotion_event": promotion_event,
+                "score_evaluation": evaluation,
+                "score_authority_witness": witness,
+            }
 
     def append_evidence_claim_tile_review(
         self,
@@ -11871,6 +12075,17 @@ def _project_vault_operational_memory(
     conn: Any,
     brand_id: Any,
 ) -> dict[str, Any] | None:
+    authority_chain = _project_vault_operational_memory_authority_chain(
+        conn,
+        brand_id,
+    )
+    return authority_chain[-1][0] if authority_chain else None
+
+
+def _project_vault_operational_memory_authority_chain(
+    conn: Any,
+    brand_id: Any,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     rows = conn.execute(
         f"""
         SELECT *
@@ -11882,6 +12097,7 @@ def _project_vault_operational_memory(
     ).fetchall()
     current: dict[str, Any] | None = None
     previous_event_id: str | None = None
+    authority_chain: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for expected_sequence, row in enumerate(rows, start=1):
         event = _vault_operational_adoption_event_record(row)
         if (
@@ -11914,8 +12130,9 @@ def _project_vault_operational_memory(
                 "The operational packet chain has a parent gap."
             )
         current = project_adopted_operational_memory(packet, event)
+        authority_chain.append((current, event))
         previous_event_id = event["event_id"]
-    return current
+    return authority_chain
 
 
 def _project_vault_canonical_memory(

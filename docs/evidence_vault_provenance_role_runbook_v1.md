@@ -119,6 +119,9 @@ The explicitly authorized landing posture for cumulative PR #71 accepts this fai
 
 ## Operational rules
 
+- The current Exa runtime is owned-link-only: it fetches an external LinkedIn company profile only when the owned raw capture contains that exact canonical URL.
+- Independent Exa discovery, unique-result selection, brand-name similarity, titles, summaries, highlights and free text never prove brand association. Without the owned exact link the capture remains owned-only.
+- `external_raw_declares_owned_domain` is reserved for a future adapter that freezes a typed canonical-website field whose domain exactly equals the brand; the current Exa projection does not emit that fact.
 - Start the acquisition worker under a separate OS/container identity. Inject its private key and scanner DSN only there.
 - A worker retry performs durable replay lookup before network collection or signing.
 - Runtime/read transactions are read-only and reverify Ed25519, snapshot, extractor, passage, lineage, freshness, registry, and disposition state in Python.

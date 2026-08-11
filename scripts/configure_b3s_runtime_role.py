@@ -19,6 +19,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.pr71_vault_database_target import (  # noqa: E402
+    PR71VaultTarget,
+    PR71_VAULT_DATABASE,
+    PR71_VAULT_RUNTIME_ROLE,
+    pr71_vault_migration_target,
+    require_pr71_vault_connection,
+    validate_pr71_vault_dsn,
+    without_libpq_environment,
+)
+
 SCHEMA = "b3s_history"
 MIGRATION_JOURNAL = "schema_migrations"
 EXPECTED_HEAD_VERSION = "023"
@@ -96,13 +106,25 @@ class Relation:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--target-profile",
+        required=True,
+        choices=("pr71-vault",),
+        help="Immutable isolated database target profile.",
+    )
+    parser.add_argument(
         "--role",
         required=True,
-        help="Existing PostgreSQL LOGIN role to configure (never a DSN or password).",
+        choices=(PR71_VAULT_RUNTIME_ROLE,),
+        help=(
+            "Existing PR71 PostgreSQL LOGIN role to configure; this command "
+            "never creates the role or receives/changes its password."
+        ),
     )
     parser.add_argument(
         "--database-name",
-        help="Database receiving CONNECT; must be the database selected by the migration URL.",
+        required=True,
+        choices=(PR71_VAULT_DATABASE,),
+        help="Exact isolated database receiving CONNECT.",
     )
     return parser.parse_args(argv)
 
@@ -324,6 +346,14 @@ def _reset_and_grant(
             role_identifier,
         )
     )
+    # PostgreSQL grants TEMPORARY to PUBLIC by default.  Remove that inherited
+    # capability from this isolated database before granting the runtime role
+    # its positive contract.  Database-owner privileges remain implicit.
+    conn.execute(
+        sql.SQL("REVOKE TEMPORARY ON DATABASE {} FROM PUBLIC").format(
+            database_identifier,
+        )
+    )
     conn.execute(
         sql.SQL("REVOKE ALL PRIVILEGES ON SCHEMA {} FROM {}").format(
             schema_identifier,
@@ -427,13 +457,29 @@ def _verify_effective_privileges(
         """
         SELECT pg_catalog.has_database_privilege(%s, %s, 'CONNECT') AS can_connect,
                pg_catalog.has_database_privilege(%s, %s, 'CREATE') AS can_create_schema,
+               pg_catalog.has_database_privilege(%s, %s, 'TEMPORARY') AS can_create_temporary,
                pg_catalog.has_schema_privilege(%s, %s, 'USAGE') AS can_use_schema,
                pg_catalog.has_schema_privilege(%s, %s, 'CREATE') AS can_create_in_schema
         """,
-        (role, database_name, role, database_name, role, SCHEMA, role, SCHEMA),
+        (
+            role,
+            database_name,
+            role,
+            database_name,
+            role,
+            database_name,
+            role,
+            SCHEMA,
+            role,
+            SCHEMA,
+        ),
     ).fetchone()
     if not bool(boundary["can_connect"]) or not bool(boundary["can_use_schema"]):
         raise RuntimeRoleConfigurationError("runtime connection boundary was not granted")
+    if bool(boundary["can_create_temporary"]):
+        raise RuntimeRoleConfigurationError(
+            "runtime role retains effective database TEMPORARY privilege"
+        )
     if bool(boundary["can_create_schema"]) or bool(boundary["can_create_in_schema"]):
         raise RuntimeRoleConfigurationError(
             "runtime role retains effective DDL privileges"
@@ -592,14 +638,36 @@ def configure_runtime_role(
     *,
     role: str,
     database_name: str | None = None,
+    connection_target: PR71VaultTarget | None = None,
 ) -> str:
     role_name = str(role or "").strip()
     if not role_name or "\x00" in role_name:
         raise RuntimeRoleConfigurationError("--role must be a valid existing identifier")
+    if connection_target is not None:
+        if role_name != PR71_VAULT_RUNTIME_ROLE:
+            raise RuntimeRoleConfigurationError("--role must match the PR71 runtime role")
+        if database_name != PR71_VAULT_DATABASE:
+            raise RuntimeRoleConfigurationError(
+                "--database-name must match the PR71 Vault database"
+            )
+        validate_pr71_vault_dsn(database_url, target=connection_target)
 
     manifest, verifier, advisory_lock_key = _migration_contract()
-    with psycopg.connect(database_url, row_factory=dict_row) as conn:
+    if connection_target is not None:
+        with without_libpq_environment():
+            connection = psycopg.connect(
+                database_url,
+                row_factory=dict_row,
+                connect_timeout=5,
+            )
+    else:
+        connection = psycopg.connect(database_url, row_factory=dict_row)
+    with connection as conn:
         with conn.transaction():
+            if connection_target is not None:
+                # This SELECT-only assertion is deliberately the first statement
+                # on the same connection that will change ACLs.
+                require_pr71_vault_connection(conn, target=connection_target)
             conn.execute(
                 "SELECT pg_catalog.pg_advisory_xact_lock(%s)",
                 (advisory_lock_key(SCHEMA, "schema-migrations-v1"),),
@@ -649,6 +717,7 @@ def main(argv: list[str] | None = None) -> int:
             database_url,
             role=args.role,
             database_name=args.database_name,
+            connection_target=pr71_vault_migration_target(),
         )
     except Exception:
         # This boundary must never echo driver errors: they can contain the DSN,

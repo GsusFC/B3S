@@ -249,10 +249,12 @@ reviewer supplies a separate `reviews.jsonl`; see
 
 Fly deploys use the GitHub `production` environment and its `FLY_API_TOKEN` secret. The `Fly Deploy` workflow is manual from `main` while the guarded rollout is active. Automatic deploys after successful CI remain disabled until the repository variable `AUTO_DEPLOY_ENABLED` is explicitly changed from `false` to `true`.
 
-Both Fly configs use the same shell-wrapped release command to verify the
-committed image before running the idempotent PostgreSQL migration. Production
-uses `fly.toml`; Vault deployment requires explicit `fly.vault.toml` and does
-not itself authorize or enable C7 cutover.
+Both production Fly configs use a shell-wrapped release command that verifies
+the committed image and the exact PostgreSQL migration head with SELECT-only
+runtime access; releases never apply migrations. Any migration requires a
+separately authorized, target-pinned external migrator. Production uses
+`fly.toml`; Vault deployment requires explicit `fly.vault.toml` and does not
+itself authorize operational Vault execution or C7 cutover.
 
 ## Status
 

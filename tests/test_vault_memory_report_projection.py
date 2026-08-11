@@ -10,9 +10,11 @@ from src import config
 from src.history.capture_observation import parse_capture_observation
 from src.history.models import ReportImportError
 from src.history.report_parser import parse_report
+from src.history.repository import PostgresHistoryRepository
 from src.sv9.export_md import build_scan_markdown
 from src.services import evidence_vault_scan_orchestration
 from src.services.evidence_vault_authority_profiles import (
+    build_initial_authority_profile_matrix,
     evaluate_reviewed_basis_authority,
 )
 from src.services.evidence_vault_candidate_resolver import (
@@ -21,8 +23,10 @@ from src.services.evidence_vault_candidate_resolver import (
 from src.services.evidence_vault_canonical_core import (
     build_candidate_tile,
     build_tile_contract_registry,
+    canonical_fingerprint,
 )
 from src.services.evidence_vault_operational_authority import (
+    EvidenceVaultOperationalAdoptionConflictError,
     build_operational_adoption_event,
     project_adopted_operational_memory,
 )
@@ -30,13 +34,20 @@ from src.services.evidence_vault_operational_memory import (
     build_operational_memory_packet,
 )
 from src.services.evidence_vault_operational_scoring import (
+    EVIDENCE_VAULT_OPERATIONAL_EVALUATION_IDENTITY_VERSION,
+    EvidenceVaultOperationalScoringError,
+    build_operational_score_authority_witness,
     build_operational_score_evaluation,
+    validate_operational_score_evaluation,
 )
 from web import report_store
 from web import scan_runner
 from web import scoring_store
 from web.app import _scan_payload_for_markdown
 from web.report_view_model import build_report_view_model
+
+
+_PROMOTION_EVENTS: dict[str, dict] = {}
 
 
 def _digest(value: str) -> str:
@@ -128,7 +139,9 @@ def _adopted_memory(ok_tile_ids: set[str], accepted_ids: set[str]) -> dict:
         idempotency_key_hash=_digest("idempotency-1"),
         expected_current_canonical_memory_version=None,
     )
-    return project_adopted_operational_memory(packet, event)
+    memory = project_adopted_operational_memory(packet, event)
+    _PROMOTION_EVENTS[event["event_id"]] = event
+    return memory
 
 
 def _memory_and_score(ok_tile_ids: set[str], accepted_ids: set[str]):
@@ -138,6 +151,55 @@ def _memory_and_score(ok_tile_ids: set[str], accepted_ids: set[str]):
         created_at="2026-08-06T13:00:00+02:00",
     )
     return memory, score
+
+
+def _scanner_adoption(packet: dict) -> tuple[dict, dict, dict]:
+    policy_fingerprint = str(
+        build_initial_authority_profile_matrix()[
+            "authority_matrix_fingerprint"
+        ]
+    )
+    event = build_operational_adoption_event(
+        packet,
+        event_id="00000000-0000-0000-0000-000000000071",
+        sequence=1,
+        previous_event_id=None,
+        adopted_by="policy",
+        actor_id="automatic-scanner-semantic-v1",
+        policy_fingerprint=policy_fingerprint,
+        created_at="2026-08-06T12:00:00+02:00",
+        idempotency_key_hash=_digest("scanner-activation"),
+        expected_current_canonical_memory_version=None,
+    )
+    memory = project_adopted_operational_memory(packet, event)
+    score = build_operational_score_evaluation(
+        memory,
+        created_at="2026-08-06T13:00:00+02:00",
+    )
+    return event, memory, score
+
+
+def _score_authority(memory: dict, score: dict) -> dict[str, dict]:
+    promotion_event = _PROMOTION_EVENTS[memory["adoption_event_id"]]
+    return {
+        "promotion_event": promotion_event,
+        "score_authority_witness": build_operational_score_authority_witness(
+            memory,
+            promotion_event=promotion_event,
+            evaluation=score,
+        ),
+    }
+
+
+def _report_projection(memory: dict, score: dict) -> dict:
+    authority = _score_authority(memory, score)
+    return {
+        "schema_version": "evidence-vault-operational-report-projection-v1",
+        "memory": memory,
+        "promotion_event": authority["promotion_event"],
+        "score_evaluation": score,
+        "score_authority_witness": authority["score_authority_witness"],
+    }
 
 
 def _snapshot(scan_id: str = "scan-tile") -> dict:
@@ -220,6 +282,7 @@ def test_compose_vault_memory_report_projects_durable_memory_model_free() -> Non
         capture_observation=_observation("scan-report"),
         memory=memory,
         score=score,
+        **_score_authority(memory, score),
     )
 
     assert report["raw"]["vault_memory_projection"] is True
@@ -237,6 +300,9 @@ def test_compose_vault_memory_report_projects_durable_memory_model_free() -> Non
     assert report["reliability_status"] == "reliable"
     assert report["vault_memory_version"] == memory["canonical_memory_version"]
     assert report["vault_score_evaluation_identity"] == score["evaluation_identity"]
+    assert report["raw"]["vault"]["score_authority_witness"][
+        "evaluation_identity"
+    ] == score["evaluation_identity"]
     assert report["total_blind_spots"] == 0
     assert report["most_painful_gap"] is None
     assert report["most_painful_gap_label"] == ""
@@ -293,6 +359,7 @@ def test_vault_report_binds_exact_persisted_observation_without_snapshot_hint() 
         capture_observation=observation,
         memory=memory,
         score=score,
+        **_score_authority(memory, score),
     )
 
     assert report["raw"]["source_capture"] == {
@@ -350,6 +417,7 @@ def test_trusted_vault_report_rebuilds_gate_from_persisted_attempts(
         capture_observation=observation,
         memory=memory,
         score=score,
+        **_score_authority(memory, score),
     )
 
     assert report["attempts"] == observation["acquisition_attempts"]
@@ -406,6 +474,7 @@ def test_trusted_not_discovered_gate_does_not_invent_exa_failure(
         capture_observation=observation,
         memory=memory,
         score=score,
+        **_score_authority(memory, score),
     )
 
     warning = report["acquisition_gate"]["warnings"][0]
@@ -427,6 +496,7 @@ def test_partial_vault_memory_report_stays_shadow_and_counts_unresolved_tiles() 
         capture_observation=_observation("scan-partial"),
         memory=memory,
         score=score,
+        **_score_authority(memory, score),
     )
 
     assert score["authority_coverage"]["score_completeness"] == "partial"
@@ -461,6 +531,7 @@ def test_vault_markdown_preserves_shadow_confidence_and_magnetism_cap() -> None:
         capture_observation=_observation("scan-markdown-partial"),
         memory=partial_memory,
         score=partial_score,
+        **_score_authority(partial_memory, partial_score),
     )
     partial_payload = _scan_payload_for_markdown(partial_report)
     partial_markdown = build_scan_markdown(partial_payload)
@@ -488,6 +559,7 @@ def test_vault_markdown_preserves_shadow_confidence_and_magnetism_cap() -> None:
         capture_observation=_observation("scan-markdown-capped"),
         memory=capped_memory,
         score=capped_score,
+        **_score_authority(capped_memory, capped_score),
     )
     capped_payload = _scan_payload_for_markdown(capped_report)
     capped_markdown = build_scan_markdown(capped_payload)
@@ -507,6 +579,7 @@ def test_compose_vault_memory_report_tracks_accepted_absences_as_shadow() -> Non
         capture_observation=_observation("scan-shadow"),
         memory=memory,
         score=score,
+        **_score_authority(memory, score),
     )
 
     assert report["reliability_status"] == "shadow"
@@ -545,6 +618,7 @@ def test_vault_memory_report_passes_report_import_contract() -> None:
         capture_observation=_observation("scan-import"),
         memory=memory,
         score=score,
+        **_score_authority(memory, score),
     )
 
     parsed = parse_report(report)
@@ -580,6 +654,7 @@ def test_vault_memory_report_records_all_tiles_in_sqlite_mirror(
         capture_observation=_observation("scan-sqlite-mirror"),
         memory=memory,
         score=score,
+        **_score_authority(memory, score),
     )
     database_path = tmp_path / "scoring.sqlite3"
     monkeypatch.setenv("B3S_SCORING_DB_PATH", str(database_path))
@@ -614,6 +689,7 @@ def test_vault_memory_report_preserves_current_acquisition_limitations() -> None
         capture_observation=_observation("scan-warning", snapshot),
         memory=memory,
         score=score,
+        **_score_authority(memory, score),
     )
 
     assert report["limitations"] == [
@@ -626,7 +702,10 @@ def test_vault_memory_report_rejects_cross_brand_memory() -> None:
     memory, score = _memory_and_score({"M1", "M2"}, {"M1", "M2"})
     memory["brand_identity"] = "other.example"
 
-    with pytest.raises(RuntimeError, match="vault_report_memory_brand_mismatch"):
+    with pytest.raises(
+        EvidenceVaultOperationalScoringError,
+        match="promotion event",
+    ):
         scan_runner._compose_vault_memory_report(
             scan_id="scan-cross-brand",
             url="https://example.com",
@@ -634,6 +713,7 @@ def test_vault_memory_report_rejects_cross_brand_memory() -> None:
             capture_observation=_observation("scan-cross-brand"),
             memory=memory,
             score=score,
+            **_score_authority(memory, score),
         )
 
 
@@ -642,7 +722,11 @@ def test_vault_memory_report_rejects_mismatched_memory_and_score_versions() -> N
     mismatched_score = dict(score)
     mismatched_score["canonical_memory_version"] = "f" * 64
 
-    with pytest.raises(RuntimeError, match="vault_memory_score_version_mismatch"):
+    authority = _score_authority(memory, score)
+    with pytest.raises(
+        EvidenceVaultOperationalScoringError,
+        match="evaluation identity mismatch",
+    ):
         scan_runner._compose_vault_memory_report(
             scan_id="scan-version-mismatch",
             url="https://example.com",
@@ -650,6 +734,62 @@ def test_vault_memory_report_rejects_mismatched_memory_and_score_versions() -> N
             capture_observation=_observation("scan-version-mismatch"),
             memory=memory,
             score=mismatched_score,
+            **authority,
+        )
+
+
+def test_vault_report_rejects_self_consistent_wrong_score_breakdown_row() -> None:
+    memory, score = _memory_and_score({"M1"}, {"M1"})
+    _wrong_memory, wrong_score = _memory_and_score(
+        {"M1", "M2"},
+        {"M1", "M2"},
+    )
+    wrong_score["canonical_memory_version"] = memory["canonical_memory_version"]
+    wrong_score["adoption_event_id"] = memory["adoption_event_id"]
+    wrong_score["evaluation_identity"] = canonical_fingerprint(
+        EVIDENCE_VAULT_OPERATIONAL_EVALUATION_IDENTITY_VERSION,
+        {
+            "canonical_memory_version": wrong_score["canonical_memory_version"],
+            "score_input_fingerprint": wrong_score["score_input_fingerprint"],
+        },
+    )
+    validate_operational_score_evaluation(wrong_score)
+    authority = _score_authority(memory, score)
+
+    with pytest.raises(
+        EvidenceVaultOperationalScoringError,
+        match="rederived from exact canonical memory",
+    ):
+        scan_runner._compose_vault_memory_report(
+            scan_id="scan-wrong-score-row",
+            url="https://example.com",
+            brand_name="Example",
+            capture_observation=_observation("scan-wrong-score-row"),
+            memory=memory,
+            score=wrong_score,
+            **authority,
+        )
+
+
+def test_vault_report_rejects_self_consistent_wrong_promotion_event_row() -> None:
+    memory, score = _memory_and_score({"M1"}, {"M1"})
+    wrong_event_score = dict(score)
+    wrong_event_score["adoption_event_id"] = str(uuid4())
+    validate_operational_score_evaluation(wrong_event_score)
+    authority = _score_authority(memory, score)
+
+    with pytest.raises(
+        EvidenceVaultOperationalScoringError,
+        match="adoption event does not match",
+    ):
+        scan_runner._compose_vault_memory_report(
+            scan_id="scan-wrong-event-row",
+            url="https://example.com",
+            brand_name="Example",
+            capture_observation=_observation("scan-wrong-event-row"),
+            memory=memory,
+            score=wrong_event_score,
+            **authority,
         )
 
 
@@ -666,6 +806,7 @@ def test_vault_memory_report_fails_closed_when_capture_evidence_is_invalid() -> 
             capture_observation=observation,
             memory=memory,
             score=score,
+            **_score_authority(memory, score),
         )
 
 
@@ -679,6 +820,7 @@ def test_vault_resume_run_branches_to_memory_projection_without_interpreter(
     status = _status(scan_id)
     scan_runner._SCANS[scan_id] = status
     snapshot = _snapshot(scan_id)
+    projection_bindings: list[dict] = []
     snapshot["raw_inputs"].append(
         {
             "source": "screenshot_capture",
@@ -702,6 +844,10 @@ def test_vault_resume_run_branches_to_memory_projection_without_interpreter(
         ):
             return score, False
 
+        def get_evidence_vault_operational_report_projection(self, *_a, **_k):
+            projection_bindings.append(dict(_k))
+            return _report_projection(memory, score)
+
     captured: list[dict] = []
 
     def fake_publish(_scan_id: str, report: dict) -> bool:
@@ -709,6 +855,7 @@ def test_vault_resume_run_branches_to_memory_projection_without_interpreter(
         return True
 
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
     monkeypatch.setattr(
         config,
         "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED",
@@ -759,6 +906,9 @@ def test_vault_resume_run_branches_to_memory_projection_without_interpreter(
         scan_runner._SCANS.pop(scan_id, None)
 
     assert len(captured) == 1
+    assert projection_bindings[0][
+        "expected_candidate_packet_fingerprint"
+    ] is None
     report = captured[0]
     assert report["id"] == scan_id
     assert report["raw"]["vault_memory_projection"] is True
@@ -789,6 +939,9 @@ def test_vault_projection_cancellation_does_not_advance_report_phases(
         ):
             return score, False
 
+        def get_evidence_vault_operational_report_projection(self, *_a, **_k):
+            return _report_projection(memory, score)
+
     published: list[dict] = []
 
     def cancel_during_stability(report: dict) -> dict:
@@ -797,6 +950,7 @@ def test_vault_projection_cancellation_does_not_advance_report_phases(
         return report
 
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
     monkeypatch.setattr(
         config,
         "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED",
@@ -842,11 +996,149 @@ def test_vault_projection_cancellation_does_not_advance_report_phases(
         scan_runner._SCANS.pop(scan_id, None)
 
 
-def test_vault_activation_boundary_rejects_late_cancellation() -> None:
+def test_scanner_activation_returns_exact_adoption_candidate_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    packet = _packet({"M1"}, {"M1"})
+    adoption_event, memory, score = _scanner_adoption(packet)
+    memory_reads = 0
+
+    class FakeRepo:
+        activate_evidence_vault_operational_scanner_result = (
+            PostgresHistoryRepository.activate_evidence_vault_operational_scanner_result
+        )
+
+        def get_capture_operation_plan(self, *_a, **_k):
+            return {
+                "operation_plan_fingerprint": "a" * 64,
+                "status": "completed",
+                "result_payload": {
+                    "output_kind": "candidate_overlay",
+                    "source_candidate_packet": {"source": "scanner"},
+                },
+            }
+
+        def get_evidence_vault_operational_memory(self, *_a, **_k):
+            nonlocal memory_reads
+            memory_reads += 1
+            return None if memory_reads == 1 else memory
+
+        def register_evidence_vault_operational_memory_packet(
+            self,
+            *_a,
+            **_k,
+        ):
+            return {"packet": packet}, False
+
+        def append_evidence_vault_operational_adoption(self, *_a, **_k):
+            return adoption_event, False
+
+        def get_or_create_evidence_vault_operational_score_evaluation(
+            self,
+            *_a,
+            **_k,
+        ):
+            return score, False
+
+    monkeypatch.setattr(
+        "src.history.repository.build_operational_packet_from_scanner_candidate",
+        lambda *_a, **_k: packet,
+    )
+
+    activated = FakeRepo().activate_evidence_vault_operational_scanner_result(
+        "example.com",
+        source_scan_id="scan-a",
+        operation_plan_fingerprint="a" * 64,
+    )
+
+    assert activated["candidate_packet_fingerprint"] == adoption_event[
+        "candidate_packet_fingerprint"
+    ]
+    assert activated["memory"] == memory
+    assert activated["score"] == score
+
+
+@pytest.mark.parametrize("superseded_read", ["memory", "score"])
+def test_scanner_activation_fails_closed_if_another_scan_supersedes_adoption(
+    monkeypatch: pytest.MonkeyPatch,
+    superseded_read: str,
+) -> None:
+    packet = _packet({"M1"}, {"M1"})
+    adoption_event, memory_a, score_a = _scanner_adoption(packet)
+    memory_b = {
+        **memory_a,
+        "canonical_memory_version": "b" * 64,
+        "adoption_event_id": "00000000-0000-0000-0000-000000000072",
+    }
+    score_b = {
+        **score_a,
+        "canonical_memory_version": memory_b["canonical_memory_version"],
+        "adoption_event_id": memory_b["adoption_event_id"],
+    }
+    memory_reads = 0
+
+    class RacingRepo:
+        activate_evidence_vault_operational_scanner_result = (
+            PostgresHistoryRepository.activate_evidence_vault_operational_scanner_result
+        )
+
+        def get_capture_operation_plan(self, *_a, **_k):
+            return {
+                "operation_plan_fingerprint": "a" * 64,
+                "status": "completed",
+                "result_payload": {
+                    "output_kind": "candidate_overlay",
+                    "source_candidate_packet": {"source": "scanner-a"},
+                },
+            }
+
+        def get_evidence_vault_operational_memory(self, *_a, **_k):
+            nonlocal memory_reads
+            memory_reads += 1
+            if memory_reads == 1:
+                return None
+            return memory_b if superseded_read == "memory" else memory_a
+
+        def register_evidence_vault_operational_memory_packet(
+            self,
+            *_a,
+            **_k,
+        ):
+            return {"packet": packet}, False
+
+        def append_evidence_vault_operational_adoption(self, *_a, **_k):
+            return adoption_event, False
+
+        def get_or_create_evidence_vault_operational_score_evaluation(
+            self,
+            *_a,
+            **_k,
+        ):
+            return score_b, False
+
+    monkeypatch.setattr(
+        "src.history.repository.build_operational_packet_from_scanner_candidate",
+        lambda *_a, **_k: packet,
+    )
+
+    with pytest.raises(
+        EvidenceVaultOperationalAdoptionConflictError,
+        match="superseded before activation completed",
+    ):
+        RacingRepo().activate_evidence_vault_operational_scanner_result(
+            "example.com",
+            source_scan_id="scan-a",
+            operation_plan_fingerprint="a" * 64,
+        )
+
+
+def test_vault_activation_boundary_rejects_cancellation_through_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     scan_id = "scan-vault-activation-boundary"
     status = _status(scan_id)
     scan_runner._SCANS[scan_id] = status
-    cancellation_results: list[dict] = []
+    cancellation_during_activation: list[dict] = []
 
     class FakeRepo:
         def activate_evidence_vault_operational_scanner_result(
@@ -854,9 +1146,20 @@ def test_vault_activation_boundary_rejects_late_cancellation() -> None:
             *_a,
             **_k,
         ):
-            cancellation_results.append(scan_runner.cancel_scan(scan_id) or {})
+            cancellation_during_activation.append(
+                scan_runner.cancel_scan(scan_id) or {}
+            )
             return {"memory": {}, "score": {}}
 
+    rejected = {
+        "state": "running",
+        "cancelled": False,
+        "reason": "vault_activation_in_progress",
+        "acquisition_gate": {},
+    }
+    published: list[dict] = []
+    monkeypatch.setattr(scan_runner, "save_report", published.append)
+    monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda _value: None)
     try:
         result = scan_runner._activate_vault_result_unless_cancelled(
             scan_id,
@@ -864,18 +1167,164 @@ def test_vault_activation_boundary_rejects_late_cancellation() -> None:
             "https://example.com",
             operation_plan_fingerprint="a" * 64,
         )
+        cancellation_immediately_after_return = scan_runner.cancel_scan(scan_id)
+
         assert result == {"memory": {}, "score": {}}
-        assert cancellation_results == [
+        assert cancellation_during_activation == [rejected]
+        assert cancellation_immediately_after_return == rejected
+        assert scan_id in scan_runner._VAULT_ACTIVATIONS
+        assert status["state"] == "running"
+
+        assert scan_runner._publish_completed_report(scan_id, {"id": scan_id})
+        assert published == [{"id": scan_id}]
+        assert scan_id not in scan_runner._VAULT_ACTIVATIONS
+        assert scan_runner.cancel_scan(scan_id) == {
+            "state": "done",
+            "cancelled": False,
+            "acquisition_gate": {},
+        }
+    finally:
+        scan_runner._SCANS.pop(scan_id, None)
+        scan_runner._SCAN_EVENTS.pop(scan_id, None)
+        scan_runner._VAULT_ACTIVATIONS.discard(scan_id)
+
+
+def test_vault_activation_error_keeps_cancel_guard_until_run_terminalizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scan_id = "scan-vault-activation-error"
+    status = _status(scan_id)
+    scan_runner._SCANS[scan_id] = status
+    monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda _value: None)
+
+    class FakeRepo:
+        def activate_evidence_vault_operational_scanner_result(
+            self,
+            *_a,
+            **_k,
+        ):
+            raise RuntimeError("activation failed after a possible partial commit")
+
+    rejected = {
+        "state": "running",
+        "cancelled": False,
+        "reason": "vault_activation_in_progress",
+        "acquisition_gate": {},
+    }
+    try:
+        with pytest.raises(RuntimeError, match="possible partial commit"):
+            scan_runner._activate_vault_result_unless_cancelled(
+                scan_id,
+                FakeRepo(),
+                "https://example.com",
+                operation_plan_fingerprint="b" * 64,
+            )
+
+        assert scan_id in scan_runner._VAULT_ACTIVATIONS
+        assert scan_runner.cancel_scan(scan_id) == rejected
+        assert status["state"] == "running"
+    finally:
+        scan_runner._SCANS.pop(scan_id, None)
+        scan_runner._SCAN_EVENTS.pop(scan_id, None)
+        scan_runner._VAULT_ACTIVATIONS.discard(scan_id)
+
+
+def test_vault_activation_error_run_terminalizes_before_releasing_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.services import evidence_vault_incremental_executor
+
+    scan_id = "scan-vault-activation-run-error"
+    status = _status(scan_id)
+    scan_runner._SCANS[scan_id] = status
+    snapshot = _snapshot(scan_id)
+    operation_plan = {
+        "operation_plan_fingerprint": "c" * 64,
+        "operations": {"llm_required": False},
+    }
+
+    class FakeRepo:
+        def activate_evidence_vault_operational_scanner_result(
+            self,
+            *_a,
+            **_k,
+        ):
+            raise RuntimeError("activation failed after partial commits")
+
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
+    monkeypatch.setattr(
+        config,
+        "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        scan_runner,
+        "_capture_snapshot",
+        lambda *_a, **_k: snapshot,
+    )
+    monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda _value: None)
+    monkeypatch.setattr(scan_runner.traceback, "print_exc", lambda: None)
+    monkeypatch.setattr(report_store, "_postgres_repository", FakeRepo)
+    monkeypatch.setattr(
+        evidence_vault_scan_orchestration,
+        "prepare_vault_scan_after_capture",
+        lambda **_k: {
+            "mode": "incremental",
+            "operation_plan": operation_plan,
+            "report_observation": _observation(scan_id, snapshot),
+        },
+    )
+    monkeypatch.setattr(
+        evidence_vault_incremental_executor,
+        "execute_vault_operation_plan",
+        lambda **_k: {"execution_status": "completed"},
+    )
+
+    original_activate = scan_runner._activate_vault_result_unless_cancelled
+    cancellation_between_exception_and_terminal: list[dict] = []
+
+    def activate_and_attempt_cancellation(*args, **kwargs):
+        try:
+            return original_activate(*args, **kwargs)
+        except RuntimeError:
+            cancellation_between_exception_and_terminal.append(
+                scan_runner.cancel_scan(scan_id) or {}
+            )
+            raise
+
+    monkeypatch.setattr(
+        scan_runner,
+        "_activate_vault_result_unless_cancelled",
+        activate_and_attempt_cancellation,
+    )
+    try:
+        scan_runner._run(scan_id, "https://example.com", "Example", False)
+
+        assert cancellation_between_exception_and_terminal == [
             {
                 "state": "running",
                 "cancelled": False,
                 "reason": "vault_activation_in_progress",
-                "acquisition_gate": {},
+                "acquisition_gate": status["acquisition_gate"],
             }
         ]
-        assert status["state"] == "running"
+        assert status["state"] == "error"
+        assert status["phase"] == "error"
+        assert status["error_code"] == "scan_execution_failed"
+        assert status["error"] == (
+            "RuntimeError: activation failed after partial commits"
+        )
+        assert scan_id not in scan_runner._VAULT_ACTIVATIONS
+        assert scan_runner.cancel_scan(scan_id) == {
+            "state": "error",
+            "cancelled": False,
+            "acquisition_gate": status["acquisition_gate"],
+        }
     finally:
         scan_runner._SCANS.pop(scan_id, None)
+        scan_runner._SCAN_EVENTS.pop(scan_id, None)
+        scan_runner._VAULT_ACTIVATIONS.discard(scan_id)
 
 
 def test_phase_persistence_reasserts_terminal_state_after_cancel_race(
@@ -908,6 +1357,10 @@ def test_fresh_vault_activation_projects_memory_without_second_interpreter(
     from src.services import evidence_vault_incremental_executor
 
     memory, score = _memory_and_score({"M1", "M2"}, {"M1", "M2"})
+    candidate_packet_fingerprint = _PROMOTION_EVENTS[
+        memory["adoption_event_id"]
+    ]["candidate_packet_fingerprint"]
+    projection_bindings: list[dict] = []
     scan_id = "scan-vault-fresh-activation"
     scan_runner._SCANS[scan_id] = _status(scan_id)
     snapshot = _snapshot(scan_id)
@@ -922,14 +1375,20 @@ def test_fresh_vault_activation_projects_memory_without_second_interpreter(
         ):
             return {
                 "created": True,
+                "candidate_packet_fingerprint": candidate_packet_fingerprint,
                 "memory": memory,
                 "score": score,
                 "score_replayed": False,
             }
 
+        def get_evidence_vault_operational_report_projection(self, *_a, **_k):
+            projection_bindings.append(dict(_k))
+            return _report_projection(memory, score)
+
     captured: list[dict] = []
 
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
     monkeypatch.setattr(
         config,
         "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED",
@@ -988,6 +1447,9 @@ def test_fresh_vault_activation_projects_memory_without_second_interpreter(
         scan_runner._SCANS.pop(scan_id, None)
 
     assert len(captured) == 1
+    assert projection_bindings[0][
+        "expected_candidate_packet_fingerprint"
+    ] == candidate_packet_fingerprint
     assert captured[0]["raw"]["vault_memory_projection"] is True
     assert captured[0]["vault_memory_version"] == memory["canonical_memory_version"]
 
@@ -1020,7 +1482,11 @@ def test_result_persisted_resume_materializes_before_projection(
             observed.append("activated_materialized_result")
             return {"memory": memory, "score": score}
 
+        def get_evidence_vault_operational_report_projection(self, *_a, **_k):
+            return _report_projection(memory, score)
+
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
     monkeypatch.setattr(
         config,
         "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED",
@@ -1112,6 +1578,7 @@ def test_cancellation_after_vault_execution_skips_memory_activation(
 
     repository = FakeRepo()
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
     monkeypatch.setattr(
         config,
         "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED",
@@ -1175,6 +1642,7 @@ def test_llm_vault_operation_without_memory_score_fails_instead_of_reinterpretin
             return {"created": False, "memory": None, "score": None}
 
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
     monkeypatch.setattr(
         config,
         "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED",
@@ -1256,6 +1724,7 @@ def test_completed_llm_resume_reactivates_and_never_uses_legacy_interpreter(
 
     repository = FakeRepo()
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
     monkeypatch.setattr(
         config,
         "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED",
@@ -1327,6 +1796,7 @@ def test_vault_run_without_canonical_memory_falls_back_to_interpreter(
         return True
 
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
     monkeypatch.setattr(
         config,
         "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED",

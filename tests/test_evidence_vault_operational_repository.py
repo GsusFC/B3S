@@ -64,6 +64,9 @@ from src.services.evidence_vault_operational_authority import (
 from src.services.evidence_vault_operational_memory import (
     build_operational_memory_packet,
 )
+from src.services.evidence_vault_operational_scoring import (
+    EvidenceVaultOperationalScoringError,
+)
 from src.services.scanner_evidence_comparison import (
     canonical_evidence_representatives,
 )
@@ -263,6 +266,49 @@ def test_operational_v2_reuses_existing_ledgers_and_survives_restart() -> None:
     )
     assert replayed is True
     assert repeated_evaluation == evaluation
+    report_projection = (
+        restarted.get_evidence_vault_operational_report_projection(
+            "example.com",
+            expected_canonical_memory_version=memory[
+                "canonical_memory_version"
+            ],
+            expected_evaluation_identity=evaluation["evaluation_identity"],
+            expected_adoption_event_id=memory["adoption_event_id"],
+            expected_candidate_packet_fingerprint=event[
+                "candidate_packet_fingerprint"
+            ],
+        )
+    )
+    assert report_projection is not None
+    assert report_projection["memory"] == memory
+    assert report_projection["score_evaluation"] == evaluation
+    assert report_projection["promotion_event"]["event_id"] == memory[
+        "adoption_event_id"
+    ]
+    no_change_projection = (
+        restarted.get_evidence_vault_operational_report_projection(
+            "example.com",
+            expected_canonical_memory_version=memory[
+                "canonical_memory_version"
+            ],
+            expected_evaluation_identity=evaluation["evaluation_identity"],
+            expected_adoption_event_id=memory["adoption_event_id"],
+        )
+    )
+    assert no_change_projection == report_projection
+    with pytest.raises(
+        EvidenceVaultOperationalScoringError,
+        match="changed before report projection",
+    ):
+        restarted.get_evidence_vault_operational_report_projection(
+            "example.com",
+            expected_canonical_memory_version=memory[
+                "canonical_memory_version"
+            ],
+            expected_evaluation_identity=evaluation["evaluation_identity"],
+            expected_adoption_event_id=memory["adoption_event_id"],
+            expected_candidate_packet_fingerprint="f" * 64,
+        )
 
     strengthened_candidates = build_incremental_candidate_tiles(
         previous_candidate_tiles=baseline_source["candidate_tiles"],
@@ -303,6 +349,22 @@ def test_operational_v2_reuses_existing_ledgers_and_survives_restart() -> None:
     )
     assert replayed is False
     assert second_event["sequence"] == 2
+
+    with pytest.raises(
+        EvidenceVaultOperationalScoringError,
+        match="changed before report projection",
+    ):
+        restarted.get_evidence_vault_operational_report_projection(
+            "example.com",
+            expected_canonical_memory_version=memory[
+                "canonical_memory_version"
+            ],
+            expected_evaluation_identity=evaluation["evaluation_identity"],
+            expected_adoption_event_id=memory["adoption_event_id"],
+            expected_candidate_packet_fingerprint=event[
+                "candidate_packet_fingerprint"
+            ],
+        )
 
     second, replayed = (
         PostgresHistoryRepository(dsn)

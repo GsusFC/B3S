@@ -130,6 +130,11 @@ def test_runtime_signs_exact_owned_external_group_and_embeds_association() -> No
     }
     assert signed.external_identity_provenance is not None
     assert (
+        signed.external_identity_provenance.association_method
+        == "owned_raw_links_external_profile"
+    )
+    assert "exa_independent_discovery" not in signed.external_identity_provenance.model_dump_json()
+    assert (
         signed.external_identity_provenance.proof_receipt_fingerprint
         == next(
             receipt.receipt_fingerprint
@@ -174,6 +179,32 @@ def test_runtime_persists_owned_only_when_external_provider_cannot_qualify() -> 
         "owned_web"
     ]
     assert signed.external_identity_provenance is None
+
+
+def test_runtime_rejects_external_url_different_from_owned_exact_link() -> None:
+    key, registry = _key_registry()
+    different = _external().model_copy(
+        update={
+            "reported_source_url": "https://www.linkedin.com/company/different",
+            "raw_fragment": {
+                **_external().raw_fragment,
+                "url": "https://www.linkedin.com/company/different",
+            },
+        }
+    )
+    runtime = TrustedAcquisitionRuntime(
+        private_key=key,
+        public_key_registry=registry,
+        owned_fetch=lambda _command: _owned(),
+        external_fetch=lambda _url: different,
+        allow_owned_only_downgrade=True,
+    )
+
+    collected = runtime.collect(_command())
+
+    assert collected["external_outcome"] == "owned_only_downgrade"
+    assert collected["external_failure_reason"] == "provider_result_ineligible"
+    assert runtime.sign(_command(), collected).external_identity_provenance is None
 
 
 def test_runtime_rejects_mismatched_key_and_tampered_collected_external() -> None:
@@ -348,45 +379,18 @@ def test_exa_fetcher_requires_one_exact_url_result_and_real_fields() -> None:
         HttpxExaExactUrlFetcher(duplicate, api_key="worker-only")(source_url)
 
 
-def test_exa_fetcher_discovers_external_profile_without_owned_linkedin() -> None:
-    profile_url = "https://www.linkedin.com/company/example"
-    discovery = json.dumps({"results": [{"url": profile_url}]}).encode()
-    contents = json.dumps(
-        {
-            "results": [
-                {
-                    "url": profile_url,
-                    "title": "Example",
-                    "summary": "Exact summary",
-                    "highlights": ["Exact highlight"],
-                    "text": "Exact provider text",
-                }
-            ]
-        }
-    ).encode()
+def test_exa_fetcher_rejects_brand_url_without_owned_linkedin_fact() -> None:
+    class NoPostClient:
+        def stream(self, *_args: Any, **_kwargs: Any) -> _Response:
+            raise AssertionError("unassociated discovery must not reach Exa")
 
-    class SequencePostClient:
-        def __init__(self) -> None:
-            self.responses = [
-                _Response(200, discovery, {"content-type": "application/json"}),
-                _Response(200, contents, {"content-type": "application/json"}),
-            ]
-            self.calls: list[dict[str, Any]] = []
-
-        def stream(self, method: str, _url: str, **kwargs: Any) -> _Response:
-            assert method == "POST"
-            self.calls.append(kwargs)
-            return self.responses.pop(0)
-
-    client = SequencePostClient()
-    observation = HttpxExaExactUrlFetcher(client, api_key="worker-only")(
-        "https://example.com"
-    )
-
-    assert observation.reported_source_url == profile_url
-    assert observation.raw_fragment["discovery_result_ordinal"] == 0
-    assert len(client.calls) == 2
-    assert b"worker-only" not in client.calls[0]["content"]
+    fetcher = HttpxExaExactUrlFetcher(NoPostClient(), api_key="worker-only")
+    assert fetcher.supports_independent_discovery is False
+    with pytest.raises(
+        EvidenceVaultAcquisitionRuntimeError,
+        match="external_source_url_ineligible",
+    ):
+        fetcher("https://example.com")
 
 
 def test_http_fetchers_stream_and_reject_oversized_bodies() -> None:
@@ -420,7 +424,7 @@ def test_http_fetcher_rejects_private_connected_peer_even_after_public_dns() -> 
         )(_command())
 
 
-def test_independent_external_fetch_does_not_fabricate_owned_link_provenance() -> None:
+def test_independent_external_fetch_remains_owned_only_without_structured_fact() -> None:
     key, registry = _key_registry()
 
     class IndependentFetcher:
@@ -445,11 +449,12 @@ def test_independent_external_fetch_does_not_fabricate_owned_link_provenance() -
     collected = runtime.collect(_command())
     signed = runtime.sign(_command(), collected)
 
-    assert fetcher.calls == ["https://example.com"]
-    assert collected["external_outcome"] == "captured"
-    assert signed.external_identity_provenance is not None
-    assert signed.external_identity_provenance.association_method == "exa_independent_discovery"
-    assert len(signed.receipts) == 2
+    assert fetcher.calls == []
+    assert collected["external_outcome"] == "not_discovered"
+    assert signed.external_identity_provenance is None
+    assert [receipt.claims.channel_role for receipt in signed.receipts] == [
+        "owned_web"
+    ]
 
 
 def test_external_failure_is_terminal_by_default_and_not_discovered_is_explicit() -> None:

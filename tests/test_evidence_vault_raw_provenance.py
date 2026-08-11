@@ -792,6 +792,36 @@ def test_external_identity_dag_has_no_external_receipt_or_self_hash_cycle(
     ) == ExternalIdentityProvenance.model_validate(provenance)
 
 
+def test_external_identity_parses_exa_discovery_but_rejects_authority(
+    key_one: Ed25519PrivateKey,
+) -> None:
+    provenance, owned, external, snapshot = _association_bundle(
+        key_one,
+        method="exa_independent_discovery",
+    )
+
+    parsed = ExternalIdentityProvenance.model_validate(provenance)
+    assert parsed.association_method == "exa_independent_discovery"
+    assert external_identity_provenance_fingerprint(parsed) == (
+        external.claims.external_identity_provenance_fingerprint
+    )
+
+    with pytest.raises(
+        EvidenceVaultRawProvenanceError,
+        match=(
+            "association_method exa_independent_discovery is structurally "
+            "readable but authority-ineligible"
+        ),
+    ):
+        validate_external_identity_provenance(
+            parsed,
+            owned_receipt=owned,
+            external_receipt=external,
+            durable_raw_capture_payload=snapshot,
+            public_key_registry=_registry(key_one),
+        )
+
+
 def test_external_identity_rejects_legacy_alias_and_name_only_shapes() -> None:
     legacy = {
         "schema_version": EXTERNAL_IDENTITY_PROVENANCE_VERSION,

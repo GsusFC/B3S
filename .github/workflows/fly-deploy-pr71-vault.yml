@@ -1,10 +1,10 @@
-name: Deploy isolated PR71 Vault
+name: Deploy isolated PR71 Vault after merge
 
 on:
   workflow_dispatch:
     inputs:
       deployment_sha:
-        description: "Exact reviewed commit SHA to deploy"
+        description: "Exact PR71 merge commit SHA to deploy"
         required: true
         type: string
       confirm_app:
@@ -18,19 +18,233 @@ concurrency:
 
 jobs:
   deploy:
-    if: ${{ inputs.confirm_app == 'b3s-pr71-vault' }}
+    if: ${{ github.ref == 'refs/heads/main' && inputs.confirm_app == 'b3s-pr71-vault' }}
     runs-on: ubuntu-latest
     environment:
       name: pr71-vault
       url: https://b3s-pr71-vault.fly.dev
     permissions:
+      actions: read
       contents: read
+      pull-requests: read
     steps:
+      # This step uses only runner-owned code and the GitHub API. Do not check
+      # out, install, or expose deployment secrets until the PR object, trusted
+      # CI workflow, exact CI run, and CI workflow blob are all attested.
+      - name: Attest exact merged PR71 commit before checkout
+        env:
+          API_URL: ${{ github.api_url }}
+          DEPLOY_SHA: ${{ inputs.deployment_sha }}
+          DISPATCH_REF: ${{ github.ref }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import re
+
+          value = os.environ["DEPLOY_SHA"]
+          if re.fullmatch(r"[0-9a-f]{40}", value) is None:
+              raise SystemExit("deployment_sha must be one full lowercase commit SHA")
+          PY
+
+          umask 077
+          attestation_dir="$(mktemp -d "$RUNNER_TEMP/pr71-attestation.XXXXXX")"
+          trap 'rm -rf "$attestation_dir"' EXIT
+
+          api_get() {
+            output="$1"
+            url="$2"
+            curl --fail --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --output "$output" \
+              "$url"
+          }
+
+          pr_file="$attestation_dir/pr.json"
+          main_ref_file="$attestation_dir/main-ref.json"
+          workflow_file="$attestation_dir/workflow.json"
+          api_get "$pr_file" "$API_URL/repos/$GH_REPOSITORY/pulls/71"
+          api_get "$main_ref_file" "$API_URL/repos/$GH_REPOSITORY/git/ref/heads/main"
+          api_get "$workflow_file" "$API_URL/repos/$GH_REPOSITORY/actions/workflows/ci.yml"
+
+          read -r trusted_base_sha trusted_workflow_id < <(
+            PR_FILE="$pr_file" \
+            MAIN_REF_FILE="$main_ref_file" \
+            WORKFLOW_FILE="$workflow_file" \
+            python - <<'PY'
+          import json
+          import os
+          import re
+
+          def load_object(name):
+              with open(os.environ[name], encoding="utf-8") as handle:
+                  value = json.load(handle)
+              if not isinstance(value, dict):
+                  raise SystemExit(f"{name} response must be an object")
+              return value
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          repository = os.environ["GH_REPOSITORY"]
+          deploy_sha = os.environ["DEPLOY_SHA"]
+          dispatch_ref = os.environ["DISPATCH_REF"]
+          pr = load_object("PR_FILE")
+          main_ref = load_object("MAIN_REF_FILE")
+          workflow = load_object("WORKFLOW_FILE")
+
+          require(
+              dispatch_ref == "refs/heads/main",
+              "deployment workflow must be dispatched from refs/heads/main",
+          )
+          require(pr.get("number") == 71, "unexpected pull request object")
+          require(pr.get("state") == "closed", "PR71 must be closed")
+          require(pr.get("merged") is True, "PR71 must be merged")
+          require(pr.get("draft") is False, "PR71 must not be a draft")
+          base = pr.get("base")
+          head = pr.get("head")
+          require(isinstance(base, dict), "PR71 base must be present")
+          require(isinstance(head, dict), "PR71 head must be present")
+          require(base.get("ref") == "main", "PR71 base ref must be main")
+          require(
+              head.get("ref") == "fix/vault-v2-cumulative-landing",
+              "PR71 head ref is not exact",
+          )
+          for label, side in (("base", base), ("head", head)):
+              repo = side.get("repo")
+              require(isinstance(repo, dict), f"PR71 {label} repository is missing")
+              require(
+                  repo.get("full_name") == repository,
+                  f"PR71 {label} repository is not the workflow repository",
+              )
+
+          merge_commit_sha = pr.get("merge_commit_sha")
+          require(
+              isinstance(merge_commit_sha, str)
+              and re.fullmatch(r"[0-9a-f]{40}", merge_commit_sha) is not None,
+              "PR71 merge commit SHA is invalid",
+          )
+          require(
+              deploy_sha == merge_commit_sha,
+              "deployment_sha is not PR71 merge_commit_sha",
+          )
+          trusted_base_sha = base.get("sha")
+          require(
+              isinstance(trusted_base_sha, str)
+              and re.fullmatch(r"[0-9a-f]{40}", trusted_base_sha) is not None,
+              "PR71 base SHA is invalid",
+          )
+
+          require(main_ref.get("ref") == "refs/heads/main", "unexpected main ref")
+          main_object = main_ref.get("object")
+          require(isinstance(main_object, dict), "main ref object is missing")
+          require(main_object.get("type") == "commit", "main must resolve to a commit")
+          main_sha = main_object.get("sha")
+          require(
+              isinstance(main_sha, str)
+              and re.fullmatch(r"[0-9a-f]{40}", main_sha) is not None,
+              "current main SHA is invalid",
+          )
+          require(main_sha == deploy_sha, "deployment_sha is not current main")
+
+          workflow_id = workflow.get("id")
+          require(
+              isinstance(workflow_id, int)
+              and not isinstance(workflow_id, bool)
+              and workflow_id > 0,
+              "trusted CI workflow id is invalid",
+          )
+          require(
+              workflow.get("path") == ".github/workflows/ci.yml",
+              "trusted CI workflow path is not exact",
+          )
+          require(workflow.get("state") == "active", "trusted CI workflow is not active")
+          print(trusted_base_sha, workflow_id)
+          PY
+          )
+
+          base_ci_file="$attestation_dir/base-ci.json"
+          deployment_ci_file="$attestation_dir/deployment-ci.json"
+          api_get \
+            "$base_ci_file" \
+            "$API_URL/repos/$GH_REPOSITORY/contents/.github/workflows/ci.yml?ref=$trusted_base_sha"
+          api_get \
+            "$deployment_ci_file" \
+            "$API_URL/repos/$GH_REPOSITORY/contents/.github/workflows/ci.yml?ref=$DEPLOY_SHA"
+          BASE_CI_FILE="$base_ci_file" \
+          DEPLOYMENT_CI_FILE="$deployment_ci_file" \
+          python - <<'PY'
+          import json
+          import os
+          import re
+
+          def load(name):
+              with open(os.environ[name], encoding="utf-8") as handle:
+                  value = json.load(handle)
+              if not isinstance(value, dict):
+                  raise SystemExit("CI contents response must be an object")
+              return value
+
+          base = load("BASE_CI_FILE")
+          deployment = load("DEPLOYMENT_CI_FILE")
+          for label, blob in (("base", base), ("deployment", deployment)):
+              if blob.get("type") != "file":
+                  raise SystemExit(f"{label} CI object must be a file")
+              if blob.get("path") != ".github/workflows/ci.yml":
+                  raise SystemExit(f"{label} CI path is not exact")
+              sha = blob.get("sha")
+              if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+                  raise SystemExit(f"{label} CI blob SHA is invalid")
+          if deployment["sha"] != base["sha"]:
+              raise SystemExit("PR71 merge changes the trusted CI workflow blob")
+          PY
+
+          workflow_runs_file="$attestation_dir/workflow-runs.json"
+          api_get \
+            "$workflow_runs_file" \
+            "$API_URL/repos/$GH_REPOSITORY/actions/workflows/$trusted_workflow_id/runs?event=push&branch=main&head_sha=$DEPLOY_SHA&per_page=100"
+          WORKFLOW_RUNS_FILE="$workflow_runs_file" \
+          TRUSTED_WORKFLOW_ID="$trusted_workflow_id" \
+          python - <<'PY'
+          import json
+          import os
+
+          with open(os.environ["WORKFLOW_RUNS_FILE"], encoding="utf-8") as handle:
+              payload = json.load(handle)
+          runs = payload.get("workflow_runs")
+          if payload.get("total_count") != 1 or not isinstance(runs, list) or len(runs) != 1:
+              raise SystemExit("required PR71 merge CI workflow run is missing or ambiguous")
+          run = runs[0]
+          expected = {
+              "workflow_id": int(os.environ["TRUSTED_WORKFLOW_ID"]),
+              "path": ".github/workflows/ci.yml",
+              "event": "push",
+              "head_branch": "main",
+              "head_sha": os.environ["DEPLOY_SHA"],
+              "status": "completed",
+              "conclusion": "success",
+          }
+          if not isinstance(run, dict) or any(
+              run.get(key) != value for key, value in expected.items()
+          ):
+              raise SystemExit("required PR71 merge CI workflow run is not exact and successful")
+          for field in ("repository", "head_repository"):
+              repo = run.get(field)
+              if not isinstance(repo, dict) or repo.get("full_name") != os.environ["GH_REPOSITORY"]:
+                  raise SystemExit(f"required PR71 merge CI run has an unexpected {field}")
+          PY
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.deployment_sha }}
+          persist-credentials: false
 
-      - name: Verify immutable source and isolated target
+      - name: Verify checked-out source and isolated target
         env:
           DEPLOY_SHA: ${{ inputs.deployment_sha }}
         run: |
@@ -47,10 +261,17 @@ jobs:
       - name: Install release package
         run: python -m pip install --disable-pip-version-check .
 
-      - name: Apply PostgreSQL migrations with the external migrator
+      - name: Migrate the attested database and configure its runtime role
         env:
           B3S_MIGRATION_DATABASE_URL: ${{ secrets.B3S_MIGRATION_DATABASE_URL }}
-        run: python scripts/migrate_b3s_history_postgres.py
+        run: |
+          set -eu
+          python scripts/migrate_b3s_history_postgres.py \
+            --target-profile pr71-vault
+          python scripts/configure_b3s_runtime_role.py \
+            --target-profile pr71-vault \
+            --role b3s_pr71_app_runtime \
+            --database-name neondb
 
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # master pinned 2026-07-27
 

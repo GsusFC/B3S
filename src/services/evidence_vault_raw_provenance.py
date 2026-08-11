@@ -597,6 +597,11 @@ def validate_external_identity_provenance(
     """Validate one strict raw association from cryptographically verified receipts."""
 
     model = _model_from(provenance, ExternalIdentityProvenance)
+    if model.association_method == "exa_independent_discovery":
+        raise EvidenceVaultRawProvenanceError(
+            "association_method exa_independent_discovery is structurally readable "
+            "but authority-ineligible"
+        )
     owned = verify_raw_acquisition_receipt(
         owned_receipt,
         public_key_registry=public_key_registry,
@@ -675,8 +680,7 @@ def validate_external_identity_provenance(
 
     expected_fact = (
         model.external_source_url
-        if model.association_method
-        in {"owned_raw_links_external_profile", "exa_independent_discovery"}
+        if model.association_method == "owned_raw_links_external_profile"
         else model.owned_source_url
     )
     if not isinstance(raw_fact, str) or raw_fact != expected_fact:

@@ -1,8 +1,8 @@
 # ADR v2 — Memoria operativa incremental del Evidence Vault
 
-- **Estado:** Núcleo v2 implementado y validado en sombra; cutover/runtime incremental no activados
+- **Estado:** Núcleo v2 implementado; capability operacional activa solo en PR71 aislado, `b3s-vault` dormant y C7 no activado
 - **Fecha:** 2026-08-06
-- **Ámbito inicial:** `b3s-vault`
+- **Ámbito inicial:** Vault; validación runtime en `b3s-pr71-vault`
 - **Sustituye:** `evidence_vault_canonical_memory_adr_v1.md`
 - **Fuera de alcance inicial:** producción y el score diagnóstico del scanner
 
@@ -266,9 +266,22 @@ Cada N nueva crea una nueva `evaluation_identity`. Si coincide
 `score_input_fingerprint`, se reutiliza el cálculo mediante
 `reused_from_evaluation_identity`; nunca se reutiliza la identidad anterior.
 
+Antes de reutilizar una evaluación `operational_v2`, el repositorio reproyecta
+la memoria histórica exacta y valida el evento de promoción que la adoptó; luego
+rederiva el cálculo desde las baldosas aceptadas. Antes de alimentar un reporte,
+toma el lock de marca y exige que `canonical_memory_version`,
+`adoption_event_id` y `evaluation_identity` sigan siendo exactamente los que
+devuelve la activación del scan. Una witness v1 enlaza por fingerprint la
+proyección completa de memoria, el evento de promoción y la derivación del
+score. Una fila internamente autoconsistente no es autoridad si su score,
+breakdown, evento o memoria difieren de esa rederivación. La witness no cambia
+el payload persistido `evidence-vault-operational-score-evaluation-v2`, no llama
+al LLM y se reproduce en replay.
+
 ## 11. Aceptación y despliegue
 
-La implementación debe demostrar en `b3s-vault`:
+La implementación debe demostrar primero en el entorno aislado
+`b3s-pr71-vault`, antes de autorizar `b3s-vault`:
 
 ```text
 primer scan → baseline parcial → 80 baldosas → score + cobertura
@@ -281,10 +294,13 @@ resolución → N+1 → evaluation_identity nueva
 SoccerSolver es el primer caso y Causa Prima la falsificación con otra marca.
 No se permiten condicionales por dominio, marca o URL.
 
-El despliegue es Vault-only y gradual: primero persistencia y métricas,
-después baseline/refresh, y finalmente perfiles deterministas probados.
-Desactivar el modo incremental conserva capturas, eventos y evaluaciones y
-devuelve el Vault al diagnóstico explícito. Producción permanece intacta.
+El despliegue es Vault-only y gradual. La configuración aislada PR71 declara
+`BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true`: esa capability conecta el
+scanner web con preparación, ejecución, activación y proyección operacional. No
+activa C7 ni autoriza producción. `b3s-vault` conserva explícitamente la misma
+capability en `false`, por lo que su pipeline incremental permanece dormant.
+Desactivar la capability en PR71 conserva capturas, eventos y evaluaciones y
+devuelve ese entorno al diagnóstico explícito.
 
 ## 12. Estado real de implementación y límites de activación
 
@@ -322,9 +338,13 @@ aceptadas no contradictorias, un paquete con autoridad humana. La adopción usa
 el mismo CAS de marca; los rechazos no crean memoria, las contradicciones
 permanecen pendientes y esta ruta no calcula score por efecto lateral.
 
-El scanner web todavía no invoca ninguna de estas rutas. Esta desconexión es
-deliberada: producción y el score diagnóstico live siguen intactos. El cutover
-por marca requiere además:
+El scanner web invoca estas rutas únicamente cuando concurren
+`BRAND3_ENVIRONMENT=vault` y la capability exacta
+`BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true`. Esa condición se cumple en
+`fly.pr71-vault.toml`; no se cumple en `fly.vault.toml`, donde la capability
+permanece en `false`. Por tanto PR71 ejerce el pipeline operacional mientras
+`b3s-vault` sigue dormant y el score diagnóstico live de ese entorno permanece
+intacto. El cutover de `b3s-vault` por marca requiere además:
 
 1. ejecutar y conservar verde la suite completa y las pruebas PostgreSQL de
    concurrencia, crash/retry, fencing e inmutabilidad;
@@ -332,7 +352,8 @@ por marca requiere además:
    diagnóstico;
 3. validar SoccerSolver y falsificar con una marca independiente;
 4. mantener todos los perfiles semánticos no revisados en shadow;
-5. activar mediante flag, kill switch y allowlist, sin fallback a full rerun.
+5. activar allí mediante flag, kill switch y allowlist, sin fallback a full
+   rerun.
 
 
 ## 13. Gate de campo pre-cutover v1
