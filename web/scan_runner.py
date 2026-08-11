@@ -31,6 +31,7 @@ from web.report_store import list_reports_for_domain, new_scan_id, save_report
 
 _SCANS: dict[str, dict[str, Any]] = {}
 _SCAN_EVENTS: dict[str, threading.Event] = {}
+_VAULT_ACTIVATIONS: set[str] = set()
 _LOCK = threading.Lock()
 _LOG = logging.getLogger(__name__)
 
@@ -156,6 +157,19 @@ def cancel_scan(scan_id: str) -> dict[str, Any] | None:
         status = _SCANS.get(scan_id)
         if status is None:
             return None
+        if scan_id in _VAULT_ACTIVATIONS:
+            return {
+                "state": str(status.get("state") or "running"),
+                "cancelled": False,
+                "reason": "vault_activation_in_progress",
+                "acquisition_gate": status.get("acquisition_gate") or {},
+            }
+        if status.get("state") in {"cancelled", "error", "done"}:
+            return {
+                "state": str(status.get("state") or ""),
+                "cancelled": status.get("state") == "cancelled",
+                "acquisition_gate": status.get("acquisition_gate") or {},
+            }
         gate = status.get("acquisition_gate") if isinstance(status.get("acquisition_gate"), dict) else {}
         if isinstance(gate, dict):
             gate = dict(gate)
@@ -177,13 +191,23 @@ def cancel_scan(scan_id: str) -> dict[str, Any] | None:
 def _set_phase(scan_id: str, key: str, state: str) -> None:
     with _LOCK:
         status = _SCANS.get(scan_id)
-        if not status:
+        if not status or status.get("state") in {"cancelled", "error", "done"}:
             return
         if state == "running":
             status["phase"] = key
         _set_phase_locked(status, key, state)
         persisted_status = _status_copy_locked(status)
     _persist_scan_status(persisted_status)
+    with _LOCK:
+        current = _SCANS.get(scan_id)
+        terminal_status = (
+            _status_copy_locked(current)
+            if current is not None
+            and current.get("state") in {"cancelled", "error", "done"}
+            else None
+        )
+    if terminal_status is not None:
+        _persist_scan_status(terminal_status)
 
 
 def _set_phase_locked(status: dict[str, Any], key: str, state: str) -> None:
@@ -220,6 +244,37 @@ def _persist_scan_status(
         )
     finally:
         store.close()
+
+
+def _activate_vault_result_unless_cancelled(
+    scan_id: str,
+    repository: Any,
+    url: str,
+    *,
+    operation_plan_fingerprint: str,
+) -> dict[str, Any] | None:
+    """Order cancellation before activation without holding the global lock."""
+
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        if status is None or status.get("state") in {
+            "cancelled",
+            "error",
+            "done",
+        }:
+            return None
+        _VAULT_ACTIVATIONS.add(scan_id)
+    try:
+        return repository.activate_evidence_vault_operational_scanner_result(
+            url,
+            source_scan_id=scan_id,
+            operation_plan_fingerprint=operation_plan_fingerprint,
+            workspace_slug="b3s",
+        )
+    finally:
+        with _LOCK:
+            _VAULT_ACTIVATIONS.discard(scan_id)
+
 
 
 def _publish_completed_report(scan_id: str, report: dict[str, Any]) -> bool:
@@ -264,6 +319,7 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
         vault_execution: dict[str, Any] | None = None
         vault_activation: dict[str, Any] | None = None
         vault_enabled = False
+        vault_interpretation_completed = False
         _set_phase(scan_id, "capture", "running")
         from src.config import (
             BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED,
@@ -328,6 +384,15 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 environment="vault",
                 incremental_enabled=True,
                 workspace_slug="b3s",
+                artifacts=_acquisition_artifacts_from_snapshot(snapshot),
+            )
+            vault_resume = (
+                dict(vault_preparation.get("resume") or {})
+                if isinstance(vault_preparation.get("resume"), dict)
+                else {}
+            )
+            vault_interpretation_completed = bool(
+                vault_resume.get("semantic_work_completed") is True
             )
             operation_plan = vault_preparation.get("operation_plan")
             if operation_plan is not None:
@@ -335,8 +400,12 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                     execute_vault_operation_plan,
                 )
 
+                operation_requires_llm = bool(
+                    operation_plan.get("operations", {}).get("llm_required")
+                    and vault_resume.get("materialization_required") is not True
+                )
                 operation_llm = None
-                if operation_plan.get("operations", {}).get("llm_required"):
+                if operation_requires_llm:
                     from src.config import SV9_FLOW_MODEL
                     from src.features.llm_analyzer import LLMAnalyzer
 
@@ -359,16 +428,42 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                             vault_execution.get("execution_status") or "unknown"
                         )
                     )
-                vault_activation = (
-                    vault_repository.activate_evidence_vault_operational_scanner_result(
-                        url,
-                        source_scan_id=scan_id,
-                        operation_plan_fingerprint=str(
-                            operation_plan["operation_plan_fingerprint"]
-                        ),
-                        workspace_slug="b3s",
-                    )
+                vault_interpretation_completed = bool(
+                    vault_interpretation_completed or operation_requires_llm
                 )
+                if _scan_cancelled(scan_id):
+                    return
+                vault_activation = _activate_vault_result_unless_cancelled(
+                    scan_id,
+                    vault_repository,
+                    url,
+                    operation_plan_fingerprint=str(
+                        operation_plan["operation_plan_fingerprint"]
+                    ),
+                )
+                if vault_activation is None:
+                    return
+            elif (
+                vault_interpretation_completed
+                and vault_resume.get("analysis_status") == "completed"
+            ):
+                if _scan_cancelled(scan_id):
+                    return
+                operation_plan_fingerprint = str(
+                    vault_resume.get("operation_plan_fingerprint") or ""
+                )
+                if not operation_plan_fingerprint:
+                    raise RuntimeError(
+                        "vault_completed_operation_missing_plan_fingerprint"
+                    )
+                vault_activation = _activate_vault_result_unless_cancelled(
+                    scan_id,
+                    vault_repository,
+                    url,
+                    operation_plan_fingerprint=operation_plan_fingerprint,
+                )
+                if vault_activation is None:
+                    return
             elif vault_repository is not None:
                 memory = vault_repository.get_evidence_vault_operational_memory(
                     url,
@@ -412,21 +507,29 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
             persisted_score = vault_activation.get("score")
             persisted_memory = vault_activation.get("memory")
             if isinstance(persisted_score, dict) and isinstance(persisted_memory, dict):
+                report_observation = vault_preparation.get("report_observation")
+                if not isinstance(report_observation, dict):
+                    raise RuntimeError("vault_report_observation_unavailable")
                 report = _compose_vault_memory_report(
                     scan_id=scan_id,
                     url=url,
                     brand_name=brand_name,
-                    snapshot=snapshot,
+                    capture_observation=report_observation,
                     memory=persisted_memory,
                     score=persisted_score,
                 )
                 report = _attach_evidence_stability(report)
+                if _scan_cancelled(scan_id):
+                    return
                 _set_phase(scan_id, "capture", "done")
                 _set_phase(scan_id, "interpret", "done")
                 _set_phase(scan_id, "score", "done")
                 _set_phase(scan_id, "report", "running")
                 _publish_completed_report(scan_id, report)
                 return
+
+        if vault_interpretation_completed:
+            raise RuntimeError("vault_interpretation_missing_memory_score")
 
         _set_phase(scan_id, "interpret", "running")
         from scripts.sv9_flow_sv9_shadow_eval import build_flow_sv9_shadow_eval
@@ -1860,7 +1963,7 @@ def _compose_vault_memory_report(
     scan_id: str,
     url: str,
     brand_name: str,
-    snapshot: dict[str, Any],
+    capture_observation: dict[str, Any],
     memory: dict[str, Any],
     score: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1871,7 +1974,39 @@ def _compose_vault_memory_report(
     memory/score rows rather than the capture snapshot.
     """
 
+    from src.history.capture_observation import parse_capture_observation
+    from src.history.report_parser import normalize_domain
     from src.services.evidence_vault_canonical_core import build_tile_contract_registry
+    from src.sv9.rubric import (
+        COMPONENTS as RUBRIC_COMPONENTS,
+        PRESENTATION_ORDER,
+        confidence_from_blind_spots,
+    )
+
+    memory_version = str(memory.get("canonical_memory_version") or "")
+    score_memory_version = str(score.get("canonical_memory_version") or "")
+    if not memory_version or score_memory_version != memory_version:
+        raise RuntimeError("vault_memory_score_version_mismatch")
+    parsed_capture = parse_capture_observation(capture_observation)
+    if parsed_capture.source_scan_id != scan_id:
+        raise RuntimeError("vault_report_capture_scan_mismatch")
+    if (
+        urlparse(parsed_capture.canonical_url).hostname
+        != urlparse(url).hostname
+    ):
+        raise RuntimeError("vault_report_capture_domain_mismatch")
+    memory_content = (
+        dict(memory.get("content") or {})
+        if isinstance(memory.get("content"), dict)
+        else {}
+    )
+    memory_brand_identity = str(
+        memory.get("brand_identity")
+        or memory_content.get("brand_identity")
+        or ""
+    )
+    if normalize_domain(memory_brand_identity) != parsed_capture.canonical_domain:
+        raise RuntimeError("vault_report_memory_brand_mismatch")
 
     registry = build_tile_contract_registry()
     accepted = {
@@ -1884,6 +2019,27 @@ def _compose_vault_memory_report(
         for row in score.get("component_breakdown") or []
         if isinstance(row, dict)
     }
+    coverage = score.get("authority_coverage") or {}
+    total_blind_spots = sum(
+        int(row.get("sin_evidencia_count") or 0)
+        for row in breakdown.values()
+    )
+    reliability_status = (
+        "reliable"
+        if coverage.get("score_completeness") == "complete"
+        and coverage.get("canonical_score_status") == "current"
+        and total_blind_spots == 0
+        else "shadow"
+    )
+    reliability_reason_codes: list[str] = []
+    if coverage.get("score_completeness") != "complete":
+        reliability_reason_codes.append("vault_authority_coverage_partial")
+    if coverage.get("canonical_score_status") != "current":
+        reliability_reason_codes.append("vault_canonical_score_not_current")
+    if total_blind_spots > 2:
+        reliability_reason_codes.append("blind_spots_above_usable_threshold")
+    elif total_blind_spots > 0:
+        reliability_reason_codes.append("blind_spots_present")
     profiles_by_component: dict[str, list[dict[str, Any]]] = {}
     for tile in registry["tiles"]:
         tile_id = str(tile["tile_id"])
@@ -1892,17 +2048,28 @@ def _compose_vault_memory_report(
         state = str(accepted_row.get("semantic_state") or "sin_evidencia")
         if state not in {"ok", "no", "sin_evidencia"}:
             state = "sin_evidencia"
-        basis_count = len(accepted_row.get("basis") or [])
+        basis_rows = [
+            dict(row)
+            for row in accepted_row.get("basis") or []
+            if isinstance(row, dict)
+        ]
         profiles_by_component.setdefault(component_key, []).append(
             {
                 "id": tile_id,
                 "tile_id": tile_id,
                 "estado": state,
-                "evidencia": (
-                    f"{basis_count} relaciones persistidas en Vault"
-                    if basis_count
-                    else ""
+                "evidencia": "",
+                "vault_authority_state": (
+                    "accepted" if tile_id in accepted else "unresolved"
                 ),
+                "vault_authority_profile_id": str(
+                    accepted_row.get("authority_profile_id") or ""
+                ),
+                "vault_decision_event_id": str(
+                    accepted_row.get("decision_event_id") or ""
+                ),
+                "vault_basis_relation_count": len(basis_rows),
+                "vault_basis": basis_rows,
                 "motivo": "Sin evidencia persistida" if state == "sin_evidencia" else "",
             }
         )
@@ -1910,35 +2077,110 @@ def _compose_vault_memory_report(
     result_components: dict[str, dict[str, Any]] = {}
     for component_key, profiles in profiles_by_component.items():
         component_score = breakdown.get(component_key) or {}
+        component_meta = RUBRIC_COMPONENTS.get(component_key) or {}
+        lit_tiles = [row["tile_id"] for row in profiles if row["estado"] == "ok"]
+        off_tiles = [row["tile_id"] for row in profiles if row["estado"] == "no"]
+        blind_spot_tiles = [
+            row["tile_id"]
+            for row in profiles
+            if row["estado"] == "sin_evidencia"
+        ]
         detail = {
             "key": component_key,
+            "component": component_key,
+            "label": str(component_meta.get("label") or component_key),
+            "question": str(component_meta.get("question") or ""),
+            "level_zero": str(component_meta.get("level_zero") or ""),
             "status": "scored",
-            "score": component_score.get("points", 0),
+            "score": component_score.get("effective_score", 0),
+            "scale": component_score.get(
+                "tile_count",
+                component_meta.get("scale", 0),
+            ),
+            "points": component_score.get("points", 0),
+            "lit": component_score.get("ok_count", 0),
+            "off": component_score.get("no_count", 0),
+            "blind": component_score.get("sin_evidencia_count", 0),
+            "blind_spot_count": len(blind_spot_tiles),
+            "confidence": confidence_from_blind_spots(len(blind_spot_tiles)),
+            "lit_tiles": lit_tiles,
+            "off_tiles": off_tiles,
+            "blind_spot_tiles": blind_spot_tiles,
             "tile_profile": profiles,
             "veredicto": "Proyección de memoria Vault",
         }
         components.append(detail)
         result_components[component_key] = dict(detail)
-    evidence_pack: dict[str, Any]
-    try:
-        from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
-
-        evidence_pack = build_evidence_pack_from_snapshot(
-            snapshot,
-            include_acquisition_steps=False,
-        ).to_dict()
-    except Exception:
-        evidence_pack = {"evidence": [], "limitations": ["vault_evidence_pack_projection_failed"]}
+    gap_key: str | None = None
+    gap_rank: tuple[int, int, int] | None = None
+    immediate_margin = 0
+    for position, component_key in enumerate(PRESENTATION_ORDER):
+        component_score = breakdown.get(component_key) or {}
+        max_points = int(component_score.get("max_points") or 0)
+        points = int(component_score.get("points") or 0)
+        gap = max_points - points
+        rank = (-gap, -max_points, position)
+        if gap > 0 and (gap_rank is None or rank < gap_rank):
+            gap_rank = rank
+            gap_key = component_key
+        if (
+            int(component_score.get("effective_score") or 0)
+            < int(component_score.get("tile_count") or 0)
+            and not (
+                component_key == "magnetism"
+                and score.get("magnetism_capped") is True
+            )
+        ):
+            immediate_margin += int(component_score.get("multiplier") or 0)
+    gap_label = str(
+        (RUBRIC_COMPONENTS.get(str(gap_key)) or {}).get("label") or gap_key or ""
+    )
+    evidence_pack = {
+        "schema_version": "brand-evidence-pack-v1",
+        "brand_name": parsed_capture.brand_name,
+        "url": parsed_capture.canonical_url,
+        "evidence": [dict(row) for row in parsed_capture.evidence_records],
+        "limitations": list(parsed_capture.limitations),
+    }
+    capture_payload = parsed_capture.capture_payload
     acquisition_gate = (
-        dict(snapshot.get("acquisition_gate") or {})
-        if isinstance(snapshot.get("acquisition_gate"), dict)
+        dict(capture_payload.get("acquisition_gate") or {})
+        if isinstance(capture_payload.get("acquisition_gate"), dict)
         else {}
     )
+    limitations = ["score_projected_from_persisted_vault_memory"]
+    for item in [
+        *parsed_capture.limitations,
+        *(acquisition_gate.get("limitations") or []),
+    ]:
+        value = str(item)
+        if value and value not in limitations:
+            limitations.append(value)
+    attempts = [dict(row) for row in parsed_capture.acquisition_attempts]
+    absences = [
+        {
+            "block": str(row.get("evidence_type") or "").rsplit(".", 1)[-1],
+            "url": str(row.get("url") or ""),
+            "content": str(row.get("content") or ""),
+        }
+        for row in parsed_capture.evidence_records
+        if str(row.get("evidence_type") or "").startswith(
+            "acquisition.absence."
+        )
+    ]
+    acquisition_artifacts = [dict(row) for row in parsed_capture.artifacts]
+    created_at = datetime.now(timezone.utc).isoformat()
+    observed_at = parsed_capture.observed_at.isoformat()
+    evaluated_at = str(score.get("created_at") or created_at)
     raw = {
         "schema_version": "b3s-vault-memory-report-v1",
-        "source_run_id": str((snapshot.get("run") or {}).get("id") or ""),
+        "source_run_id": parsed_capture.source_run_id,
         "vault_memory_projection": True,
-        "source_capture": dict(snapshot.get("source_capture") or {}),
+        "source_capture": {
+            "source_scan_id": parsed_capture.source_scan_id,
+            "observation_hash": parsed_capture.observation_hash,
+            "capture_hash": parsed_capture.capture_hash,
+        },
         "flow": {
             "candidate": {"evidence_pack": evidence_pack, "interpretation": {}},
             "interpretation_debug": {"mode": "persisted_vault_memory"},
@@ -1946,17 +2188,7 @@ def _compose_vault_memory_report(
         "sv9": {
             "brand3_score": score.get("score"),
             "base_average": score.get("base_average"),
-            "reliability_status": (
-                "reliable"
-                if int(
-                    (score.get("authority_coverage") or {}).get(
-                        "accepted_sin_evidencia_count",
-                        0,
-                    )
-                )
-                == 0
-                else "shadow"
-            ),
+            "reliability_status": reliability_status,
             "components": result_components,
             "result": {
                 "components": result_components,
@@ -1964,52 +2196,51 @@ def _compose_vault_memory_report(
                 "base_average": score.get("base_average"),
                 "rubric_version": score.get("rubric_version"),
                 "evaluator_model": "vault-deterministic-memory",
+                "magnetism_capped": score.get("magnetism_capped") is True,
+                "most_painful_gap": gap_key,
+                "immediate_margin": immediate_margin,
+                "total_blind_spots": total_blind_spots,
+                "reliability_status": reliability_status,
+                "reliability_reason_codes": reliability_reason_codes,
             },
         },
         "vault": {
-            "memory_version": memory.get("canonical_memory_version"),
+            "memory_version": memory_version,
             "score_evaluation": score,
         },
     }
-    coverage = score.get("authority_coverage") or {}
     return {
         "id": scan_id,
         "brand_name": brand_name,
         "url": url,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": created_at,
+        "observed_at": observed_at,
+        "recorded_at": created_at,
+        "evaluated_at": evaluated_at,
         "pipeline_commit_sha": current_build_sha(),
         "score": score.get("score"),
         "base_average": score.get("base_average"),
         "reliability_status": raw["sv9"]["reliability_status"],
+        "reliability_reason_codes": reliability_reason_codes,
+        "magnetism_capped": score.get("magnetism_capped") is True,
         "not_detected": [],
-        "most_painful_gap": next(
-            (
-                component_key
-                for component_key, rows in profiles_by_component.items()
-                if any(row["estado"] == "sin_evidencia" for row in rows)
-            ),
-            None,
-        ),
-        "most_painful_gap_label": "",
-        "immediate_margin": None,
-        "total_blind_spots": int(coverage.get("accepted_sin_evidencia_count", 0)),
+        "most_painful_gap": gap_key,
+        "most_painful_gap_label": gap_label,
+        "immediate_margin": immediate_margin,
+        "total_blind_spots": total_blind_spots,
         "executive_reading": "Memoria de marca reconstruida desde Vault.",
         "editorial": {},
-        "detected_count": sum(
-            1
-            for row in profiles_by_component.values()
-            if any(tile["estado"] == "ok" for tile in row)
-        ),
+        "detected_count": 0,
         "block_count": 0,
         "components": components,
         "blocks": [],
         "acquisition_gate": acquisition_gate,
-        "acquisition_artifacts": _acquisition_artifacts_from_snapshot(snapshot),
-        "coverage_acquisition": {},
-        "absences": [],
-        "attempts": [],
-        "limitations": ["score_projected_from_persisted_vault_memory"],
-        "vault_memory_version": memory.get("canonical_memory_version"),
+        "acquisition_artifacts": acquisition_artifacts,
+        "coverage_acquisition": dict(parsed_capture.acquisition_summary),
+        "absences": absences,
+        "attempts": attempts,
+        "limitations": limitations,
+        "vault_memory_version": memory_version,
         "vault_score_evaluation_identity": score.get("evaluation_identity"),
         "raw": raw,
     }

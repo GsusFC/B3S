@@ -27,7 +27,7 @@ from src.services.evidence_vault_incremental_refresh import (
 from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
 
 
-VAULT_INCREMENTAL_CAPTURE_PIPELINE_VERSION = "vault-incremental-capture-v1"
+VAULT_INCREMENTAL_CAPTURE_PIPELINE_VERSION = "vault-incremental-capture-v2"
 
 
 class EvidenceVaultScanOrchestrationError(ValueError):
@@ -179,9 +179,9 @@ def prepare_vault_scan_after_capture(
         if (
             canonical_json_hash(observation["capture_payload"])
             != str(existing.get("capture_hash") or "")
-            or canonical_json_hash(observation["evidence_records"])
-            != canonical_json_hash(
-                raw_observation.get("evidence_records") or []
+            or not _same_exact_capture_observation(
+                observation,
+                raw_observation,
             )
         ):
             raise EvidenceVaultScanOrchestrationError(
@@ -199,12 +199,27 @@ def prepare_vault_scan_after_capture(
                 analysis_result_fingerprint=stored_metadata.get(
                     "analysis_result_fingerprint"
                 ),
+                report_observation=raw_observation,
             )
         outcome = repository.persist_capture_observation(
             raw_observation,
             workspace_slug=workspace_slug,
         )
+        observation = dict(raw_observation)
         analysis_status = str(stored_metadata.get("analysis_status") or "")
+        if stored_plan.get("mode") != resolved.get("mode"):
+            raise EvidenceVaultScanOrchestrationError(
+                "persisted scan mode conflicts with this retry"
+            )
+        current_version = (
+            str(current_memory["canonical_memory_version"])
+            if current_memory is not None
+            else None
+        )
+        if stored_plan.get("canonical_memory_version") != current_version:
+            raise EvidenceVaultScanOrchestrationError(
+                "persisted operation plan has a superseded canonical parent"
+            )
         if analysis_status == "completed":
             result_fingerprint = str(
                 stored_metadata.get("analysis_result_fingerprint") or ""
@@ -225,6 +240,7 @@ def prepare_vault_scan_after_capture(
                     if hasattr(outcome, "to_dict")
                     else dict(outcome)
                 ),
+                "report_observation": dict(raw_observation),
                 "operation_plan": None,
                 "resume": {
                     "analysis_status": "completed",
@@ -232,22 +248,14 @@ def prepare_vault_scan_after_capture(
                         "operation_plan_fingerprint"
                     ],
                     "analysis_result_fingerprint": result_fingerprint,
+                    "semantic_work_completed": bool(
+                        dict(stored_plan.get("operations") or {}).get(
+                            "llm_required"
+                        )
+                    ),
                     "work_required": False,
                 },
             }
-        if stored_plan.get("mode") != resolved.get("mode"):
-            raise EvidenceVaultScanOrchestrationError(
-                "persisted scan mode conflicts with this retry"
-            )
-        current_version = (
-            str(current_memory["canonical_memory_version"])
-            if current_memory is not None
-            else None
-        )
-        if stored_plan.get("canonical_memory_version") != current_version:
-            raise EvidenceVaultScanOrchestrationError(
-                "persisted operation plan has a superseded canonical parent"
-            )
         plan = dict(stored_plan)
     else:
         previous_rows = history[0]["evidence_records"] if history else []
@@ -341,6 +349,7 @@ def prepare_vault_scan_after_capture(
                 if hasattr(outcome, "to_dict")
                 else dict(outcome)
             ),
+            report_observation=observation,
         )
     return {
         **resolved,
@@ -348,6 +357,7 @@ def prepare_vault_scan_after_capture(
         "capture_import": (
             outcome.to_dict() if hasattr(outcome, "to_dict") else dict(outcome)
         ),
+        "report_observation": dict(observation),
         "operation_plan": plan,
     }
 
@@ -381,6 +391,37 @@ def _operational_c7_plan_blocked(
     ) and not current_c7_cutover_decision(brand_or_url).enabled
 
 
+def _same_exact_capture_observation(
+    attempted: Mapping[str, Any],
+    persisted: Mapping[str, Any],
+) -> bool:
+    fields = (
+        "schema_version",
+        "source_scan_id",
+        "source_run_id",
+        "brand_name",
+        "url",
+        "acquisition_state",
+        "acquisition_summary",
+        "limitations",
+        "capture_payload",
+        "evidence_records",
+        "acquisition_attempts",
+    )
+    # v1 runner captures did not freeze screenshot/visual artifacts. Preserve
+    # their resumability while v2 makes artifacts part of exact capture identity.
+    if str(persisted.get("pipeline_version") or "") != (
+        "vault-incremental-capture-v1"
+    ):
+        fields = (*fields, "artifacts")
+    return canonical_json_hash(
+        {field: attempted.get(field) for field in fields}
+    ) == canonical_json_hash(
+        {field: persisted.get(field) for field in fields}
+    )
+
+
+
 def _blocked_operational_c7_resume(
     *,
     resolved: Mapping[str, Any],
@@ -388,6 +429,7 @@ def _blocked_operational_c7_resume(
     analysis_status: str,
     analysis_result_fingerprint: Any,
     capture_import: Mapping[str, Any] | None = None,
+    report_observation: Mapping[str, Any] | None = None,
     capture_persisted: bool = True,
 ) -> dict[str, Any]:
     result = {
@@ -408,6 +450,8 @@ def _blocked_operational_c7_resume(
     }
     if capture_import is not None:
         result["capture_import"] = dict(capture_import)
+    if report_observation is not None:
+        result["report_observation"] = dict(report_observation)
     return result
 
 
@@ -427,11 +471,9 @@ def _resume_first_class_operation(
         raise EvidenceVaultScanOrchestrationError(
             "persisted operation has no exact capture and plan"
         )
-    if (
-        canonical_json_hash(attempted_observation["capture_payload"])
-        != canonical_json_hash(raw.get("capture_payload") or {})
-        or canonical_json_hash(attempted_observation["evidence_records"])
-        != canonical_json_hash(raw.get("evidence_records") or [])
+    if not _same_exact_capture_observation(
+        attempted_observation,
+        raw,
     ):
         raise EvidenceVaultScanOrchestrationError(
             "scan_id already belongs to a different exact capture"
@@ -459,6 +501,7 @@ def _resume_first_class_operation(
             plan=plan,
             analysis_status=status,
             analysis_result_fingerprint=operation.get("result_fingerprint"),
+            report_observation=raw,
         )
     outcome = repository.persist_capture_observation(
         dict(raw),
@@ -475,6 +518,7 @@ def _resume_first_class_operation(
                 if hasattr(outcome, "to_dict")
                 else dict(outcome)
             ),
+            report_observation=raw,
         )
     lease_reclaimable = bool(
         status in {"claimed", "running"}
@@ -489,8 +533,16 @@ def _resume_first_class_operation(
         execution_required
         and dict(plan.get("operations") or {}).get("llm_required")
     )
+    semantic_work_completed = bool(
+        status in {"completed", "result_persisted"}
+        and dict(plan.get("operations") or {}).get("llm_required")
+    )
     materialization_required = status == "result_persisted"
-    operation_plan = dict(plan) if execution_required else None
+    operation_plan = (
+        dict(plan)
+        if execution_required or materialization_required
+        else None
+    )
     return {
         **dict(resolved),
         "mode": plan["mode"],
@@ -498,6 +550,7 @@ def _resume_first_class_operation(
         "capture_import": (
             outcome.to_dict() if hasattr(outcome, "to_dict") else dict(outcome)
         ),
+        "report_observation": dict(raw),
         "operation_plan": operation_plan,
         "resume": {
             "analysis_status": status,
@@ -509,6 +562,7 @@ def _resume_first_class_operation(
             ),
             "execution_required": execution_required,
             "semantic_work_required": semantic_work_required,
+            "semantic_work_completed": semantic_work_completed,
             "materialization_required": materialization_required,
             "work_required": execution_required
             or materialization_required,
@@ -636,10 +690,15 @@ def _snapshot_observed_at(snapshot: Mapping[str, Any]) -> str | None:
         and not isinstance(run_id, bool)
         and float(run_id) >= 946684800
     ):
-        return datetime.fromtimestamp(
-            float(run_id),
-            tz=timezone.utc,
-        ).isoformat()
+        try:
+            return datetime.fromtimestamp(
+                float(run_id),
+                tz=timezone.utc,
+            ).isoformat()
+        except (OSError, OverflowError, ValueError):
+            # Verified-raw snapshots use an opaque positive integer identity,
+            # not necessarily a Unix timestamp.
+            return None
     return None
 
 
