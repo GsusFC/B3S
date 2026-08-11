@@ -408,56 +408,24 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
             if persisted_status is not None:
                 _persist_scan_status(persisted_status)
 
-        if (
-            vault_enabled
-            and isinstance(vault_activation, dict)
-            and vault_activation.get("reason") in {
-                "no_candidate_delta",
-                "persisted_operation_resume",
-                "scanner_candidate_has_no_accepted_change",
-            }
-        ):
-            prior_reports = list_reports_for_domain(url)
-            prior = prior_reports[0] if prior_reports else None
+        if vault_enabled and isinstance(vault_activation, dict):
             persisted_score = vault_activation.get("score")
             persisted_memory = vault_activation.get("memory")
-            if (
-                isinstance(prior, dict)
-                and isinstance(persisted_score, dict)
-                and isinstance(persisted_memory, dict)
-            ):
-                reused_report = copy.deepcopy(prior)
-                reused_report.update(
-                    {
-                        "id": scan_id,
-                        "brand_name": brand_name,
-                        "url": url,
-                        "created_at": datetime.now(timezone.utc).isoformat(),
-                        "score": persisted_score.get("score"),
-                        "base_average": persisted_score.get("base_average"),
-                        "vault_memory_version": persisted_memory.get(
-                            "canonical_memory_version"
-                        ),
-                        "vault_score_evaluation_identity": persisted_score.get(
-                            "evaluation_identity"
-                        ),
-                    }
+            if isinstance(persisted_score, dict) and isinstance(persisted_memory, dict):
+                report = _compose_vault_memory_report(
+                    scan_id=scan_id,
+                    url=url,
+                    brand_name=brand_name,
+                    snapshot=snapshot,
+                    memory=persisted_memory,
+                    score=persisted_score,
                 )
-                raw = reused_report.get("raw")
-                if isinstance(raw, dict):
-                    raw["source_capture"] = snapshot.get("source_capture")
-                    raw["vault"] = {
-                        "memory_version": persisted_memory.get(
-                            "canonical_memory_version"
-                        ),
-                        "score_evaluation": persisted_score,
-                        "reused": True,
-                    }
+                report = _attach_evidence_stability(report)
                 _set_phase(scan_id, "capture", "done")
                 _set_phase(scan_id, "interpret", "done")
                 _set_phase(scan_id, "score", "done")
                 _set_phase(scan_id, "report", "running")
-                _publish_completed_report(scan_id, reused_report)
+                _publish_completed_report(scan_id, report)
                 return
 
         _set_phase(scan_id, "interpret", "running")
@@ -1885,6 +1853,166 @@ def _attach_sv9_editorial(
         "structured_components": sorted(str(key) for key in structured_components.keys()),
     }
     return payload
+
+
+def _compose_vault_memory_report(
+    *,
+    scan_id: str,
+    url: str,
+    brand_name: str,
+    snapshot: dict[str, Any],
+    memory: dict[str, Any],
+    score: dict[str, Any],
+) -> dict[str, Any]:
+    """Project the persisted Vault memory into the existing report shape.
+
+    This is intentionally model-free.  Vault operation execution is the only
+    interpretation step; the report and score are reconstructed from durable
+    memory/score rows rather than the capture snapshot.
+    """
+
+    from src.services.evidence_vault_canonical_core import build_tile_contract_registry
+
+    registry = build_tile_contract_registry()
+    accepted = {
+        str(row.get("tile_id") or ""): row
+        for row in (memory.get("content", {}).get("accepted_tiles") or [])
+        if isinstance(row, dict)
+    }
+    breakdown = {
+        str(row.get("component_key") or ""): row
+        for row in score.get("component_breakdown") or []
+        if isinstance(row, dict)
+    }
+    profiles_by_component: dict[str, list[dict[str, Any]]] = {}
+    for tile in registry["tiles"]:
+        tile_id = str(tile["tile_id"])
+        component_key = str(tile["component_key"])
+        accepted_row = accepted.get(tile_id) or {}
+        state = str(accepted_row.get("semantic_state") or "sin_evidencia")
+        if state not in {"ok", "no", "sin_evidencia"}:
+            state = "sin_evidencia"
+        basis_count = len(accepted_row.get("basis") or [])
+        profiles_by_component.setdefault(component_key, []).append(
+            {
+                "id": tile_id,
+                "tile_id": tile_id,
+                "estado": state,
+                "evidencia": (
+                    f"{basis_count} relaciones persistidas en Vault"
+                    if basis_count
+                    else ""
+                ),
+                "motivo": "Sin evidencia persistida" if state == "sin_evidencia" else "",
+            }
+        )
+    components: list[dict[str, Any]] = []
+    result_components: dict[str, dict[str, Any]] = {}
+    for component_key, profiles in profiles_by_component.items():
+        component_score = breakdown.get(component_key) or {}
+        detail = {
+            "key": component_key,
+            "status": "scored",
+            "score": component_score.get("points", 0),
+            "tile_profile": profiles,
+            "veredicto": "Proyección de memoria Vault",
+        }
+        components.append(detail)
+        result_components[component_key] = dict(detail)
+    evidence_pack: dict[str, Any]
+    try:
+        from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
+
+        evidence_pack = build_evidence_pack_from_snapshot(
+            snapshot,
+            include_acquisition_steps=False,
+        ).to_dict()
+    except Exception:
+        evidence_pack = {"evidence": [], "limitations": ["vault_evidence_pack_projection_failed"]}
+    acquisition_gate = (
+        dict(snapshot.get("acquisition_gate") or {})
+        if isinstance(snapshot.get("acquisition_gate"), dict)
+        else {}
+    )
+    raw = {
+        "schema_version": "b3s-vault-memory-report-v1",
+        "source_run_id": str((snapshot.get("run") or {}).get("id") or ""),
+        "vault_memory_projection": True,
+        "source_capture": dict(snapshot.get("source_capture") or {}),
+        "flow": {
+            "candidate": {"evidence_pack": evidence_pack, "interpretation": {}},
+            "interpretation_debug": {"mode": "persisted_vault_memory"},
+        },
+        "sv9": {
+            "brand3_score": score.get("score"),
+            "base_average": score.get("base_average"),
+            "reliability_status": (
+                "reliable"
+                if int(
+                    (score.get("authority_coverage") or {}).get(
+                        "accepted_sin_evidencia_count",
+                        0,
+                    )
+                )
+                == 0
+                else "shadow"
+            ),
+            "components": result_components,
+            "result": {
+                "components": result_components,
+                "brand3_score": score.get("score"),
+                "base_average": score.get("base_average"),
+                "rubric_version": score.get("rubric_version"),
+                "evaluator_model": "vault-deterministic-memory",
+            },
+        },
+        "vault": {
+            "memory_version": memory.get("canonical_memory_version"),
+            "score_evaluation": score,
+        },
+    }
+    coverage = score.get("authority_coverage") or {}
+    return {
+        "id": scan_id,
+        "brand_name": brand_name,
+        "url": url,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "pipeline_commit_sha": current_build_sha(),
+        "score": score.get("score"),
+        "base_average": score.get("base_average"),
+        "reliability_status": raw["sv9"]["reliability_status"],
+        "not_detected": [],
+        "most_painful_gap": next(
+            (
+                component_key
+                for component_key, rows in profiles_by_component.items()
+                if any(row["estado"] == "sin_evidencia" for row in rows)
+            ),
+            None,
+        ),
+        "most_painful_gap_label": "",
+        "immediate_margin": None,
+        "total_blind_spots": int(coverage.get("accepted_sin_evidencia_count", 0)),
+        "executive_reading": "Memoria de marca reconstruida desde Vault.",
+        "editorial": {},
+        "detected_count": sum(
+            1
+            for row in profiles_by_component.values()
+            if any(tile["estado"] == "ok" for tile in row)
+        ),
+        "block_count": 0,
+        "components": components,
+        "blocks": [],
+        "acquisition_gate": acquisition_gate,
+        "acquisition_artifacts": _acquisition_artifacts_from_snapshot(snapshot),
+        "coverage_acquisition": {},
+        "absences": [],
+        "attempts": [],
+        "limitations": ["score_projected_from_persisted_vault_memory"],
+        "vault_memory_version": memory.get("canonical_memory_version"),
+        "vault_score_evaluation_identity": score.get("evaluation_identity"),
+        "raw": raw,
+    }
 
 
 def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, Any]) -> dict[str, Any]:
