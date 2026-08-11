@@ -76,6 +76,26 @@ def reports_dir() -> Path:
     return Path(os.environ.get("B3S_REPORTS_DIR", "data/reports"))
 
 
+def verify_postgres_runtime_ready() -> None:
+    """Fail startup when an explicitly required PostgreSQL head is unavailable."""
+
+    required = os.environ.get("B3S_POSTGRES_REQUIRED", "").strip().lower()
+    if required in {"", "false"}:
+        return
+    if required != "true":
+        raise RuntimeError("B3S_POSTGRES_REQUIRED must be true or false")
+    database_url = os.environ.get("B3S_DATABASE_URL", "").strip()
+    if not database_url:
+        raise RuntimeError("required PostgreSQL history is not configured")
+    try:
+        repository = _postgres_repository_for_url(database_url)
+        repository.verify_migration_head()
+    except Exception:
+        raise RuntimeError(
+            "required PostgreSQL history failed schema verification"
+        ) from None
+
+
 def _postgres_repository():
     # Tests and local tooling may point the file store at a temporary directory;
     # keep that explicit override authoritative even when a .env has a DSN.
@@ -96,7 +116,7 @@ def _postgres_repository():
 def _postgres_repository_for_url(database_url: str):
     from src.history.repository import PostgresHistoryRepository
 
-    return PostgresHistoryRepository(database_url)
+    return PostgresHistoryRepository(database_url, schema_policy="verify_head")
 
 
 def operational_c7_runtime_projection_for_domain(

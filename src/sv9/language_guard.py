@@ -134,6 +134,8 @@ _STATUS_LABELS_ES = {
 
 _REASON_LABELS_ES = {
     "scan_not_complete": "scan incompleto",
+    "vault_authority_coverage_partial": "cobertura de autoridad Vault parcial",
+    "vault_canonical_score_not_current": "score canónico Vault no vigente",
     "coherencia_needs_review": "coherencia requiere revisión",
     "components_not_detected": "componentes no detectados",
     "blind_spots_above_usable_threshold": "puntos ciegos por encima del umbral usable",

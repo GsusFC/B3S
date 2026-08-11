@@ -271,3 +271,9 @@ BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH = os.environ.get(
     "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH",
     "",
 ).strip()
+# Owned-only analysis may continue scoring when Exa identity is absent, but the
+# resulting snapshot can never satisfy the two-channel C7 readiness contract.
+BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS = os.environ.get(
+    "BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS",
+    "false",
+).strip().lower() == "true"

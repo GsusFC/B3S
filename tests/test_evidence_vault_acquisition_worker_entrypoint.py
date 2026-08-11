@@ -80,3 +80,93 @@ def test_registry_loader_rejects_duplicate_and_nonfinite_json(tmp_path: Path) ->
         path.chmod(0o600)
         with pytest.raises(ValueError, match="registry_file_invalid"):
             module._load_json_model(path, module.PublicKeyRegistry)
+
+
+def test_worker_dsn_validation_requires_authenticated_tls_and_fixed_authority() -> None:
+    module = _module()
+    module._validate_postgres_dsn(
+        "postgresql://scanner:secret@db.example/vault"
+        "?sslmode=require&channel_binding=require"
+    )
+    module._validate_postgres_dsn(
+        "postgresql://scanner:secret@db.example/vault?sslmode=verify-full"
+    )
+    for invalid in (
+        "postgresql://scanner:secret@db.example/vault?sslmode=require",
+        "postgresql://scanner:secret@db.example/vault?sslmode=verify-ca",
+        "postgresql://scanner:secret@db.example/vault?sslmode=disable",
+        "postgresql://scanner:secret@db.example/vault"
+        "?sslmode=require&channel_binding=require&host=other",
+        "postgresql://scanner:secret@db.example/vault"
+        "?sslmode=require&channel_binding=require&options=-c%20neon.branch_id%3Dfake",
+    ):
+        with pytest.raises(ValueError, match="ingest_dsn_file_invalid"):
+            module._validate_postgres_dsn(invalid)
+
+
+def test_worker_operation_plan_uses_frozen_incremental_history_and_filters_c7() -> None:
+    module = _module()
+    from src.services.evidence_vault_acquisition_contract import (
+        TrustedAcquisitionCommand,
+    )
+
+    command = TrustedAcquisitionCommand(
+        workspace_slug="b3s",
+        source_scan_id="scan-incremental-worker",
+        brand_url="https://example.com",
+    )
+    previous = [
+        {
+            "ref": "E1",
+            "source": "web",
+            "evidence_type": "copy",
+            "url": "https://example.com/about",
+            "content": "Old mission evidence",
+            "confidence": "high",
+            "metadata": {"source_class": "owned_copy"},
+        }
+    ]
+    current = [{**previous[0], "ref": "E2", "content": "New mission evidence"}]
+    previous_fingerprint = module.build_vault_scan_plan(
+        brand_identity="example.com",
+        subject_url=command.brand_url,
+        mode="baseline",
+        current_evidence_records=previous,
+    )["semantic_context"]["evidence_fingerprints"][0]
+    context = module.EvidenceVaultRawPlanningContext(
+        canonical_memory_version="a" * 64,
+        previous_capture_evidence_records=tuple(previous),
+        known_evidence_records=tuple(previous),
+        accepted_evidence_tile_relations=(
+            {
+                "tile_id": "C7",
+                "evidence_fingerprint": previous_fingerprint,
+                "evidence_locator": None,
+            },
+            {
+                "tile_id": "M1",
+                "evidence_fingerprint": previous_fingerprint,
+                "evidence_locator": None,
+            },
+        ),
+    )
+
+    plan = module._operation_plan(command, current, context)
+
+    assert plan["mode"] == "incremental_refresh"
+    assert plan["canonical_memory_version"] == "a" * 64
+    assert plan["delta"]["modified_evidence_fingerprints"]
+    assert plan["delta"]["affected_tile_ids"] == ["M1"]
+    assert plan["operations"]["llm_required"] is True
+
+    identical = module._operation_plan(
+        command,
+        previous,
+        module.EvidenceVaultRawPlanningContext(
+            canonical_memory_version="a" * 64,
+            previous_capture_evidence_records=tuple(previous),
+            known_evidence_records=tuple(previous),
+            accepted_evidence_tile_relations=(),
+        ),
+    )
+    assert identical["operations"]["llm_required"] is False

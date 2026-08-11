@@ -385,6 +385,7 @@ def _readback(
     return {
         "capture_id": CAPTURE_ID,
         "capture_content_hash": built.capture_content_hash,
+        "capture_observation_hash": "f" * 64,
         "durable_raw_capture_payload": deepcopy(built.durable_raw_capture_payload),
         "database_time": database_time,
         "receipt_rows": rows,
@@ -511,6 +512,7 @@ def test_capture_returns_only_safe_deterministic_documents_after_durable_readbac
         "brand_url",
         "capture_id",
         "capture_content_hash",
+        "capture_observation_hash",
         "receipt_set_fingerprint",
         "receipt_rows",
         "documents",
@@ -532,6 +534,7 @@ def test_capture_returns_only_safe_deterministic_documents_after_durable_readbac
             "source_url",
             "extracted_document",
             "extracted_document_sha256",
+            "extractor_version",
             "receipt_fingerprint",
         }
         for document in public["documents"]

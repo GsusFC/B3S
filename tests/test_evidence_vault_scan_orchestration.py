@@ -65,6 +65,23 @@ def test_report_binding_freezes_exact_capture_hashes() -> None:
 
 
 
+def test_opaque_verified_run_id_is_not_interpreted_as_unix_time() -> None:
+    snapshot = _snapshot("Evidence")
+    snapshot["run"]["id"] = (1 << 63) - 1
+
+    observation = build_capture_observation_from_snapshot(
+        snapshot=snapshot,
+        scan_id="scan-opaque-run-id",
+        url="https://example.com",
+        brand_name="Example",
+        mode="incremental",
+    )
+
+    assert observation["source_run_id"] == str((1 << 63) - 1)
+    assert observation["observed_at"] == observation["recorded_at"]
+    assert observation["observed_at"].endswith("+00:00")
+
+
 def test_production_bypass_does_not_touch_vault_repository() -> None:
     repository = _Repository(memory=None, history=[])
 
@@ -85,13 +102,22 @@ def test_production_bypass_does_not_touch_vault_repository() -> None:
 
 
 def test_identical_vault_refresh_persists_capture_and_plans_zero_llm() -> None:
+    snapshot = _snapshot("Evidence")
+    snapshot["acquisition_steps"]["web"] = {
+        "status": "error",
+        "details": {"reason": "timeout"},
+    }
     previous_observation = build_capture_observation_from_snapshot(
-        snapshot=_snapshot("Evidence"),
+        snapshot=snapshot,
         scan_id="scan-old",
         url="https://example.com",
         brand_name="Example",
         mode="incremental_refresh",
         observed_at="2026-08-06T10:00:00Z",
+    )
+    assert any(
+        str(row.get("evidence_type") or "").startswith("acquisition.attempt.")
+        for row in previous_observation["evidence_records"]
     )
     repository = _Repository(
         memory={
@@ -103,7 +129,7 @@ def test_identical_vault_refresh_persists_capture_and_plans_zero_llm() -> None:
 
     result = prepare_vault_scan_after_capture(
         repository=repository,
-        snapshot=_snapshot("Evidence"),
+        snapshot=snapshot,
         scan_id="scan-new",
         url="https://example.com",
         brand_name="Example",
@@ -117,6 +143,7 @@ def test_identical_vault_refresh_persists_capture_and_plans_zero_llm() -> None:
     assert len(repository.persisted) == 1
     assert repository.persisted[0]["metadata"]["operation_plan"] == plan
     assert repository.persisted[0]["metadata"]["analysis_status"] == "not_required"
+    assert result["report_observation"] == repository.persisted[0]
     assert plan["mode"] == "incremental_refresh"
     assert plan["canonical_impact"] == "none"
     assert plan["operations"]["llm_required"] is False
@@ -432,6 +459,11 @@ def test_retry_returns_the_exact_persisted_pending_plan() -> None:
 
 
 def test_completed_retry_returns_no_work_plan() -> None:
+    snapshot = _snapshot("Completed evidence")
+    snapshot["acquisition_steps"]["web"] = {
+        "status": "error",
+        "details": {"reason": "timeout"},
+    }
     repository = _Repository(
         memory={
             "brand_identity": "example.com",
@@ -441,7 +473,7 @@ def test_completed_retry_returns_no_work_plan() -> None:
     )
     first = prepare_vault_scan_after_capture(
         repository=repository,
-        snapshot=_snapshot("Completed evidence"),
+        snapshot=snapshot,
         scan_id="scan-completed",
         url="https://example.com",
         brand_name="Example",
@@ -450,13 +482,17 @@ def test_completed_retry_returns_no_work_plan() -> None:
         observed_at="2026-08-06T11:00:00Z",
     )
     persisted = repository.persisted[0]
+    assert any(
+        str(row.get("evidence_type") or "").startswith("acquisition.attempt.")
+        for row in persisted["evidence_records"]
+    )
     completed = _history_capture(persisted, analysis_status="completed")
     completed["metadata"]["analysis_result_fingerprint"] = "c" * 64
     repository.history = [completed]
 
     retried = prepare_vault_scan_after_capture(
         repository=repository,
-        snapshot=_snapshot("Completed evidence"),
+        snapshot=snapshot,
         scan_id="scan-completed",
         url="https://example.com",
         brand_name="Example",
@@ -473,9 +509,81 @@ def test_completed_retry_returns_no_work_plan() -> None:
             "operation_plan_fingerprint"
         ],
         "analysis_result_fingerprint": "c" * 64,
+        "semantic_work_completed": True,
         "work_required": False,
     }
+    assert retried["report_observation"] == completed["raw_observation"]
 
+
+
+def test_retry_rejects_changed_capture_artifacts_for_same_scan_id() -> None:
+    repository = _Repository(memory=None, history=[])
+    first = prepare_vault_scan_after_capture(
+        repository=repository,
+        snapshot=_snapshot("Artifact evidence"),
+        scan_id="scan-artifact-conflict",
+        url="https://example.com",
+        brand_name="Example",
+        environment="vault",
+        incremental_enabled=True,
+        artifacts=({"kind": "screenshot", "path": "/tmp/a.png"},),
+        observed_at="2026-08-06T11:00:00Z",
+    )
+    persisted = repository.persisted[0]
+    repository.history = [_history_capture(persisted, analysis_status="pending")]
+
+    with pytest.raises(
+        EvidenceVaultScanOrchestrationError,
+        match="different exact capture",
+    ):
+        prepare_vault_scan_after_capture(
+            repository=repository,
+            snapshot=_snapshot("Artifact evidence"),
+            scan_id="scan-artifact-conflict",
+            url="https://example.com",
+            brand_name="Example",
+            environment="vault",
+            incremental_enabled=True,
+            artifacts=({"kind": "screenshot", "path": "/tmp/b.png"},),
+            observed_at="2026-08-06T11:00:00Z",
+        )
+    assert first["report_observation"]["artifacts"][0]["path"] == "/tmp/a.png"
+
+
+def test_v1_retry_ignores_artifacts_that_old_runner_never_persisted() -> None:
+    repository = _Repository(memory=None, history=[])
+    first = prepare_vault_scan_after_capture(
+        repository=repository,
+        snapshot=_snapshot("Legacy artifact evidence"),
+        scan_id="scan-v1-artifact-resume",
+        url="https://example.com",
+        brand_name="Example",
+        environment="vault",
+        incremental_enabled=True,
+        observed_at="2026-08-06T11:00:00Z",
+    )
+    persisted = repository.persisted[0]
+    persisted["pipeline_version"] = "vault-incremental-capture-v1"
+    assert persisted["artifacts"] == []
+    repository.history = [_history_capture(persisted, analysis_status="pending")]
+
+    resumed = prepare_vault_scan_after_capture(
+        repository=repository,
+        snapshot=_snapshot("Legacy artifact evidence"),
+        scan_id="scan-v1-artifact-resume",
+        url="https://example.com",
+        brand_name="Example",
+        environment="vault",
+        incremental_enabled=True,
+        artifacts=({"kind": "screenshot", "path": "/tmp/new.png"},),
+        observed_at="2026-08-06T11:00:00Z",
+    )
+
+    assert resumed["operation_plan"] == first["operation_plan"]
+    assert resumed["report_observation"]["pipeline_version"] == (
+        "vault-incremental-capture-v1"
+    )
+    assert resumed["report_observation"]["artifacts"] == []
 
 
 def test_retry_rejects_a_superseded_canonical_parent() -> None:
@@ -636,6 +744,75 @@ def _snapshot(content: str) -> dict:
     }
 
 
+def test_trusted_worker_binding_resumes_exact_persisted_capture() -> None:
+    initial = _Repository(memory=None, history=[])
+    first = prepare_vault_scan_after_capture(
+        repository=initial,
+        snapshot=_snapshot("Trusted worker evidence"),
+        scan_id="scan-trusted-worker",
+        url="https://example.com",
+        brand_name="Example",
+        environment="vault",
+        incremental_enabled=True,
+        observed_at="2026-08-06T11:00:00Z",
+    )
+    raw = deepcopy(initial.persisted[0])
+    raw["pipeline_version"] = "evidence-vault-trusted-acquisition-v1"
+    plan = first["operation_plan"]
+
+    class DirectRepository(_Repository):
+        def get_capture_operation_plan(self, source_scan_id, **_kwargs):
+            return {
+                "status": "pending",
+                "raw_observation": raw,
+                "plan": plan,
+                "result_fingerprint": None,
+            }
+
+    repository = DirectRepository(memory=None, history=[])
+    wrapper_snapshot = _snapshot("Trusted worker evidence")
+    wrapper_snapshot["run"]["id"] = 2**63 - 1
+    wrapper_snapshot["acquisition_steps"]["exa"] = {
+        "status": "error",
+        "details": {"reason": "verified_external_document_unavailable"},
+    }
+    wrapper_snapshot["source_capture"] = {
+        "source_scan_id": "scan-trusted-worker",
+        "observation_hash": canonical_json_hash(raw),
+        "capture_hash": canonical_json_hash(raw["capture_payload"]),
+    }
+
+    resumed = prepare_vault_scan_after_capture(
+        repository=repository,
+        snapshot=wrapper_snapshot,
+        scan_id="scan-trusted-worker",
+        url="https://example.com",
+        brand_name="Example",
+        environment="vault",
+        incremental_enabled=True,
+        observed_at="2026-08-06T11:00:00Z",
+    )
+
+    assert resumed["operation_plan"] == plan
+    assert resumed["report_observation"] == raw
+
+    wrapper_snapshot["source_capture"]["observation_hash"] = "0" * 64
+    with pytest.raises(
+        EvidenceVaultScanOrchestrationError,
+        match="different exact capture",
+    ):
+        prepare_vault_scan_after_capture(
+            repository=repository,
+            snapshot=wrapper_snapshot,
+            scan_id="scan-trusted-worker",
+            url="https://example.com",
+            brand_name="Example",
+            environment="vault",
+            incremental_enabled=True,
+            observed_at="2026-08-06T11:00:00Z",
+        )
+
+
 def test_retry_uses_first_class_operation_lookup_for_result_recovery() -> None:
     initial = _Repository(memory=None, history=[])
     first = prepare_vault_scan_after_capture(
@@ -675,11 +852,64 @@ def test_retry_uses_first_class_operation_lookup_for_result_recovery() -> None:
         observed_at="2026-08-06T11:00:00Z",
     )
 
-    assert resumed["operation_plan"] is None
+    assert resumed["operation_plan"] == plan
     assert resumed["resume"]["analysis_status"] == "result_persisted"
     assert resumed["resume"]["semantic_work_required"] is False
+    assert resumed["resume"]["semantic_work_completed"] is True
     assert resumed["resume"]["materialization_required"] is True
     assert resumed["resume"]["work_required"] is True
+
+
+def test_completed_first_class_retry_rejects_unattributed_memory_advance() -> None:
+    parent = {
+        "brand_identity": "example.com",
+        "canonical_memory_version": "a" * 64,
+    }
+    initial = _Repository(memory=parent, history=[])
+    first = prepare_vault_scan_after_capture(
+        repository=initial,
+        snapshot=_snapshot("Completed first-class evidence"),
+        scan_id="scan-first-class-completed",
+        url="https://example.com",
+        brand_name="Example",
+        environment="vault",
+        incremental_enabled=True,
+        observed_at="2026-08-06T11:00:00Z",
+    )
+    raw = initial.persisted[0]
+    plan = first["operation_plan"]
+
+    class CompletedRepository(_Repository):
+        def get_capture_operation_plan(self, source_scan_id, **_kwargs):
+            return {
+                "status": "completed",
+                "raw_observation": raw,
+                "plan": plan,
+                "result_fingerprint": "f" * 64,
+            }
+
+    repository = CompletedRepository(
+        memory={
+            "brand_identity": "example.com",
+            "canonical_memory_version": "b" * 64,
+        },
+        history=[],
+    )
+    with pytest.raises(
+        EvidenceVaultScanOrchestrationError,
+        match="superseded canonical parent",
+    ):
+        prepare_vault_scan_after_capture(
+            repository=repository,
+            snapshot=_snapshot("Completed first-class evidence"),
+            scan_id="scan-first-class-completed",
+            url="https://example.com",
+            brand_name="Example",
+            environment="vault",
+            incremental_enabled=True,
+            observed_at="2026-08-06T11:00:00Z",
+        )
+
 
 
 def test_retry_reclaims_expired_lease_but_leaves_active_lease_busy() -> None:

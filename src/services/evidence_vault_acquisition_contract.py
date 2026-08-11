@@ -74,6 +74,7 @@ class SafeDeterministicDocument(_StrictPublicModel):
     source_url: str = Field(min_length=8, max_length=2048)
     extracted_document: str = Field(min_length=1, max_length=2_097_152)
     extracted_document_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    extractor_version: str = Field(min_length=1, max_length=128)
     receipt_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
@@ -104,6 +105,7 @@ class SignedAcquisitionResultEnvelope(_StrictPublicModel):
     brand_url: str = Field(min_length=8, max_length=2048)
     capture_id: str
     capture_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    capture_observation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     receipt_set_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     receipt_rows: list[SafeReceiptArrival] = Field(min_length=1, max_length=2)
     documents: list[SafeDeterministicDocument] = Field(min_length=1, max_length=2)

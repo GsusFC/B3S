@@ -59,6 +59,7 @@ def _result() -> SignedAcquisitionResultEnvelope:
         brand_url="https://example.com",
         capture_id="12345678-1234-4234-8234-123456789abc",
         capture_content_hash="2" * 64,
+        capture_observation_hash="3" * 64,
         receipt_set_fingerprint=receipt_set,
         receipt_rows=[
             {
@@ -75,6 +76,7 @@ def _result() -> SignedAcquisitionResultEnvelope:
                 "extracted_document_sha256": hashlib.sha256(
                     b"Durable verified acquisition document."
                 ).hexdigest(),
+                "extractor_version": "evidence-vault-deterministic-extractor-v1",
                 "receipt_fingerprint": _FINGERPRINT,
             }
         ],
@@ -145,8 +147,8 @@ def test_real_separate_process_round_trip_has_one_typed_capture_verb(socket_dir:
         assert result == _result()
         assert set(result.model_dump(mode="json")) == {
             "schema_version", "workspace_slug", "source_scan_id", "brand_url",
-            "capture_id", "capture_content_hash", "receipt_set_fingerprint",
-            "receipt_rows", "documents",
+            "capture_id", "capture_content_hash", "capture_observation_hash",
+            "receipt_set_fingerprint", "receipt_rows", "documents",
         }
         assert "raw_payload" not in result.model_dump_json()
         assert "signature" not in result.model_dump_json()
@@ -261,6 +263,7 @@ def test_public_document_projection_enforces_character_and_utf8_byte_caps() -> N
         "extracted_document_sha256": hashlib.sha256(
             ("x" * 2_097_152).encode()
         ).hexdigest(),
+        "extractor_version": "evidence-vault-deterministic-extractor-v1",
     }
     accepted = SafeDeterministicDocument(
         **common, extracted_document="x" * 2_097_152
@@ -367,6 +370,7 @@ def test_public_document_rejects_noncanonical_role_urls() -> None:
     common = {
         "extracted_document": document,
         "extracted_document_sha256": hashlib.sha256(document.encode()).hexdigest(),
+        "extractor_version": "evidence-vault-deterministic-extractor-v1",
         "receipt_fingerprint": "a" * 64,
     }
     with pytest.raises(ValueError, match="owned source URL"):

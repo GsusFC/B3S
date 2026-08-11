@@ -1,7 +1,7 @@
 """Worker-only PostgreSQL ingest for signed Evidence Vault acquisitions.
 
 The repository intentionally has no migration or general table-DML surface.  Its
-only durable capabilities are the scanner role's two SECURITY DEFINER functions.
+only durable capabilities are the scanner role's three bounded SECURITY DEFINER functions.
 Every successful write is read back and reverified before its transaction commits.
 """
 
@@ -24,14 +24,21 @@ from src.history.capture_observation import (
     CAPTURE_OBSERVATION_SCHEMA_VERSION,
     parse_capture_observation,
 )
+from src.services.evidence_vault_acquisition_outcome import (
+    trusted_acquisition_report_metadata as _trusted_acquisition_report_metadata,
+)
 from src.services.evidence_vault_acquisition_worker import (
     DurableAcquisitionReadback,
     DurableReceiptReadback,
     SignedAcquisition,
     TrustedAcquisitionCommand,
 )
+from src.services.evidence_vault_c7_shadow_readiness import _current_memory
 from src.services.evidence_vault_canonical_core import canonical_fingerprint, canonical_json
-from src.services.evidence_vault_incremental_refresh import validate_vault_scan_plan
+from src.services.evidence_vault_incremental_refresh import (
+    build_vault_scan_plan,
+    validate_vault_scan_plan,
+)
 from src.services.evidence_vault_raw_capture import (
     DETERMINISTIC_EXTRACTOR_VERSION,
     VerifiedRawCapture,
@@ -68,16 +75,64 @@ _READ_SQL = (
     "SELECT b3s_history.read_evidence_vault_raw_acquisition(%s, %s) "
     "AS acquisition, clock_timestamp() AS database_time"
 )
+_PLANNING_CONTEXT_SQL = (
+    "SELECT b3s_history.read_evidence_vault_raw_planning_context("
+    "%s, %s, %s, %s, %s, %s) AS planning_context"
+)
 _READ_ONLY_SQL = "SET TRANSACTION READ ONLY"
+_PLANNING_CONTEXT_VERSION = "evidence-vault-raw-planning-context-v1"
 _ROLE_PREFLIGHT_SQL = """
 WITH role_row AS (
     SELECT * FROM pg_catalog.pg_roles WHERE rolname = current_user
-), forbidden_table_privilege AS (
+), allowed_functions AS (
+    SELECT routines.oid, routines.proowner, routines.proacl
+    FROM pg_catalog.pg_proc AS routines
+    WHERE routines.oid = ANY(ARRAY[
+        'b3s_history.append_evidence_vault_raw_acquisition(jsonb)'::regprocedure::oid,
+        'b3s_history.read_evidence_vault_raw_acquisition(text,text)'::regprocedure::oid,
+        'b3s_history.read_evidence_vault_raw_planning_context(text,text,text,uuid,uuid,uuid)'::regprocedure::oid
+    ])
+), allowed_function_acl_invalid AS (
     SELECT 1
+    FROM allowed_functions AS routines
+    CROSS JOIN role_row
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.aclexplode(
+            coalesce(
+                routines.proacl,
+                pg_catalog.acldefault('f', routines.proowner)
+            )
+        ) AS grants
+        WHERE grants.grantee = role_row.oid
+          AND grants.privilege_type = 'EXECUTE'
+          AND NOT grants.is_grantable
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.aclexplode(
+            coalesce(
+                routines.proacl,
+                pg_catalog.acldefault('f', routines.proowner)
+            )
+        ) AS grants
+        WHERE grants.privilege_type = 'EXECUTE'
+          AND (
+              grants.grantee = 0
+              OR grants.grantee NOT IN (role_row.oid, routines.proowner)
+              OR (grants.grantee = role_row.oid AND grants.is_grantable)
+          )
+    )
+), application_relations AS (
+    SELECT relations.oid, relations.relkind,
+           relations.relowner, relations.relacl
     FROM pg_catalog.pg_class AS relations
     JOIN pg_catalog.pg_namespace AS schemas ON schemas.oid = relations.relnamespace
-    WHERE schemas.nspname = 'b3s_history'
-      AND relations.relkind IN ('r', 'p')
+    WHERE schemas.nspname !~ '^pg_'
+      AND schemas.nspname <> 'information_schema'
+), forbidden_table_privilege AS (
+    SELECT 1
+    FROM application_relations AS relations
+    WHERE relations.relkind IN ('r', 'p', 'v', 'm', 'f')
       AND (
           pg_catalog.has_table_privilege(current_user, relations.oid, 'SELECT')
           OR pg_catalog.has_table_privilege(current_user, relations.oid, 'INSERT')
@@ -85,22 +140,98 @@ WITH role_row AS (
           OR pg_catalog.has_table_privilege(current_user, relations.oid, 'DELETE')
           OR pg_catalog.has_table_privilege(current_user, relations.oid, 'TRUNCATE')
           OR pg_catalog.has_table_privilege(current_user, relations.oid, 'TRIGGER')
+          OR pg_catalog.has_table_privilege(current_user, relations.oid, 'REFERENCES')
+          OR EXISTS (
+              SELECT 1
+              FROM pg_catalog.aclexplode(
+                  coalesce(
+                      relations.relacl,
+                      pg_catalog.acldefault('r', relations.relowner)
+                  )
+              ) AS grants
+              WHERE grants.grantee IN (0, (SELECT oid FROM role_row))
+                AND grants.privilege_type = 'MAINTAIN'
+          )
       )
+), forbidden_column_privilege AS (
+    SELECT 1
+    FROM application_relations AS relations
+    WHERE relations.relkind IN ('r', 'p', 'v', 'm', 'f')
+      AND pg_catalog.has_any_column_privilege(
+          current_user,
+          relations.oid,
+          'SELECT,INSERT,UPDATE,REFERENCES'
+      )
+), forbidden_sequence_privilege AS (
+    SELECT 1
+    FROM application_relations AS relations
+    WHERE relations.relkind = 'S'
+      AND (
+          pg_catalog.has_sequence_privilege(current_user, relations.oid, 'USAGE')
+          OR pg_catalog.has_sequence_privilege(current_user, relations.oid, 'SELECT')
+          OR pg_catalog.has_sequence_privilege(current_user, relations.oid, 'UPDATE')
+      )
+), forbidden_security_definer_execute AS (
+    SELECT 1
+    FROM pg_catalog.pg_proc AS routines
+    WHERE routines.prosecdef
+      AND routines.oid NOT IN (SELECT oid FROM allowed_functions)
+      AND pg_catalog.has_function_privilege(
+          current_user, routines.oid, 'EXECUTE'
+      )
+), forbidden_direct_function_grant AS (
+    SELECT 1
+    FROM pg_catalog.pg_proc AS routines
+    JOIN pg_catalog.pg_namespace AS schemas ON schemas.oid = routines.pronamespace
+    CROSS JOIN role_row
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+        coalesce(
+            routines.proacl,
+            pg_catalog.acldefault('f', routines.proowner)
+        )
+    ) AS grants
+    WHERE grants.grantee = role_row.oid
+      AND grants.privilege_type = 'EXECUTE'
+      AND routines.oid NOT IN (SELECT oid FROM allowed_functions)
+), forbidden_schema_create AS (
+    SELECT 1
+    FROM pg_catalog.pg_namespace AS schemas
+    WHERE schemas.nspname !~ '^pg_'
+      AND schemas.nspname <> 'information_schema'
+      AND pg_catalog.has_schema_privilege(
+          current_user, schemas.oid, 'CREATE'
+      )
+), owned_object AS (
+    SELECT 1
+    FROM pg_catalog.pg_shdepend AS dependencies
+    CROSS JOIN role_row
+    WHERE dependencies.refclassid = 'pg_catalog.pg_authid'::regclass
+      AND dependencies.refobjid = role_row.oid
+      AND dependencies.deptype = 'o'
 ), role_membership AS (
     SELECT 1
     FROM pg_catalog.pg_auth_members AS memberships
     JOIN role_row ON role_row.oid = memberships.member
 )
 SELECT
-    session_user = current_user AS direct_session,
+    session_user = current_user
+        AND (%s::text IS NULL OR current_user::text = %s::text)
+        AS direct_session,
     role_row.rolcanlogin AND NOT role_row.rolsuper
         AND NOT role_row.rolinherit AND NOT role_row.rolcreaterole
         AND NOT role_row.rolcreatedb AND NOT role_row.rolreplication
         AND NOT role_row.rolbypassrls AS restricted_login,
+    pg_catalog.has_database_privilege(
+        current_user, current_database(), 'CONNECT'
+    ) AND NOT pg_catalog.has_database_privilege(
+        current_user, current_database(), 'CREATE'
+    ) AS database_scope,
     pg_catalog.has_schema_privilege(current_user, 'b3s_history', 'USAGE')
         AND NOT pg_catalog.has_schema_privilege(
             current_user, 'b3s_history', 'CREATE'
-        ) AS schema_scope,
+        )
+        AND NOT EXISTS (SELECT 1 FROM forbidden_schema_create)
+        AS schema_scope,
     pg_catalog.has_function_privilege(
         current_user,
         'b3s_history.append_evidence_vault_raw_acquisition(jsonb)'::regprocedure,
@@ -109,26 +240,31 @@ SELECT
         current_user,
         'b3s_history.read_evidence_vault_raw_acquisition(text,text)'::regprocedure,
         'EXECUTE'
-    ) AS required_execute,
-    NOT pg_catalog.has_function_privilege(
+    ) AND pg_catalog.has_function_privilege(
         current_user,
-        'b3s_history.bind_evidence_vault_verified_c7_lineage(jsonb)'::regprocedure,
+        'b3s_history.read_evidence_vault_raw_planning_context(text,text,text,uuid,uuid,uuid)'::regprocedure,
         'EXECUTE'
-    ) AND NOT pg_catalog.has_function_privilege(
-        current_user,
-        'b3s_history.append_evidence_vault_raw_provenance_disposition(jsonb)'::regprocedure,
-        'EXECUTE'
-    ) AND NOT pg_catalog.has_function_privilege(
-        current_user,
-        'b3s_history.read_evidence_vault_raw_provenance(uuid)'::regprocedure,
-        'EXECUTE'
-    ) AS forbidden_execute_absent,
+    ) AND NOT EXISTS (SELECT 1 FROM allowed_function_acl_invalid)
+        AS required_execute,
+    NOT EXISTS (SELECT 1 FROM forbidden_security_definer_execute)
+        AND NOT EXISTS (SELECT 1 FROM forbidden_direct_function_grant)
+        AS forbidden_execute_absent,
     NOT EXISTS (SELECT 1 FROM forbidden_table_privilege)
         AS table_privileges_absent,
+    NOT EXISTS (SELECT 1 FROM forbidden_column_privilege)
+        AS column_privileges_absent,
+    NOT EXISTS (SELECT 1 FROM forbidden_sequence_privilege)
+        AS sequence_privileges_absent,
+    NOT EXISTS (SELECT 1 FROM owned_object)
+        AS ownership_absent,
     NOT EXISTS (SELECT 1 FROM role_membership)
         AND NOT pg_catalog.pg_has_role(
             current_user, 'b3s_history_vault_provenance_owner', 'MEMBER'
-        ) AS memberships_absent
+        ) AS memberships_absent,
+    current_database() = %s
+        AND current_setting('neon.project_id', true) IS NOT DISTINCT FROM %s
+        AND current_setting('neon.branch_id', true) IS NOT DISTINCT FROM %s
+        AS target_identity
 FROM role_row
 """
 
@@ -313,13 +449,25 @@ class EvidenceVaultRawRepositoryError(RuntimeError):
     """A scanner-ingest failure that never exposes database or signed raw data."""
 
 
+@dataclass(frozen=True)
+class EvidenceVaultRawPlanningContext:
+    """Exact bounded DB context frozen before one atomic raw append."""
+
+    canonical_memory_version: str | None
+    previous_capture_evidence_records: tuple[dict[str, Any], ...]
+    known_evidence_records: tuple[dict[str, Any], ...]
+    accepted_evidence_tile_relations: tuple[dict[str, Any], ...]
+    existing_operation_plan: dict[str, Any] | None = None
+
+
 class OperationPlanBuilder(Protocol):
-    """Worker-local planner over the repository's exact deterministic evidence."""
+    """Worker-local planner over exact current evidence and frozen DB history."""
 
     def __call__(
         self,
         command: TrustedAcquisitionCommand,
         evidence_records: Sequence[Mapping[str, Any]],
+        planning_context: EvidenceVaultRawPlanningContext,
     ) -> Mapping[str, Any]: ...
 
 
@@ -340,6 +488,10 @@ class EvidenceVaultRawRepository:
     __slots__ = (
         "__connect_fn",
         "__dsn",
+        "__expected_database",
+        "__expected_neon_branch_id",
+        "__expected_neon_project_id",
+        "__expected_role",
         "__operation_plan_builder",
         "__public_key_registry_json",
     )
@@ -350,12 +502,35 @@ class EvidenceVaultRawRepository:
         *,
         public_key_registry: PublicKeyRegistry | Mapping[str, Any],
         operation_plan_builder: OperationPlanBuilder,
+        expected_database: str,
+        expected_neon_project_id: str | None,
+        expected_neon_branch_id: str | None,
+        expected_role: str | None = None,
         connect: Callable[..., Any] = psycopg.connect,
     ) -> None:
         if not isinstance(dsn, str) or not dsn.strip():
             raise EvidenceVaultRawRepositoryError(_ERROR)
         if not callable(connect) or not callable(operation_plan_builder):
             raise EvidenceVaultRawRepositoryError(_ERROR)
+        try:
+            database = _target_identity_text(expected_database, maximum=63)
+            project_id = _optional_target_identity_text(
+                expected_neon_project_id,
+                maximum=255,
+            )
+            branch_id = _optional_target_identity_text(
+                expected_neon_branch_id,
+                maximum=255,
+            )
+            role = (
+                None
+                if expected_role is None
+                else _target_identity_text(expected_role, maximum=63)
+            )
+            if (project_id is None) != (branch_id is None):
+                raise ValueError("incomplete Neon target")
+        except Exception:
+            raise EvidenceVaultRawRepositoryError(_ERROR) from None
         try:
             registry_value = (
                 public_key_registry.model_dump(mode="python", round_trip=True)
@@ -369,8 +544,24 @@ class EvidenceVaultRawRepository:
             raise EvidenceVaultRawRepositoryError(_ERROR)
         self.__dsn = dsn
         self.__connect_fn = connect
+        self.__expected_database = database
+        self.__expected_neon_project_id = project_id
+        self.__expected_neon_branch_id = branch_id
+        self.__expected_role = role
         self.__operation_plan_builder = operation_plan_builder
         self.__public_key_registry_json = registry.model_dump_json()
+
+    def verify_ingest_capability(self) -> None:
+        """Prove database connectivity and the execute-only scanner role."""
+
+        try:
+            with self.__connect() as connection:
+                connection.execute(_READ_ONLY_SQL)
+                self.__assert_scanner_session(connection)
+                return
+        except Exception:
+            pass
+        raise EvidenceVaultRawRepositoryError(_ERROR)
 
     def persist(
         self,
@@ -387,9 +578,20 @@ class EvidenceVaultRawRepository:
                 signed_acquisition,
                 registry=registry,
             )
-            prepared = self.__prepare(validated_command, verified)
             with self.__connect() as connection:
-                _assert_scanner_session(connection)
+                self.__assert_scanner_session(connection)
+                planning_context = self.__read_planning_context(
+                    connection,
+                    validated_command,
+                )
+                prepared = self.__prepare(
+                    validated_command,
+                    verified,
+                    planning_context=planning_context,
+                    frozen_operation_plan=(
+                        planning_context.existing_operation_plan
+                    ),
+                )
                 append_row = connection.execute(
                     _APPEND_SQL,
                     (Jsonb(deepcopy(prepared.envelope)),),
@@ -425,7 +627,7 @@ class EvidenceVaultRawRepository:
             validated_command = _reparse_command(command)
             with self.__connect() as connection:
                 connection.execute(_READ_ONLY_SQL)
-                _assert_scanner_session(connection)
+                self.__assert_scanner_session(connection)
                 row = connection.execute(
                     _READ_SQL,
                     (validated_command.workspace_slug, validated_command.source_scan_id),
@@ -445,6 +647,45 @@ class EvidenceVaultRawRepository:
             pass
         raise EvidenceVaultRawRepositoryError(_ERROR)
 
+    def __read_planning_context(
+        self,
+        connection: Any,
+        command: TrustedAcquisitionCommand,
+    ) -> EvidenceVaultRawPlanningContext:
+        workspace_id = str(_stable_uuid("workspace", command.workspace_slug))
+        brand_id = str(
+            _stable_uuid(workspace_id, "brand", _command_domain(command))
+        )
+        scan_id = str(
+            _stable_uuid(workspace_id, "scan", command.source_scan_id)
+        )
+        row = connection.execute(
+            _PLANNING_CONTEXT_SQL,
+            (
+                command.workspace_slug,
+                command.source_scan_id,
+                _command_domain(command),
+                workspace_id,
+                brand_id,
+                scan_id,
+            ),
+        ).fetchone()
+        if not isinstance(row, Mapping):
+            raise ValueError("raw planning context row is absent")
+        return _validate_planning_context(
+            row.get("planning_context"),
+            command=command,
+        )
+
+    def __assert_scanner_session(self, connection: Any) -> None:
+        _assert_scanner_session(
+            connection,
+            expected_database=self.__expected_database,
+            expected_neon_project_id=self.__expected_neon_project_id,
+            expected_neon_branch_id=self.__expected_neon_branch_id,
+            expected_role=self.__expected_role,
+        )
+
     def __connect(self) -> Any:
         return self.__connect_fn(
             self.__dsn,
@@ -463,14 +704,22 @@ class EvidenceVaultRawRepository:
         command: TrustedAcquisitionCommand,
         verified: VerifiedRawCapture,
         *,
+        planning_context: EvidenceVaultRawPlanningContext | None = None,
         frozen_operation_plan: Mapping[str, Any] | None = None,
     ) -> _PreparedAcquisition:
         evidence = _deterministic_evidence_records(verified)
+        context = planning_context or EvidenceVaultRawPlanningContext(
+            canonical_memory_version=None,
+            previous_capture_evidence_records=(),
+            known_evidence_records=(),
+            accepted_evidence_tile_relations=(),
+        )
         plan = (
             _build_and_validate_plan(
                 self.__operation_plan_builder,
                 command=command,
                 evidence_records=evidence,
+                planning_context=context,
             )
             if frozen_operation_plan is None
             else _validate_plan_for_evidence(
@@ -481,6 +730,14 @@ class EvidenceVaultRawRepository:
         )
         observed_at = _latest_fetched_at_text(verified)
         plan_status = _pre_interpretation_status(plan)
+        capture_payload = _durable_payload(verified)
+        _trusted_acquisition_report_metadata(
+            capture_payload,
+            external_captured=any(
+                receipt.claims.channel_role == "external_social_profile"
+                for receipt in verified.receipts
+            ),
+        )
         observation_payload = {
             "schema_version": CAPTURE_OBSERVATION_SCHEMA_VERSION,
             "source_scan_id": command.source_scan_id,
@@ -496,7 +753,7 @@ class EvidenceVaultRawRepository:
                 "receipt_set_fingerprint": verified.envelope.receipt_set_fingerprint,
             },
             "limitations": [],
-            "capture_payload": _durable_payload(verified),
+            "capture_payload": capture_payload,
             "evidence_records": deepcopy(evidence),
             "acquisition_attempts": [],
             "artifacts": [],
@@ -655,6 +912,7 @@ class EvidenceVaultRawRepository:
         return DurableAcquisitionReadback(
             capture_id=expected_capture_id,
             capture_content_hash=verified.capture_content_hash,
+            capture_observation_hash=observation.observation_hash,
             durable_raw_capture_payload=_durable_payload(verified),
             database_time=database_time,
             receipt_rows=arrivals,
@@ -665,16 +923,37 @@ class EvidenceVaultRawRepository:
 PostgresEvidenceVaultRawRepository = EvidenceVaultRawRepository
 
 
-def _assert_scanner_session(connection: Any) -> None:
-    row = connection.execute(_ROLE_PREFLIGHT_SQL).fetchone()
+def _assert_scanner_session(
+    connection: Any,
+    *,
+    expected_database: str,
+    expected_neon_project_id: str | None,
+    expected_neon_branch_id: str | None,
+    expected_role: str | None,
+) -> None:
+    row = connection.execute(
+        _ROLE_PREFLIGHT_SQL,
+        (
+            expected_role,
+            expected_role,
+            expected_database,
+            expected_neon_project_id,
+            expected_neon_branch_id,
+        ),
+    ).fetchone()
     expected = {
         "direct_session",
         "restricted_login",
+        "database_scope",
         "schema_scope",
         "required_execute",
         "forbidden_execute_absent",
         "table_privileges_absent",
+        "column_privileges_absent",
+        "sequence_privileges_absent",
+        "ownership_absent",
         "memberships_absent",
+        "target_identity",
     }
     if not isinstance(row, Mapping) or set(row) != expected or not all(
         row[field] is True for field in expected
@@ -757,10 +1036,13 @@ def _deterministic_evidence_records(verified: VerifiedRawCapture) -> list[dict[s
                 "confidence": "high",
                 "metadata": {
                     "source_class": source_class,
+                    "provider": "verified_raw_acquisition",
                     "role": role,
+                    "channel_role": role,
                     "receipt_fingerprint": receipt.receipt_fingerprint,
                     "extractor_version": receipt.claims.extractor_version,
                     "extracted_document_sha256": extraction.sha256,
+                    "verified_raw": True,
                 },
             }
         )
@@ -787,19 +1069,209 @@ def _receipt_source_url(acquisition: Any, *, role: str) -> str:
     raise ValueError("receipt role has no safe exact source URL")
 
 
+def _validate_planning_context(
+    value: Any,
+    *,
+    command: TrustedAcquisitionCommand,
+) -> EvidenceVaultRawPlanningContext:
+    expected_fields = {
+        "schema_version",
+        "workspace_slug",
+        "source_scan_id",
+        "canonical_domain",
+        "canonical_memory_version",
+        "previous_capture_evidence_records",
+        "known_evidence_records",
+        "accepted_evidence_tile_relations",
+        "operational_authority_context",
+        "existing_operation_plan",
+    }
+    context = _mapping(value, fields=expected_fields)
+    if (
+        context["schema_version"] != _PLANNING_CONTEXT_VERSION
+        or context["workspace_slug"] != command.workspace_slug
+        or context["source_scan_id"] != command.source_scan_id
+        or context["canonical_domain"] != _command_domain(command)
+    ):
+        raise ValueError("raw planning context identity diverged")
+    canonical_version = context["canonical_memory_version"]
+    if canonical_version is not None and (
+        not isinstance(canonical_version, str)
+        or len(canonical_version) != 64
+        or any(character not in "0123456789abcdef" for character in canonical_version)
+    ):
+        raise ValueError("raw planning canonical version is invalid")
+    authority = _mapping(
+        context["operational_authority_context"],
+        fields={
+            "database_time",
+            "operational_adoption_count",
+            "operational_adoptions",
+            "operational_packet_count",
+            "operational_packets",
+        },
+    )
+    adoption_count = authority["operational_adoption_count"]
+    packet_count = authority["operational_packet_count"]
+    adoptions = authority["operational_adoptions"]
+    packets = authority["operational_packets"]
+    if (
+        not isinstance(adoption_count, int)
+        or isinstance(adoption_count, bool)
+        or not isinstance(packet_count, int)
+        or isinstance(packet_count, bool)
+        or not isinstance(adoptions, list)
+        or not isinstance(packets, list)
+        or not 0 <= adoption_count <= 128
+        or not 0 <= packet_count <= 128
+        or len(adoptions) > 128
+        or len(packets) > 128
+    ):
+        raise ValueError("raw planning operational authority is invalid")
+    database_time = _database_datetime(authority["database_time"])
+    if canonical_version is None:
+        if adoption_count != 0 or packet_count != 0 or adoptions or packets:
+            raise ValueError("raw planning absent authority is contaminated")
+    else:
+        workspace_id = str(_stable_uuid("workspace", command.workspace_slug))
+        brand_id = str(
+            _stable_uuid(workspace_id, "brand", _command_domain(command))
+        )
+        current_memory, _event, _identity = _current_memory(
+            authority,
+            brand=_command_domain(command),
+            brand_id=brand_id,
+            database_time=database_time,
+        )
+        if current_memory.get("canonical_memory_version") != canonical_version:
+            raise ValueError("raw planning canonical authority diverged")
+
+    def evidence_rows(field: str, *, maximum: int) -> tuple[dict[str, Any], ...]:
+        raw_rows = context[field]
+        if not isinstance(raw_rows, list) or len(raw_rows) > maximum:
+            raise ValueError(f"raw planning {field} is invalid")
+        rows: list[dict[str, Any]] = []
+        fields = {
+            "ref", "source", "evidence_type", "url", "content",
+            "confidence", "metadata",
+        }
+        for raw in raw_rows:
+            row = _mapping(raw, fields=fields)
+            if not all(
+                isinstance(row[name], str)
+                for name in (
+                    "ref", "source", "evidence_type", "url", "content",
+                    "confidence",
+                )
+            ) or not isinstance(row["metadata"], Mapping):
+                raise ValueError(f"raw planning {field} row is invalid")
+            rows.append(_canonical_detach(row))
+        return tuple(rows)
+
+    previous = evidence_rows(
+        "previous_capture_evidence_records",
+        maximum=5000,
+    )
+    known = evidence_rows("known_evidence_records", maximum=5000)
+    if sum(
+        len(row["content"].encode("utf-8"))
+        for row in (*previous, *known)
+    ) > 70 * 1024 * 1024:
+        raise ValueError("raw planning evidence content exceeds bound")
+    raw_relations = context["accepted_evidence_tile_relations"]
+    if not isinstance(raw_relations, list) or len(raw_relations) > 5000:
+        raise ValueError("raw planning accepted relations are invalid")
+    relations: list[dict[str, Any]] = []
+    for raw in raw_relations:
+        relation = _mapping(
+            raw,
+            fields={"tile_id", "evidence_fingerprint", "evidence_locator"},
+        )
+        if not isinstance(relation["tile_id"], str):
+            raise ValueError("raw planning accepted relation is invalid")
+        fingerprint = relation["evidence_fingerprint"]
+        locator = relation["evidence_locator"]
+        if bool(fingerprint) == bool(locator):
+            raise ValueError("raw planning accepted relation identity is invalid")
+        if fingerprint is not None and (
+            not isinstance(fingerprint, str)
+            or len(fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in fingerprint)
+        ):
+            raise ValueError("raw planning accepted fingerprint is invalid")
+        if locator is not None and not isinstance(locator, str):
+            raise ValueError("raw planning accepted locator is invalid")
+        relations.append(_canonical_detach(relation))
+    existing = context["existing_operation_plan"]
+    if existing is not None and not isinstance(existing, Mapping):
+        raise ValueError("raw planning existing operation is invalid")
+    return EvidenceVaultRawPlanningContext(
+        canonical_memory_version=canonical_version,
+        previous_capture_evidence_records=previous,
+        known_evidence_records=known,
+        accepted_evidence_tile_relations=tuple(relations),
+        existing_operation_plan=(
+            _canonical_detach(existing) if existing is not None else None
+        ),
+    )
+
 def _build_and_validate_plan(
     builder: OperationPlanBuilder,
     *,
     command: TrustedAcquisitionCommand,
     evidence_records: Sequence[Mapping[str, Any]],
+    planning_context: EvidenceVaultRawPlanningContext,
 ) -> dict[str, Any]:
     detached_rows = tuple(deepcopy(dict(row)) for row in evidence_records)
-    value = builder(command, detached_rows)
-    return _validate_plan_for_evidence(
+    builder_context = EvidenceVaultRawPlanningContext(
+        canonical_memory_version=planning_context.canonical_memory_version,
+        previous_capture_evidence_records=tuple(
+            deepcopy(row)
+            for row in planning_context.previous_capture_evidence_records
+        ),
+        known_evidence_records=tuple(
+            deepcopy(row) for row in planning_context.known_evidence_records
+        ),
+        accepted_evidence_tile_relations=tuple(
+            deepcopy(row)
+            for row in planning_context.accepted_evidence_tile_relations
+        ),
+        existing_operation_plan=(
+            deepcopy(planning_context.existing_operation_plan)
+            if planning_context.existing_operation_plan is not None
+            else None
+        ),
+    )
+    value = builder(command, detached_rows, builder_context)
+    plan = _validate_plan_for_evidence(
         value,
         command=command,
         evidence_records=evidence_records,
     )
+    expected_mode = (
+        "incremental_refresh"
+        if planning_context.canonical_memory_version is not None
+        else "baseline"
+    )
+    expected = build_vault_scan_plan(
+        brand_identity=_command_domain(command),
+        subject_url=command.brand_url,
+        mode=expected_mode,
+        current_evidence_records=evidence_records,
+        previous_capture_evidence_records=(
+            planning_context.previous_capture_evidence_records
+        ),
+        known_evidence_records=planning_context.known_evidence_records,
+        accepted_evidence_tile_relations=[
+            deepcopy(row)
+            for row in planning_context.accepted_evidence_tile_relations
+            if str(row.get("tile_id") or "") != "C7"
+        ],
+        canonical_memory_version=planning_context.canonical_memory_version,
+    )
+    if plan != expected:
+        raise ValueError("operation plan differs from its frozen planning context")
+    return plan
 
 
 def _validate_plan_for_evidence(
@@ -1522,6 +1994,28 @@ def _durable_payload(verified: VerifiedRawCapture) -> dict[str, Any]:
     return payload
 
 
+def _target_identity_text(value: str, *, maximum: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value.encode("utf-8")) > maximum
+        or any(not character.isprintable() for character in value)
+    ):
+        raise ValueError("database target identity is invalid")
+    return value
+
+
+def _optional_target_identity_text(
+    value: str | None,
+    *,
+    maximum: int,
+) -> str | None:
+    if value is None:
+        return None
+    return _target_identity_text(value, maximum=maximum)
+
+
 def _stable_uuid(*parts: Any) -> UUID:
     return uuid5(_ID_NAMESPACE, ":".join(str(part) for part in parts))
 
@@ -1626,6 +2120,7 @@ def _single_result(row: Any, field: str) -> Any:
 
 
 __all__ = [
+    "EvidenceVaultRawPlanningContext",
     "EvidenceVaultRawRepository",
     "EvidenceVaultRawRepositoryError",
     "OperationPlanBuilder",

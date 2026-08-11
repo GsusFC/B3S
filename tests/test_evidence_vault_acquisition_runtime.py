@@ -348,6 +348,47 @@ def test_exa_fetcher_requires_one_exact_url_result_and_real_fields() -> None:
         HttpxExaExactUrlFetcher(duplicate, api_key="worker-only")(source_url)
 
 
+def test_exa_fetcher_discovers_external_profile_without_owned_linkedin() -> None:
+    profile_url = "https://www.linkedin.com/company/example"
+    discovery = json.dumps({"results": [{"url": profile_url}]}).encode()
+    contents = json.dumps(
+        {
+            "results": [
+                {
+                    "url": profile_url,
+                    "title": "Example",
+                    "summary": "Exact summary",
+                    "highlights": ["Exact highlight"],
+                    "text": "Exact provider text",
+                }
+            ]
+        }
+    ).encode()
+
+    class SequencePostClient:
+        def __init__(self) -> None:
+            self.responses = [
+                _Response(200, discovery, {"content-type": "application/json"}),
+                _Response(200, contents, {"content-type": "application/json"}),
+            ]
+            self.calls: list[dict[str, Any]] = []
+
+        def stream(self, method: str, _url: str, **kwargs: Any) -> _Response:
+            assert method == "POST"
+            self.calls.append(kwargs)
+            return self.responses.pop(0)
+
+    client = SequencePostClient()
+    observation = HttpxExaExactUrlFetcher(client, api_key="worker-only")(
+        "https://example.com"
+    )
+
+    assert observation.reported_source_url == profile_url
+    assert observation.raw_fragment["discovery_result_ordinal"] == 0
+    assert len(client.calls) == 2
+    assert b"worker-only" not in client.calls[0]["content"]
+
+
 def test_http_fetchers_stream_and_reject_oversized_bodies() -> None:
     huge_owned = _Response(
         200,
@@ -377,6 +418,38 @@ def test_http_fetcher_rejects_private_connected_peer_even_after_public_dns() -> 
         HttpxOwnedFetcher(
             _GetClient([response]), resolver=_global_resolver
         )(_command())
+
+
+def test_independent_external_fetch_does_not_fabricate_owned_link_provenance() -> None:
+    key, registry = _key_registry()
+
+    class IndependentFetcher:
+        supports_independent_discovery = True
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def __call__(self, source_url: str):
+            self.calls.append(source_url)
+            return _external()
+
+    fetcher = IndependentFetcher()
+    runtime = TrustedAcquisitionRuntime(
+        private_key=key,
+        public_key_registry=registry,
+        owned_fetch=lambda _command: _owned(linkedin=False),
+        external_fetch=fetcher,
+        allow_owned_only_downgrade=False,
+    )
+
+    collected = runtime.collect(_command())
+    signed = runtime.sign(_command(), collected)
+
+    assert fetcher.calls == ["https://example.com"]
+    assert collected["external_outcome"] == "captured"
+    assert signed.external_identity_provenance is not None
+    assert signed.external_identity_provenance.association_method == "exa_independent_discovery"
+    assert len(signed.receipts) == 2
 
 
 def test_external_failure_is_terminal_by_default_and_not_discovered_is_explicit() -> None:
@@ -478,6 +551,15 @@ def test_http_fetcher_requires_identity_encoding_and_exact_www_linkedin() -> Non
         resolver=_global_resolver,
     )(_command())
     assert "linkedin" not in observation.raw_fragment
+
+    trailing = b'<a href="https://www.linkedin.com/company/example/">canonical company</a>'
+    observation = HttpxOwnedFetcher(
+        _GetClient([_Response(200, trailing, {"content-type": "text/html"})]),
+        resolver=_global_resolver,
+    )(_command())
+    assert observation.raw_fragment["linkedin"] == (
+        "https://www.linkedin.com/company/example"
+    )
 
 
 def test_explicit_downgrade_distinguishes_ineligible_provider_result() -> None:

@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import base64
+import binascii
 import json
 import logging
 import os
 from pathlib import Path
+import re
+import secrets
+import unicodedata
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 import uuid
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -38,6 +43,7 @@ from web.report_store import (
     list_reports,
     list_reports_for_domain,
     load_report,
+    verify_postgres_runtime_ready,
 )
 from web.report_view_model import build_report_view_model
 from web.scan_runner import approve_degraded_scan, cancel_scan, recover_interrupted_scans, scan_status, start_scan
@@ -101,6 +107,8 @@ _VAULT_REVIEW_STATE_FILTERS = (
 _VAULT_REVIEW_STATE_KEYS = frozenset(
     key for key, _label in _VAULT_REVIEW_STATE_FILTERS
 )
+_VAULT_REVIEW_LOGIN_CSRF_COOKIE = "b3s_vault_reviewer_login_csrf"
+_VAULT_REVIEW_LOGIN_CSRF_MAX_AGE = 10 * 60
 
 
 def _initialize_runtime() -> None:
@@ -109,6 +117,7 @@ def _initialize_runtime() -> None:
         from scripts.sv9_flow_shadow_run import _load_env_file
 
         _load_env_file(str(env_file))
+    verify_postgres_runtime_ready()
     recover_interrupted_scans()
 
 
@@ -119,6 +128,226 @@ async def _lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="B3S — Brand Evidence Lab", lifespan=_lifespan)
+
+_SITE_BASIC_AUTH_ENABLED_ENV = "B3S_SITE_BASIC_AUTH_ENABLED"
+_SITE_BASIC_AUTH_USERNAME_ENV = "B3S_SITE_BASIC_AUTH_USERNAME"
+_SITE_BASIC_AUTH_PASSWORD_ENV = "B3S_SITE_BASIC_AUTH_PASSWORD"
+_SITE_BASIC_AUTH_USERNAME_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$"
+)
+_SITE_BASIC_AUTH_CHALLENGE = 'Basic realm="B3S", charset="UTF-8"'
+_SITE_BASIC_AUTH_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _valid_site_basic_auth_password(password: str) -> bool:
+    return (
+        32 <= len(password) <= 1024
+        and password == password.strip()
+        and not any(
+            unicodedata.category(character).startswith("C")
+            for character in password
+        )
+    )
+
+
+def _normalized_http_origin(value: str, *, origin_header: bool = False) -> str | None:
+    raw = value.strip()
+    if (
+        not raw
+        or "\\" in raw
+        or any(unicodedata.category(character).startswith("C") for character in raw)
+    ):
+        return None
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    if (
+        scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    if origin_header and (parsed.path or parsed.query or parsed.fragment):
+        return None
+    try:
+        hostname = parsed.hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return None
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+    default_port = 443 if scheme == "https" else 80
+    authority = hostname if port in {None, default_port} else f"{hostname}:{port}"
+    return f"{scheme}://{authority}"
+
+
+def _site_basic_auth_configuration() -> tuple[str, str, str]:
+    """Return (state, username, password) without ever logging credentials."""
+
+    raw_enabled = os.environ.get(_SITE_BASIC_AUTH_ENABLED_ENV, "").strip().lower()
+    if raw_enabled in {"", "false"}:
+        return "disabled", "", ""
+    if raw_enabled != "true":
+        return "invalid", "", ""
+
+    username = os.environ.get(_SITE_BASIC_AUTH_USERNAME_ENV, "")
+    password = os.environ.get(_SITE_BASIC_AUTH_PASSWORD_ENV, "")
+    valid_username = _SITE_BASIC_AUTH_USERNAME_RE.fullmatch(username) is not None
+    valid_password = _valid_site_basic_auth_password(password)
+    if not valid_username or not valid_password:
+        return "invalid", "", ""
+    return "enabled", username, password
+
+
+def _site_basic_auth_credentials(authorization: str | None) -> tuple[str, str] | None:
+    if not authorization:
+        return None
+    scheme, separator, encoded = authorization.partition(" ")
+    if scheme.lower() != "basic" or separator != " " or not encoded:
+        return None
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+    if ":" not in decoded:
+        return None
+    username, password = decoded.split(":", 1)
+    if _SITE_BASIC_AUTH_USERNAME_RE.fullmatch(username) is None:
+        return None
+    if not _valid_site_basic_auth_password(password):
+        return None
+    return username, password
+
+
+def _site_basic_auth_matches(
+    authorization: str | None,
+    *,
+    expected_username: str,
+    expected_password: str,
+) -> bool:
+    supplied = _site_basic_auth_credentials(authorization)
+    if supplied is None:
+        return False
+    supplied_username, supplied_password = supplied
+    username_matches = secrets.compare_digest(
+        supplied_username.encode("utf-8"),
+        expected_username.encode("utf-8"),
+    )
+    password_matches = secrets.compare_digest(
+        supplied_password.encode("utf-8"),
+        expected_password.encode("utf-8"),
+    )
+    return username_matches and password_matches
+
+
+def _site_basic_auth_unauthorized() -> PlainTextResponse:
+    return PlainTextResponse(
+        "Unauthorized\n",
+        status_code=401,
+        headers={
+            "WWW-Authenticate": _SITE_BASIC_AUTH_CHALLENGE,
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+def _site_basic_auth_forbidden() -> PlainTextResponse:
+    return PlainTextResponse(
+        "Forbidden\n",
+        status_code=403,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _is_vault_reviewer_path(path: str) -> bool:
+    """Identify the reviewer-only surface that has its own session boundary."""
+
+    return path == "/vault/review" or path.startswith("/vault/review/")
+
+
+def _same_origin_request_is_valid(
+    request: Request,
+    *,
+    allow_referer_fallback: bool = False,
+) -> bool:
+    configured_origin = _normalized_http_origin(
+        os.environ.get("BRAND3_BASE_URL", "")
+    )
+    if configured_origin is None:
+        return False
+    origin_values = request.headers.getlist("origin")
+    if len(origin_values) == 1 and origin_values[0].strip().lower() not in {"", "null"}:
+        request_origin = _normalized_http_origin(
+            origin_values[0], origin_header=True
+        )
+        return request_origin == configured_origin
+    if not allow_referer_fallback:
+        return False
+    referer_values = request.headers.getlist("referer")
+    if len(referer_values) != 1:
+        return False
+    return _normalized_http_origin(referer_values[0]) == configured_origin
+
+
+@app.middleware("http")
+async def require_site_basic_auth(request: Request, call_next):
+    path = request.url.path
+    if path == "/health" or path.startswith("/api/v1/"):
+        return await call_next(request)
+
+    # The reviewer surface is intentionally the one browser exception to the
+    # broad site Basic gate: it has a dedicated reviewer-token login, a signed
+    # HttpOnly session, CSRF protection, and no runtime effect. Keep the origin
+    # fence for unsafe requests even though Basic is not required here.
+    reviewer_surface = vault_reviewer_enabled() and _is_vault_reviewer_path(path)
+    if reviewer_surface:
+        unsafe = request.method.upper() not in _SITE_BASIC_AUTH_SAFE_METHODS
+        origin_valid = _same_origin_request_is_valid(
+            request,
+            allow_referer_fallback=True,
+        )
+        csrf_protected_without_origin = (
+            request.method.upper() == "POST"
+            and (
+                path == "/vault/review/login"
+                or path == "/vault/review/logout"
+                or path.endswith("/decisions")
+            )
+        )
+        if unsafe and not origin_valid and not csrf_protected_without_origin:
+            return _site_basic_auth_forbidden()
+        return await call_next(request)
+
+    state, username, password = _site_basic_auth_configuration()
+    if state == "disabled":
+        return await call_next(request)
+    if state == "invalid":
+        return PlainTextResponse(
+            "Service unavailable\n",
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    authorization_values = request.headers.getlist("authorization")
+    authorization = authorization_values[0] if len(authorization_values) == 1 else None
+    if not _site_basic_auth_matches(
+        authorization,
+        expected_username=username,
+        expected_password=password,
+    ):
+        return _site_basic_auth_unauthorized()
+
+    if (
+        request.method.upper() not in _SITE_BASIC_AUTH_SAFE_METHODS
+        and not _same_origin_request_is_valid(request)
+    ):
+        return _site_basic_auth_forbidden()
+    return await call_next(request)
+
+
 install_scanner_api(app)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 templates.env.autoescape = select_autoescape(("html", "j2"))
@@ -730,14 +959,25 @@ def _vault_review_login_response(
     error: str = "",
     status_code: int = 200,
 ):
+    login_csrf = secrets.token_hex(32)
     response = templates.TemplateResponse(
         request,
         "vault_review_login.html.j2",
         {
             "next_path": safe_vault_review_path(next_path),
+            "login_csrf": login_csrf,
             "error": error,
         },
         status_code=status_code,
+    )
+    response.set_cookie(
+        key=_VAULT_REVIEW_LOGIN_CSRF_COOKIE,
+        value=login_csrf,
+        max_age=_VAULT_REVIEW_LOGIN_CSRF_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/vault/review/login",
     )
     return _vault_response_headers(response)
 
@@ -1476,10 +1716,29 @@ def create_vault_review_session(
     request: Request,
     token: str = Form(""),
     next_path: str = Form("/"),
+    login_csrf: str = Form(""),
 ):
     if not vault_reviewer_enabled():
         raise HTTPException(status_code=404, detail="Not found")
     destination = safe_vault_review_path(next_path)
+    origin_valid = _same_origin_request_is_valid(
+        request,
+        allow_referer_fallback=True,
+    )
+    if not origin_valid:
+        supplied_challenge = str(login_csrf or "").strip()
+        stored_challenge = request.cookies.get(_VAULT_REVIEW_LOGIN_CSRF_COOKIE, "")
+        if (
+            len(supplied_challenge) != 64
+            or len(stored_challenge) != 64
+            or not secrets.compare_digest(supplied_challenge, stored_challenge)
+        ):
+            return _vault_review_login_response(
+                request,
+                next_path=destination,
+                error="La sesión de acceso caducó. Recarga esta página e inténtalo de nuevo.",
+                status_code=403,
+            )
     try:
         principal = authenticate_vault_reviewer(token)
         cookie_value = issue_vault_reviewer_session(principal)
@@ -1506,6 +1765,13 @@ def create_vault_review_session(
         secure=True,
         samesite="strict",
         path="/vault/review",
+    )
+    response.delete_cookie(
+        _VAULT_REVIEW_LOGIN_CSRF_COOKIE,
+        path="/vault/review/login",
+        secure=True,
+        httponly=True,
+        samesite="strict",
     )
     return _vault_response_headers(response)
 

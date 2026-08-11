@@ -2,16 +2,16 @@
 
 Status: deployment contract for cumulative Draft PR #71 (including PR #70). Production remains **NO-GO**.
 
-Migrations 019/020 deliberately create no application `LOGIN` roles and embed no credentials. Provision logins in the deployment control plane. Never reuse the FastAPI/report DSN as scanner ingest, shadow-read, governance, or release-migration identity.
+Migrations 019–023 deliberately create no application `LOGIN` roles and embed no credentials. Provision logins in the deployment control plane. Never reuse the FastAPI/report DSN as scanner ingest, shadow-read, governance, or release-migration identity.
 
 ## Role split
 
 | Identity | LOGIN | Purpose | Allowed Vault surface |
 |---|---:|---|---|
-| `b3s_history_vault_provenance_owner` | no | owns migration-019 journals and migration-019/020 definer functions | no direct connection |
+| `b3s_history_vault_provenance_owner` | no | owns migration-019 journals and migration-019–023 definer functions | no direct connection |
 | `b3s_history_vault_runtime_read` | no | migration-020 execute-only bounded-read capability group | schema `USAGE` plus exactly three bounded shadow functions |
 | release migrator | yes, controlled | applies immutable migrations | release window only; may `SET ROLE` to owner |
-| scanner ingest | yes | isolated acquisition worker | execute raw append and raw replay-read functions only |
+| scanner ingest | yes | isolated acquisition worker | execute raw append, exact replay-read, and bounded planning-context functions only |
 | runtime read login | yes | public-key verification/shadow readiness reader | sole membership in the runtime-read capability group |
 | provenance governance | yes | reviewed lineage binding and retention/revocation | execute bind and disposition functions only |
 
@@ -38,9 +38,11 @@ CREATE ROLE b3s_history_vault_runtime_read NOLOGIN NOINHERIT
   NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ```
 
-Keep the release migrator's owner `SET` capability until migration 020 has transferred and verified its three functions. Migration 019 must remain byte-for-byte immutable; 020 is the append-only upgrade.
+Keep the release migrator's owner `SET` capability through migration 023. Migration 022 transfers and verifies the bounded planning projection and sanitizes the complete scanner-function ACL. The already-applied migrations 019–022 remain byte-for-byte immutable; migration 023 is the append-only raw-replay projection upgrade.
 
-## After migrations 019 and 020
+## After migration 023
+
+Migration 023 keeps replay strict after report materialization by projecting the original acquisition-time scan envelope from the immutable request payload, protected observation hash, and immutable operation plan. It normalizes only the report lifecycle fields written by the current PostgreSQL report path; current source-run/status/error/requested/started values and non-lifecycle metadata remain visible to the strict validator and therefore fail closed on contamination. The temporary function-owner schema `CREATE` window and `SET LOCAL ROLE` are transactionally bounded and revoked before postconditions.
 
 Create deployment-specific login roles (names below are examples), then grant only schema use and exact function execution:
 
@@ -63,7 +65,10 @@ GRANT USAGE ON SCHEMA b3s_history TO
 
 GRANT EXECUTE ON FUNCTION
   b3s_history.append_evidence_vault_raw_acquisition(jsonb),
-  b3s_history.read_evidence_vault_raw_acquisition(text, text)
+  b3s_history.read_evidence_vault_raw_acquisition(text, text),
+  b3s_history.read_evidence_vault_raw_planning_context(
+    text, text, text, uuid, uuid, uuid
+  )
 TO b3s_vault_scanner_ingest;
 
 GRANT b3s_history_vault_runtime_read TO b3s_vault_runtime_read;
@@ -102,7 +107,7 @@ REVOKE CREATE ON SCHEMA b3s_history FROM
   b3s_vault_provenance_governance;
 ```
 
-The table-wide revocation does not remove a pre-existing column ACL; explicitly revoke any `SELECT`, `INSERT`, `UPDATE` or `REFERENCES` column grant found in `information_schema.column_privileges`. Apply only the scanner/governance direct function grants again after those revocations; never add direct runtime grants. Verify table, column, sequence, schema and function privileges from each login, and prove the runtime login has no effective database-wide `SECURITY DEFINER` execution except the three bounded B3S reads. Scanner/governance functions also use fixed `search_path`; their owner remains NOLOGIN. After both migrations validate, revoke owner membership from the release migrator and re-grant it only inside a later controlled migration window.
+The table-wide revocation does not remove a pre-existing column ACL; explicitly revoke any `SELECT`, `INSERT`, `UPDATE` or `REFERENCES` column grant found in `information_schema.column_privileges`. Apply only the scanner/governance direct function grants again after those revocations; never add direct runtime grants. Verify table, column, sequence, schema and function privileges from each login, and prove the runtime login has no effective database-wide `SECURITY DEFINER` execution except the three bounded B3S reads. Scanner/governance functions also use fixed `search_path`; their owner remains NOLOGIN. After all packaged migrations validate, revoke owner membership from the release migrator and re-grant it only inside a later controlled migration window.
 
 ## Core-parent immutability and physical-deletion boundary
 

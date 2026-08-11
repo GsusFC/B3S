@@ -209,6 +209,10 @@ class TrustedAcquisitionRuntime:
         if owned is None:
             raise EvidenceVaultAcquisitionRuntimeError("owned_collection_failed")
         linkedin_url = _owned_linkedin_fact(owned.raw_fragment)
+        independent_external = bool(
+            getattr(self.__external_fetch, "supports_independent_discovery", False)
+        )
+        external_attempted = linkedin_url is not None or independent_external
         external: ExternalProviderObservation | None = None
         outcome: Literal[
             "not_discovered",
@@ -220,12 +224,14 @@ class TrustedAcquisitionRuntime:
             "provider_unavailable",
             "provider_result_ineligible",
         ] | None = None
-        if linkedin_url is not None:
+        if external_attempted:
             if self.__external_fetch is None:
                 failure_reason = "provider_not_configured"
             else:
                 try:
-                    candidate_value = self.__external_fetch(linkedin_url)
+                    candidate_value = self.__external_fetch(
+                        linkedin_url if linkedin_url is not None else validated.brand_url
+                    )
                 except _ExternalProviderResultError:
                     failure_reason = "provider_result_ineligible"
                 except EvidenceVaultAcquisitionRuntimeError:
@@ -236,7 +242,10 @@ class TrustedAcquisitionRuntime:
                             candidate_value,
                             ExternalProviderObservation,
                         )
-                        _validate_external_observation(linkedin_url, candidate)
+                        _validate_external_observation(
+                            candidate.reported_source_url,
+                            candidate,
+                        )
                     except (ValidationError, ValueError):
                         failure_reason = "provider_result_ineligible"
                     else:
@@ -266,12 +275,22 @@ class TrustedAcquisitionRuntime:
             _validate_owned_observation(validated, frozen.owned)
             linkedin_url = _owned_linkedin_fact(frozen.owned.raw_fragment)
             if frozen.external is not None:
-                if linkedin_url is None:
-                    raise ValueError("external collection has no owned raw link")
-                _validate_external_observation(linkedin_url, frozen.external)
+                _validate_external_observation(
+                    frozen.external.reported_source_url,
+                    frozen.external,
+                )
             _validate_external_outcome(
                 frozen,
-                linkedin_url=linkedin_url,
+                external_attempted=(
+                    linkedin_url is not None
+                    or bool(
+                        getattr(
+                            self.__external_fetch,
+                            "supports_independent_discovery",
+                            False,
+                        )
+                    )
+                ),
                 allow_owned_only_downgrade=self.__allow_owned_only_downgrade,
             )
             registry = PublicKeyRegistry.model_validate_json(
@@ -492,8 +511,9 @@ class HttpxOwnedFetcher:
 
 
 class HttpxExaExactUrlFetcher:
-    """Call Exa's exact-URL contents endpoint and retain real HTTP metadata."""
+    """Acquire an exact external profile, discovering it independently via Exa."""
 
+    supports_independent_discovery = True
     __slots__ = ("_api_key", "_client")
 
     def __init__(self, client: Any, *, api_key: str) -> None:
@@ -503,9 +523,50 @@ class HttpxExaExactUrlFetcher:
         self._api_key = api_key.strip()
 
     def __call__(self, source_url: str) -> ExternalProviderObservation:
-        _strict_linkedin_company_url(source_url)
+        discovery_fingerprint: str | None = None
+        try:
+            _strict_linkedin_company_url(source_url)
+            target_url = source_url
+            discovery_ordinal = None
+        except ValueError:
+            discovery_body = {
+                "query": f"{source_url} company LinkedIn profile",
+                "type": "auto",
+                "numResults": 10,
+            }
+            discovery_fingerprint = canonical_fingerprint(
+                "evidence-vault-exa-independent-discovery-request-v1",
+                discovery_body,
+            )
+            discovery_payload, _status, _headers, _body_size = self._post_json(
+                "https://api.exa.ai/search",
+                discovery_body,
+            )
+            results = (
+                discovery_payload.get("results")
+                if isinstance(discovery_payload, Mapping)
+                else None
+            )
+            if not isinstance(results, list):
+                raise _ExternalProviderResultError("exa_discovery_results_invalid")
+            matches: list[tuple[int, str]] = []
+            for ordinal, item in enumerate(results):
+                candidate = item.get("url") if isinstance(item, Mapping) else None
+                if not isinstance(candidate, str):
+                    continue
+                try:
+                    _strict_linkedin_company_url(candidate)
+                except ValueError:
+                    continue
+                matches.append((ordinal, candidate))
+            if len(matches) != 1:
+                raise _ExternalProviderResultError(
+                    "exa_independent_profile_not_unique"
+                )
+            discovery_ordinal, target_url = matches[0]
+
         request_body = {
-            "ids": [source_url],
+            "ids": [target_url],
             "text": {"maxCharacters": 20_000},
             "highlights": {"maxCharacters": 4_000},
             "summary": {"query": "Exact company profile summary"},
@@ -513,18 +574,72 @@ class HttpxExaExactUrlFetcher:
         }
         request_fingerprint = canonical_fingerprint(
             "evidence-vault-exa-exact-url-request-v1",
+            {
+                "discovery_request_fingerprint": discovery_fingerprint,
+                "contents_request": request_body,
+            },
+        )
+        payload, status, selected_headers, body_size = self._post_json(
+            "https://api.exa.ai/contents",
             request_body,
         )
+        results = payload.get("results") if isinstance(payload, Mapping) else None
+        if not isinstance(results, list):
+            raise _ExternalProviderResultError("exa_results_invalid")
+        matches = [
+            (ordinal, item)
+            for ordinal, item in enumerate(results)
+            if isinstance(item, Mapping) and item.get("url") == target_url
+        ]
+        if len(matches) != 1:
+            raise _ExternalProviderResultError("exa_exact_result_not_unique")
+        ordinal, item = matches[0]
+        title = item.get("title")
+        summary = item.get("summary")
+        text = item.get("text")
+        highlights = item.get("highlights")
+        if (
+            not all(isinstance(value, str) for value in (title, summary, text))
+            or not isinstance(highlights, list)
+            or not all(isinstance(value, str) for value in highlights)
+        ):
+            raise _ExternalProviderResultError("exa_result_fields_invalid")
+        fragment: dict[str, JsonValue] = {
+            "url": target_url,
+            "title": title,
+            "summary": summary,
+            "highlights": list(highlights),
+            "text": text,
+        }
+        if discovery_ordinal is not None:
+            fragment["discovery_result_ordinal"] = discovery_ordinal
+        return ExternalProviderObservation(
+            provider_request_fingerprint=request_fingerprint,
+            result_ordinal=ordinal,
+            reported_source_url=target_url,
+            fetched_at=_utc_now(),
+            status_code=status,
+            selected_headers=selected_headers,
+            media_type="application/json",
+            byte_count=body_size,
+            raw_fragment=fragment,
+        )
+
+    def _post_json(
+        self,
+        endpoint: str,
+        request_body: Mapping[str, Any],
+    ) -> tuple[Mapping[str, Any], int, dict[str, str], int]:
         with self._client.stream(
             "POST",
-            "https://api.exa.ai/contents",
+            endpoint,
             headers={
                 "accept": "application/json",
                 "accept-encoding": "identity",
                 "content-type": "application/json",
                 "x-api-key": self._api_key,
             },
-            content=canonical_json(request_body).encode("utf-8"),
+            content=canonical_json(dict(request_body)).encode("utf-8"),
             timeout=30.0,
         ) as response:
             _require_public_peer(response)
@@ -543,44 +658,9 @@ class HttpxExaExactUrlFetcher:
             payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise _ExternalProviderResultError("exa_json_invalid") from None
-        results = payload.get("results") if isinstance(payload, Mapping) else None
-        if not isinstance(results, list):
-            raise _ExternalProviderResultError("exa_results_invalid")
-        matches: list[tuple[int, Mapping[str, Any]]] = []
-        for ordinal, item in enumerate(results):
-            if isinstance(item, Mapping) and item.get("url") == source_url:
-                matches.append((ordinal, item))
-        if len(matches) != 1:
-            raise _ExternalProviderResultError("exa_exact_result_not_unique")
-        ordinal, item = matches[0]
-        title = item.get("title")
-        summary = item.get("summary")
-        text = item.get("text")
-        highlights = item.get("highlights")
-        if (
-            not all(isinstance(value, str) for value in (title, summary, text))
-            or not isinstance(highlights, list)
-            or not all(isinstance(value, str) for value in highlights)
-        ):
-            raise _ExternalProviderResultError("exa_result_fields_invalid")
-        fragment: dict[str, JsonValue] = {
-            "url": source_url,
-            "title": title,
-            "summary": summary,
-            "highlights": list(highlights),
-            "text": text,
-        }
-        return ExternalProviderObservation(
-            provider_request_fingerprint=request_fingerprint,
-            result_ordinal=ordinal,
-            reported_source_url=source_url,
-            fetched_at=_utc_now(),
-            status_code=status,
-            selected_headers=selected_headers,
-            media_type=media_type,
-            byte_count=len(body),
-            raw_fragment=fragment,
-        )
+        if not isinstance(payload, Mapping):
+            raise _ExternalProviderResultError("exa_json_object_invalid")
+        return payload, status, selected_headers, len(body)
 
 
 def _sign_collected(
@@ -623,16 +703,30 @@ def _sign_collected(
     association: ExternalIdentityProvenance | None = None
     if collected.external is not None:
         external_url = collected.external.reported_source_url
+        owned_linkedin_url = _owned_linkedin_fact(collected.owned.raw_fragment)
+        association_method = (
+            "owned_raw_links_external_profile"
+            if owned_linkedin_url is not None
+            else "exa_independent_discovery"
+        )
         association = ExternalIdentityProvenance(
             schema_version="external-identity-provenance-v1",
             policy_version="evidence-vault-external-identity-association-policy-v1",
-            association_method="owned_raw_links_external_profile",
+            association_method=association_method,
             canonical_brand_domain=snapshot.canonical_brand_domain,
             owned_source_url=snapshot.canonical_brand_url,
             external_source_url=external_url,
             proof_receipt_fingerprint=owned_receipt.receipt_fingerprint,
-            raw_fact_role="owned_web",
-            raw_fact_json_pointer="/sources/owned/linkedin",
+            raw_fact_role=(
+                "owned_web"
+                if owned_linkedin_url is not None
+                else "external_social_profile"
+            ),
+            raw_fact_json_pointer=(
+                "/sources/owned/linkedin"
+                if owned_linkedin_url is not None
+                else "/sources/external/url"
+            ),
             raw_fact_sha256=_json_fragment_sha256(external_url),
             source_identity_schema_version="evidence-memory-document-v2",
             owned_source_identity_id=evidence_memory_source_identity_id(
@@ -654,9 +748,12 @@ def _sign_collected(
                 snapshot_sha=snapshot_sha,
                 external_provenance_fingerprint=(
                     external_identity_provenance_fingerprint(association)
+                    if association is not None
+                    else None
                 ),
             )
         )
+
     receipts.sort(key=lambda receipt: receipt.receipt_fingerprint)
     signed = SignedAcquisition(
         pre_receipt_snapshot=snapshot,
@@ -767,13 +864,13 @@ def _model(value: Any, model: type[BaseModel]) -> Any:
 def _validate_external_outcome(
     collected: CollectedAcquisition,
     *,
-    linkedin_url: str | None,
+    external_attempted: bool,
     allow_owned_only_downgrade: bool,
 ) -> None:
     if collected.external_outcome == "captured":
         if (
             collected.external is None
-            or linkedin_url is None
+            or not external_attempted
             or collected.external_failure_reason is not None
         ):
             raise ValueError("captured external outcome is inconsistent")
@@ -781,7 +878,7 @@ def _validate_external_outcome(
     if collected.external_outcome == "not_discovered":
         if (
             collected.external is not None
-            or linkedin_url is not None
+            or external_attempted
             or collected.external_failure_reason is not None
         ):
             raise ValueError("not-discovered external outcome is inconsistent")
@@ -789,7 +886,7 @@ def _validate_external_outcome(
     if (
         collected.external_outcome != "owned_only_downgrade"
         or collected.external is not None
-        or linkedin_url is None
+        or not external_attempted
         or collected.external_failure_reason is None
         or not allow_owned_only_downgrade
     ):
@@ -864,6 +961,12 @@ class _OwnedHtmlParser(HTMLParser):
             if name.lower() != "href" or not isinstance(value, str):
                 continue
             candidate = urljoin(self.base_url, value.strip())
+            # Public company pages commonly publish one trailing slash, while
+            # the signed external target is canonicalized without it. Only
+            # remove that single safe suffix; query/fragment and other
+            # non-canonical forms remain rejected by the strict validator.
+            if candidate.endswith("/"):
+                candidate = candidate[:-1]
             try:
                 _strict_linkedin_company_url(candidate)
             except ValueError:

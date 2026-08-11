@@ -9,7 +9,7 @@ from importlib import resources
 import logging
 import re
 from threading import Lock
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping
 from uuid import UUID, uuid4, uuid5
 
 import psycopg
@@ -178,12 +178,15 @@ from src.services.evidence_vault_operational_authority import (
     validate_operational_memory_packet,
 )
 from src.services.evidence_vault_authority_profiles import (
+    SCANNER_SEMANTIC_PROFILE_ID,
     build_initial_authority_profile_matrix,
     evaluate_reviewed_basis_authority,
+    evaluate_scanner_semantic_authority,
     validate_authority_decision,
 )
 from src.services.evidence_vault_operational_candidate import (
     build_operational_packet_from_reviewed_candidate,
+    build_operational_packet_from_scanner_candidate,
     build_provisional_operational_packet_from_report,
 )
 from src.services.evidence_vault_operational_review import (
@@ -208,6 +211,11 @@ _ID_NAMESPACE = UUID("3ef1b80c-e7b7-4fb3-95ad-fb9e03c59d52")
 _SCHEMA = "b3s_history"
 _CONNECT_TIMEOUT_SECONDS = 5
 _LOG = logging.getLogger(__name__)
+_SCHEMA_POLICIES = frozenset({"migrate", "verify_head"})
+
+
+class SchemaHeadMismatchError(RuntimeError):
+    """The database migration manifest does not exactly match this build."""
 
 
 class PostgresHistoryRepository:
@@ -218,17 +226,24 @@ class PostgresHistoryRepository:
         dsn: str,
         *,
         connect: Callable[..., Any] = psycopg.connect,
+        schema_policy: Literal["migrate", "verify_head"] = "migrate",
     ) -> None:
         if not str(dsn or "").strip():
             raise ValueError("B3S_DATABASE_URL is required")
+        if schema_policy not in _SCHEMA_POLICIES:
+            raise ValueError("schema_policy must be 'migrate' or 'verify_head'")
         self.dsn = dsn
+        self.schema_policy = schema_policy
         self._connect_fn = connect
         self._migrated = False
         self._migration_lock = Lock()
 
     def migrate(self) -> list[str]:
-        """Apply immutable SQL migrations and reject edited applied files."""
+        """Apply immutable SQL migrations and reject manifest drift."""
 
+        if self.schema_policy != "migrate":
+            raise RuntimeError("schema policy verify_head does not permit migrations")
+        manifest = _migration_manifest()
         applied: list[str] = []
         with self._connect() as conn:
             conn.execute(
@@ -246,16 +261,24 @@ class PostgresHistoryRepository:
                 )
                 """
             )
-            for filename, sql_text in _migration_files():
-                version = filename.split("_", 1)[0]
-                checksum = hashlib.sha256(sql_text.encode("utf-8")).hexdigest()
+            for version, filename, checksum, sql_text in manifest:
                 row = conn.execute(
-                    f"SELECT checksum FROM {_SCHEMA}.schema_migrations WHERE version = %s",
+                    f"""
+                    SELECT filename, checksum
+                    FROM {_SCHEMA}.schema_migrations
+                    WHERE version = %s
+                    """,
                     (version,),
                 ).fetchone()
                 if row:
+                    if str(row["filename"]) != filename:
+                        raise SchemaHeadMismatchError(
+                            f"applied migration {version} has filename drift"
+                        )
                     if str(row["checksum"]) != checksum:
-                        raise RuntimeError(f"applied migration {filename} has changed")
+                        raise SchemaHeadMismatchError(
+                            f"applied migration {filename} has checksum drift"
+                        )
                     continue
                 conn.execute(sql_text, prepare=False)
                 conn.execute(
@@ -266,8 +289,41 @@ class PostgresHistoryRepository:
                     (version, filename, checksum),
                 )
                 applied.append(filename)
+            rows = conn.execute(
+                f"""
+                SELECT version, filename, checksum
+                FROM {_SCHEMA}.schema_migrations
+                ORDER BY version
+                """
+            ).fetchall()
+            _require_exact_migration_manifest(manifest, rows)
         self._migrated = True
         return applied
+
+    def verify_migration_head(self) -> None:
+        """Verify the exact packaged migration head without mutating PostgreSQL."""
+
+        manifest = _migration_manifest()
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+                )
+                rows = conn.execute(
+                    f"""
+                    SELECT version, filename, checksum
+                    FROM {_SCHEMA}.schema_migrations
+                    ORDER BY version
+                    """
+                ).fetchall()
+        except Exception:
+            # Do not surface connection details, credentials, or server errors at
+            # this runtime trust boundary.
+            raise SchemaHeadMismatchError(
+                "history schema migration manifest is unavailable"
+            ) from None
+        _require_exact_migration_manifest(manifest, rows)
+        self._migrated = True
 
     def import_report(
         self,
@@ -3031,6 +3087,161 @@ class PostgresHistoryRepository:
             "packet_replayed": packet_replayed,
             "adoption_replayed": adoption_replayed,
             "score_replayed": score_replayed,
+        }
+
+    def activate_evidence_vault_operational_scanner_result(
+        self,
+        domain_or_url: str,
+        *,
+        source_scan_id: str,
+        operation_plan_fingerprint: str,
+        workspace_slug: str = "b3s",
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Adopt a completed incremental scan into isolated Vault memory.
+
+        The operation result and source packet are already immutable.  This
+        method only builds the scanner-compatibility projection from that exact
+        packet, persists it, appends the idempotent Vault policy event, and
+        materializes the deterministic score.  It never changes B3S reports or
+        grants production/runtime authority.
+        """
+
+        operation = self.get_capture_operation_plan(
+            source_scan_id,
+            workspace_slug=workspace_slug,
+        )
+        if operation is None:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The scanner operation does not exist."
+            )
+        if str(operation.get("operation_plan_fingerprint") or "") != str(
+            operation_plan_fingerprint
+        ):
+            raise EvidenceVaultOperationalAuthorityError(
+                "The scanner operation plan fingerprint does not match."
+            )
+        if str(operation.get("status") or "") != "completed":
+            raise EvidenceVaultOperationalAuthorityError(
+                "The scanner operation is not completed."
+            )
+        result = operation.get("result_payload")
+        if not isinstance(result, Mapping):
+            raise EvidenceVaultOperationalAuthorityError(
+                "The scanner operation has no immutable result."
+            )
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceVaultOperationalAuthorityError(
+                "The brand domain does not exist in durable history."
+            )
+        current = self.get_evidence_vault_operational_memory(
+            domain,
+            workspace_slug=workspace_slug,
+        )
+        if str(result.get("output_kind") or "") != "candidate_overlay":
+            score, score_replayed = (
+                self.get_or_create_evidence_vault_operational_score_evaluation(
+                    domain,
+                    workspace_slug=workspace_slug,
+                )
+            )
+            return {
+                "created": False,
+                "reason": "no_candidate_delta",
+                "memory": current,
+                "score": score,
+                "score_replayed": score_replayed,
+            }
+        source_packet = result.get("source_candidate_packet")
+        if not isinstance(source_packet, Mapping):
+            raise EvidenceVaultOperationalAuthorityError(
+                "The scanner operation has no source candidate packet."
+            )
+        operational = build_operational_packet_from_scanner_candidate(
+            source_packet,
+            current_operational_memory=current,
+        )
+        stored, packet_replayed = self.register_evidence_vault_operational_memory_packet(
+            domain,
+            operational,
+            source_scan_id=source_scan_id,
+            operation_plan_fingerprint=operation_plan_fingerprint,
+            workspace_slug=workspace_slug,
+        )
+        packet = stored["packet"]
+        if packet["has_accepted_change"] is not True:
+            score, score_replayed = (
+                self.get_or_create_evidence_vault_operational_score_evaluation(
+                    domain,
+                    workspace_slug=workspace_slug,
+                )
+            )
+            return {
+                "created": False,
+                "reason": "scanner_candidate_has_no_accepted_change",
+                "packet_replayed": packet_replayed,
+                "memory": current,
+                "score": score,
+                "score_replayed": score_replayed,
+            }
+        policy_fingerprint = str(
+            build_initial_authority_profile_matrix()["authority_matrix_fingerprint"]
+        )
+        actor_id = "automatic-scanner-semantic-v1"
+        parent = (
+            str(current["canonical_memory_version"])
+            if current is not None
+            else None
+        )
+        request_fingerprint = adoption_request_fingerprint(
+            candidate_packet_fingerprint=packet["candidate_packet_fingerprint"],
+            parent_canonical_memory_version=parent,
+            adopted_by="policy",
+            actor_id=actor_id,
+            policy_fingerprint=policy_fingerprint,
+        )
+        command = OperationalAdoptionCommand(
+            candidate_packet_fingerprint=packet["candidate_packet_fingerprint"],
+            parent_canonical_memory_version=parent,
+            adopted_by="policy",
+            actor_id=actor_id,
+            policy_fingerprint=policy_fingerprint,
+            created_at=created_at or datetime.now(timezone.utc).isoformat(),
+            idempotency_key_hash=canonical_fingerprint(
+                "evidence-vault-scanner-semantic-idempotency-v1",
+                {
+                    "candidate_packet_fingerprint": packet[
+                        "candidate_packet_fingerprint"
+                    ],
+                    "parent_canonical_memory_version": parent,
+                    "policy_fingerprint": policy_fingerprint,
+                },
+            ),
+            request_fingerprint=request_fingerprint,
+        )
+        _, adoption_replayed = self.append_evidence_vault_operational_adoption(
+            domain,
+            command,
+            workspace_slug=workspace_slug,
+        )
+        memory = self.get_evidence_vault_operational_memory(
+            domain,
+            workspace_slug=workspace_slug,
+        )
+        score, score_replayed = (
+            self.get_or_create_evidence_vault_operational_score_evaluation(
+                domain,
+                workspace_slug=workspace_slug,
+            )
+        )
+        return {
+            "created": True,
+            "packet_replayed": packet_replayed,
+            "adoption_replayed": adoption_replayed,
+            "score_replayed": score_replayed,
+            "memory": memory,
+            "score": score,
         }
 
     def activate_evidence_vault_operational_baseline(
@@ -7903,7 +8114,11 @@ class PostgresHistoryRepository:
         if self._migrated:
             return
         with self._migration_lock:
-            if not self._migrated:
+            if self._migrated:
+                return
+            if self.schema_policy == "verify_head":
+                self.verify_migration_head()
+            else:
                 self.migrate()
 
     def _connect(self):
@@ -9376,6 +9591,81 @@ def _migration_files() -> list[tuple[str, str]]:
         for item in sorted(root.iterdir(), key=lambda path: path.name)
         if item.name.endswith(".sql")
     ]
+
+
+def _migration_manifest() -> list[tuple[str, str, str, str]]:
+    manifest: list[tuple[str, str, str, str]] = []
+    versions: set[str] = set()
+    for filename, sql_text in _migration_files():
+        version = filename.split("_", 1)[0]
+        if not version or version in versions:
+            raise RuntimeError("packaged history migration manifest is invalid")
+        versions.add(version)
+        manifest.append(
+            (
+                version,
+                filename,
+                hashlib.sha256(sql_text.encode("utf-8")).hexdigest(),
+                sql_text,
+            )
+        )
+    return manifest
+
+
+def _require_exact_migration_manifest(
+    expected: Iterable[tuple[str, str, str, str]],
+    actual: Iterable[Mapping[str, Any]],
+) -> None:
+    expected_rows = {
+        version: (filename, checksum)
+        for version, filename, checksum, _sql_text in expected
+    }
+    actual_rows: dict[str, tuple[str, str]] = {}
+    duplicate_versions: set[str] = set()
+    for row in actual:
+        try:
+            version = str(row["version"])
+            filename = str(row["filename"])
+            checksum = str(row["checksum"])
+        except (KeyError, TypeError):
+            raise SchemaHeadMismatchError(
+                "history schema migration manifest is malformed"
+            ) from None
+        if version in actual_rows:
+            duplicate_versions.add(version)
+        actual_rows[version] = (filename, checksum)
+
+    expected_versions = set(expected_rows)
+    actual_versions = set(actual_rows)
+    missing = sorted(expected_versions - actual_versions)
+    unexpected = sorted(actual_versions - expected_versions)
+    common = expected_versions & actual_versions
+    filename_drift = sorted(
+        version
+        for version in common
+        if actual_rows[version][0] != expected_rows[version][0]
+    )
+    checksum_drift = sorted(
+        version
+        for version in common
+        if actual_rows[version][1] != expected_rows[version][1]
+    )
+    problems: list[str] = []
+    if missing:
+        problems.append(f"missing versions [{', '.join(missing)}]")
+    if unexpected:
+        problems.append(f"unexpected/ahead versions ({len(unexpected)})")
+    if duplicate_versions:
+        problems.append(f"duplicate versions ({len(duplicate_versions)})")
+    if filename_drift:
+        problems.append(f"filename drift [{', '.join(filename_drift)}]")
+    if checksum_drift:
+        problems.append(f"checksum drift [{', '.join(checksum_drift)}]")
+    if problems:
+        raise SchemaHeadMismatchError(
+            "history schema is not at the packaged migration head: "
+            + "; ".join(problems)
+        )
 
 
 def _require_operational_c7_plan_allowed(
@@ -11339,7 +11629,12 @@ def _validate_operational_packet_lineage_for_storage(
             raise EvidenceVaultOperationalAuthorityError(
                 f"Accepted tile {tile_id} is absent from the source packet."
             )
-        if tile_id == "C7":
+        if (
+            tile_id == "C7"
+            and accepted.get("authority_profile_id") != SCANNER_SEMANTIC_PROFILE_ID
+        ):
+            # The operational C7 supplement remains separately gated.  The
+            # ordinary rubric C7 tile follows the normal scanner-memory path.
             source_coverage = source_manifest.get("coverage_summary") or {}
             source_basis = [
                 row
@@ -11412,7 +11707,12 @@ def _validate_operational_packet_lineage_for_storage(
                 )
         else:
             matrix = build_initial_authority_profile_matrix()
-            decision = evaluate_reviewed_basis_authority(
+            evaluator = (
+                evaluate_scanner_semantic_authority
+                if accepted.get("authority_profile_id") == SCANNER_SEMANTIC_PROFILE_ID
+                else evaluate_reviewed_basis_authority
+            )
+            decision = evaluator(
                 candidate_tile=source,
                 authority_matrix=matrix,
             )

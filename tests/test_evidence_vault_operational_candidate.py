@@ -12,6 +12,7 @@ from src.services.evidence_vault_canonical_core import (
 )
 from src.services.evidence_vault_operational_candidate import (
     build_operational_packet_from_reviewed_candidate,
+    build_operational_packet_from_scanner_candidate,
     build_provisional_operational_packet_from_report,
 )
 
@@ -100,6 +101,23 @@ def test_contradiction_is_local_and_does_not_block_other_reviewed_tiles() -> Non
     assert coverage["contradiction_on_unresolved_count"] == 1
     assert c8["candidate_preview_points"] is None
     assert c8["canonical_semantic_state"] is None
+
+
+def test_scanner_candidate_materializes_normal_vault_memory() -> None:
+    candidates = _candidates()
+    candidates[0] = build_candidate_tile(
+        tile_id="M1",
+        basis=[_basis("scanner-m1", "supports", reviewed=False)],
+    )
+
+    operational = build_operational_packet_from_scanner_candidate(_packet(candidates))
+
+    accepted = operational["accepted_memory"]["accepted_tiles"]
+    assert len(accepted) == 80
+    m1 = next(row for row in accepted if row["tile_id"] == "M1")
+    assert m1["authority_profile_id"] == "scanner-semantic-v1"
+    assert m1["authority_source"] == "policy"
+    assert operational["scoring_projection"]["coverage"]["accepted_tile_count"] == 80
 
 
 def test_scanner_report_becomes_provisional_overlay_not_automatic_truth() -> None:

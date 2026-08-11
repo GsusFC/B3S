@@ -68,6 +68,7 @@ def test_verified_raw_shadow_calls_only_public_ipc_and_records_safe_result(
             return SimpleNamespace(
                 capture_id="12345678-1234-4234-8234-123456789abc",
                 capture_content_hash="1" * 64,
+                capture_observation_hash="5" * 64,
                 receipt_set_fingerprint="2" * 64,
                 receipt_rows=[object(), object()],
                 documents=[
@@ -117,6 +118,7 @@ def test_verified_raw_shadow_calls_only_public_ipc_and_records_safe_result(
                     "url": "https://example.com",
                     "content": "Exact owned document.",
                     "extracted_document_sha256": "3" * 64,
+                    "extractor_version": "evidence-vault-deterministic-extractor-v1",
                     "receipt_fingerprint": "1" * 64,
                 },
             },
@@ -127,11 +129,17 @@ def test_verified_raw_shadow_calls_only_public_ipc_and_records_safe_result(
                     "url": "https://www.linkedin.com/company/example",
                     "content": "Exact external document.",
                     "extracted_document_sha256": "4" * 64,
+                    "extractor_version": "evidence-vault-deterministic-extractor-v1",
                     "receipt_fingerprint": "2" * 64,
                 },
             },
         ]
         assert snapshot["acquisition_steps"]["searchapi"]["status"] == "disabled"
+        assert snapshot["source_capture"] == {
+            "source_scan_id": scan_id,
+            "observation_hash": "5" * 64,
+            "capture_hash": "1" * 64,
+        }
         assert snapshot["run"]["url"] == "https://example.com"
         command = observed[1][1]
         assert command.workspace_slug == "b3s"
@@ -141,6 +149,7 @@ def test_verified_raw_shadow_calls_only_public_ipc_and_records_safe_result(
             "state": "persisted_shadow",
             "capture_id": "12345678-1234-4234-8234-123456789abc",
             "capture_content_hash": "1" * 64,
+            "capture_observation_hash": "5" * 64,
             "receipt_set_fingerprint": "2" * 64,
             "receipt_count": 2,
         }
@@ -318,6 +327,8 @@ def test_verified_external_document_survives_real_evidence_pack() -> None:
         scan_id="stable-scan-id",
         brand_name="Example",
         canonical_url="https://example.com",
+        capture_content_hash="5" * 64,
+        capture_observation_hash="6" * 64,
         documents=documents,
     )
     pack = build_evidence_pack_from_snapshot(snapshot)
@@ -333,6 +344,42 @@ def test_verified_external_document_survives_real_evidence_pack() -> None:
     )
 
 
+def test_verified_owned_only_report_pack_omits_unstored_acquisition_diagnostics() -> None:
+    from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
+
+    snapshot = {
+        "run": {"brand_name": "Example", "url": "https://example.com"},
+        "raw_inputs": [
+            {
+                "source": "verified_raw_document",
+                "payload": {
+                    "role": "owned_web",
+                    "url": "https://example.com",
+                    "content": "Exact owned verified text.",
+                    "extracted_document_sha256": "3" * 64,
+                    "extractor_version": "vault-extractor-v1",
+                    "receipt_fingerprint": "1" * 64,
+                },
+            }
+        ],
+        "acquisition_steps": {
+            "web": {"status": "success"},
+            "exa": {
+                "status": "error",
+                "detail": "verified_external_document_unavailable",
+            },
+        },
+        "features": [],
+    }
+    full_pack = build_evidence_pack_from_snapshot(snapshot)
+    capture_pack = build_evidence_pack_from_snapshot(
+        snapshot, include_acquisition_steps=False
+    )
+    assert len(full_pack.evidence) > len(capture_pack.evidence)
+    assert len(capture_pack.evidence) == 1
+    assert capture_pack.evidence[0].content == "Exact owned verified text."
+
+
 def test_verified_owned_only_never_fabricates_configured_searchapi_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -341,6 +388,8 @@ def test_verified_owned_only_never_fabricates_configured_searchapi_fallback(
         scan_id="owned-only",
         brand_name="Example",
         canonical_url="https://example.com",
+        capture_content_hash="5" * 64,
+        capture_observation_hash="6" * 64,
         documents=[
             SimpleNamespace(
                 role="owned_web",
@@ -367,3 +416,19 @@ def test_verified_owned_only_never_fabricates_configured_searchapi_fallback(
             "reason": "vertical external-proof fallback for Exa failure",
         }
     ]
+
+
+def test_owned_only_analysis_records_external_gap_without_blocking_score():
+    gate = scan_runner._build_acquisition_gate(
+        {
+            "web": {"status": "success"},
+            "exa": {"status": "error", "detail": "verified_external_document_unavailable"},
+            "searchapi": {"status": "disabled"},
+        },
+        allow_owned_only_analysis=True,
+    )
+    assert gate["state"] == "warning"
+    assert gate["issues"] == []
+    assert gate["can_continue"] is True
+    assert gate["warnings"][0]["code"] == "exa_failed"
+    assert "not C7 qualifying proof" in gate["warnings"][0]["message"]
