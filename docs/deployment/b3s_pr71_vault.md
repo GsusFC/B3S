@@ -135,20 +135,17 @@ immediately before dispatch is mandatory. A caller can request
 could remove an in-workflow check, so the environment policy is part of the
 boundary rather than optional duplication.
 
-The `pr71-vault` environment now contains exactly
-`B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN`, provisioned only after the
-owner authorized the isolated deployment. The first dispatch (`31507333105`)
-failed closed in pre-checkout attestation, before either secret expression or
-any database/Fly mutation. Authorized retry `31526043212` passed the complete
-workflow attestation, checkout, and installation, then failed closed in the
-migration target preflight before any DDL, role grants, or Fly mutation. A
-read-only diagnostic on that same target proved the exact database, user,
-project, and branch plus `connection.pgconn.ssl_in_use is True`; Neon reported
-`pg_stat_ssl.ssl=false` because its proxy terminates the client TLS connection.
-Retain those secrets only for an explicitly authorized retry of the exact
-hotfix/current-main SHA; remove them if that retry is abandoned. Secret
-expressions occur only in steps after the complete attestation, checkout, and
-package installation.
+The `pr71-vault` environment currently contains zero deployment secrets.
+Exactly `B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN` were provisioned only
+after the owner authorized the isolated deployment. Dispatch `31507333105`
+failed closed before checkout or secret use; retry `31526043212` failed closed
+in the migration target preflight before advisory lock, DDL, ACL, or Fly
+mutation. Final run `31534878673` completed every attestation, migration/ACL,
+deploy, and exact-commit liveness step successfully.
+Both temporary deployment secrets were then removed.
+Any future deployment requires a new exact-SHA GO and fresh secret provisioning.
+Secret expressions remain confined to steps
+after complete attestation, checkout, and package installation.
 
 Before checkout, dependency installation, or deployment-secret use,
 runner-owned code fetches PR #71 through the GitHub REST API and requires
@@ -266,10 +263,11 @@ if readiness becomes true.
 ## Rollback and NO-GO
 
 Deployment is **NO-GO** unless the fixed PR #71 reviewed head and merge attest,
-the requested SHA equals both dispatched and live current `main`, the only
-post-PR71 changes are the exact three-file hotfix, all three CI blobs and all
-required CI runs attest, the separate deployment GO and secret provisioning are
-complete, the external migration target assertion passes before DDL, head `023`
+the requested SHA equals both dispatched and live current `main`, the cumulative
+post-PR71 changes are the exact seven audited files listed above, all three CI
+blobs and all required CI runs attest, the separate deployment GO and secret
+provisioning are complete, the external migration target assertion passes before
+DDL, head `023`
 verifies exactly, the idempotent runtime-role contract passes, and C7 remains
 denied.
 `b3s` and `b3s-vault` must remain on their SELECT-only release verifiers and may
