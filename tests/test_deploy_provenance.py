@@ -549,10 +549,17 @@ def test_pr71_runbook_marks_workflow_post_merge_and_separately_authorized():
     assert "`merge_commit_sha`" in runbook
     assert "`refs/heads/main`" in runbook
     assert "custom deployment branch policy configured to allow only `main`" in runbook
-    assert "now contains exactly" in runbook
-    assert "`B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN`" in runbook
-    assert "first dispatch (`31507333105`)" in runbook
-    assert "before either secret expression" in runbook
+    assert "currently contains zero deployment secrets" in runbook
+    assert "`B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN` were provisioned only" in runbook
+    assert "Dispatch `31507333105`" in runbook
+    assert "failed closed before checkout or secret use" in runbook
+    assert "retry `31526043212`" in runbook
+    assert "before advisory lock, DDL, ACL, or Fly" in runbook
+    assert "Final run `31534878673`" in runbook
+    assert "completed every attestation, migration/ACL" in runbook
+    assert "Both temporary deployment secrets were then removed" in runbook
+    assert "Any future deployment requires a new exact-SHA GO" in runbook
+    assert "exact seven audited files listed above" in runbook
     assert "without filtering" in runbook
     assert "non-successful runs" in runbook
     assert "`pull_requests` array may be empty" in runbook
