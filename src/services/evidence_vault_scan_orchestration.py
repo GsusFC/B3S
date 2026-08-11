@@ -391,10 +391,43 @@ def _operational_c7_plan_blocked(
     ) and not current_c7_cutover_decision(brand_or_url).enabled
 
 
+def _trusted_capture_binding_matches(
+    attempted: Mapping[str, Any],
+    persisted: Mapping[str, Any],
+) -> bool:
+    if str(persisted.get("pipeline_version") or "") != (
+        "evidence-vault-trusted-acquisition-v1"
+    ):
+        return False
+    capture_payload = attempted.get("capture_payload")
+    if not isinstance(capture_payload, Mapping):
+        return False
+    source_capture = capture_payload.get("source_capture")
+    if not isinstance(source_capture, Mapping):
+        return False
+    source_scan_id = str(persisted.get("source_scan_id") or "")
+    # The acquisition worker owns the raw observation. The web runner receives
+    # only these two hashes, so it must resume that observation rather than
+    # treating its derived pre-analysis wrapper as a second capture.
+    return bool(
+        source_scan_id
+        and str(attempted.get("source_scan_id") or "") == source_scan_id
+        and str(source_capture.get("source_scan_id") or "") == source_scan_id
+        and normalize_domain(str(attempted.get("url") or ""))
+        == normalize_domain(str(persisted.get("url") or ""))
+        and str(source_capture.get("observation_hash") or "")
+        == canonical_json_hash(dict(persisted))
+        and str(source_capture.get("capture_hash") or "")
+        == canonical_json_hash(persisted.get("capture_payload") or {})
+    )
+
+
 def _same_exact_capture_observation(
     attempted: Mapping[str, Any],
     persisted: Mapping[str, Any],
 ) -> bool:
+    if _trusted_capture_binding_matches(attempted, persisted):
+        return True
     fields = (
         "schema_version",
         "source_scan_id",

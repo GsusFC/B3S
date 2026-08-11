@@ -744,6 +744,75 @@ def _snapshot(content: str) -> dict:
     }
 
 
+def test_trusted_worker_binding_resumes_exact_persisted_capture() -> None:
+    initial = _Repository(memory=None, history=[])
+    first = prepare_vault_scan_after_capture(
+        repository=initial,
+        snapshot=_snapshot("Trusted worker evidence"),
+        scan_id="scan-trusted-worker",
+        url="https://example.com",
+        brand_name="Example",
+        environment="vault",
+        incremental_enabled=True,
+        observed_at="2026-08-06T11:00:00Z",
+    )
+    raw = deepcopy(initial.persisted[0])
+    raw["pipeline_version"] = "evidence-vault-trusted-acquisition-v1"
+    plan = first["operation_plan"]
+
+    class DirectRepository(_Repository):
+        def get_capture_operation_plan(self, source_scan_id, **_kwargs):
+            return {
+                "status": "pending",
+                "raw_observation": raw,
+                "plan": plan,
+                "result_fingerprint": None,
+            }
+
+    repository = DirectRepository(memory=None, history=[])
+    wrapper_snapshot = _snapshot("Trusted worker evidence")
+    wrapper_snapshot["run"]["id"] = 2**63 - 1
+    wrapper_snapshot["acquisition_steps"]["exa"] = {
+        "status": "error",
+        "details": {"reason": "verified_external_document_unavailable"},
+    }
+    wrapper_snapshot["source_capture"] = {
+        "source_scan_id": "scan-trusted-worker",
+        "observation_hash": canonical_json_hash(raw),
+        "capture_hash": canonical_json_hash(raw["capture_payload"]),
+    }
+
+    resumed = prepare_vault_scan_after_capture(
+        repository=repository,
+        snapshot=wrapper_snapshot,
+        scan_id="scan-trusted-worker",
+        url="https://example.com",
+        brand_name="Example",
+        environment="vault",
+        incremental_enabled=True,
+        observed_at="2026-08-06T11:00:00Z",
+    )
+
+    assert resumed["operation_plan"] == plan
+    assert resumed["report_observation"] == raw
+
+    wrapper_snapshot["source_capture"]["observation_hash"] = "0" * 64
+    with pytest.raises(
+        EvidenceVaultScanOrchestrationError,
+        match="different exact capture",
+    ):
+        prepare_vault_scan_after_capture(
+            repository=repository,
+            snapshot=wrapper_snapshot,
+            scan_id="scan-trusted-worker",
+            url="https://example.com",
+            brand_name="Example",
+            environment="vault",
+            incremental_enabled=True,
+            observed_at="2026-08-06T11:00:00Z",
+        )
+
+
 def test_retry_uses_first_class_operation_lookup_for_result_recovery() -> None:
     initial = _Repository(memory=None, history=[])
     first = prepare_vault_scan_after_capture(
