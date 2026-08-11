@@ -2,13 +2,13 @@
 
 Status: deployment contract for cumulative Draft PR #71 (including PR #70). Production remains **NO-GO**.
 
-Migrations 019–022 deliberately create no application `LOGIN` roles and embed no credentials. Provision logins in the deployment control plane. Never reuse the FastAPI/report DSN as scanner ingest, shadow-read, governance, or release-migration identity.
+Migrations 019–023 deliberately create no application `LOGIN` roles and embed no credentials. Provision logins in the deployment control plane. Never reuse the FastAPI/report DSN as scanner ingest, shadow-read, governance, or release-migration identity.
 
 ## Role split
 
 | Identity | LOGIN | Purpose | Allowed Vault surface |
 |---|---:|---|---|
-| `b3s_history_vault_provenance_owner` | no | owns migration-019 journals and migration-019–022 definer functions | no direct connection |
+| `b3s_history_vault_provenance_owner` | no | owns migration-019 journals and migration-019–023 definer functions | no direct connection |
 | `b3s_history_vault_runtime_read` | no | migration-020 execute-only bounded-read capability group | schema `USAGE` plus exactly three bounded shadow functions |
 | release migrator | yes, controlled | applies immutable migrations | release window only; may `SET ROLE` to owner |
 | scanner ingest | yes | isolated acquisition worker | execute raw append, exact replay-read, and bounded planning-context functions only |
@@ -38,9 +38,11 @@ CREATE ROLE b3s_history_vault_runtime_read NOLOGIN NOINHERIT
   NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ```
 
-Keep the release migrator's owner `SET` capability through migration 022, which transfers and verifies the bounded planning projection and sanitizes the complete scanner-function ACL. Migrations 019–021 must remain byte-for-byte immutable; 022 is the append-only upgrade.
+Keep the release migrator's owner `SET` capability through migration 023. Migration 022 transfers and verifies the bounded planning projection and sanitizes the complete scanner-function ACL. The already-applied migrations 019–022 remain byte-for-byte immutable; migration 023 is the append-only raw-replay projection upgrade.
 
-## After migration 022
+## After migration 023
+
+Migration 023 keeps replay strict after report materialization by projecting the original acquisition-time scan envelope from the immutable request payload, protected observation hash, and immutable operation plan. It normalizes only the report lifecycle fields written by the current PostgreSQL report path; current source-run/status/error/requested/started values and non-lifecycle metadata remain visible to the strict validator and therefore fail closed on contamination. The temporary function-owner schema `CREATE` window and `SET LOCAL ROLE` are transactionally bounded and revoked before postconditions.
 
 Create deployment-specific login roles (names below are examples), then grant only schema use and exact function execution:
 

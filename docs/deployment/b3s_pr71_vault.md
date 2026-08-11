@@ -47,6 +47,8 @@ migration versions, filenames, and checksums. The isolated release verifier
 also requires `current_user = b3s_pr71_app_runtime`; an owner or migration
 credential on the same branch is rejected before the Machine update.
 
+Migration 023 keeps the worker replay reader strict after a report upgrades mutable `scan_runs` presentation fields: it reconstructs the frozen raw scan projection from the immutable request and plan, while retaining current source-run/status/error/requested/started and non-lifecycle metadata so contamination still fails closed.
+
 The isolated L2 logins are fixed and distinct:
 
 - `b3s_pr71_app_runtime` — FastAPI/report runtime login

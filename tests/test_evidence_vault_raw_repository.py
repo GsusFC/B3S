@@ -994,6 +994,176 @@ def test_postgres_scanner_execute_role_persists_looks_up_and_replays() -> None:
         assert first.receipt_rows == looked_up.receipt_rows == replayed.receipt_rows
         assert first.durable_raw_capture_payload == looked_up.durable_raw_capture_payload
 
+        with psycopg.connect(scanner_dsn) as scanner:
+            frozen_before = scanner.execute(
+                "SELECT b3s_history.read_evidence_vault_raw_acquisition(%s, %s)",
+                (command.workspace_slug, command.source_scan_id),
+            ).fetchone()[0]
+        with psycopg.connect(admin_dsn) as admin:
+            admin.execute(
+                """UPDATE b3s_history.scan_runs
+                   SET pipeline_version = 'b3s-vault-memory-report-v1',
+                       acquisition_state = 'warning',
+                       completed_at = completed_at + interval '1 second',
+                       recorded_at = completed_at + interval '1 second',
+                       metadata = metadata || jsonb_build_object(
+                           'analysis_status', 'completed',
+                           'analysis_result_fingerprint', repeat('a', 64),
+                           'candidate_packet_fingerprint', NULL,
+                           'persisted_as', 'capture_with_report',
+                           'report_hash', repeat('b', 64)
+                       )
+                   WHERE source_scan_id = %s""",
+                (command.source_scan_id,),
+            )
+        with psycopg.connect(scanner_dsn) as scanner:
+            frozen_after = scanner.execute(
+                "SELECT b3s_history.read_evidence_vault_raw_acquisition(%s, %s)",
+                (command.workspace_slug, command.source_scan_id),
+            ).fetchone()[0]
+        assert frozen_after["scan_run"] == frozen_before["scan_run"]
+        assert frozen_after["scan_run"]["metadata"]["persisted_as"] == "capture_only"
+        assert (
+            frozen_after["scan_run"]["metadata"]["operation_plan_fingerprint"]
+            == frozen_after["operation_plan"]["operation_plan_fingerprint"]
+        )
+        completed_lookup = repository.lookup(command)
+        assert completed_lookup is not None
+        assert completed_lookup.capture_id == first.capture_id
+        assert completed_lookup.capture_content_hash == first.capture_content_hash
+        assert completed_lookup.receipt_rows == first.receipt_rows
+        assert planner_calls == 1
+
+        scan_poison_cases = (
+            ("status = 'forged'", "status = 'completed'"),
+            ("error_summary = 'forged'", "error_summary = ''"),
+            (
+                "requested_at = requested_at + interval '1 second'",
+                "requested_at = requested_at - interval '1 second'",
+            ),
+            (
+                "started_at = started_at + interval '1 second'",
+                "started_at = started_at - interval '1 second'",
+            ),
+            ("source_run_id = 'forged'", "source_run_id = ''"),
+            (
+                "metadata = metadata || '{\"unexpected\":true}'::jsonb",
+                "metadata = metadata - 'unexpected'",
+            ),
+            (
+                "metadata = jsonb_set(metadata, "
+                "'{operation_plan_fingerprint}', to_jsonb(repeat('0', 64)))",
+                "metadata = jsonb_set(metadata, "
+                "'{operation_plan_fingerprint}', "
+                "metadata #> '{operation_plan,operation_plan_fingerprint}')",
+            ),
+        )
+        for poison, restore in scan_poison_cases:
+            with psycopg.connect(admin_dsn) as admin:
+                admin.execute(
+                    sql.SQL(
+                        "UPDATE b3s_history.scan_runs SET {} "
+                        "WHERE source_scan_id = %s"
+                    ).format(sql.SQL(poison)),
+                    (command.source_scan_id,),
+                )
+            with pytest.raises(EvidenceVaultRawRepositoryError):
+                repository.lookup(command)
+            with psycopg.connect(admin_dsn) as admin:
+                admin.execute(
+                    sql.SQL(
+                        "UPDATE b3s_history.scan_runs SET {} "
+                        "WHERE source_scan_id = %s"
+                    ).format(sql.SQL(restore)),
+                    (command.source_scan_id,),
+                )
+            assert repository.lookup(command) is not None
+
+        scan_trigger = "evidence_vault_scan_parent_immutable"
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("ALTER TABLE b3s_history.scan_runs DISABLE TRIGGER {}")
+                .format(sql.Identifier(scan_trigger))
+            )
+            admin.execute(
+                """UPDATE b3s_history.scan_runs
+                   SET metadata = jsonb_set(
+                       metadata,
+                       '{observation_hash}',
+                       to_jsonb(repeat('0', 64))
+                   )
+                   WHERE source_scan_id = %s""",
+                (command.source_scan_id,),
+            )
+            admin.execute(
+                sql.SQL("ALTER TABLE b3s_history.scan_runs ENABLE TRIGGER {}")
+                .format(sql.Identifier(scan_trigger))
+            )
+        with pytest.raises(EvidenceVaultRawRepositoryError):
+            repository.lookup(command)
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("ALTER TABLE b3s_history.scan_runs DISABLE TRIGGER {}")
+                .format(sql.Identifier(scan_trigger))
+            )
+            admin.execute(
+                """UPDATE b3s_history.scan_runs
+                   SET metadata = jsonb_set(
+                       metadata,
+                       '{observation_hash}',
+                       to_jsonb(%s::text)
+                   )
+                   WHERE source_scan_id = %s""",
+                (
+                    frozen_before["scan_run"]["metadata"]["observation_hash"],
+                    command.source_scan_id,
+                ),
+            )
+            admin.execute(
+                sql.SQL("ALTER TABLE b3s_history.scan_runs ENABLE TRIGGER {}")
+                .format(sql.Identifier(scan_trigger))
+            )
+        assert repository.lookup(command) is not None
+
+        with pytest.raises(psycopg.Error):
+            with psycopg.connect(admin_dsn) as admin:
+                admin.execute(
+                    """UPDATE b3s_history.scan_runs
+                       SET request_payload = jsonb_set(
+                           request_payload,
+                           '{pipeline_version}',
+                           '"forged"'::jsonb
+                       )
+                       WHERE source_scan_id = %s""",
+                    (command.source_scan_id,),
+                )
+        with pytest.raises(psycopg.Error):
+            with psycopg.connect(admin_dsn) as admin:
+                admin.execute(
+                    """UPDATE b3s_history.evidence_vault_operation_plans
+                       SET plan_payload = jsonb_set(
+                           plan_payload,
+                           '{mode}',
+                           '"incremental_refresh"'::jsonb
+                       )
+                       WHERE scan_run_id = (
+                           SELECT id FROM b3s_history.scan_runs
+                           WHERE source_scan_id = %s
+                       )""",
+                    (command.source_scan_id,),
+                )
+        with pytest.raises(psycopg.Error):
+            with psycopg.connect(admin_dsn) as admin:
+                admin.execute(
+                    """UPDATE b3s_history.captures
+                       SET raw_payload = raw_payload || '{"forged":true}'::jsonb
+                       WHERE scan_run_id = (
+                           SELECT id FROM b3s_history.scan_runs
+                           WHERE source_scan_id = %s
+                       )""",
+                    (command.source_scan_id,),
+                )
+
         worker_fixtures = runpy.run_path(
             "tests/test_evidence_vault_acquisition_worker.py"
         )

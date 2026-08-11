@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
 
 SCHEMA = "b3s_history"
 MIGRATION_JOURNAL = "schema_migrations"
-EXPECTED_HEAD_VERSION = "022"
+EXPECTED_HEAD_VERSION = "023"
 WATERMARK_TABLE = "evidence_vault_capture_watermark_events"
 RAW_MIGRATION_019_RELATIONS = frozenset(
     {
@@ -127,7 +127,7 @@ def _verify_exact_head(
     verifier: Callable[[Iterable[tuple[str, str, str, str]], Iterable[Mapping[str, Any]]], None],
 ) -> str:
     if not manifest or manifest[-1][0] != EXPECTED_HEAD_VERSION:
-        raise RuntimeRoleConfigurationError("this runtime grant tool requires packaged migration head 022")
+        raise RuntimeRoleConfigurationError("this runtime grant tool requires packaged migration head 023")
     rows = conn.execute(
         sql.SQL(
             """

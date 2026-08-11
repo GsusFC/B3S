@@ -104,7 +104,7 @@ Validate, migrate, and import the current file-backed reports:
 ```
 
 The importer applies immutable packaged migrations through
-`022_evidence_vault_raw_incremental_planning.sql`, is idempotent, and
+`023_evidence_vault_raw_replay_projection.sql`, is idempotent, and
 rejects a reused report id with different content. The schema, invariants,
 integration scope, and cutover boundary are documented in
 [`docs/b3s_postgres_history_v1.md`](docs/b3s_postgres_history_v1.md).

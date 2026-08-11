@@ -159,7 +159,7 @@ python scripts/import_b3s_reports_postgres.py --migrate-only
 ```
 
 The first run must apply every packaged migration through
-`022_evidence_vault_raw_incremental_planning.sql`; the second must apply
+`023_evidence_vault_raw_replay_projection.sql`; the second must apply
 none. Current PostgreSQL integration coverage includes base history/import,
 Brand3 archive isolation, Vault operational persistence and execution, capture
 lineage, verified-raw provenance and roles, bounded C7 shadow readiness, and
