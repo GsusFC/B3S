@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+import textwrap
 import tomllib
 from pathlib import Path
+
+import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -16,10 +23,172 @@ ISOLATED_RELEASE_COMMAND = (
     "python scripts/verify_b3s_history_postgres.py && "
     "python scripts/verify_pr71_vault_target.py'"
 )
+TRUSTED_PR_HEAD_SHA = "377364784ee9b4554acd074a7013e870191654e0"
+TRUSTED_PR_MERGE_SHA = "05393b5eac7fa7be68f5739eba92becb40619a50"
+TRUSTED_CI_BLOB_SHA = "c1082f6b5c53a364b8d38e43936b93722c0183d1"
+TRUSTED_REPOSITORY_ID = 1288696741
+TRUSTED_CI_WORKFLOW_ID = 306885838
+TRUSTED_PR_CI_RUN_ID = 31496647341
+TRUSTED_MERGE_CI_RUN_ID = 31506929921
+FIXTURE_DEPLOY_SHA = "a" * 40
+HOTFIX_FILES = {
+    ".github/workflows/fly-deploy-pr71-vault.yml",
+    "docs/deployment/b3s_pr71_vault.md",
+    "tests/test_deploy_provenance.py",
+}
 
 
 def _read(relative_path: str) -> str:
     return (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def _attestation_source() -> str:
+    workflow = _read(".github/workflows/fly-deploy-pr71-vault.yml")
+    marker = "          python - <<'PY'\n"
+    start = workflow.index(marker) + len(marker)
+    end = workflow.index("\n          PY", start)
+    return textwrap.dedent(workflow[start:end])
+
+
+def _attestation_fixture() -> dict[str, dict]:
+    repository = {"id": TRUSTED_REPOSITORY_ID, "full_name": "GsusFC/B3S"}
+    common_run = {
+        "workflow_id": TRUSTED_CI_WORKFLOW_ID,
+        "path": ".github/workflows/ci.yml",
+        "status": "completed",
+        "conclusion": "success",
+        "run_attempt": 1,
+        "repository": repository,
+        "head_repository": repository,
+    }
+    ci_blob = {
+        "type": "file",
+        "path": ".github/workflows/ci.yml",
+        "sha": TRUSTED_CI_BLOB_SHA,
+    }
+    fixture = {
+        "PR_FILE": {
+            "number": 71,
+            "state": "closed",
+            "merged": True,
+            "draft": False,
+            "merge_commit_sha": TRUSTED_PR_MERGE_SHA,
+            "base": {
+                "ref": "main",
+                "sha": "b" * 40,
+                "repo": repository,
+            },
+            "head": {
+                "ref": "fix/vault-v2-cumulative-landing",
+                "sha": TRUSTED_PR_HEAD_SHA,
+                "repo": repository,
+            },
+        },
+        "MAIN_REF_FILE": {
+            "ref": "refs/heads/main",
+            "object": {"type": "commit", "sha": FIXTURE_DEPLOY_SHA},
+        },
+        "WORKFLOW_FILE": {
+            "id": TRUSTED_CI_WORKFLOW_ID,
+            "path": ".github/workflows/ci.yml",
+            "state": "active",
+        },
+        "HEAD_CI_FILE": dict(ci_blob),
+        "MERGE_CI_FILE": dict(ci_blob),
+        "DEPLOY_CI_FILE": dict(ci_blob),
+        "HEAD_MERGE_COMPARE_FILE": {
+            "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
+            "base_commit": {"sha": TRUSTED_PR_HEAD_SHA},
+            "merge_base_commit": {"sha": TRUSTED_PR_HEAD_SHA},
+            "commits": [{"sha": TRUSTED_PR_MERGE_SHA}],
+            "files": [],
+        },
+        "MERGE_DEPLOY_COMPARE_FILE": {
+            "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
+            "base_commit": {"sha": TRUSTED_PR_MERGE_SHA},
+            "merge_base_commit": {"sha": TRUSTED_PR_MERGE_SHA},
+            "commits": [{"sha": FIXTURE_DEPLOY_SHA}],
+            "files": [
+                {"filename": filename, "status": "modified"}
+                for filename in sorted(HOTFIX_FILES)
+            ],
+        },
+        "PR_CI_RUN_FILE": {
+            **common_run,
+            "id": TRUSTED_PR_CI_RUN_ID,
+            "event": "pull_request",
+            "head_branch": "fix/vault-v2-cumulative-landing",
+            "head_sha": TRUSTED_PR_HEAD_SHA,
+        },
+        "MERGE_CI_RUN_FILE": {
+            **common_run,
+            "id": TRUSTED_MERGE_CI_RUN_ID,
+            "event": "push",
+            "head_branch": "main",
+            "head_sha": TRUSTED_PR_MERGE_SHA,
+        },
+        "DEPLOYMENT_CI_RUNS_FILE": {
+            "total_count": 1,
+            "workflow_runs": [
+                {
+                    **common_run,
+                    "id": 40000000000,
+                    "event": "push",
+                    "head_branch": "main",
+                    "head_sha": FIXTURE_DEPLOY_SHA,
+                }
+            ],
+        },
+    }
+    return json.loads(json.dumps(fixture))
+
+
+def _run_attestation(
+    tmp_path: Path,
+    fixture: dict[str, dict],
+    *,
+    env_updates: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    env = {
+        **os.environ,
+        "DEPLOY_SHA": FIXTURE_DEPLOY_SHA,
+        "DISPATCH_REF": "refs/heads/main",
+        "DISPATCH_SHA": FIXTURE_DEPLOY_SHA,
+        "GH_REPOSITORY": "GsusFC/B3S",
+        "TRUSTED_PR_HEAD_SHA": TRUSTED_PR_HEAD_SHA,
+        "TRUSTED_PR_MERGE_SHA": TRUSTED_PR_MERGE_SHA,
+        "TRUSTED_CI_BLOB_SHA": TRUSTED_CI_BLOB_SHA,
+        "TRUSTED_REPOSITORY_ID": str(TRUSTED_REPOSITORY_ID),
+        "TRUSTED_CI_WORKFLOW_ID": str(TRUSTED_CI_WORKFLOW_ID),
+        "TRUSTED_PR_CI_RUN_ID": str(TRUSTED_PR_CI_RUN_ID),
+        "TRUSTED_MERGE_CI_RUN_ID": str(TRUSTED_MERGE_CI_RUN_ID),
+    }
+    for name, payload in fixture.items():
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        env[name] = str(path)
+    if env_updates:
+        env.update(env_updates)
+    return subprocess.run(
+        [sys.executable, "-c", _attestation_source()],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+
+def _replace_nested(payload: dict, path: tuple[str | int, ...], value: object) -> None:
+    target: object = payload
+    for part in path[:-1]:
+        target = target[part]  # type: ignore[index]
+    target[path[-1]] = value  # type: ignore[index]
 
 
 def test_container_persists_immutable_build_identity():
@@ -110,7 +279,7 @@ def test_isolated_pr71_vault_workflow_is_manual_post_merge_only():
     assert f"actions/checkout@{CHECKOUT_V7_SHA}" in workflow
     assert f"actions/setup-python@{SETUP_PYTHON_V7_SHA}" in workflow
     assert "setup-flyctl@master" not in workflow
-    attest = workflow.index("Attest exact merged PR71 commit before checkout")
+    attest = workflow.index("Attest PR71 ancestry and current main before checkout")
     checkout = workflow.index(f"actions/checkout@{CHECKOUT_V7_SHA}")
     install = workflow.index("Install release package")
     migration_secret = workflow.index("secrets.B3S_MIGRATION_DATABASE_URL")
@@ -118,70 +287,235 @@ def test_isolated_pr71_vault_workflow_is_manual_post_merge_only():
     assert attest < checkout < install < migration_secret < fly_secret
     assert 'r"[0-9a-f]{40}"' in workflow
     assert 'DISPATCH_REF: ${{ github.ref }}' in workflow
-    assert 'dispatch_ref == "refs/heads/main"' in workflow
+    assert 'os.environ["DISPATCH_REF"] == "refs/heads/main"' in workflow
     assert '"$API_URL/repos/$GH_REPOSITORY/pulls/71"' in workflow
     assert "persist-credentials: false" in workflow
 
 
-def test_isolated_deploy_attests_the_complete_merged_pr71_object():
+def test_isolated_deploy_attests_exact_pr71_and_current_main_ancestry():
     workflow = _read(".github/workflows/fly-deploy-pr71-vault.yml")
 
     required_contract = (
-        'dispatch_ref == "refs/heads/main"',
-        'pr.get("number") == 71',
+        'DISPATCH_SHA: ${{ github.sha }}',
+        'deploy_sha == dispatch_sha',
+        'pr.get("number"), 71',
         'pr.get("state") == "closed"',
         'pr.get("merged") is True',
         'pr.get("draft") is False',
         'base.get("ref") == "main"',
         'head.get("ref") == "fix/vault-v2-cumulative-landing"',
+        'head.get("sha") == trusted_head',
+        'pr.get("merge_commit_sha") == trusted_merge',
+        'repo.get("id"), trusted_repository_id',
         'repo.get("full_name") == repository',
-        'merge_commit_sha = pr.get("merge_commit_sha")',
-        'deploy_sha == merge_commit_sha',
-        'trusted_base_sha = base.get("sha")',
         'main_ref.get("ref") == "refs/heads/main"',
         'main_object.get("type") == "commit"',
-        'main_sha == deploy_sha',
+        'main_object.get("sha") == deploy_sha',
+        'payload.get("merge_base_commit", {}).get("sha") == base_sha',
+        'commits[-1].get("sha") == head_sha',
     )
     for assertion in required_contract:
         assert assertion in workflow
-    assert 'for label, side in (("base", base), ("head", head))' in workflow
-    assert '"$API_URL/repos/$GH_REPOSITORY/git/ref/heads/main"' in workflow
-    assert 'pr.get("state") == "open"' not in workflow
-    assert 'head.get("sha") == deploy_sha' not in workflow
-    assert 'base.get("sha") == main_sha' not in workflow
+    assert TRUSTED_PR_HEAD_SHA in workflow
+    assert TRUSTED_PR_MERGE_SHA in workflow
+    assert (
+        "compare/$TRUSTED_PR_HEAD_SHA...$TRUSTED_PR_MERGE_SHA?"
+        "per_page=100&page=1"
+    ) in workflow
+    assert (
+        "compare/$TRUSTED_PR_MERGE_SHA...$DEPLOY_SHA?per_page=100&page=1"
+        in workflow
+    )
+    assert 'deploy_sha == trusted_merge' not in workflow
 
 
-def test_isolated_deploy_binds_merge_success_to_the_trusted_ci_workflow():
+def test_isolated_deploy_pins_ci_blob_runs_and_hotfix_file_set():
     workflow = _read(".github/workflows/fly-deploy-pr71-vault.yml")
 
     assert "actions: read" in workflow
     assert "checks: read" not in workflow
-    assert (
-        '"$API_URL/repos/$GH_REPOSITORY/actions/workflows/ci.yml"' in workflow
-    )
-    assert 'workflow.get("path") == ".github/workflows/ci.yml"' in workflow
+    assert TRUSTED_CI_BLOB_SHA in workflow
+    assert str(TRUSTED_REPOSITORY_ID) in workflow
+    assert str(TRUSTED_CI_WORKFLOW_ID) in workflow
+    assert str(TRUSTED_PR_CI_RUN_ID) in workflow
+    assert str(TRUSTED_MERGE_CI_RUN_ID) in workflow
+    assert 'workflow.get("id"), trusted_workflow_id' in workflow
+    assert 'workflow.get("path") == CI_PATH' in workflow
     assert 'workflow.get("state") == "active"' in workflow
+    for ref in (
+        "$TRUSTED_PR_HEAD_SHA",
+        "$TRUSTED_PR_MERGE_SHA",
+        "$DEPLOY_SHA",
+    ):
+        assert f"contents/.github/workflows/ci.yml?ref={ref}" in workflow
+    assert 'blob.get("sha") == trusted_blob' in workflow
+    assert "HOTFIX_FILES = {" in workflow
+    for filename in HOTFIX_FILES:
+        assert f'"{filename}"' in workflow
+    assert "filenames == expected_files" in workflow
+    assert 'item.get("status") == "modified"' in workflow
+    assert '"previous_filename" not in item' in workflow
     assert (
-        'contents/.github/workflows/ci.yml?ref=$trusted_base_sha' in workflow
-    )
-    assert 'contents/.github/workflows/ci.yml?ref=$DEPLOY_SHA' in workflow
-    assert 'if deployment["sha"] != base["sha"]:' in workflow
-    assert (
-        "actions/workflows/$trusted_workflow_id/runs?event=push&branch=main&"
-        "head_sha=$DEPLOY_SHA&per_page=100" in workflow
-    )
-    assert "status=success" not in workflow
-    assert '"workflow_id": int(os.environ["TRUSTED_WORKFLOW_ID"])' in workflow
-    assert '"path": ".github/workflows/ci.yml"' in workflow
+        "actions/workflows/$TRUSTED_CI_WORKFLOW_ID/runs?event=push&"
+        "branch=main&head_sha=$DEPLOY_SHA&per_page=100"
+    ) in workflow
     assert '"event": "push"' in workflow
     assert '"head_branch": "main"' in workflow
-    assert '"head_sha": os.environ["DEPLOY_SHA"]' in workflow
+    assert '"head_sha": deploy_sha' in workflow
     assert '"status": "completed"' in workflow
     assert '"conclusion": "success"' in workflow
+    assert '"run_attempt": 1' in workflow
     assert 'for field in ("repository", "head_repository")' in workflow
+    assert 'deployment_runs.get("total_count"), 1' in workflow
+    assert "len(runs) == 1" in workflow
     assert 'run.get("pull_requests")' not in workflow
-    assert 'payload.get("total_count") != 1' in workflow
-    assert "len(runs) != 1" in workflow
+
+
+def test_pr71_attestation_fixture_accepts_only_current_allowlisted_main(tmp_path):
+    result = _run_attestation(tmp_path, _attestation_fixture())
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("target", "path", "value", "error"),
+    [
+        ("PR_FILE", ("head", "sha"), "f" * 40, "reviewed head SHA"),
+        ("PR_FILE", ("merge_commit_sha",), "f" * 40, "merge commit SHA"),
+        ("MAIN_REF_FILE", ("object", "sha"), "f" * 40, "not current main"),
+        ("WORKFLOW_FILE", ("id",), 1, "workflow id"),
+        ("HEAD_CI_FILE", ("sha",), "f" * 40, "blob SHA"),
+        ("MERGE_CI_FILE", ("sha",), "f" * 40, "blob SHA"),
+        ("DEPLOY_CI_FILE", ("sha",), "f" * 40, "blob SHA"),
+        (
+            "HEAD_MERGE_COMPARE_FILE",
+            ("merge_base_commit", "sha"),
+            "f" * 40,
+            "merge base",
+        ),
+        (
+            "MERGE_DEPLOY_COMPARE_FILE",
+            ("behind_by",),
+            1,
+            "behind its base",
+        ),
+        (
+            "MERGE_DEPLOY_COMPARE_FILE",
+            ("commits", 0, "sha"),
+            "f" * 40,
+            "head commit",
+        ),
+        ("PR_CI_RUN_FILE", ("conclusion",), "failure", "unexpected conclusion"),
+        ("MERGE_CI_RUN_FILE", ("head_sha",), "f" * 40, "unexpected head_sha"),
+        (
+            "DEPLOYMENT_CI_RUNS_FILE",
+            ("workflow_runs", 0, "event"),
+            "workflow_dispatch",
+            "unexpected event",
+        ),
+        (
+            "DEPLOYMENT_CI_RUNS_FILE",
+            ("workflow_runs", 0, "head_sha"),
+            TRUSTED_PR_MERGE_SHA,
+            "unexpected head_sha",
+        ),
+        (
+            "DEPLOYMENT_CI_RUNS_FILE",
+            ("workflow_runs", 0, "repository", "full_name"),
+            "attacker/fork",
+            "unexpected repository name",
+        ),
+        (
+            "DEPLOYMENT_CI_RUNS_FILE",
+            ("workflow_runs", 0, "head_repository", "id"),
+            1,
+            "unexpected head_repository id",
+        ),
+        (
+            "DEPLOYMENT_CI_RUNS_FILE",
+            ("total_count",),
+            2,
+            "missing or ambiguous",
+        ),
+    ],
+)
+def test_pr71_attestation_rejects_tampered_rest_objects(
+    tmp_path, target, path, value, error
+):
+    fixture = _attestation_fixture()
+    _replace_nested(fixture[target], path, value)
+
+    result = _run_attestation(tmp_path, fixture)
+
+    assert result.returncode != 0
+    assert error in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("files", "error"),
+    [
+        (
+            [
+                {"filename": filename, "status": "modified"}
+                for filename in sorted(HOTFIX_FILES | {"src/config.py"})
+            ],
+            "changed files are not exact",
+        ),
+        (
+            [
+                {"filename": filename, "status": "modified"}
+                for filename in sorted(HOTFIX_FILES - {"tests/test_deploy_provenance.py"})
+            ],
+            "changed files are not exact",
+        ),
+        (
+            [
+                {
+                    "filename": filename,
+                    "status": "added"
+                    if filename == "tests/test_deploy_provenance.py"
+                    else "modified",
+                }
+                for filename in sorted(HOTFIX_FILES)
+            ],
+            "non-modified allowlisted file",
+        ),
+        (
+            [
+                {
+                    "filename": filename,
+                    "status": "modified",
+                    **(
+                        {"previous_filename": "src/config.py"}
+                        if filename == "tests/test_deploy_provenance.py"
+                        else {}
+                    ),
+                }
+                for filename in sorted(HOTFIX_FILES)
+            ],
+            "renamed file",
+        ),
+    ],
+)
+def test_pr71_attestation_rejects_non_exact_hotfix_file_sets(tmp_path, files, error):
+    fixture = _attestation_fixture()
+    fixture["MERGE_DEPLOY_COMPARE_FILE"]["files"] = files
+
+    result = _run_attestation(tmp_path, fixture)
+
+    assert result.returncode != 0
+    assert error in result.stderr
+
+
+def test_pr71_attestation_rejects_dispatch_sha_other_than_input(tmp_path):
+    result = _run_attestation(
+        tmp_path,
+        _attestation_fixture(),
+        env_updates={"DISPATCH_SHA": "f" * 40},
+    )
+
+    assert result.returncode != 0
+    assert "not the dispatched main SHA" in result.stderr
 
 
 def test_isolated_deploy_does_not_accept_named_check_or_commit_status():
@@ -211,7 +545,10 @@ def test_pr71_runbook_marks_workflow_post_merge_and_separately_authorized():
     assert "`merge_commit_sha`" in runbook
     assert "`refs/heads/main`" in runbook
     assert "custom deployment branch policy configured to allow only `main`" in runbook
-    assert "currently has no deployment secrets" in runbook
+    assert "now contains exactly" in runbook
+    assert "`B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN`" in runbook
+    assert "first dispatch (`31507333105`)" in runbook
+    assert "before either secret expression" in runbook
     assert "without filtering" in runbook
     assert "non-successful runs" in runbook
     assert "`pull_requests` array may be empty" in runbook
