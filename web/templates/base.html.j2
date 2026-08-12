@@ -1456,6 +1456,12 @@
     </svg>
   </a>
   <span class="tagline">brand evidence lab — every number must survive “show me the evidence”</span>
+  {% if request.state.google_site_user %}
+  <form method="post" action="/auth/google/logout">
+    <input type="hidden" name="csrf_token" value="{{ request.state.google_site_user.csrf_token }}">
+    <button type="submit" class="secondary">Salir</button>
+  </form>
+  {% endif %}
   <div class="theme-switch" aria-label="Tema">
     <button type="button" class="theme-choice" data-theme-choice="light" aria-pressed="false">Day</button>
     <button type="button" class="theme-choice" data-theme-choice="dark" aria-pressed="false">Night</button>

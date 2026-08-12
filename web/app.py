@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-import base64
-import binascii
 import json
 import logging
 import os
@@ -48,6 +46,17 @@ from web.report_store import (
 from web.report_view_model import build_report_view_model
 from web.scan_runner import approve_degraded_scan, cancel_scan, recover_interrupted_scans, scan_status, start_scan
 from web.scoring_store import backfill_reports, dashboard as scoring_dashboard
+from web.site_google_auth import (
+    begin_google_login,
+    clear_google_session_cookie,
+    complete_google_login,
+    google_login_path,
+    google_oidc_config,
+    google_oidc_enabled,
+    google_session_cookie_name,
+    read_google_site_session,
+    safe_site_destination,
+)
 from web.vault_reviewer_session import (
     VAULT_REVIEWER_COOKIE,
     VAULT_REVIEWER_SESSION_MAX_AGE,
@@ -117,6 +126,8 @@ def _initialize_runtime() -> None:
         from scripts.sv9_flow_shadow_run import _load_env_file
 
         _load_env_file(str(env_file))
+    if google_oidc_enabled(os.environ) is not False and google_oidc_config(os.environ) is None:
+        raise RuntimeError("Google OIDC site access configuration is invalid")
     verify_postgres_runtime_ready()
     recover_interrupted_scans()
 
@@ -129,25 +140,7 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(title="B3S — Brand Evidence Lab", lifespan=_lifespan)
 
-_SITE_BASIC_AUTH_ENABLED_ENV = "B3S_SITE_BASIC_AUTH_ENABLED"
-_SITE_BASIC_AUTH_USERNAME_ENV = "B3S_SITE_BASIC_AUTH_USERNAME"
-_SITE_BASIC_AUTH_PASSWORD_ENV = "B3S_SITE_BASIC_AUTH_PASSWORD"
-_SITE_BASIC_AUTH_USERNAME_RE = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$"
-)
-_SITE_BASIC_AUTH_CHALLENGE = 'Basic realm="B3S", charset="UTF-8"'
-_SITE_BASIC_AUTH_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-
-
-def _valid_site_basic_auth_password(password: str) -> bool:
-    return (
-        32 <= len(password) <= 1024
-        and password == password.strip()
-        and not any(
-            unicodedata.category(character).startswith("C")
-            for character in password
-        )
-    )
+_SITE_ACCESS_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 def _normalized_http_origin(value: str, *, origin_header: bool = False) -> str | None:
@@ -184,84 +177,6 @@ def _normalized_http_origin(value: str, *, origin_header: bool = False) -> str |
     return f"{scheme}://{authority}"
 
 
-def _site_basic_auth_configuration() -> tuple[str, str, str]:
-    """Return (state, username, password) without ever logging credentials."""
-
-    raw_enabled = os.environ.get(_SITE_BASIC_AUTH_ENABLED_ENV, "").strip().lower()
-    if raw_enabled in {"", "false"}:
-        return "disabled", "", ""
-    if raw_enabled != "true":
-        return "invalid", "", ""
-
-    username = os.environ.get(_SITE_BASIC_AUTH_USERNAME_ENV, "")
-    password = os.environ.get(_SITE_BASIC_AUTH_PASSWORD_ENV, "")
-    valid_username = _SITE_BASIC_AUTH_USERNAME_RE.fullmatch(username) is not None
-    valid_password = _valid_site_basic_auth_password(password)
-    if not valid_username or not valid_password:
-        return "invalid", "", ""
-    return "enabled", username, password
-
-
-def _site_basic_auth_credentials(authorization: str | None) -> tuple[str, str] | None:
-    if not authorization:
-        return None
-    scheme, separator, encoded = authorization.partition(" ")
-    if scheme.lower() != "basic" or separator != " " or not encoded:
-        return None
-    try:
-        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
-    except (binascii.Error, UnicodeDecodeError, ValueError):
-        return None
-    if ":" not in decoded:
-        return None
-    username, password = decoded.split(":", 1)
-    if _SITE_BASIC_AUTH_USERNAME_RE.fullmatch(username) is None:
-        return None
-    if not _valid_site_basic_auth_password(password):
-        return None
-    return username, password
-
-
-def _site_basic_auth_matches(
-    authorization: str | None,
-    *,
-    expected_username: str,
-    expected_password: str,
-) -> bool:
-    supplied = _site_basic_auth_credentials(authorization)
-    if supplied is None:
-        return False
-    supplied_username, supplied_password = supplied
-    username_matches = secrets.compare_digest(
-        supplied_username.encode("utf-8"),
-        expected_username.encode("utf-8"),
-    )
-    password_matches = secrets.compare_digest(
-        supplied_password.encode("utf-8"),
-        expected_password.encode("utf-8"),
-    )
-    return username_matches and password_matches
-
-
-def _site_basic_auth_unauthorized() -> PlainTextResponse:
-    return PlainTextResponse(
-        "Unauthorized\n",
-        status_code=401,
-        headers={
-            "WWW-Authenticate": _SITE_BASIC_AUTH_CHALLENGE,
-            "Cache-Control": "no-store",
-        },
-    )
-
-
-def _site_basic_auth_forbidden() -> PlainTextResponse:
-    return PlainTextResponse(
-        "Forbidden\n",
-        status_code=403,
-        headers={"Cache-Control": "no-store"},
-    )
-
-
 def _is_vault_reviewer_path(path: str) -> bool:
     """Identify the reviewer-only surface that has its own session boundary."""
 
@@ -292,19 +207,24 @@ def _same_origin_request_is_valid(
     return _normalized_http_origin(referer_values[0]) == configured_origin
 
 
+def _site_access_forbidden() -> PlainTextResponse:
+    return PlainTextResponse(
+        "Forbidden\n",
+        status_code=403,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.middleware("http")
-async def require_site_basic_auth(request: Request, call_next):
+async def require_google_site_access(request: Request, call_next):
     path = request.url.path
     if path == "/health" or path.startswith("/api/v1/"):
         return await call_next(request)
 
-    # The reviewer surface is intentionally the one browser exception to the
-    # broad site Basic gate: it has a dedicated reviewer-token login, a signed
-    # HttpOnly session, CSRF protection, and no runtime effect. Keep the origin
-    # fence for unsafe requests even though Basic is not required here.
+    # The reviewer surface retains its separate reviewer-token/session boundary.
     reviewer_surface = vault_reviewer_enabled() and _is_vault_reviewer_path(path)
     if reviewer_surface:
-        unsafe = request.method.upper() not in _SITE_BASIC_AUTH_SAFE_METHODS
+        unsafe = request.method.upper() not in _SITE_ACCESS_SAFE_METHODS
         origin_valid = _same_origin_request_is_valid(
             request,
             allow_referer_fallback=True,
@@ -318,34 +238,53 @@ async def require_site_basic_auth(request: Request, call_next):
             )
         )
         if unsafe and not origin_valid and not csrf_protected_without_origin:
-            return _site_basic_auth_forbidden()
+            return _site_access_forbidden()
         return await call_next(request)
 
-    state, username, password = _site_basic_auth_configuration()
-    if state == "disabled":
+    oidc_enabled = google_oidc_enabled(os.environ)
+    if oidc_enabled is False:
         return await call_next(request)
-    if state == "invalid":
+    config = google_oidc_config(os.environ)
+    if oidc_enabled is not True or config is None:
         return PlainTextResponse(
             "Service unavailable\n",
             status_code=503,
             headers={"Cache-Control": "no-store"},
         )
 
-    authorization_values = request.headers.getlist("authorization")
-    authorization = authorization_values[0] if len(authorization_values) == 1 else None
-    if not _site_basic_auth_matches(
-        authorization,
-        expected_username=username,
-        expected_password=password,
-    ):
-        return _site_basic_auth_unauthorized()
+    auth_routes = {
+        ("GET", "/auth/google/login"),
+        ("GET", "/auth/google/callback"),
+        ("POST", "/auth/google/logout"),
+    }
+    if (request.method.upper(), path) in auth_routes:
+        return await call_next(request)
+
+    session = read_google_site_session(
+        config,
+        request.cookies.get(google_session_cookie_name()),
+    )
+    if session is None:
+        if request.method.upper() not in {"GET", "HEAD"}:
+            return _site_access_forbidden()
+        return RedirectResponse(
+            google_login_path(request.url.path + (
+                f"?{request.url.query}" if request.url.query else ""
+            )),
+            status_code=303,
+            headers={"Cache-Control": "no-store"},
+        )
 
     if (
-        request.method.upper() not in _SITE_BASIC_AUTH_SAFE_METHODS
+        request.method.upper() not in _SITE_ACCESS_SAFE_METHODS
         and not _same_origin_request_is_valid(request)
     ):
-        return _site_basic_auth_forbidden()
-    return await call_next(request)
+        return _site_access_forbidden()
+    request.state.google_site_user = session
+    response = await call_next(request)
+    response.headers.setdefault("Cache-Control", "private, no-store")
+    response.headers.setdefault("Vary", "Cookie")
+    return response
 
 
 install_scanner_api(app)
@@ -354,6 +293,61 @@ templates.env.autoescape = select_autoescape(("html", "j2"))
 _STATIC_DIR = Path(__file__).parent / "static"
 if _STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+
+@app.get("/auth/google/login")
+async def google_site_login(next_path: str = "/"):
+    config = google_oidc_config(os.environ)
+    if config is None:
+        return PlainTextResponse(
+            "Service unavailable\n",
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    return await begin_google_login(
+        config,
+        next_path=safe_site_destination(next_path),
+    )
+
+
+@app.get("/auth/google/callback")
+async def google_site_callback(request: Request):
+    config = google_oidc_config(os.environ)
+    if config is None:
+        return PlainTextResponse(
+            "Service unavailable\n",
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    return await complete_google_login(
+        config,
+        query_params=request.query_params,
+        flow_cookie=request.cookies.get("__Host-b3s_google_oidc_flow"),
+    )
+
+
+@app.post("/auth/google/logout")
+def google_site_logout(request: Request, csrf_token: str = Form("")):
+    config = google_oidc_config(os.environ)
+    if config is None:
+        return PlainTextResponse(
+            "Service unavailable\n",
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    session = read_google_site_session(
+        config,
+        request.cookies.get(google_session_cookie_name()),
+    )
+    if (
+        session is None
+        or not _same_origin_request_is_valid(request)
+        or not secrets.compare_digest(session.csrf_token, str(csrf_token or ""))
+    ):
+        return _site_access_forbidden()
+    response = RedirectResponse("/", status_code=303)
+    clear_google_session_cookie(response)
+    return response
 
 
 def _component_display_text(component: dict[str, Any], *, prefer_summary: bool = False) -> str:

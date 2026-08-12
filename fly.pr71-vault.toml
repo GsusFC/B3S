@@ -31,9 +31,8 @@ kill_timeout = "30s"
   B3S_EXPECTED_NEON_ENDPOINT_HOST = "ep-broad-river-as71uv9y.c-4.eu-central-1.aws.neon.tech"
   B3S_EXPECTED_DATABASE_NAME = "neondb"
   B3S_EXPECTED_RUNTIME_ROLE = "b3s_pr71_app_runtime"
-  # Gate all browser/legacy/diagnostic routes. API v1 retains bearer scopes.
-  B3S_SITE_BASIC_AUTH_ENABLED = "true"
-  B3S_SITE_BASIC_AUTH_USERNAME = "vault"
+  # Google OIDC gates browser/legacy/diagnostic routes. API v1 retains bearer scopes.
+  B3S_GOOGLE_OIDC_ENABLED = "true"
   B3S_VAULT_WORKER_ENABLED = "true"
   BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED = "true"
   # Score owned-web evidence when no external identity exists; it cannot satisfy C7's two-channel evidence contract.
@@ -45,6 +44,9 @@ kill_timeout = "30s"
 [[mounts]]
   source = "b3s_pr71_vault_data"
   destination = "/data"
+
+[processes]
+  app = "python -m uvicorn web.app:app --host 0.0.0.0 --port 8080 --workers 1 --no-access-log"
 
 [http_service]
   internal_port = 8080

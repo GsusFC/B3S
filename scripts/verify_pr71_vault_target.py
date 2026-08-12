@@ -32,8 +32,7 @@ _EXPECTED = {
     "BRAND3_ENVIRONMENT": "vault",
     "BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED": "true",
     "B3S_POSTGRES_REQUIRED": "true",
-    "B3S_SITE_BASIC_AUTH_ENABLED": "true",
-    "B3S_SITE_BASIC_AUTH_USERNAME": "vault",
+    "B3S_GOOGLE_OIDC_ENABLED": "true",
     "B3S_EXPECTED_NEON_PROJECT_ID": PR71_VAULT_PROJECT_ID,
     "B3S_EXPECTED_NEON_BRANCH_ID": PR71_VAULT_BRANCH_ID,
     "B3S_EXPECTED_NEON_ENDPOINT_HOST": PR71_VAULT_HOST,
@@ -57,6 +56,16 @@ def main() -> int:
     for name, expected in _EXPECTED.items():
         if os.environ.get(name, "") != expected:
             raise SystemExit("isolated Vault deployment target verification failed")
+    from web.site_google_auth import google_oidc_allowed_emails, google_oidc_config
+
+    expected_emails = frozenset({
+        "jesus@wearefloc.com",
+        "sergio@wearefloc.com",
+        "javi@wearefloc.com",
+        "victor@wearefloc.com",
+    })
+    if google_oidc_allowed_emails() != expected_emails or google_oidc_config(os.environ) is None:
+        raise SystemExit("isolated Vault deployment target verification failed")
     dsn = os.environ.get("B3S_DATABASE_URL", "").strip()
     target = pr71_vault_runtime_target()
     try:
