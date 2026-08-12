@@ -567,10 +567,6 @@ class PostgresHistoryRepository:
                 raise CaptureConflictError(
                     "capture operation plan belongs to another brand"
                 )
-            _require_operational_c7_plan_allowed(
-                operation_plan,
-                brand_identity=parsed.canonical_domain,
-            )
         self._ensure_migrated()
         with self._connect() as conn:
             workspace_id = self._ensure_workspace(
@@ -797,10 +793,6 @@ class PostgresHistoryRepository:
                 (_advisory_lock_key(row["brand_id"], "evidence-vault-canonical-promotion"),),
             )
             record = _vault_operation_plan_record(row)
-            _require_operational_c7_plan_allowed(
-                record["plan"],
-                brand_identity=str(row["canonical_domain"]),
-            )
             if record["status"] in {"completed", "result_persisted", "superseded"}:
                 return {**record, "claim_status": record["status"], "claimed": False}
             current = _project_vault_operational_memory(conn, row["brand_id"])
@@ -935,10 +927,6 @@ class PostgresHistoryRepository:
             )
             if row is None:
                 raise CaptureConflictError("capture operation plan does not exist")
-            _require_operational_c7_plan_allowed(
-                dict(row.get("plan_payload") or {}),
-                brand_identity=str(row["canonical_domain"]),
-            )
             allowed = {"claimed"} if start else {"claimed", "running"}
             if str(row["status"]) not in allowed or not _lease_matches(
                 row,
@@ -994,10 +982,6 @@ class PostgresHistoryRepository:
             )
             if row is None:
                 raise CaptureConflictError("capture operation plan does not exist")
-            _require_operational_c7_plan_allowed(
-                dict(row.get("plan_payload") or {}),
-                brand_identity=str(row["canonical_domain"]),
-            )
             _validate_vault_operation_result_for_plan(
                 conn,
                 detached,
@@ -1104,10 +1088,6 @@ class PostgresHistoryRepository:
             if row is None:
                 raise CaptureConflictError("capture operation plan does not exist")
             record = _vault_operation_plan_record(row)
-            _require_operational_c7_plan_allowed(
-                record["plan"],
-                brand_identity=str(row["canonical_domain"]),
-            )
             if record["operation_plan_fingerprint"] != plan_fingerprint:
                 raise CaptureConflictError("operation plan fingerprint mismatch")
             if record.get("result_fingerprint") != expected_result:
@@ -3153,6 +3133,55 @@ class PostgresHistoryRepository:
             domain,
             workspace_slug=workspace_slug,
         )
+        superseded_fingerprints = {
+            str(value)
+            for value in (operation.get("plan") or {}).get("delta", {}).get(
+                "superseded_evidence_fingerprints"
+            )
+            or []
+        }
+        active_c7_group = (
+            self.get_evidence_vault_active_c7_group_attestation(
+                domain,
+                workspace_slug=workspace_slug,
+            )
+            if superseded_fingerprints
+            else None
+        )
+        if active_c7_group is not None and superseded_fingerprints.intersection(
+            active_c7_group["member_evidence_fingerprints"]
+        ):
+            try:
+                self.reopen_evidence_vault_composite_group(
+                    domain,
+                    exact_source_candidate_packet_fingerprint=str(
+                        active_c7_group[
+                            "exact_source_candidate_packet_fingerprint"
+                        ]
+                    ),
+                    source_scan_id=source_scan_id,
+                    workspace_slug=workspace_slug,
+                    created_at=created_at,
+                )
+            except EvidenceVaultOperationalAdoptionConflictError:
+                # A concurrent activation may already have reopened this exact
+                # group. Continue only after the authoritative read proves the
+                # old group is no longer active; otherwise the stale parent must
+                # be rebased by the caller.
+                remaining_group = (
+                    self.get_evidence_vault_active_c7_group_attestation(
+                        domain,
+                        workspace_slug=workspace_slug,
+                    )
+                )
+                if remaining_group is not None and remaining_group.get(
+                    "group_id"
+                ) == active_c7_group.get("group_id"):
+                    raise
+            current = self.get_evidence_vault_operational_memory(
+                domain,
+                workspace_slug=workspace_slug,
+            )
         if str(result.get("output_kind") or "") != "candidate_overlay":
             score, score_replayed = (
                 self.get_or_create_evidence_vault_operational_score_evaluation(
@@ -4756,11 +4785,6 @@ class PostgresHistoryRepository:
                     "The source operation has no exact persisted result."
                 )
             operation_plan = dict(operation.get("plan_payload") or {})
-            _require_operational_c7_plan_allowed(
-                operation_plan,
-                brand_identity=str(operation["canonical_domain"]),
-                error_type=EvidenceVaultOperationalAuthorityError,
-            )
             if (
                 domain != str(operation["canonical_domain"])
                 or domain != str(operation_plan.get("brand_identity") or "")
@@ -5546,11 +5570,6 @@ class PostgresHistoryRepository:
                         "The operational packet has no unique durable operation."
                     )
                 operation_row = operation_rows[0]
-                _require_operational_c7_plan_allowed(
-                    dict(operation_row.get("plan_payload") or {}),
-                    brand_identity=str(operation_row["canonical_domain"]),
-                    error_type=EvidenceVaultOperationalAuthorityError,
-                )
             resolved_group_source_record = None
             if (
                 source_row is not None
@@ -6109,33 +6128,6 @@ class PostgresHistoryRepository:
                 )
             except EvidenceVaultCompositeGroupLifecycleError:
                 return None
-
-    def get_evidence_vault_c7_runtime_snapshot(
-        self,
-        domain_or_url: str,
-        *,
-        workspace_slug: str = "b3s",
-    ) -> dict[str, Any] | None:
-        """Keep runtime unavailable until one verified, atomic read exists."""
-
-        del domain_or_url, workspace_slug
-        return None
-
-    def get_evidence_vault_runtime_ready_c7_group_attestation(
-        self,
-        domain_or_url: str,
-        *,
-        workspace_slug: str = "b3s",
-    ) -> dict[str, Any] | None:
-        """Keep runtime cutover denied despite private verified-raw readiness.
-
-        Migrations 019-020 and the private validator can prove verified-raw
-        provenance without granting runtime authority. This stub remains closed
-        until a separately authorized atomic runtime-read adapter replaces it.
-        """
-
-        del domain_or_url, workspace_slug
-        return None
 
     def get_or_create_evidence_vault_operational_score_evaluation(
         self,
@@ -9872,26 +9864,6 @@ def _require_exact_migration_manifest(
         )
 
 
-def _require_operational_c7_plan_allowed(
-    plan: Mapping[str, Any],
-    *,
-    brand_identity: str,
-    error_type: type[Exception] = CaptureConflictError,
-) -> None:
-    from src.services.evidence_vault_c7_cutover import (
-        current_c7_cutover_decision,
-        operation_plan_affects_operational_c7,
-    )
-
-    if not operation_plan_affects_operational_c7(plan):
-        return
-    decision = current_c7_cutover_decision(brand_identity)
-    if not decision.enabled:
-        raise error_type(
-            f"Operational C7 plan is denied by current controls: {decision.reason}."
-        )
-
-
 def _stable_uuid(*parts: Any) -> UUID:
     key = ":".join(str(part) for part in parts)
     return uuid5(_ID_NAMESPACE, key)
@@ -11833,12 +11805,9 @@ def _validate_operational_packet_lineage_for_storage(
             raise EvidenceVaultOperationalAuthorityError(
                 f"Accepted tile {tile_id} is absent from the source packet."
             )
-        if (
-            tile_id == "C7"
-            and accepted.get("authority_profile_id") != SCANNER_SEMANTIC_PROFILE_ID
-        ):
-            # The operational C7 supplement remains separately gated.  The
-            # ordinary rubric C7 tile follows the normal scanner-memory path.
+        if tile_id == "C7":
+            # C7 follows the normal tile lifecycle, but its evidence contract
+            # still requires one complete reviewed two-member channel group.
             source_coverage = source_manifest.get("coverage_summary") or {}
             source_basis = [
                 row

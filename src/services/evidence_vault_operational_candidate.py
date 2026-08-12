@@ -128,10 +128,9 @@ def build_operational_packet_from_scanner_candidate(
     """Materialize the normal Vault brand-memory path from one scan result.
 
     The candidate remains immutable and its evidence bindings are rechecked by
-    the repository.  Non-contradictory scanner states become the Vault policy
-    projection; contradictions stay pending and therefore cannot silently
-    change a tile or score.  This policy is Vault-only and does not grant the
-    disabled operational C7 cutover any authority.
+    the repository. Non-contradictory scanner states become the Vault policy
+    projection for ordinary tiles; contradictions stay pending. C7 also stays
+    pending because only its exact reviewed two-channel group may be accepted.
     """
 
     packet = dict(candidate_packet)

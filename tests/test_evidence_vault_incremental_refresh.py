@@ -228,6 +228,35 @@ def test_modified_multi_chunk_locator_only_supersedes_missing_fingerprint() -> N
 
 
 
+def test_changed_reacquisition_supersedes_accepted_historical_member() -> None:
+    historical = [_row("home", "Accepted historical C7 member")]
+    changed = [_row("home", "Materially changed C7 member")]
+    historical_record = canonical_evidence_rows(
+        historical, subject_url=SUBJECT_URL
+    )[0]
+    changed_record = canonical_evidence_rows(changed, subject_url=SUBJECT_URL)[0]
+
+    delta = build_incremental_evidence_delta(
+        subject_url=SUBJECT_URL,
+        current_evidence_records=changed,
+        previous_capture_evidence_records=[],
+        known_evidence_records=historical,
+        accepted_evidence_tile_relations=[
+            {
+                "evidence_fingerprint": historical_record.fingerprint,
+                "tile_id": "C7",
+            }
+        ],
+    )
+
+    assert delta["modified_evidence_fingerprints"] == [changed_record.fingerprint]
+    assert delta["superseded_evidence_fingerprints"] == [
+        historical_record.fingerprint
+    ]
+    assert delta["affected_tile_ids"] == ["C7"]
+
+
+
 def test_reacquired_historical_evidence_needs_no_llm() -> None:
     historical = [_row("proof", "Known proof")]
 

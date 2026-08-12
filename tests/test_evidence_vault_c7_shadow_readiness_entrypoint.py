@@ -179,10 +179,9 @@ def test_mismatched_registry_pin_fails_before_connecting(
             str(path),
             "--expected-registry-fingerprint",
             "0" * 64,
-            "--require-ready",
         ],
         environ={"B3S_C7_RUNTIME_READ_DATABASE_URL": dsn},
-    ) == 1
+    ) == 0
 
     payload = _payload(capsys)
     assert payload == {
@@ -193,7 +192,7 @@ def test_mismatched_registry_pin_fails_before_connecting(
     assert "never-connect" not in json.dumps(payload)
 
 
-def test_require_ready_fails_closed_on_sanitized_database_error(
+def test_database_error_is_sanitized_diagnostic_output(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -214,9 +213,9 @@ def test_require_ready_fails_closed_on_sanitized_database_error(
     monkeypatch.setattr(readiness_cli, "EvidenceVaultC7ShadowRepository", Repository)
 
     assert readiness_cli.main(
-        [*_arguments(path, registry), "--require-ready"],
+        _arguments(path, registry),
         environ={"B3S_C7_RUNTIME_READ_DATABASE_URL": dsn},
-    ) == 1
+    ) == 0
 
     payload = _payload(capsys)
     assert payload == {
@@ -229,7 +228,7 @@ def test_require_ready_fails_closed_on_sanitized_database_error(
     assert "witness" not in rendered
 
 
-def test_false_readiness_is_observable_without_gate_and_nonzero_with_gate(
+def test_false_readiness_is_observable_without_becoming_a_gate(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -260,12 +259,6 @@ def test_false_readiness_is_observable_without_gate_and_nonzero_with_gate(
         _arguments(path, registry),
         environ=environment,
     ) == 0
-    assert _payload(capsys)["reason"] == "brand_context_unavailable"
-
-    assert readiness_cli.main(
-        [*_arguments(path, registry), "--require-ready"],
-        environ=environment,
-    ) == 1
     assert _payload(capsys)["reason"] == "brand_context_unavailable"
 
 

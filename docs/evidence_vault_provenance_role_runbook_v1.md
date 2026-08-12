@@ -113,9 +113,9 @@ The table-wide revocation does not remove a pre-existing column ACL; explicitly 
 
 Migration 018 protects more than new Vault journals. It also installs database triggers on the pre-existing `captures`, `evidence_records`, `scan_runs`, and `brands` tables. Capture rows and evidence rows become immutable; scan identity/request/observation identity and brand workspace/domain identity cannot be rewritten. Migration 021 separately rejects deletion of operation plans.
 
-These guards apply even while C7 runtime and acquisition remain disabled. Combined with existing `ON DELETE CASCADE` relationships, they mean a physical delete of a workspace, brand, scan, or capture can fail whenever the cascade reaches a protected evidence record or operation plan. Disabling a feature flag does not restore deletability, and operators must not bypass the guards by disabling triggers or issuing direct SQL.
+These guards apply independently of whether verified-raw acquisition is running. Combined with existing `ON DELETE CASCADE` relationships, they mean a physical delete of a workspace, brand, scan, or capture can fail whenever the cascade reaches a protected evidence record or operation plan. Disabling the diagnostic does not restore deletability, and operators must not bypass the guards by disabling triggers or issuing direct SQL.
 
-The explicitly authorized landing posture for cumulative PR #71 accepts this fail-closed **no-physical-purge boundary**. It does not claim legal erasure, tenant offboarding, retention deletion, or crypto-shred support, and it does not authorize deployment or C7 activation. If any current production obligation requires physical deletion of these rows, that obligation remains a deployment blocker. Before C7 activation, approve and independently review a separate owner-controlled retention/erasure design; do not add an undocumented purge escape hatch to this migration stack.
+The explicitly authorized landing posture for cumulative PR #71 accepts this fail-closed **no-physical-purge boundary**. It does not claim legal erasure, tenant offboarding, retention deletion, or crypto-shred support, and it does not authorize deployment. If any current production obligation requires physical deletion of these verified-raw rows, that obligation remains a deployment blocker for this storage subsystem—not for C7 tile functionality. Before deploying verified-raw storage, approve and independently review a separate owner-controlled retention/erasure design; do not add an undocumented purge escape hatch to this migration stack.
 
 ## Operational rules
 
@@ -126,4 +126,4 @@ The explicitly authorized landing posture for cumulative PR #71 accepts this fai
 - A worker retry performs durable replay lookup before network collection or signing.
 - Runtime/read transactions are read-only and reverify Ed25519, snapshot, extractor, passage, lineage, freshness, registry, and disposition state in Python.
 - Legal hold and `revoke_runtime` are logical append-only dispositions. This release makes no physical purge or crypto-shred claim.
-- Do not grant any production role until the final authorization review. Draft PR #70 itself does not enable C7 runtime, API, scanner effects, scoring, or presentation.
+- Do not grant any production role until the final authorization review. These diagnostic roles do not enable or disable C7 runtime, API, scanner effects, scoring, or presentation.

@@ -302,11 +302,23 @@ def test_contextual_plan_is_bound_to_the_frozen_parent_and_exact_history() -> No
         "confidence": "high",
         "metadata": {"source_class": "owned_copy"},
     }
+    previous_fingerprint = build_vault_scan_plan(
+        brand_identity="example.com",
+        subject_url=command.brand_url,
+        mode="baseline",
+        current_evidence_records=[previous],
+    )["semantic_context"]["evidence_fingerprints"][0]
     context = raw_repository.EvidenceVaultRawPlanningContext(
         canonical_memory_version="a" * 64,
         previous_capture_evidence_records=(previous,),
         known_evidence_records=(previous,),
-        accepted_evidence_tile_relations=(),
+        accepted_evidence_tile_relations=(
+            {
+                "tile_id": "C7",
+                "evidence_fingerprint": previous_fingerprint,
+                "evidence_locator": None,
+            },
+        ),
     )
     seen: list[raw_repository.EvidenceVaultRawPlanningContext] = []
 
@@ -321,6 +333,9 @@ def test_contextual_plan_is_bound_to_the_frozen_parent_and_exact_history() -> No
                 planning_context.previous_capture_evidence_records
             ),
             known_evidence_records=planning_context.known_evidence_records,
+            accepted_evidence_tile_relations=(
+                planning_context.accepted_evidence_tile_relations
+            ),
             canonical_memory_version=planning_context.canonical_memory_version,
         )
 
@@ -354,6 +369,9 @@ def test_contextual_plan_is_bound_to_the_frozen_parent_and_exact_history() -> No
     assert prepared.envelope["operation_plan"]["plan_payload"]["delta"][
         "modified_evidence_fingerprints"
     ]
+    assert prepared.envelope["operation_plan"]["plan_payload"]["delta"][
+        "affected_tile_ids"
+    ] == ["C7"]
 
 
 def test_contextual_plan_rejects_a_self_consistent_forged_delta() -> None:

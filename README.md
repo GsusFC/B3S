@@ -104,7 +104,7 @@ Validate, migrate, and import the current file-backed reports:
 ```
 
 The importer applies immutable packaged migrations through
-`023_evidence_vault_raw_replay_projection.sql`, is idempotent, and
+`024_evidence_vault_raw_accepted_relation_projection.sql`, is idempotent, and
 rejects a reused report id with different content. The schema, invariants,
 integration scope, and cutover boundary are documented in
 [`docs/b3s_postgres_history_v1.md`](docs/b3s_postgres_history_v1.md).
@@ -229,11 +229,12 @@ see
 [`docs/evidence_accepted_memory_v1.md`](docs/evidence_accepted_memory_v1.md).
 
 Vault v2 separately persists exact reviewed/adopted authority, operation plans,
-capture lineage, and verified-raw provenance in PostgreSQL. That authority is
-limited to its versioned Vault history: it does not alter production/scanner
-scoring or presentation. The Fly Vault config keeps C7 cutover denied and the
-verified-raw worker/socket path disabled, so this code is dormant deployment
-infrastructure rather than an enabled runtime C7 path.
+capture lineage, and verified-raw provenance in PostgreSQL. C7 remains a normal,
+fully functional Coherencia tile through capture, review, adoption, reopening,
+scoring, report, UI, API, and history. It has no special cutover or blocking
+control. The verified-raw shadow evaluator is an optional private provenance
+diagnostic and the reusable Fly Vault config keeps its worker/socket path
+disabled by default.
 
 Prepare and evaluate the versioned identity review set with:
 
@@ -254,13 +255,13 @@ the committed image and the exact PostgreSQL migration head with SELECT-only
 runtime access; releases never apply migrations. Any migration requires a
 separately authorized, target-pinned external migrator. Production uses
 `fly.toml`; Vault deployment requires explicit `fly.vault.toml` and does not
-itself authorize operational Vault execution or C7 cutover.
+itself authorize generic operational Vault execution.
 
 ## Status
 
 Experimental. Contracts and policies are expected to change; policy changes
-must carry a changelog entry justified by a real captured case. Vault C7 runtime
-cutover remains disabled.
+must carry a changelog entry justified by a real captured case. C7 follows the
+ordinary scored-tile contract and never acts as a special operational blocker.
 
 CI runs PostgreSQL 16 integration coverage for history/import, archive
 isolation, Vault persistence/execution, capture lineage, verified provenance,

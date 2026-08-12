@@ -1,6 +1,6 @@
 # ADR v2 — Memoria operativa incremental del Evidence Vault
 
-- **Estado:** Núcleo v2 implementado; capability operacional activa solo en PR71 aislado, `b3s-vault` dormant y C7 no activado
+- **Estado:** Núcleo v2 implementado; capability operacional activa solo en PR71 aislado y `b3s-vault` dormant. C7 usa el ciclo normal de baldosa.
 - **Fecha:** 2026-08-06
 - **Ámbito inicial:** Vault; validación runtime en `b3s-pr71-vault`
 - **Sustituye:** `evidence_vault_canonical_memory_adr_v1.md`
@@ -182,7 +182,8 @@ solo produce `no` si el contrato define la prueba y la cobertura es suficiente.
 - Nunca adopta memoria por efecto lateral.
 
 Durante la validación estos modos solo se habilitan en
-`BRAND3_ENVIRONMENT=vault`. Producción no cambia hasta un cutover explícito.
+`BRAND3_ENVIRONMENT=vault`. Esta es una capability genérica del pipeline, no un
+gate de C7. Producción no cambia hasta una autorización de despliegue explícita.
 
 ## 8. Persistencia capture-only
 
@@ -344,19 +345,12 @@ El scanner web invoca estas rutas únicamente cuando concurren
 `fly.pr71-vault.toml`; no se cumple en `fly.vault.toml`, donde la capability
 permanece en `false`. Por tanto PR71 ejerce el pipeline operacional mientras
 `b3s-vault` sigue dormant y el score diagnóstico live de ese entorno permanece
-intacto. El cutover de `b3s-vault` por marca requiere además:
-
-1. ejecutar y conservar verde la suite completa y las pruebas PostgreSQL de
-   concurrencia, crash/retry, fencing e inmutabilidad;
-2. exponer memoria/score autorizados sin sustituir silenciosamente el reporte
-   diagnóstico;
-3. validar SoccerSolver y falsificar con una marca independiente;
-4. mantener todos los perfiles semánticos no revisados en shadow;
-5. activar allí mediante flag, kill switch y allowlist, sin fallback a full
-   rerun.
+intacto. Cualquier despliegue del pipeline genérico en otro entorno requiere una revisión
+y autorización separadas. C7 no añade una bandera, allowlist, readiness ni
+ventana de activación propias.
 
 
-## 13. Gate de campo pre-cutover v1
+## 13. Validación de campo v1
 
 El corpus congelado en
 `fixtures/evidence_vault_field_validation_v1/` contiene tres observaciones
@@ -388,12 +382,10 @@ La primera ejecución de campo obligó a endurecer el contrato:
 - el writer shadow rechaza rutas libpq efectivas no locales, overrides de
   entorno/query y cualquier token que no coincida con la base desechable.
 
-El gate conservado en `audits/evidence_vault_field_validation_v1/` completó
-ambas marcas sin autoridad, memoria aceptada ni score. El veredicto sigue siendo
-**NO-GO para cutover de producción** y **GO para shadow Vault-only y revisión
-humana**. Los worksheets deben ser resueltos por un humano identificado antes
-de probar adopción real por marca y habilitar flag, kill switch, allowlist y la
-presentación del score autorizado.
+La validación histórica conservada en `audits/evidence_vault_field_validation_v1/`
+completó ambas marcas sin autoridad, memoria aceptada ni score. Los worksheets
+debían ser resueltos por un humano identificado antes de probar la adopción real.
+Ese resultado histórico no es un gate actual de C7 ni autoriza despliegues.
 
 
 ## 14. Revisión humana de campo v1
@@ -502,6 +494,6 @@ reabrir el grupo completo. El contrato congela
 `member_change_requires_review=true`. La rama apilada de lifecycle v1 implementa
 la detección contra deltas durables, la reapertura atómica, la supresión del
 score, la persistencia de `pending_reassessment` y la resolución mediante un
-grupo `all_of` nuevo; véase `evidence_vault_c7_group_lifecycle_v1.md`. Esto no
-habilita el scanner ni autoriza producción: feature flag, kill switch, allowlist,
-watermark/replay y presentación separada del score siguen bloqueando el cutover.
+grupo `all_of` nuevo; véase `evidence_vault_c7_group_lifecycle_v1.md`. La
+reapertura cambia solo el estado y los puntos ordinarios de C7; no bloquea el
+scanner, el informe, la API/UI ni un despliegue.

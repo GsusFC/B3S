@@ -22,7 +22,6 @@ from src.services.evidence_vault_canonical_authority import (
     CanonicalMemoryPromotionCommand,
     promotion_request_fingerprint,
 )
-from src.services.evidence_vault_c7_cutover import load_c7_runtime_projection
 from src.services.evidence_vault_candidate_resolver import (
     canonical_aggregation_policy_fingerprint,
 )
@@ -848,14 +847,6 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
         for review in shadow_context["relation_reviews"]
     } == {"operational_source_v2"}
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
-    monkeypatch.setenv("BRAND3_VAULT_C7_CUTOVER_ENABLED", "true")
-    monkeypatch.setenv("BRAND3_VAULT_C7_EMERGENCY_DENY", "false")
-    monkeypatch.setenv("BRAND3_VAULT_C7_ALLOWLIST", brand)
-    # Accepted group authority is independent of capture freshness.  The
-    # synthetic empty capture cannot prove the exact two-member raw lineage, so
-    # runtime presentation fails closed without changing memory or score.
-    exact_runtime_c7 = load_c7_runtime_projection(repository, brand)
-    assert exact_runtime_c7 is None
 
     historical_report = {
         "id": "causa-lineage-report-derived",
@@ -1000,14 +991,9 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
         brand,
         second_report_export,
     ) == (second_report_binding, True)
-    assert (
-        repository.get_evidence_vault_runtime_ready_c7_group_attestation(brand)
-        is None
-    )
     assert repository.get_evidence_vault_active_c7_group_attestation(
         brand
     ) == exact_attestation
-    assert load_c7_runtime_projection(repository, brand) is None
 
     relabeled_observation = deepcopy(report_observation)
     relabeled_observation["source_scan_id"] = "causa-relabeled-c7-capture"
@@ -1062,10 +1048,6 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
             brand,
             relabeled_export,
         )
-    assert (
-        repository.get_evidence_vault_runtime_ready_c7_group_attestation(brand)
-        is None
-    )
 
     coverage_loss_report = deepcopy(second_historical_report)
     coverage_loss_report["id"] = "causa-c7-linkedin-not-reacquired"
@@ -1102,14 +1084,9 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
     )
     assert coverage_loss_head is not None
     assert coverage_loss_head["append_origin"] == "capture_observation_commit"
-    assert (
-        repository.get_evidence_vault_runtime_ready_c7_group_attestation(brand)
-        is None
-    )
     assert repository.get_evidence_vault_active_c7_group_attestation(
         brand
     ) == exact_attestation
-    assert load_c7_runtime_projection(repository, brand) is None
 
     with psycopg.connect(dsn) as conn:
         with pytest.raises(psycopg.Error, match="append-only"):
@@ -1378,8 +1355,6 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
     assert (
         repository.get_evidence_vault_active_c7_group_attestation(brand) is None
     )
-    pending_runtime_c7 = load_c7_runtime_projection(repository, brand)
-    assert pending_runtime_c7 is None
 
     reopen_replay = repository.reopen_evidence_vault_composite_group(
         brand,
@@ -1599,8 +1574,6 @@ def test_coverage_supplement_registers_reviews_and_adopts_n_plus_one(
     assert historical_reopen_replay["adoption"] == reopen["adoption"]
     assert historical_reopen_replay["memory"] == reopen["memory"]
     assert historical_reopen_replay["memory"] != replacement_memory
-    replacement_runtime_c7 = load_c7_runtime_projection(repository, brand)
-    assert replacement_runtime_c7 is None
     replacement_review_replay = (
         repository.review_and_adopt_evidence_vault_operational_source(
             brand,

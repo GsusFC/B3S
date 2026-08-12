@@ -1058,6 +1058,66 @@ def test_scanner_activation_returns_exact_adoption_candidate_binding(
     assert activated["score"] == score
 
 
+def test_scanner_activation_reopens_superseded_active_c7_before_no_delta_return() -> None:
+    member_fingerprint = "c" * 64
+    reopened_memory = {"canonical_memory_version": "d" * 64}
+    reopened_score = {"canonical_memory_version": "d" * 64, "score": 0}
+    calls: list[tuple[str, dict]] = []
+    memory_reads = 0
+
+    class FakeRepo:
+        activate_evidence_vault_operational_scanner_result = (
+            PostgresHistoryRepository.activate_evidence_vault_operational_scanner_result
+        )
+
+        def get_capture_operation_plan(self, *_a, **_k):
+            return {
+                "operation_plan_fingerprint": "a" * 64,
+                "status": "completed",
+                "plan": {
+                    "delta": {
+                        "superseded_evidence_fingerprints": [member_fingerprint]
+                    }
+                },
+                "result_payload": {"output_kind": "material_delta_only"},
+            }
+
+        def get_evidence_vault_operational_memory(self, *_a, **_k):
+            nonlocal memory_reads
+            memory_reads += 1
+            return None if memory_reads == 1 else reopened_memory
+
+        def get_evidence_vault_active_c7_group_attestation(self, *_a, **_k):
+            return {
+                "exact_source_candidate_packet_fingerprint": "e" * 64,
+                "member_evidence_fingerprints": [member_fingerprint, "f" * 64],
+            }
+
+        def reopen_evidence_vault_composite_group(self, *_a, **kwargs):
+            calls.append(("reopen", kwargs))
+            return {"memory": reopened_memory, "score": reopened_score}
+
+        def get_or_create_evidence_vault_operational_score_evaluation(
+            self, *_a, **_k
+        ):
+            return reopened_score, False
+
+    activated = FakeRepo().activate_evidence_vault_operational_scanner_result(
+        "example.com",
+        source_scan_id="scan-c7-change",
+        operation_plan_fingerprint="a" * 64,
+    )
+
+    assert calls == [("reopen", {
+        "exact_source_candidate_packet_fingerprint": "e" * 64,
+        "source_scan_id": "scan-c7-change",
+        "workspace_slug": "b3s",
+        "created_at": None,
+    })]
+    assert activated["memory"] == reopened_memory
+    assert activated["score"] == reopened_score
+
+
 @pytest.mark.parametrize("superseded_read", ["memory", "score"])
 def test_scanner_activation_fails_closed_if_another_scan_supersedes_adoption(
     monkeypatch: pytest.MonkeyPatch,

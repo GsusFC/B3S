@@ -35,7 +35,6 @@ _MAX_REGISTRY_BYTES = 131_072
 _MAX_DSN_CHARS = 16_384
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _USAGE_EXIT = 2
-_NOT_READY_EXIT = 1
 
 
 class _ArgumentError(Exception):
@@ -55,7 +54,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--domain", required=True)
     parser.add_argument("--registry-file", type=Path, required=True)
     parser.add_argument("--expected-registry-fingerprint", required=True)
-    parser.add_argument("--require-ready", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -102,8 +100,6 @@ def main(
         result = storage_unavailable_result()
 
     _emit(result)
-    if args.require_ready and not result.ready:
-        return _NOT_READY_EXIT
     return 0
 
 

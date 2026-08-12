@@ -113,11 +113,19 @@ def test_scanner_candidate_materializes_normal_vault_memory() -> None:
     operational = build_operational_packet_from_scanner_candidate(_packet(candidates))
 
     accepted = operational["accepted_memory"]["accepted_tiles"]
-    assert len(accepted) == 80
+    assert len(accepted) == 79
+    assert "C7" not in {row["tile_id"] for row in accepted}
     m1 = next(row for row in accepted if row["tile_id"] == "M1")
     assert m1["authority_profile_id"] == "scanner-semantic-v1"
     assert m1["authority_source"] == "policy"
-    assert operational["scoring_projection"]["coverage"]["accepted_tile_count"] == 80
+    c7 = next(
+        row
+        for row in operational["candidate_overlay"]["candidate_tiles"]
+        if row["tile_id"] == "C7"
+    )
+    assert c7["authority_state"] == "pending"
+    assert c7["review_state"] == "required"
+    assert operational["scoring_projection"]["coverage"]["accepted_tile_count"] == 79
 
 
 def test_scanner_report_becomes_provisional_overlay_not_automatic_truth() -> None:

@@ -252,9 +252,7 @@ def test_isolated_pr71_vault_config_is_exact_and_fail_closed():
     assert config["env"]["B3S_POSTGRES_REQUIRED"] == "true"
     assert config["env"]["BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED"] == "true"
     assert config["env"]["B3S_SITE_BASIC_AUTH_ENABLED"] == "true"
-    assert config["env"]["BRAND3_VAULT_C7_CUTOVER_ENABLED"] == "false"
-    assert config["env"]["BRAND3_VAULT_C7_EMERGENCY_DENY"] == "true"
-    assert config["env"]["BRAND3_VAULT_C7_ALLOWLIST"] == ""
+    assert not any("C7" in key for key in config["env"])
     assert config["env"]["B3S_VAULT_WORKER_ENABLED"] == "true"
     assert config["env"]["BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED"] == "true"
     assert config["env"]["BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH"] == ""

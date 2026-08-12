@@ -541,6 +541,13 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
         )
         .read_text(encoding="utf-8")
     )
+    accepted_relation_projection_sql = (
+        resources.files("src.history")
+        .joinpath(
+            "migrations/024_evidence_vault_raw_accepted_relation_projection.sql"
+        )
+        .read_text(encoding="utf-8")
+    )
 
     assert filenames[13:] == [
         "014_evidence_vault_operational_memory_v2.sql",
@@ -553,6 +560,7 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
         "021_evidence_vault_cumulative_landing_hardening.sql",
         "022_evidence_vault_raw_incremental_planning.sql",
         "023_evidence_vault_raw_replay_projection.sql",
+        "024_evidence_vault_raw_accepted_relation_projection.sql",
     ]
     assert "packet_kind" in operational_memory_sql
     assert "operational_source_v2" in operational_memory_sql
@@ -625,6 +633,15 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
     assert "scans.source_run_id" in raw_replay_sql
     assert "scans.status" in raw_replay_sql
     assert "scans.error_summary" in raw_replay_sql
+    assert "accepted_evidence_tile_relations', accepted_relations" in (
+        accepted_relation_projection_sql
+    )
+    assert "evidence_vault_verified_c7_lineage_members" in (
+        accepted_relation_projection_sql
+    )
+    assert "Never turn a missing diagnostic mapping" in (
+        accepted_relation_projection_sql
+    )
 
 
 def test_claim_tile_review_requires_packet_fingerprint() -> None:
@@ -854,7 +871,7 @@ def test_concurrent_release_migration_is_database_serialized() -> None:
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(lambda _index: migrate_concurrently(), range(2)))
-        assert sorted(len(result) for result in results) == [0, 23]
+        assert sorted(len(result) for result in results) == [0, 24]
         assert sorted({filename for result in results for filename in result}) == [
             f"{index:03d}_" + name
             for index, name in enumerate(
@@ -882,6 +899,7 @@ def test_concurrent_release_migration_is_database_serialized() -> None:
                     "evidence_vault_cumulative_landing_hardening.sql",
                     "evidence_vault_raw_incremental_planning.sql",
                     "evidence_vault_raw_replay_projection.sql",
+                    "evidence_vault_raw_accepted_relation_projection.sql",
                 ],
                 start=1,
             )
@@ -938,6 +956,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "021_evidence_vault_cumulative_landing_hardening.sql",
             "022_evidence_vault_raw_incremental_planning.sql",
             "023_evidence_vault_raw_replay_projection.sql",
+            "024_evidence_vault_raw_accepted_relation_projection.sql",
         ]
         assert repository.migrate() == []
 
@@ -1873,6 +1892,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "021_evidence_vault_cumulative_landing_hardening.sql",
             "022_evidence_vault_raw_incremental_planning.sql",
             "023_evidence_vault_raw_replay_projection.sql",
+            "024_evidence_vault_raw_accepted_relation_projection.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0
@@ -1941,7 +1961,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
         assert stored[8] == (
             "b3s_history.evidence_vault_operational_relation_reviews"
         )
-        assert stored[9] == 23
+        assert stored[9] == 24
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")

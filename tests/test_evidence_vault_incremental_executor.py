@@ -7,7 +7,6 @@ import pytest
 
 from src.services.evidence_vault_canonical_core import canonical_fingerprint
 from src.services.evidence_vault_incremental_executor import (
-    EvidenceVaultIncrementalExecutorError,
     execute_vault_operation_plan,
     validate_vault_operation_result,
 )
@@ -198,7 +197,7 @@ def test_executor_builds_pending_overlay_without_authority_or_score() -> None:
     assert repository.source_packets and repository.operational_packets
 
 
-def test_executor_denies_c7_plan_before_claim_or_llm(monkeypatch) -> None:
+def test_executor_processes_c7_plan_without_special_runtime_gate() -> None:
     rows = [_row("Stable evidence")]
     plan = build_vault_scan_plan(
         brand_identity="example.com",
@@ -233,25 +232,16 @@ def test_executor_denies_c7_plan_before_claim_or_llm(monkeypatch) -> None:
         plan_unsigned,
     )
     repository = MemoryRepository(plan=plan, rows=rows)
-    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
-    monkeypatch.setenv("BRAND3_VAULT_C7_CUTOVER_ENABLED", "true")
-    monkeypatch.setenv("BRAND3_VAULT_C7_EMERGENCY_DENY", "true")
-    monkeypatch.setenv("BRAND3_VAULT_C7_ALLOWLIST", "example.com")
+    execution = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="scan-1",
+        worker_id="worker-a",
+        llm=NoCallLLM(),
+    )
 
-    with pytest.raises(
-        EvidenceVaultIncrementalExecutorError,
-        match="denied by current controls",
-    ):
-        execute_vault_operation_plan(
-            repository=repository,
-            source_scan_id="scan-1",
-            worker_id="worker-a",
-            llm=NoCallLLM(),
-        )
-
-    assert repository.operation["status"] == "pending"
-    assert repository.source_packets == []
-    assert repository.operational_packets == []
+    assert execution["execution_status"] == "completed"
+    assert repository.operation["status"] == "completed"
+    assert repository.failures == []
 
 
 def test_no_delta_executor_performs_zero_llm_and_creates_no_packet() -> None:

@@ -95,7 +95,31 @@ def _report(scan_id: str = "scan123") -> dict:
                         }
                     ],
                 },
-            }
+            },
+            {
+                "key": "coherencia",
+                "label": "Coherencia",
+                "status": "scored",
+                "score": 6,
+                "scale": 10,
+                "confidence": "high",
+                "resumen": "The narrative is coherent across channels.",
+                "veredicto": "Coherent.",
+                "message": "Keep the cross-channel promise aligned.",
+                "detected_content": "Owned and external narratives.",
+                "evaluation_model": "test-model",
+                "tile_profile": [
+                    {
+                        "id": "C7",
+                        "estado": "ok",
+                        "evidencia": "The owned and social narratives match.",
+                    }
+                ],
+                "lit": 1,
+                "off": 0,
+                "blind": 0,
+                "block": {"coverage_status": "positive_evidence", "refs": []},
+            },
         ],
         "raw": {
             "schema_version": "sv9-flow-v1",
@@ -103,123 +127,6 @@ def _report(scan_id: str = "scan123") -> dict:
             "sv9": {"result": {"rubric_version": "rubric-v1"}},
         },
     }
-
-
-def _operational_c7_projection() -> dict:
-    return {
-        "schema_version": "evidence-vault-c7-runtime-projection-v1",
-        "brand_identity": "example.com",
-        "canonical_memory_version": "a" * 64,
-        "adoption_event_id": "55ad9724-e936-59bf-a4ba-b6b69f8f70ef",
-        "evaluation_identity": "b" * 64,
-        "score_input_fingerprint": "c" * 64,
-        "tile_id": "C7",
-        "component_key": "coherencia",
-        "status": "accepted",
-        "semantic_state": "ok",
-        "effective_points": 2,
-        "score_eligible": True,
-        "group_identity": {
-            "group_id": "d" * 64,
-            "group_contract_fingerprint": "e" * 64,
-            "member_relation_ids": ["2" * 64, "3" * 64],
-            "member_channel_roles": [
-                "external_social_profile",
-                "owned_web",
-            ],
-            "attestation_fingerprint": "4" * 64,
-        },
-        "authority": True,
-        "authority_scope": "b3s-vault",
-        "vault_runtime_effect": True,
-        "operational_c7_effect": True,
-        "legacy_c7_unchanged": True,
-        "production_runtime_effect": False,
-        "scanner_runtime_effect": False,
-        "projection_fingerprint": "1" * 64,
-    }
-
-
-def test_operational_c7_api_uses_uniform_not_available_shape(monkeypatch) -> None:
-    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
-    monkeypatch.setattr(
-        "web.api_v1.router.operational_c7_runtime_projection_for_domain",
-        lambda _domain: None,
-    )
-
-    response = TestClient(app).get(
-        "/api/v1/brands/example.com/operational-c7",
-        headers=AUTH,
-    )
-
-    assert response.status_code == 404
-    assert response.json()["error"]["code"] == "operational_c7_not_available"
-    assert response.headers["cache-control"] == "private, no-store"
-    assert response.headers["pragma"] == "no-cache"
-    assert response.headers["vary"] == "Authorization"
-    assert "allowlist" not in response.text
-
-
-def test_operational_c7_api_is_typed_separate_and_never_cached(monkeypatch) -> None:
-    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
-    projection = _operational_c7_projection()
-    monkeypatch.setattr(
-        "web.api_v1.router.operational_c7_runtime_projection_for_domain",
-        lambda _domain: projection,
-    )
-
-    response = TestClient(app).get(
-        "/api/v1/brands/example.com/operational-c7",
-        headers=AUTH,
-    )
-
-    assert response.status_code == 200
-    assert response.headers["cache-control"] == "private, no-store"
-    assert response.headers["pragma"] == "no-cache"
-    assert response.headers["vary"] == "Authorization"
-    assert response.json() == {
-        "object": "operational_c7_runtime",
-        "api_version": "v1",
-        "projection": projection,
-    }
-
-
-def test_operational_c7_api_rejects_malformed_projection_uniformly(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
-    malformed = _operational_c7_projection()
-    malformed["score_eligible"] = "true"
-    malformed["group_identity"]["unexpected"] = "field"
-    monkeypatch.setattr(
-        "web.api_v1.router.operational_c7_runtime_projection_for_domain",
-        lambda _domain: malformed,
-    )
-
-    response = TestClient(app).get(
-        "/api/v1/brands/example.com/operational-c7",
-        headers=AUTH,
-    )
-
-    assert response.status_code == 404
-    assert response.json()["error"]["code"] == "operational_c7_not_available"
-    assert response.headers["cache-control"] == "private, no-store"
-    assert response.headers["pragma"] == "no-cache"
-    assert response.headers["vary"] == "Authorization"
-    assert "unexpected" not in response.text
-
-
-def test_operational_c7_api_auth_failure_is_never_cached(monkeypatch) -> None:
-    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
-
-    response = TestClient(app).get(
-        "/api/v1/brands/example.com/operational-c7"
-    )
-
-    assert response.status_code == 401
-    assert response.headers["cache-control"] == "private, no-store"
-    assert response.headers["pragma"] == "no-cache"
-    assert response.headers["vary"] == "Authorization"
 
 
 def test_api_health_is_public(monkeypatch):
@@ -343,6 +250,19 @@ def test_completed_result_has_stable_schema_and_etag(monkeypatch):
         "total": 2,
     }
     assert response.json()["components"][0]["evidence_refs"][0]["ref"] == "raw_inputs.1"
+    coherencia = next(
+        component
+        for component in response.json()["components"]
+        if component["key"] == "coherencia"
+    )
+    assert coherencia["tiles"] == [
+        {
+            "id": "C7",
+            "estado": "ok",
+            "evidencia": "The owned and social narratives match.",
+        }
+    ]
+    assert coherencia["score"] == 6
     etag = response.headers["etag"]
 
     cached = client.get("/api/v1/scans/scan123/result", headers={**AUTH, "If-None-Match": etag})

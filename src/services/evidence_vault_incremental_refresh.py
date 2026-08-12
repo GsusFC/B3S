@@ -513,18 +513,6 @@ def build_incremental_evidence_delta(
             modified_locators.add(locator)
         else:
             added.add(fingerprint)
-    superseded_previous = {
-        fingerprint
-        for locator in modified_locators
-        for fingerprint in previous_by_locator.get(locator, ())
-        if fingerprint not in current_by_fingerprint
-    }
-    not_reacquired = sorted(
-        set(previous_by_fingerprint)
-        - set(current_by_fingerprint)
-        - superseded_previous
-    )
-
     relation_tiles = _relation_tiles(
         accepted_evidence_tile_relations,
         known_fingerprints=(
@@ -534,6 +522,25 @@ def build_incremental_evidence_delta(
             set(known_by_locator) | set(previous_by_locator)
         ),
     )
+    accepted_fingerprints = set(relation_tiles["by_fingerprint"])
+    superseded_previous = {
+        fingerprint
+        for locator in modified_locators
+        for fingerprint in (
+            set(previous_by_locator.get(locator, ()))
+            | (
+                set(known_by_locator.get(locator, ()))
+                & accepted_fingerprints
+            )
+        )
+        if fingerprint not in current_by_fingerprint
+    }
+    not_reacquired = sorted(
+        set(previous_by_fingerprint)
+        - set(current_by_fingerprint)
+        - superseded_previous
+    )
+
     affected_tiles: set[str] = set()
     for locator in modified_locators:
         affected_tiles.update(relation_tiles["by_locator"].get(locator, ()))

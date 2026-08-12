@@ -112,14 +112,4 @@ def install_api_error_handlers(app: FastAPI) -> None:
             )
         response.headers.setdefault("X-Request-ID", correlation_id)
         response.headers.setdefault("X-B3S-API-Version", "v1")
-        if request.url.path.endswith("/operational-c7"):
-            response.headers["Cache-Control"] = "private, no-store"
-            response.headers["Pragma"] = "no-cache"
-            vary = {
-                value.strip()
-                for value in response.headers.get("Vary", "").split(",")
-                if value.strip()
-            }
-            vary.add("Authorization")
-            response.headers["Vary"] = ", ".join(sorted(vary))
         return response

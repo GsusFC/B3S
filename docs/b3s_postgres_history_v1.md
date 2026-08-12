@@ -6,7 +6,7 @@ PostgreSQL is the system of record for B3S brand history. The schema is relation
 
 The implementation lives in `src/history/` and uses the isolated `b3s_history` schema. PostgreSQL is the primary historical read model when `B3S_DATABASE_URL` is configured. Completed scans are persisted to PostgreSQL and JSON at report completion; JSON remains the compatibility fallback until the scan lifecycle cutover described below. A conflicting immutable report id aborts before the JSON fallback is changed.
 
-The same repository also contains the Vault operational, lineage, verified-raw provenance, immutable planning-context, and strict raw-replay contracts through migration `023`. Those paths can persist exact reviewed authority inside the isolated Vault history, but do not grant production, scanner, scoring, or presentation authority. The verified-raw worker, operational pipeline, and C7 runtime cutover remain dormant unless their separate explicit deployment capabilities are enabled.
+The same repository also contains the Vault operational, lineage, verified-raw provenance, immutable planning-context, and strict raw-replay contracts through migration `023`. Those paths persist exact reviewed authority inside isolated Vault history. The verified-raw worker and generic operational pipeline remain separate deployment capabilities; C7 itself has no special runtime cutover and follows the ordinary scored-tile lifecycle whenever that pipeline runs.
 
 ## Historical semantics
 
@@ -162,16 +162,16 @@ Fly release commands do not invoke this path; they verify the exact head with
 SELECT-only runtime access after a separately authorized external migration.
 
 The first run must apply every packaged migration through
-`023_evidence_vault_raw_replay_projection.sql`; the second must apply
+`024_evidence_vault_raw_accepted_relation_projection.sql`; the second must apply
 none. Current PostgreSQL integration coverage includes base history/import,
 Brand3 archive isolation, Vault operational persistence and execution, capture
 lineage, verified-raw provenance and roles, bounded C7 shadow readiness, and
 populated-schema upgrades. It proves local/CI database contracts, not a Fly
-release, a provisioned acquisition worker, or runtime C7 cutover.
+release or a provisioned acquisition worker. C7 has no separate runtime cutover.
 
 ## Cutover boundary
 
-For the main scanner, PostgreSQL serves imported history and mirrors completed reports, but is not yet the transactional live scan writer. Vault-specific persistence and provenance integrations do not change that boundary; the Fly worker/socket path is disabled and both C7 runtime-read methods remain fail-closed. The remaining controlled scan-lifecycle cutover is:
+For the main scanner, PostgreSQL serves imported history and mirrors completed reports, but is not yet the transactional live scan writer. Vault-specific persistence and provenance integrations do not change that boundary; the Fly worker/socket path is disabled. This is a generic scan-lifecycle deployment boundary, not a C7 gate. The remaining controlled scan-lifecycle cutover is:
 
 1. Add persistent scan lifecycle methods to `PostgresHistoryRepository`.
 2. Write scan start, capture completion and evaluation completion transactionally.

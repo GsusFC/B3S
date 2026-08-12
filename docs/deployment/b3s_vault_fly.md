@@ -38,16 +38,16 @@ routes are disabled unless `BRAND3_ENVIRONMENT=vault`. The general evidence
 review journals remain append-only and non-authoritative; operational Vault
 adoption has its own explicit, versioned authority contract.
 
-## Current state: dormant, no cutover
+## Current state: dormant Vault pipeline
 
-`fly.vault.toml` keeps `BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=false`,
-`BRAND3_VAULT_C7_CUTOVER_ENABLED=false`, emergency deny on, and the allowlist
-empty. It also disables verified-raw acquisition shadow and leaves its worker
-socket blank. `BRAND3_ENVIRONMENT=vault` alone is not an activation capability.
-This deployment launches no acquisition worker, operational planning/execution
-pipeline, or C7 runtime snapshot. The verified provenance, shadow-readiness,
-and PostgreSQL repository code can therefore be exercised by tests without
-claiming that operational Vault or C7 is active on Fly.
+`fly.vault.toml` keeps `BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=false`. It also
+disables verified-raw acquisition shadow and leaves its worker socket blank.
+`BRAND3_ENVIRONMENT=vault` alone is not an activation capability. This
+deployment launches no acquisition worker or operational planning/execution
+pipeline. C7 has no separate activation state: whenever the generic tile
+pipeline runs, it follows the same capture, review, scoring, report, API, and
+history lifecycle as the other tiles. Verified-raw shadow readiness is an
+optional diagnostic and cannot block product or deployment behavior.
 
 The release command verifies immutable build identity and then runs only the
 SELECT-only exact packaged head-`023` verifier through the runtime
@@ -82,13 +82,13 @@ migration has completed; never grant DDL to `B3S_DATABASE_URL` to bypass it.
    database isolation before field scans.
 
 Do not run a Vault deployment with the default `fly.toml`: that file targets
-production. Deployment alone does not authorize C7 cutover.
+production.
 
 ## Deployment and rollback NO-GO
 
 A deploy is **NO-GO** while the external migration is unauthorized, the runtime
 SELECT-only verifier cannot prove exact head `023`, database isolation is
-unproven, or the dormant operational/C7 flags drift. A release-command failure
+unproven, or the generic operational controls drift. A release-command failure
 must leave the existing Machine in place; it is not permission to run migration
 DDL with the runtime role.
 

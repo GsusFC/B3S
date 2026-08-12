@@ -624,7 +624,7 @@ def attest_active_composite_group(
         != ["external_social_profile", "owned_web"]
     ):
         raise EvidenceVaultCompositeGroupLifecycleError(
-            "C7 runtime attestation requires exactly two frozen channel members"
+            "C7 group attestation requires exactly two frozen channel members"
         )
     body = {
         "schema_version": EVIDENCE_VAULT_COMPOSITE_GROUP_ATTESTATION_VERSION,

@@ -141,8 +141,12 @@ def build_initial_authority_profile_matrix() -> dict[str, Any]:
             "tile_key": str(tile["tile_key"]),
             "accepted_basis_reduction_profile_id": REVIEWED_BASIS_PROFILE_ID,
             "new_semantic_mapping_profile_id": SCANNER_SEMANTIC_PROFILE_ID,
-            "automatic_new_mapping_enabled": True,
-            "tile_guardrails": [],
+            "automatic_new_mapping_enabled": str(tile["tile_id"]) != "C7",
+            "tile_guardrails": (
+                ["c7_requires_exact_reviewed_two_member_group"]
+                if str(tile["tile_id"]) == "C7"
+                else []
+            ),
         }
         for tile in registry["tiles"]
     ]
@@ -184,9 +188,9 @@ def build_initial_authority_profile_matrix() -> dict[str, Any]:
         "tile_profiles": tile_profiles,
         "summary": {
             "tile_count": len(tile_profiles),
-            "automatic_new_mapping_tile_count": 80,
+            "automatic_new_mapping_tile_count": 79,
             "shadow_insufficient_data_tile_count": 0,
-            "human_required_tile_count": 0,
+            "human_required_tile_count": 1,
             "deterministic_reviewed_basis_tile_count": 80,
         },
     }
@@ -308,6 +312,8 @@ def evaluate_scanner_semantic_authority(
         in {"supports", "contradicts", "demonstrates_absence"}
     ]
     failures: list[str] = []
+    if tile_id == "C7":
+        failures.append("c7_requires_exact_reviewed_two_member_group")
     if state is TileState.CONTRADICTION:
         failures.append("contradiction_requires_review")
     for row in effective:

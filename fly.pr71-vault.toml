@@ -34,13 +34,9 @@ kill_timeout = "30s"
   # Gate all browser/legacy/diagnostic routes. API v1 retains bearer scopes.
   B3S_SITE_BASIC_AUTH_ENABLED = "true"
   B3S_SITE_BASIC_AUTH_USERNAME = "vault"
-  # C7 remains denied until live verified-raw readiness and a separate cutover.
-  BRAND3_VAULT_C7_CUTOVER_ENABLED = "false"
-  BRAND3_VAULT_C7_EMERGENCY_DENY = "true"
-  BRAND3_VAULT_C7_ALLOWLIST = ""
   B3S_VAULT_WORKER_ENABLED = "true"
   BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED = "true"
-  # Score owned-web evidence when no external identity exists; never qualifies C7.
+  # Score owned-web evidence when no external identity exists; it cannot satisfy C7's two-channel evidence contract.
   BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS = "true"
   BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH = ""
   SCREENSHOT_PROVIDER = "playwright"
