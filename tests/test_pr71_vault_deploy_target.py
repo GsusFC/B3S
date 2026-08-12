@@ -43,6 +43,11 @@ class _Connection:
 def _environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for name, value in target._EXPECTED.items():
         monkeypatch.setenv(name, value)
+    monkeypatch.setenv("B3S_GOOGLE_OIDC_CLIENT_ID", "1234567890-example.apps.googleusercontent.com")
+    monkeypatch.setenv("B3S_GOOGLE_OIDC_CLIENT_SECRET", "google-client-secret-0123456789")
+    monkeypatch.setenv("B3S_GOOGLE_OIDC_SESSION_SECRET", "site-session-secret-" + ("x" * 48))
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", "scanner-token-" + ("s" * 32))
+    monkeypatch.setenv("B3S_EVIDENCE_ADJUDICATION_TOKEN", "reviewer-token-" + ("r" * 32))
     monkeypatch.setenv(
         "B3S_DATABASE_URL",
         (
@@ -110,6 +115,11 @@ def test_wrong_branch_fails_without_leaking_dsn(monkeypatch):
 
 def test_wrong_dsn_hostname_fails_before_database_connection(monkeypatch) -> None:
     _environment(monkeypatch)
+    monkeypatch.setenv("B3S_GOOGLE_OIDC_CLIENT_ID", "1234567890-example.apps.googleusercontent.com")
+    monkeypatch.setenv("B3S_GOOGLE_OIDC_CLIENT_SECRET", "google-client-secret-0123456789")
+    monkeypatch.setenv("B3S_GOOGLE_OIDC_SESSION_SECRET", "site-session-secret-" + ("x" * 48))
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", "scanner-token-" + ("s" * 32))
+    monkeypatch.setenv("B3S_EVIDENCE_ADJUDICATION_TOKEN", "reviewer-token-" + ("r" * 32))
     monkeypatch.setenv(
         "B3S_DATABASE_URL",
         "postgresql://runtime:secret@wrong.example/neondb",
@@ -136,6 +146,11 @@ def test_wrong_dsn_hostname_fails_before_database_connection(monkeypatch) -> Non
 )
 def test_effective_target_overrides_fail_before_connection(monkeypatch, query):
     _environment(monkeypatch)
+    monkeypatch.setenv("B3S_GOOGLE_OIDC_CLIENT_ID", "1234567890-example.apps.googleusercontent.com")
+    monkeypatch.setenv("B3S_GOOGLE_OIDC_CLIENT_SECRET", "google-client-secret-0123456789")
+    monkeypatch.setenv("B3S_GOOGLE_OIDC_SESSION_SECRET", "site-session-secret-" + ("x" * 48))
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", "scanner-token-" + ("s" * 32))
+    monkeypatch.setenv("B3S_EVIDENCE_ADJUDICATION_TOKEN", "reviewer-token-" + ("r" * 32))
     monkeypatch.setenv(
         "B3S_DATABASE_URL",
         (
@@ -224,3 +239,56 @@ def test_connected_host_must_be_observable_and_exact(monkeypatch) -> None:
 
     with pytest.raises(SystemExit, match="target verification failed"):
         target.main()
+
+
+@pytest.mark.parametrize("name", ["B3S_GOOGLE_OIDC_CLIENT_ID", "B3S_GOOGLE_OIDC_CLIENT_SECRET", "B3S_GOOGLE_OIDC_SESSION_SECRET"])
+def test_missing_google_oidc_secret_fails_before_database_connection(monkeypatch, name):
+    _environment(monkeypatch)
+    monkeypatch.delenv(name)
+    monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: pytest.fail("database must not be contacted"))
+    with pytest.raises(SystemExit, match="target verification failed"):
+        target.main()
+
+
+def test_google_oidc_secrets_must_be_distinct(monkeypatch):
+    _environment(monkeypatch)
+    monkeypatch.setenv("B3S_GOOGLE_OIDC_SESSION_SECRET", os.environ["B3S_GOOGLE_OIDC_CLIENT_SECRET"])
+    monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: pytest.fail("database must not be contacted"))
+    with pytest.raises(SystemExit, match="target verification failed"):
+        target.main()
+
+
+@pytest.mark.parametrize("name", ["B3S_SCANNER_API_TOKEN", "B3S_EVIDENCE_ADJUDICATION_TOKEN"])
+def test_missing_isolated_bearer_fails_before_database_connection(monkeypatch, name):
+    _environment(monkeypatch)
+    monkeypatch.delenv(name)
+    monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: pytest.fail("database must not be contacted"))
+    with pytest.raises(SystemExit, match="target verification failed"):
+        target.main()
+
+
+def test_scanner_and_reviewer_bearers_must_differ(monkeypatch):
+    _environment(monkeypatch)
+    monkeypatch.setenv("B3S_EVIDENCE_ADJUDICATION_TOKEN", os.environ["B3S_SCANNER_API_TOKEN"])
+    monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: pytest.fail("database must not be contacted"))
+    with pytest.raises(SystemExit, match="target verification failed"):
+        target.main()
+
+
+@pytest.mark.parametrize("name", ["B3S_SCANNER_API_TOKEN", "B3S_EVIDENCE_ADJUDICATION_TOKEN"])
+def test_whitespace_padded_bearer_fails_before_database_connection(monkeypatch, name):
+    _environment(monkeypatch)
+    monkeypatch.setenv(name, " " + os.environ[name])
+    monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: pytest.fail("database must not be contacted"))
+    with pytest.raises(SystemExit, match="target verification failed"):
+        target.main()
+
+
+def test_legacy_scanner_alias_is_allowed_only_when_exact(monkeypatch):
+    _environment(monkeypatch)
+    token = os.environ["B3S_SCANNER_API_TOKEN"]
+    monkeypatch.delenv("B3S_SCANNER_API_TOKEN")
+    monkeypatch.setenv("BRAND3_SCANNER_API_TOKEN", token)
+    connection = _Connection(("neondb", "b3s_pr71_app_runtime", "jolly-river-32467750", "br-divine-star-aspobuer"))
+    monkeypatch.setattr(target.psycopg, "connect", lambda *_a, **_kw: connection)
+    assert target.main() == 0

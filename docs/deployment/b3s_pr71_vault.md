@@ -25,21 +25,40 @@ release command never applies DDL with the runtime `B3S_DATABASE_URL`.
 
 ## Access boundary
 
-The isolated app sets `B3S_SITE_BASIC_AUTH_ENABLED=true`. HTTP Basic protects
-every browser, legacy, diagnostic, report, brand, artifact, and provider-check
-route. The dedicated `/vault/review/*` surface is the deliberate exception: it
-uses only the evidence-reviewer credential, then an 8-hour signed
-HttpOnly/SameSite=Strict session with CSRF protection. Unsafe requests require
-an exact same-origin `Origin`; browsers that omit `Origin` may use an exact
-same-origin `Referer` fallback, or the route's own signed CSRF token for the
-login, logout, and decision POSTs. Only `/health` and `/api/v1/*`
-otherwise bypass the site gate; versioned API routes retain their existing
-bearer scopes.
+The isolated app sets `B3S_GOOGLE_OIDC_ENABLED=true`. Google OpenID Connect protects every browser, legacy, diagnostic, report, brand, artifact, and provider-check route. Access is authorized only for these exact verified Google Workspace identities:
 
-Store the scanner bearer and reviewer bearer in an approved secret manager.
-They must be fresh and the scanner and reviewer bearers must differ. Never
-place credentials in this file, URLs, screenshots, PR comments, or command
-history.
+- `jesus@wearefloc.com`
+- `sergio@wearefloc.com`
+- `javi@wearefloc.com`
+- `victor@wearefloc.com`
+
+The server validates Google signature, issuer, audience, expiry, nonce, PKCE, `email_verified=true`, exact `hd=wearefloc.com`, and exact email membership. The `hd` authorization-request parameter is only an account-picker hint. OAuth provider tokens are never persisted. Site sessions are signed, Secure, HttpOnly, SameSite=Lax, fixed to eight hours, and re-check the allowlist on every request. Authentication flow state expires after ten minutes.
+
+The dedicated `/vault/review/*` surface remains a deliberate exception and continues to use only the distinct evidence-reviewer credential and its own signed session/CSRF boundary. Only exact `/health` and `/api/v1/*` otherwise bypass site OIDC; versioned API routes retain existing bearer scopes. Unsafe browser routes retain exact same-origin protection. Uvicorn access logging is disabled for this PR71 process so callback query codes and state do not enter application access logs. This does not prove that Fly edge telemetry omits query strings; verify and document the platform retention/redaction policy before deployment, and never expose edge logs containing OAuth callback queries.
+
+The Google OAuth Web client must use this exact authorized redirect URI:
+
+```text
+https://b3s-pr71-vault.fly.dev/auth/google/callback
+```
+
+Store the OAuth client secret, session-signing secret, scanner bearer, and reviewer bearer in the approved secret manager. All four capabilities must be distinct. Never place credentials in files, URLs, screenshots, PR comments, or command history.
+
+
+### OIDC transition without a public window
+
+Create the company-controlled Google OAuth Web client before deployment and keep
+the current Basic-gated Machine unchanged. Stage `B3S_GOOGLE_OIDC_CLIENT_ID`,
+`B3S_GOOGLE_OIDC_CLIENT_SECRET`, and `B3S_GOOGLE_OIDC_SESSION_SECRET` without
+restarting the old image. Only the newly reauthorized OIDC image reads them.
+Its release verifier and startup both fail closed if any OIDC value, the exact
+four-user allowlist, base URL, or secret-separation contract is wrong. Deploy the
+new source and Fly config atomically; the old Machine remains Basic-gated until
+replacement, while the new Machine either serves OIDC or fails startup. Verify
+an allowed login, a disallowed login, exact SHA, API Bearer behavior, and the
+separate reviewer surface before removing the now-unused Basic password secret.
+The app has an attached volume, so this is a rolling single-Machine replacement,
+not a canary or blue/green rollout.
 
 ## PostgreSQL identities
 
@@ -127,7 +146,9 @@ live REST `main` ref. The environment has a custom deployment branch policy conf
 
 The `pr71-vault` environment currently contains zero deployment secrets.
 `B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN` were provisioned only for the
-previous authorized deployment and then removed. Dispatch `31507333105` failed closed before checkout or secret use; retry `31526043212` failed before advisory lock, DDL, ACL, or Fly mutation. Final run `31534878673` completed every attestation, migration/ACL, deploy, and exact-commit liveness step successfully. Both temporary deployment secrets were then removed.
+previous authorized deployment and then removed. Deployment run `31595043741`
+completed every attestation, migration/ACL, deploy, and exact-commit liveness
+step successfully at `1b1df547ef52c49674a3705411361d84473956b3`. Both temporary deployment secrets were then removed.
 Any future deployment requires a new exact-SHA GO and fresh secret provisioning.
 
 Before checkout, dependency installation, or deployment-secret use,
@@ -142,7 +163,12 @@ comparison must contain the exact three audited files listed above; those are th
 - `tests/test_deploy_provenance.py`
 
 Any runtime, database, CI-workflow, config, or other source change after PR #76
-is outside the attestation allowlist and fails closed.
+is outside the attestation allowlist and fails closed. In particular, the Google
+OIDC implementation changes runtime and Fly configuration and therefore cannot
+be deployed by this PR76-pinned workflow. After the OIDC implementation PR is
+reviewed, green, and merged, a separate three-file control-plane PR must re-pin
+the deployment workflow and this runbook to that new reviewed PR, head, merge,
+and exact CI runs before any OIDC deployment is authorized.
 
 The trusted CI identity is pinned to workflow ID `306885838`, path
 `.github/workflows/ci.yml`, and blob
@@ -159,7 +185,9 @@ wrong-event, workflow-modified, truncated, or ambiguous objects fail closed.
 L1 operation requires only app-scoped credentials:
 
 - `B3S_DATABASE_URL` — isolated least-privilege runtime DSN
-- `B3S_SITE_BASIC_AUTH_PASSWORD` — browser/legacy site gate
+- `B3S_GOOGLE_OIDC_CLIENT_ID` — Google OAuth Web client identifier
+- `B3S_GOOGLE_OIDC_CLIENT_SECRET` — Google OAuth client secret
+- `B3S_GOOGLE_OIDC_SESSION_SECRET` — independent random site-session signing secret
 - `B3S_SCANNER_API_TOKEN` — versioned scanner API bearer
 - `B3S_EVIDENCE_ADJUDICATION_TOKEN` — distinct reviewer/adjudication bearer
 - provider credentials required by the standard scanner (`BRAND3_LLM_*`,
@@ -217,12 +245,15 @@ or deny C7 and are never a deployment or publication gate.
 
 ## Rollback and NO-GO
 
-Deployment is **NO-GO** unless the fixed PR #76 reviewed head and merge attest,
-the requested SHA equals both dispatched and live current `main`, the cumulative
-post-PR76 changes are the exact three audited files listed above, all three CI
-blobs and all required CI runs attest, the separate deployment GO and secret
-provisioning are complete, the external migration target assertion passes before
-DDL, head `024` verifies exactly, and the idempotent runtime-role contract passes.
+Deployment remains **NO-GO** for the OIDC source change while the workflow is
+pinned to PR #76 and its exact three-file post-baseline comparison. The OIDC PR
+must first merge with green CI, then a separate reviewed control-plane PR must
+re-pin the workflow to that new baseline and its immutable CI objects. After
+that reauthorization, the requested SHA must equal dispatched and live `main`,
+all new OIDC app secrets must validate, the separate deployment GO and temporary
+deployment-secret provisioning must be complete, the external migration target
+assertion must pass before DDL, head `024` must verify exactly, and the idempotent
+runtime-role contract must pass.
 `b3s` and `b3s-vault` must remain on their SELECT-only release verifiers and may
 not be used as fallback migration targets.
 

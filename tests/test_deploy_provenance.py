@@ -247,9 +247,15 @@ def test_isolated_pr71_vault_config_is_exact_and_fail_closed():
     assert config["env"]["B3S_EXPECTED_RUNTIME_ROLE"] == "b3s_pr71_app_runtime"
     assert config["env"]["B3S_POSTGRES_REQUIRED"] == "true"
     assert config["env"]["BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED"] == "true"
-    assert config["env"]["B3S_SITE_BASIC_AUTH_ENABLED"] == "true"
+    assert config["env"]["B3S_GOOGLE_OIDC_ENABLED"] == "true"
+    assert "B3S_SITE_BASIC_AUTH_ENABLED" not in config["env"]
+    assert "B3S_SITE_BASIC_AUTH_USERNAME" not in config["env"]
+    assert "B3S_GOOGLE_OIDC_ALLOWED_EMAILS" not in config["env"]
     assert not any("C7" in key for key in config["env"])
     assert config["env"]["B3S_VAULT_WORKER_ENABLED"] == "true"
+    assert config["processes"]["app"].endswith("--no-access-log")
+    assert "--no-access-log" not in _read("fly.toml")
+    assert "--no-access-log" not in _read("fly.vault.toml")
     assert config["env"]["BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED"] == "true"
     assert config["env"]["BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH"] == ""
     assert config["http_service"]["auto_start_machines"] is True
@@ -545,12 +551,9 @@ def test_pr71_runbook_marks_workflow_post_merge_and_separately_authorized():
     assert "custom deployment branch policy configured to allow only `main`" in runbook
     assert "currently contains zero deployment secrets" in runbook
     assert "`B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN` were provisioned only" in runbook
-    assert "Dispatch `31507333105`" in runbook
-    assert "failed closed before checkout or secret use" in runbook
-    assert "retry `31526043212`" in runbook
-    assert "before advisory lock, DDL, ACL, or Fly" in runbook
-    assert "Final run `31534878673`" in runbook
+    assert "Deployment run `31595043741`" in runbook
     assert "completed every attestation, migration/ACL" in runbook
+    assert "`1b1df547ef52c49674a3705411361d84473956b3`" in runbook
     assert "Both temporary deployment secrets were then removed" in runbook
     assert "Any future deployment requires a new exact-SHA GO" in runbook
     assert "exact three audited files listed above" in runbook
