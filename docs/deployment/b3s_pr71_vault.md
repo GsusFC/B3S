@@ -17,7 +17,7 @@ not authorize either existing app, a production migration, or any later deployme
 - Public hostname: `b3s-pr71-vault.fly.dev`
 
 The release command runs `verify_release_build.py`, the SELECT-only exact schema
-head-023 verifier, and `verify_pr71_vault_target.py`. The final verifier checks
+head-024 verifier, and `verify_pr71_vault_target.py`. The final verifier checks
 the Fly app, base URL, authenticated TLS session, exact host/database/runtime
 role/project/branch identity, the operational-pipeline capability, and access
 gate. A mismatch aborts before an app Machine is updated. The
@@ -51,7 +51,7 @@ migration versions, filenames, and checksums. The isolated release verifier
 also requires `current_user = b3s_pr71_app_runtime`; an owner or migration
 credential on the same branch is rejected before the Machine update.
 
-Migration 023 keeps the worker replay reader strict after a report upgrades mutable `scan_runs` presentation fields: it reconstructs the frozen raw scan projection from the immutable request and plan, while retaining current source-run/status/error/requested/started and non-lifecycle metadata so contamination still fails closed.
+Migration 024 preserves the strict replay behavior from migration 023 and additionally projects exact active accepted evidence relations into fresh planning. Migration 023 keeps the worker replay reader strict after a report upgrades mutable `scan_runs` presentation fields: it reconstructs the frozen raw scan projection from the immutable request and plan, while retaining current source-run/status/error/requested/started and non-lifecycle metadata so contamination still fails closed.
 
 The isolated L2 logins are fixed and distinct:
 
@@ -112,89 +112,47 @@ password, or prints a DSN/driver error.
 ## Post-merge deployment gate
 
 Do not use `fly.toml`, `fly.vault.toml`, `b3s`, `b3s-vault`, their volumes, or
-their database branches in this workflow. The manual GitHub workflow is a **post-merge-only** deployment mechanism: the
-workflow file was not registered on the default branch before PR #71 landed.
-PR #71 is fixed at reviewed head
-`377364784ee9b4554acd074a7013e870191654e0` and merge commit
-`05393b5eac7fa7be68f5739eba92becb40619a50`. The post-merge attestation hotfix
-may be dispatched only after it lands on `main`; provide the full 40-character
-SHA of that then-current `main`, not the older PR #71 merge SHA, and type
-`b3s-pr71-vault`. Neither merging PR #71, merging the attestation hotfix, the
-presence of `workflow_dispatch`, the confirmation input, nor a successful
-attestation authorizes a merge or a deployment. Merge approval and the
-deployment GO remain separate operator decisions.
+their database branches in this workflow. The manual GitHub workflow is a
+**post-merge-only** deployment mechanism for the isolated `b3s-pr71-vault`
+target. Its current reviewed application baseline is PR #76 at head
+`4210f743660b57cf760a91b353dc775019c9dc90` and merge commit
+`5c4c737a17e46c0dc571132b5bd1dfdd63c687cc`. Neither merging the reviewed
+PR, the presence of `workflow_dispatch`, the confirmation input, nor a
+successful attestation authorizes a merge or deployment. Merge approval and
+the deployment GO remain separate operator decisions.
 
-Dispatch only from the exact Git ref `refs/heads/main` and only through the
-GitHub environment `pr71-vault`. The job condition and the pre-checkout
-attestation both require `github.ref == refs/heads/main`; the input SHA must
-also equal both the immutable workflow-dispatch `github.sha` and the live REST
-`refs/heads/main` commit. The environment has a custom deployment branch policy configured to allow only `main`;
-retaining and verifying that external policy
-immediately before dispatch is mandatory. A caller can request
-`workflow_dispatch` with another `ref`, and code loaded from that mutable ref
-could remove an in-workflow check, so the environment policy is part of the
-boundary rather than optional duplication.
+Dispatch only from exact `refs/heads/main` through the GitHub environment
+`pr71-vault`. The input SHA must equal both the immutable dispatch SHA and the
+live REST `main` ref. The environment has a custom deployment branch policy configured to allow only `main`.
 
 The `pr71-vault` environment currently contains zero deployment secrets.
-Exactly `B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN` were provisioned only
-after the owner authorized the isolated deployment. Dispatch `31507333105`
-failed closed before checkout or secret use; retry `31526043212` failed closed
-in the migration target preflight before advisory lock, DDL, ACL, or Fly
-mutation. Final run `31534878673` completed every attestation, migration/ACL,
-deploy, and exact-commit liveness step successfully.
-Both temporary deployment secrets were then removed.
+`B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN` were provisioned only for the
+previous authorized deployment and then removed. Dispatch `31507333105` failed closed before checkout or secret use; retry `31526043212` failed before advisory lock, DDL, ACL, or Fly mutation. Final run `31534878673` completed every attestation, migration/ACL, deploy, and exact-commit liveness step successfully. Both temporary deployment secrets were then removed.
 Any future deployment requires a new exact-SHA GO and fresh secret provisioning.
-Secret expressions remain confined to steps
-after complete attestation, checkout, and package installation.
 
 Before checkout, dependency installation, or deployment-secret use,
-runner-owned code fetches PR #71 through the GitHub REST API and requires
-`state=closed`, `merged=true`, and `draft=false`. It requires base ref `main`,
-head ref `fix/vault-v2-cumulative-landing`, exact repository ID `1288696741`
-and name `GsusFC/B3S` in both `base.repo` and `head.repo`, exact `head.sha`
-`377364784ee9b4554acd074a7013e870191654e0`, and exact `merge_commit_sha`
-`05393b5eac7fa7be68f5739eba92becb40619a50`.
-
-Two GitHub Compare REST responses prove the immutable reviewed head is an
-ancestor of the PR #71 merge and that the PR #71 merge is an ancestor of the
-current deployment SHA. Each response must return the exact `base_commit.sha`
-and `merge_base_commit.sha`, `behind_by=0`, an ancestral `status`, a complete
-bounded commit page, and the exact final commit. The cumulative
-PR71-merge-to-deployment `files` array must be untruncated and exactly these
-seven existing, `modified`, non-renamed paths:
+runner-owned code fetches PR #76 and requires `state=closed`, `merged=true`, and `draft=false`, base `main`, head `fix/c7-functional-nonblocking`, repository ID
+`1288696741` and name `GsusFC/B3S`, exact reviewed head, and exact `merge_commit_sha`.
+It proves reviewed-head-to-merge and merge-to-current-main ancestry from complete
+GitHub Compare responses. For the deployment-attestation follow-up, the latter
+comparison must contain the exact three audited files listed above; those are these existing, modified, non-renamed paths:
 
 - `.github/workflows/fly-deploy-pr71-vault.yml`
 - `docs/deployment/b3s_pr71_vault.md`
-- `scripts/pr71_vault_database_target.py`
-- `tests/test_configure_b3s_runtime_role.py`
 - `tests/test_deploy_provenance.py`
-- `tests/test_pr71_vault_deploy_target.py`
-- `tests/test_pr71_vault_migration_target.py`
 
-Any runtime, database, CI-workflow, config, or other source change after the PR
-#71 merge is outside the hotfix allowlist and fails closed.
+Any runtime, database, CI-workflow, config, or other source change after PR #76
+is outside the attestation allowlist and fails closed.
 
-The trusted CI identity is pinned, not inherited from the old PR base:
-workflow ID `306885838`, path `.github/workflows/ci.yml`, and Git blob
-`c1082f6b5c53a364b8d38e43936b93722c0183d1`. The workflow must still be active,
-and the Contents REST response at the reviewed PR head, PR #71 merge, and
-current deployment SHA must return `type=file`, the exact path, and that exact
-blob SHA. This deliberately accepts PR #71's sole reviewed CI edit,
-`B3S_TEST_ALLOW_SCHEMA_DROP=1`, while rejecting any later CI drift.
-
-The attestation also fetches and validates the exact successful PR CI run
-`31496647341` and the exact successful PR #71 `push`/`main` CI run
-`31506929921`. Finally it queries runs through the pinned workflow ID with
-`event=push`, `branch=main`, and the exact current deployment `head_sha`, without filtering away
-non-successful runs. Exactly one run may exist. Every accepted
-run must return exact REST fields: `id`, `workflow_id`, `path`, `event`,
-`head_branch`, `head_sha`, `status=completed`, `conclusion=success`,
-`run_attempt=1`, plus repository ID `1288696741` and name `GsusFC/B3S` in
-both `repository` and `head_repository`.
-GitHub push runs do not need a PR linkage and their `pull_requests` array may be empty,
-so it is intentionally not an acceptance condition. Missing, pending,
-failed, foreign, stale, wrong-event, workflow-modified, truncated, or ambiguous
-objects fail closed.
+The trusted CI identity is pinned to workflow ID `306885838`, path
+`.github/workflows/ci.yml`, and blob
+`c1082f6b5c53a364b8d38e43936b93722c0183d1`. The workflow must remain active;
+the reviewed head, merge, and deployment Contents responses must carry that
+exact blob. Exact successful CI runs `31567629360` (reviewed PR #76 head) and
+`31568953356` (PR #76 merge on `main`) are pinned. The current exact-main push run is fetched without filtering away non-successful runs; exactly one completed,
+successful, first-attempt run with the expected repository and SHA is accepted.
+The `pull_requests` array may be empty. Missing, pending, failed, foreign, stale,
+wrong-event, workflow-modified, truncated, or ambiguous objects fail closed.
 
 ## Required app secrets
 
@@ -259,16 +217,16 @@ or deny C7 and are never a deployment or publication gate.
 
 ## Rollback and NO-GO
 
-Deployment is **NO-GO** unless the fixed PR #71 reviewed head and merge attest,
+Deployment is **NO-GO** unless the fixed PR #76 reviewed head and merge attest,
 the requested SHA equals both dispatched and live current `main`, the cumulative
-post-PR71 changes are the exact seven audited files listed above, all three CI
+post-PR76 changes are the exact three audited files listed above, all three CI
 blobs and all required CI runs attest, the separate deployment GO and secret
 provisioning are complete, the external migration target assertion passes before
-DDL, head `023` verifies exactly, and the idempotent runtime-role contract passes.
+DDL, head `024` verifies exactly, and the idempotent runtime-role contract passes.
 `b3s` and `b3s-vault` must remain on their SELECT-only release verifiers and may
 not be used as fallback migration targets.
 
-No older application image is assumed compatible with schema head `023`, and
+No older application image is assumed compatible with schema head `024`, and
 this runbook pre-authorizes no image rollback. Engage the access and scan holds first,
 stop new scans, and drain the single active scan. Prefer a reviewed forward fix;
 any coordinated image-plus-Neon-restore plan requires separate authorization and
