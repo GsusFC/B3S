@@ -2,7 +2,7 @@
 
 `https://b3s-pr71-vault.fly.dev` is a third, isolated environment for operating
 and validating the PR71 Vault stack. It is not `b3s`, not `b3s-vault`, and does
-not authorize either existing app, production migration, or C7 cutover.
+not authorize either existing app, a production migration, or any later deployment.
 
 ## Fixed identity
 
@@ -19,8 +19,8 @@ not authorize either existing app, production migration, or C7 cutover.
 The release command runs `verify_release_build.py`, the SELECT-only exact schema
 head-023 verifier, and `verify_pr71_vault_target.py`. The final verifier checks
 the Fly app, base URL, authenticated TLS session, exact host/database/runtime
-role/project/branch identity, the operational-pipeline capability, access gate,
-and denied C7 controls. A mismatch aborts before an app Machine is updated. The
+role/project/branch identity, the operational-pipeline capability, and access
+gate. A mismatch aborts before an app Machine is updated. The
 release command never applies DDL with the runtime `B3S_DATABASE_URL`.
 
 ## Access boundary
@@ -58,7 +58,7 @@ The isolated L2 logins are fixed and distinct:
 - `b3s_pr71_app_runtime` — FastAPI/report runtime login
 - `b3s_pr71_scanner_ingest` — worker-only execute-only raw append, exact replay, and bounded planning-context login;
   the worker preflight binds the session to this exact role
-- `b3s_pr71_c7_runtime_read` — external private readiness login
+- `b3s_pr71_c7_runtime_read` — external private provenance-diagnostic login
 - `b3s_pr71_c7_governance` — external governance/adoption capability
 
 Provision these names in the isolated Neon branch only. Never substitute the
@@ -237,11 +237,11 @@ persistent sources remain unreadable to `b3s` and must be removed when L2 ends.
 `B3S_C7_RUNTIME_READ_DATABASE_URL` and the governance DSN remain external
 operator capabilities; neither is installed in the Fly app or this volume.
 
-## C7 boundary
+## C7 and provenance-diagnostic boundary
 
-The isolated L2 configuration enables only acquisition shadowing. Owned-web-only
-analysis may continue when no external identity is available; its explicit
-warning is non-qualifying and can never satisfy C7.
+C7 is a normal functional and scored tile. Owned-web-only analysis may continue
+when no external identity is available; without the second reviewed channel C7
+uses its ordinary unresolved/pending evidence state and the scan still completes.
 
 ```text
 BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true
@@ -249,16 +249,13 @@ B3S_VAULT_WORKER_ENABLED=true
 BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED=true
 BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS=true
 BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH=
-BRAND3_VAULT_C7_CUTOVER_ENABLED=false
-BRAND3_VAULT_C7_EMERGENCY_DENY=true
-BRAND3_VAULT_C7_ALLOWLIST=
 ```
 
 The release Machine keeps the socket path empty; the supervisor injects its
-validated dynamic `/run` socket only into the live web child. L2 still requires
-two live captures 5 minutes–24 hours apart, review/adoption, governance bindings,
-and a private readiness probe. C7 runtime remains a later independent gate even
-if readiness becomes true.
+validated dynamic `/run` socket only into the live web child. Two live captures,
+review/adoption, governance bindings, and the private probe apply only when an
+operator wants the optional verified-raw diagnostic result. They do not enable
+or deny C7 and are never a deployment or publication gate.
 
 ## Rollback and NO-GO
 
@@ -267,14 +264,12 @@ the requested SHA equals both dispatched and live current `main`, the cumulative
 post-PR71 changes are the exact seven audited files listed above, all three CI
 blobs and all required CI runs attest, the separate deployment GO and secret
 provisioning are complete, the external migration target assertion passes before
-DDL, head `023`
-verifies exactly, the idempotent runtime-role contract passes, and C7 remains
-denied.
+DDL, head `023` verifies exactly, and the idempotent runtime-role contract passes.
 `b3s` and `b3s-vault` must remain on their SELECT-only release verifiers and may
 not be used as fallback migration targets.
 
 No older application image is assumed compatible with schema head `023`, and
-this runbook pre-authorizes no image rollback. Engage the access/C7 holds first,
+this runbook pre-authorizes no image rollback. Engage the access and scan holds first,
 stop new scans, and drain the single active scan. Prefer a reviewed forward fix;
 any coordinated image-plus-Neon-restore plan requires separate authorization and
 proof against a preserved restore anchor. A release verifier mismatch is a hard

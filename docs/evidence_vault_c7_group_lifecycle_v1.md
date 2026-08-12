@@ -134,22 +134,13 @@ The regression set covers:
 - exact retry, stale competing trigger, and durable loser observation; and
 - journal `UPDATE`/`DELETE` rejection.
 
-## Remaining production blockers
+## Product boundary
 
-This control is intentionally not wired into a live scanner or production
-route. Production remains **NO-GO** until the separate cutover work supplies
-and validates at least:
+This lifecycle is the ordinary functional lifecycle for C7. A material member
+change reopens C7 and temporarily changes only its tile state and normal
+Coherencia contribution; it never blocks the surrounding scan, persistence,
+report, API, UI, or deployment.
 
-- a disabled-by-default feature flag and kill switch;
-- a Vault-only brand allowlist;
-- raw acquisition/lineage replay and latest-capture watermark policy;
-- separated operational versus legacy score presentation;
-- removal of offline field adapters from the runtime repository boundary; and
-- an authorized deployment/replay plan.
-
-## Runtime cutover boundary
-
-The group lifecycle remains an offline Vault authority. Present-time operational
-C7 effect is governed separately by
-[`evidence_vault_c7_cutover_controls_v1.md`](evidence_vault_c7_cutover_controls_v1.md);
-the default is deny and legacy SV9 C7 is unchanged.
+See the active
+[`evidence_vault_c7_product_contract_v1.md`](evidence_vault_c7_product_contract_v1.md).
+The former C7-specific runtime cutover control plane is retired.

@@ -34,15 +34,20 @@ def test_initial_matrix_is_complete_but_does_not_claim_semantic_calibration() ->
     validate_authority_profile_matrix(matrix)
     assert matrix["summary"] == {
         "tile_count": 80,
-        "automatic_new_mapping_tile_count": 80,
+        "automatic_new_mapping_tile_count": 79,
         "shadow_insufficient_data_tile_count": 0,
-        "human_required_tile_count": 0,
+        "human_required_tile_count": 1,
         "deterministic_reviewed_basis_tile_count": 80,
     }
     assert matrix["corpus"]["generalization_claim"] is False
     assert other["new_semantic_mapping_profile_id"] == SCANNER_SEMANTIC_PROFILE_ID
     assert c8["new_semantic_mapping_profile_id"] == SCANNER_SEMANTIC_PROFILE_ID
     assert c8["accepted_basis_reduction_profile_id"] == REVIEWED_BASIS_PROFILE_ID
+    c7 = next(row for row in matrix["tile_profiles"] if row["tile_key"] == "coherencia.C7")
+    assert c7["automatic_new_mapping_enabled"] is False
+    assert c7["tile_guardrails"] == [
+        "c7_requires_exact_reviewed_two_member_group"
+    ]
 
 
 def test_corpus_folds_are_split_by_brand_without_leakage() -> None:
@@ -102,6 +107,20 @@ def test_scanner_semantic_policy_accepts_persisted_unreviewed_relation() -> None
     assert decision["authority_profile_id"] == SCANNER_SEMANTIC_PROFILE_ID
     assert decision["eligible"] is True
     validate_authority_decision(decision, candidate_tile=candidate)
+
+
+def test_scanner_semantic_policy_keeps_c7_pending_for_exact_group_review() -> None:
+    scanner_basis = _basis("scanner-c7", "supports", review_status="unreviewed")
+    scanner_basis["decision_event_id"] = None
+    candidate = build_candidate_tile(tile_id="C7", basis=[scanner_basis])
+
+    decision = evaluate_scanner_semantic_authority(candidate_tile=candidate)
+
+    assert decision["eligible"] is False
+    assert decision["decision"] == "remain_pending"
+    assert "c7_requires_exact_reviewed_two_member_group" in decision["reason_codes"]
+    with pytest.raises(EvidenceVaultAuthorityProfileError, match="not eligible"):
+        validate_authority_decision(decision, candidate_tile=candidate)
 
 
 def test_scanner_semantic_policy_keeps_contradiction_pending() -> None:

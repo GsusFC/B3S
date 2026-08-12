@@ -1265,7 +1265,6 @@ def _build_and_validate_plan(
         accepted_evidence_tile_relations=[
             deepcopy(row)
             for row in planning_context.accepted_evidence_tile_relations
-            if str(row.get("tile_id") or "") != "C7"
         ],
         canonical_memory_version=planning_context.canonical_memory_version,
     )

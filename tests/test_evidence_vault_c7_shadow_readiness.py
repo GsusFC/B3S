@@ -317,9 +317,14 @@ def test_migration_019_is_immutable_and_020_owns_bounded_shadow_reads() -> None:
         "f64b80d7a1b5208ae7fda3c450f49ae84f9e297d0150aa9307912e028b658209"
     )
 
-    sql = Path(
+    migration_020_path = Path(
         "src/history/migrations/020_evidence_vault_c7_shadow_readiness.sql"
-    ).read_text()
+    )
+    migration_020 = migration_020_path.read_bytes()
+    assert hashlib.sha256(migration_020).hexdigest() == (
+        "e2eed9295862bd47bdd7fa7c7b024a747fb0927d0fa89bfc1614e95ae89574cf"
+    )
+    sql = migration_020.decode()
     for function_name in (
         "read_evidence_vault_c7_shadow_context",
         "read_evidence_vault_c7_shadow_provenance",
@@ -333,23 +338,6 @@ def test_migration_019_is_immutable_and_020_owns_bounded_shadow_reads() -> None:
     assert "REVOKE ALL ON FUNCTION" in sql
     assert "TO b3s_history_vault_runtime_read" in sql
     assert "GRANT EXECUTE ON FUNCTION" in sql
-
-
-def test_runtime_c7_stubs_remain_fail_closed() -> None:
-    source = Path("src/history/repository.py").read_text()
-    snapshot_start = source.index("    def get_evidence_vault_c7_runtime_snapshot(")
-    attestation_start = source.index(
-        "    def get_evidence_vault_runtime_ready_c7_group_attestation(",
-        snapshot_start,
-    )
-    next_method = source.index(
-        "    def get_or_create_evidence_vault_operational_score_evaluation(",
-        attestation_start,
-    )
-
-    assert "return None" in source[snapshot_start:attestation_start]
-    assert "return None" in source[attestation_start:next_method]
-    assert "shadow" not in source[snapshot_start:next_method].lower()
 
 
 @pytest.mark.skipif(

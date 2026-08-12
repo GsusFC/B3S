@@ -40,9 +40,6 @@ _EXPECTED = {
     "B3S_EXPECTED_DATABASE_NAME": PR71_VAULT_DATABASE,
     "B3S_EXPECTED_RUNTIME_ROLE": PR71_VAULT_RUNTIME_ROLE,
     "B3S_VAULT_WORKER_ENABLED": "true",
-    "BRAND3_VAULT_C7_CUTOVER_ENABLED": "false",
-    "BRAND3_VAULT_C7_EMERGENCY_DENY": "true",
-    "BRAND3_VAULT_C7_ALLOWLIST": "",
     "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED": "true",
     "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH": "",
 }
@@ -78,7 +75,6 @@ def main() -> int:
                 "database": _EXPECTED["B3S_EXPECTED_DATABASE_NAME"],
                 "neon_project_id": _EXPECTED["B3S_EXPECTED_NEON_PROJECT_ID"],
                 "neon_branch_id": _EXPECTED["B3S_EXPECTED_NEON_BRANCH_ID"],
-                "c7_cutover": "disabled",
             },
             sort_keys=True,
         )

@@ -1,6 +1,6 @@
 # PR #70 — C7 Verified Raw/Live Provenance Contract
 
-Status: implementation contract for the Draft PR #70 stack based on PR #69 head `95e3591`. Production remains `NO-GO`.
+Status: implemented historical provenance/security contract. Its shadow result is a private diagnostic, never a C7 product or deployment gate.
 
 ## 1. Verdict
 
@@ -58,7 +58,7 @@ The final capture observation includes the frozen raw snapshot, exact receipts a
 PR #70 adds an explicit `cryptography` dependency. The acquisition signer alone receives the private key; PostgreSQL and API/runtime receive only a strict bounded public-key registry. Missing, unknown, revoked or malformed keys mean no verified receipt. Rotation accepts explicitly versioned public keys with canonical `signing_not_before`/`signing_ended_at` windows; new signing uses exactly one current key. Verification-only keys accept only signatures fetched inside their historical window and first received within the bounded transport allowance; revoked keys always fail.
 
 There is no signer inside the FastAPI process. PR #70 extracts acquisition into a separate worker/process identity that alone holds the private key and scanner-ingest credential. Its narrow command accepts only `{workspace_slug, source_scan_id, canonical brand/url}`—never caller-supplied raw payloads or receipt claims—performs the transport collection itself, freezes/signs/persists the snapshot atomically, and only then returns the signed public result. API/report/replay/runtime receive public verification keys only and have no constructor or IPC verb that signs arbitrary content.
-Migration 022 keeps that IPC contract unchanged and adds one bounded execute-only planning projection to the same worker identity. In the raw-append transaction it acquires the scan/brand/canonical-parent locks, freezes the current operational parent plus the latest 500 capture contexts (at most 5,000 evidence rows and 64 MiB serialized), and then the worker derives the pre-interpretation plan from its newly verified documents. To avoid trusting only a caller-visible parent hash, the projection also returns at most 128 adopted operational events and their 128 packets (64 MiB total) to the worker-local validator; this authority witness never crosses IPC or enters a report/plan, and the scanner login still has no table privileges. Accepted operational `evidence_id` values are not capture evidence fingerprints; migration 022 returns no accepted relations until an exact validated translation exists, and the worker continues to exclude C7 fail-closed.
+Migration 022 keeps that IPC contract unchanged and adds one bounded execute-only planning projection to the same worker identity. In the raw-append transaction it acquires the scan/brand/canonical-parent locks, freezes the current operational parent plus the latest 500 capture contexts (at most 5,000 evidence rows and 64 MiB serialized), and then the worker derives the pre-interpretation plan from its newly verified documents. To avoid trusting only a caller-visible parent hash, the projection also returns at most 128 adopted operational events and their 128 packets (64 MiB total) to the worker-local validator; this authority witness never crosses IPC or enters a report/plan, and the scanner login still has no table privileges. Accepted operational `evidence_id` values are not capture evidence fingerprints. Migration 022 therefore returned no accepted relations; the forward migration that introduces an exact validated capture-identity translation supersedes only that projection behavior. C7 capture and planning are no longer suppressed.
 Migration 023 leaves collection, signing, and plan selection unchanged. It makes exact worker replay independent of later mutable report presentation fields by rebuilding only the original raw scan projection from the immutable request, protected observation hash, and immutable plan. Source-run/status/error/requested/started and all non-lifecycle metadata remain strict, so direct DML contamination cannot be hidden; the worker still replays through lookup before any collector, signer, persister, or planner call.
 
 ### 3.2 Qualifying roles
@@ -183,13 +183,13 @@ Add pure strict validators/builders plus repository methods:
 
 Replay rule: deterministic IDs and `INSERT ... ON CONFLICT DO NOTHING`, followed by a complete stored-content comparison. Exact replay succeeds; any divergence raises a conflict. A retry never regenerates `fetched_at`, nonce or signature.
 
-PR #70 keeps both `get_evidence_vault_c7_runtime_snapshot()` and `get_evidence_vault_runtime_ready_c7_group_attestation()` returning `None`. It adds shadow proof, not cutover.
+The former C7-specific runtime snapshot and cutover surface have been retired. The shadow proof remains diagnostic and the functional C7 tile uses the ordinary memory, scoring, report, UI, API, and history paths.
 
 ## 6. Shadow-readiness predicate
 
 A brand is `verified_raw_ready` only when one repeatable-read transaction proves all predicates:
 
-1. provenance public-key, freshness and retention configuration is strictly valid; shadow proof does not require `current_c7_cutover_decision.enabled`, an allowlist or production flags, and both production runtime stubs remain `None`;
+1. provenance public-key, freshness and retention configuration is strictly valid; the result has no product, publication, or deployment authority;
 2. current operational memory has exactly one accepted C7 and no C7 pending reassessment;
 3. the accepted group is the existing exact two-member `all_of` group;
 4. reviewed packet, exact source packet, accepted decisions and current memory all bind exactly as PR #69 requires, including repository-derived packet/adoption identities and a source → review → reviewed packet → adoption time chain no later than the final database clock;
@@ -240,8 +240,8 @@ Any missing, duplicated, malformed, stale or changing input returns a stable fai
 - real owned-web + Exa LinkedIn capture creates two signed receipts and one shadow-ready C7 group;
 - blocked/partial providers stay non-ready without manufacturing evidence;
 - crash after capture, after receipts and after binding replays idempotently;
-- public brand GET remains write-free and operational C7 remains absent;
-- authenticated API remains private/no-store and returns unavailable while runtime snapshot is disabled.
+- public brand GET remains write-free;
+- ordinary authenticated scan-result API output includes C7 through the normal Coherencia component, independent of this diagnostic.
 
 ## 8. PR #70 scope and sequence
 
@@ -256,36 +256,22 @@ Branch from exact PR #69 head; target PR #69, not PR #68 or `main`.
 7. negative/concurrency/PG14-16-18 suites;
 8. Draft PR with production explicitly `NO-GO`.
 
-Do not include: physical purge/crypto-shred claims, legacy scorer changes, public C7 presentation, runtime snapshot enablement, backfill of report-derived rows, broad provider expansion, deployment, key provisioning, PR #69 edits or migration 017/018 edits.
+Historical PR #70 exclusions were: physical purge/crypto-shred claims, legacy scorer changes, public C7 presentation, runtime snapshot enablement, backfill of report-derived rows, broad provider expansion, deployment, key provisioning, PR #69 edits, and migration 017/018 edits. Those historical scope limits do not define the current C7 product surface; the active contract is `evidence_vault_c7_product_contract_v1.md`.
 
-## 9. Exact exit criteria from `NO-GO`
+## 9. Diagnostic assurance criteria
 
-A later cutover PR may be proposed only after all are true:
+These criteria improve confidence in the optional verified-raw provenance
+diagnostic; they do not enable, disable, or block C7:
 
-### Code gate
+- provenance suites should pass on supported PostgreSQL versions;
+- acquisition signing/persistence must remain isolated from the FastAPI runtime;
+- retention, legal-hold, and logical revocation policy must be explicit for the
+  immutable verified-raw store;
+- real captures should reproduce receipt, extraction, passage, and evidence
+  hashes without exposing private witness material; and
+- monitoring may expose sanitized diagnostic reason codes only.
 
-- PR #70 is independently reviewed and merged through its stack;
-- full suite and the complete provenance matrix pass on PostgreSQL 14, 16 and 18;
-- no unresolved P0/P1 security, SQL, replay, race or trust-boundary findings;
-- acquisition collection/signing/persistence runs in a separate worker process/service identity; the FastAPI/report runtime demonstrably has no private key or ingest credential; strict public-key configuration is available and missing/malformed/revoked configuration fails closed;
-- retention duration, legal-hold ownership and logical runtime-revocation policy for the immutable plaintext snapshot are explicitly approved;
-- atomic runtime snapshot implementation is separately reviewed; serving a request performs no writes.
-
-### Live-data gate, per initially allowlisted brand
-
-- two consecutive post-contract real captures—not report replays, at least 5 minutes apart and no more than 24 hours apart—each contain two valid signed receipts from one scan; the most recent is the current head;
-- raw fragments remain retrievable and reproduce receipt, extraction, passage and evidence hashes;
-- owned domain, exact LinkedIn company URL and deterministic cross-channel association validate;
-- exact two-member group is human-reviewed, adopted, current and has no pending reassessment;
-- verified binding targets the current watermark and remains inside the 24-hour policy;
-- persisted score evaluation matches the same canonical memory;
-- shadow readiness succeeds for both consecutive captures after any required human review, with no bypass, manual database repair or reuse of a prior receipt nonce.
-
-### Operational gate
-
-- emergency deny has been exercised successfully;
-- cutover starts with one explicit domain allowlisted, master disabled by default and rollback documented;
-- monitoring exposes readiness failures, stale provenance and signature/key failures without leaking receipt contents;
-- a named human operator approves the live evidence and cutover window.
-
-Until every code, live-data and operational item is true, production remains `NO-GO`; accepted historical C7 memory may exist, but it has zero runtime/scanner effect.
+A false or unavailable diagnostic result leaves C7 in its ordinary evidence
+state. It never blocks a scan, score, report, API/UI response, deployment, or
+rollback. See
+[`evidence_vault_c7_product_contract_v1.md`](evidence_vault_c7_product_contract_v1.md).

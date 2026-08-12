@@ -186,10 +186,10 @@ def test_material_delta_is_scoped_and_never_falls_through_to_full_rerun() -> Non
     assert plan["operations"]["create_canonical_report"] is False
 
 
-def test_operational_c7_relations_are_excluded_while_cutover_is_disabled() -> None:
+def test_c7_relations_enter_the_normal_vault_plan_without_special_enablement() -> None:
     previous = build_capture_observation_from_snapshot(
         snapshot=_snapshot("Old evidence"),
-        scan_id="scan-old-c7-off",
+        scan_id="scan-old-c7",
         url="https://example.com",
         brand_name="Example",
         mode="incremental_refresh",
@@ -206,56 +206,10 @@ def test_operational_c7_relations_are_excluded_while_cutover_is_disabled() -> No
         },
         history=[_history_capture(previous, analysis_status="completed")],
     )
-
     result = prepare_vault_scan_after_capture(
         repository=repository,
         snapshot=_snapshot("New evidence"),
-        scan_id="scan-new-c7-off",
-        url="https://example.com",
-        brand_name="Example",
-        environment="vault",
-        incremental_enabled=True,
-        accepted_evidence_tile_relations=[
-            {"tile_id": "C7", "evidence_fingerprint": fingerprint},
-            {"tile_id": "M1", "evidence_fingerprint": fingerprint},
-        ],
-        observed_at="2026-08-06T11:00:00Z",
-    )
-
-    assert result["operation_plan"]["delta"]["affected_tile_ids"] == ["M1"]
-
-
-def test_allowlisted_operational_c7_relation_can_enter_vault_plan(
-    monkeypatch,
-) -> None:
-    previous = build_capture_observation_from_snapshot(
-        snapshot=_snapshot("Old evidence"),
-        scan_id="scan-old-c7-on",
-        url="https://example.com",
-        brand_name="Example",
-        mode="incremental_refresh",
-        observed_at="2026-08-06T10:00:00Z",
-    )
-    fingerprint = canonical_evidence_rows(
-        previous["evidence_records"],
-        subject_url="https://example.com",
-    )[0].fingerprint
-    repository = _Repository(
-        memory={
-            "brand_identity": "example.com",
-            "canonical_memory_version": "a" * 64,
-        },
-        history=[_history_capture(previous, analysis_status="completed")],
-    )
-    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
-    monkeypatch.setenv("BRAND3_VAULT_C7_CUTOVER_ENABLED", "true")
-    monkeypatch.setenv("BRAND3_VAULT_C7_EMERGENCY_DENY", "false")
-    monkeypatch.setenv("BRAND3_VAULT_C7_ALLOWLIST", "example.com")
-
-    result = prepare_vault_scan_after_capture(
-        repository=repository,
-        snapshot=_snapshot("New evidence"),
-        scan_id="scan-new-c7-on",
+        scan_id="scan-new-c7",
         url="https://example.com",
         brand_name="Example",
         environment="vault",
@@ -270,74 +224,8 @@ def test_allowlisted_operational_c7_relation_can_enter_vault_plan(
     assert result["operation_plan"]["delta"]["affected_tile_ids"] == ["C7", "M1"]
 
 
-def test_emergency_flip_before_persistence_rebuilds_plan_without_c7(
-    monkeypatch,
-) -> None:
-    previous = build_capture_observation_from_snapshot(
-        snapshot=_snapshot("Old evidence"),
-        scan_id="scan-old-c7-flip",
-        url="https://example.com",
-        brand_name="Example",
-        mode="incremental_refresh",
-        observed_at="2026-08-06T10:00:00Z",
-    )
-    fingerprint = canonical_evidence_rows(
-        previous["evidence_records"],
-        subject_url="https://example.com",
-    )[0].fingerprint
-    repository = _Repository(
-        memory={
-            "brand_identity": "example.com",
-            "canonical_memory_version": "a" * 64,
-        },
-        history=[_history_capture(previous, analysis_status="completed")],
-    )
-    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
-    monkeypatch.setenv("BRAND3_VAULT_C7_CUTOVER_ENABLED", "true")
-    monkeypatch.setenv("BRAND3_VAULT_C7_EMERGENCY_DENY", "false")
-    monkeypatch.setenv("BRAND3_VAULT_C7_ALLOWLIST", "example.com")
-    from src.services import evidence_vault_scan_orchestration as orchestration
-
-    original_builder = orchestration.build_vault_scan_plan
-    calls = 0
-
-    def build_then_kill(**kwargs):
-        nonlocal calls
-        calls += 1
-        result = original_builder(**kwargs)
-        if calls == 1:
-            monkeypatch.setenv("BRAND3_VAULT_C7_EMERGENCY_DENY", "true")
-        return result
-
-    monkeypatch.setattr(orchestration, "build_vault_scan_plan", build_then_kill)
-
-    result = prepare_vault_scan_after_capture(
-        repository=repository,
-        snapshot=_snapshot("New evidence"),
-        scan_id="scan-new-c7-flip",
-        url="https://example.com",
-        brand_name="Example",
-        environment="vault",
-        incremental_enabled=True,
-        accepted_evidence_tile_relations=[
-            {"tile_id": "C7", "evidence_fingerprint": fingerprint},
-            {"tile_id": "M1", "evidence_fingerprint": fingerprint},
-        ],
-        observed_at="2026-08-06T11:00:00Z",
-    )
-
-    assert calls == 2
-    assert result["operation_plan"]["delta"]["affected_tile_ids"] == ["M1"]
-    assert repository.persisted[0]["metadata"]["operation_plan"] == result[
-        "operation_plan"
-    ]
-
-
 @pytest.mark.parametrize("first_class", [False, True])
-def test_emergency_deny_suppresses_persisted_c7_plan_retry_without_write(
-    monkeypatch,
-    first_class: bool,
-) -> None:
+def test_c7_pending_plan_retry_remains_resumable(first_class: bool) -> None:
     previous = build_capture_observation_from_snapshot(
         snapshot=_snapshot("Old evidence"),
         scan_id="scan-old-c7-retry",
@@ -354,10 +242,6 @@ def test_emergency_deny_suppresses_persisted_c7_plan_retry_without_write(
         "brand_identity": "example.com",
         "canonical_memory_version": "a" * 64,
     }
-    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
-    monkeypatch.setenv("BRAND3_VAULT_C7_CUTOVER_ENABLED", "true")
-    monkeypatch.setenv("BRAND3_VAULT_C7_EMERGENCY_DENY", "false")
-    monkeypatch.setenv("BRAND3_VAULT_C7_ALLOWLIST", "example.com")
     initial = _Repository(
         memory=memory,
         history=[_history_capture(previous, analysis_status="completed")],
@@ -395,8 +279,6 @@ def test_emergency_deny_suppresses_persisted_c7_plan_retry_without_write(
             memory=memory,
             history=[_history_capture(raw, analysis_status="pending")],
         )
-    monkeypatch.setenv("BRAND3_VAULT_C7_EMERGENCY_DENY", "true")
-
     retried = prepare_vault_scan_after_capture(
         repository=retry_repository,
         snapshot=_snapshot("New evidence"),
@@ -411,10 +293,11 @@ def test_emergency_deny_suppresses_persisted_c7_plan_retry_without_write(
         observed_at="2026-08-06T11:00:00Z",
     )
 
-    assert retried["operation_plan"] is None
-    assert retried["resume"]["operational_c7_cutover_blocked"] is True
-    assert retried["resume"]["work_required"] is False
-    assert retry_repository.persisted == []
+    assert retried["operation_plan"] == plan
+    assert retried["capture_persisted"] is True
+    if first_class:
+        assert retried["resume"]["execution_required"] is True
+    assert len(retry_repository.persisted) == 1
 
 
 def test_retry_returns_the_exact_persisted_pending_plan() -> None:

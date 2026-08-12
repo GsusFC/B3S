@@ -104,7 +104,7 @@ def test_worker_dsn_validation_requires_authenticated_tls_and_fixed_authority() 
             module._validate_postgres_dsn(invalid)
 
 
-def test_worker_operation_plan_uses_frozen_incremental_history_and_filters_c7() -> None:
+def test_worker_operation_plan_uses_frozen_history_including_c7() -> None:
     module = _module()
     from src.services.evidence_vault_acquisition_contract import (
         TrustedAcquisitionCommand,
@@ -156,7 +156,7 @@ def test_worker_operation_plan_uses_frozen_incremental_history_and_filters_c7() 
     assert plan["mode"] == "incremental_refresh"
     assert plan["canonical_memory_version"] == "a" * 64
     assert plan["delta"]["modified_evidence_fingerprints"]
-    assert plan["delta"]["affected_tile_ids"] == ["M1"]
+    assert plan["delta"]["affected_tile_ids"] == ["C7", "M1"]
     assert plan["operations"]["llm_required"] is True
 
     identical = module._operation_plan(

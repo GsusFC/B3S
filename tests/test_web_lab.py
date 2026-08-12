@@ -1383,46 +1383,6 @@ def test_brand_view_prefers_structured_web_capture_for_visual_module(monkeypatch
     assert "visual-assets-v2" in response.text
 
 
-def test_operational_c7_report_adapter_does_not_open_repository_when_denied(
-    monkeypatch,
-) -> None:
-    from web import report_store
-
-    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
-    monkeypatch.setenv("BRAND3_VAULT_C7_CUTOVER_ENABLED", "false")
-    monkeypatch.setenv("BRAND3_VAULT_C7_EMERGENCY_DENY", "false")
-    monkeypatch.setenv("BRAND3_VAULT_C7_ALLOWLIST", "example.com")
-    monkeypatch.setattr(
-        report_store,
-        "_postgres_repository",
-        lambda: pytest.fail("denied C7 must not open the repository"),
-    )
-
-    assert (
-        report_store.operational_c7_runtime_projection_for_domain("example.com")
-        is None
-    )
-
-
-def test_public_brand_view_never_resolves_operational_c7(monkeypatch):
-    from web import report_store
-    from web.app import app
-
-    monkeypatch.setattr("web.app.list_reports_for_domain", lambda domain: [])
-    monkeypatch.setattr(
-        report_store,
-        "operational_c7_runtime_projection_for_domain",
-        lambda _domain: pytest.fail("public brand view must not resolve operational C7"),
-    )
-
-    response = TestClient(app).get("/brand/example.com?lang=es")
-
-    assert response.status_code == 200
-    assert response.headers["cache-control"] == "private, no-store"
-    assert "c7_operacional" not in response.text
-    assert "Proyección separada del C7 histórico" not in response.text
-
-
 def test_brand_view_handles_missing_scan(monkeypatch):
     from web.app import app
 
@@ -3027,6 +2987,17 @@ def test_report_view_renders_coherencia_once_and_prioritizes_editorial_message(m
             "resumen": "Componente Coherencia detectado: 6/10 baldosas encendidas, 0 apagadas, 4 puntos ciegos. Revisa las fuentes para validar el matiz exacto.",
             "veredicto": "Optiak construye un discurso técnico sólido.",
             "message": "Lectura editorial de coherencia.",
+            "tile_profile": [
+                {
+                    "id": "C7",
+                    "estado": "no",
+                    "motivo": "El discurso cambia entre web y red social.",
+                    "evidencia": "Las promesas de canal no coinciden.",
+                }
+            ],
+            "lit": 0,
+            "off": 1,
+            "blind": 0,
         },
     ]
     monkeypatch.setattr(
@@ -3066,6 +3037,9 @@ def test_report_view_renders_coherencia_once_and_prioritizes_editorial_message(m
     assert "Lectura editorial de coherencia." in response.text
     assert "Optiak construye un discurso técnico sólido." in response.text
     assert "Componente Coherencia detectado" not in response.text
+    assert "C7" in response.text
+    assert "Web-redes" in response.text
+    assert "El discurso cambia entre web y red social." in response.text
 
 
 def test_report_view_does_not_instantiate_llm_analyzer(monkeypatch):

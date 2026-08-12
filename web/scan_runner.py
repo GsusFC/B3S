@@ -991,7 +991,7 @@ def _build_acquisition_gate(
             severity="warning" if allow_owned_only_analysis else "blocker",
             message=(
                 "Exa failed; continuing with owned-web analysis only. "
-                "This result is not C7 qualifying proof."
+                "C7 remains sin_evidencia until its second channel is captured and reviewed."
                 if allow_owned_only_analysis
                 else "Exa failed; external proof acquisition is incomplete."
             ),
@@ -2069,7 +2069,7 @@ def _trusted_persisted_acquisition_gate(
                 "severity": "warning",
                 "message": (
                     "Exa failed; continuing with owned-web analysis only. "
-                    "This result is not C7 qualifying proof."
+                    "C7 remains sin_evidencia until its second channel is captured and reviewed."
                 ),
                 "status": "error",
                 "detail": detail,
@@ -2095,7 +2095,7 @@ def _trusted_persisted_acquisition_gate(
             "severity": "warning",
             "message": (
                 "No independent external identity was discovered; continuing "
-                "with owned-web analysis only. This result is not C7 qualifying proof."
+                "with owned-web analysis only. C7 remains sin_evidencia until its second channel is captured and reviewed."
             ),
             "status": "not_discovered",
             "detail": "external_acquisition:not_discovered",

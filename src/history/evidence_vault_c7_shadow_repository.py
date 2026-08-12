@@ -15,9 +15,9 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import dict_row
 
-from src.services.evidence_vault_c7_cutover import (
-    EvidenceVaultC7CutoverError,
-    canonicalize_c7_brand,
+from src.services.evidence_vault_brand_identity import (
+    EvidenceVaultBrandIdentityError,
+    canonicalize_vault_brand,
 )
 from src.services.evidence_vault_c7_shadow_readiness import (
     C7ShadowReadinessResult,
@@ -262,8 +262,8 @@ class EvidenceVaultC7ShadowRepository:
         """Collect and verify one snapshot, returning no part of its witness."""
 
         try:
-            brand = canonicalize_c7_brand(domain_or_url)
-        except EvidenceVaultC7CutoverError:
+            brand = canonicalize_vault_brand(domain_or_url)
+        except EvidenceVaultBrandIdentityError:
             return self.__evaluator.evaluate(str(domain_or_url or ""), {})
         if not isinstance(workspace_slug, str) or not _WORKSPACE_RE.fullmatch(workspace_slug):
             return storage_unavailable_result()

@@ -63,21 +63,17 @@ retain `authority=false`, `production_runtime_effect=false` and
 A stale exact retry may recover an already-existing checkpoint. It cannot create
 a new stale checkpoint, skip a capture sequence, or claim an earlier origin.
 
-## Runtime readiness
+## Provenance diagnostic boundary
 
-Accepted group authority and present-time readiness are separate APIs.
-`get_evidence_vault_active_c7_group_attestation()` preserves historical accepted
-authority. `get_evidence_vault_runtime_ready_c7_group_attestation()` currently
-returns no attestation by construction: migration 017 admits only
-report-derived audit bindings, and this Draft contains no trusted live or
-verified-raw artifact variant.
+`get_evidence_vault_active_c7_group_attestation()` can rederive the exact
+historical group authority. Report-derived replay still cannot claim verified
+raw acquisition provenance. That distinction affects the private provenance
+diagnostic only; it does not activate or deny the functional C7 tile.
 
-The cutover adapter calls the runtime-readiness API before operational score
-get-or-create and again before projection construction. It also rereads the kill
-switch and allowlist at every effect boundary. Consequently this branch cannot
-present operational C7 even if its Vault flags are changed. A later change must
-introduce a separately validated, trusted acquisition provenance before the
-runtime API may return authority.
+The former runtime-readiness stubs, kill switch, allowlist, and separate C7
+presentation adapter were retired. C7 now follows the ordinary tile lifecycle
+described in
+[`evidence_vault_c7_product_contract_v1.md`](evidence_vault_c7_product_contract_v1.md).
 
 ## External recovery observation
 
@@ -90,22 +86,12 @@ loss, not contradiction or refutation. The reports and generated packets remain
 outside Git because they contain sensitive evidence.
 
 Those reports can close deterministic report-derived audit lineage. They cannot
-close original raw acquisition provenance. Causa Prima therefore remains
-runtime-not-ready and must not enter the allowlist.
+close original raw acquisition provenance. That limitation remains visible in
+the optional diagnostic but does not suppress C7's normal product lifecycle.
 
-## Remaining NO-GO conditions
+## Historical scope boundary
 
-- the original accepted raw acquisition envelopes are unavailable;
-- there is no trusted builder or validator for live/verified-raw lineage;
-- legacy parentless genesis/seed remains unresolved and preview or score output
-  is not a valid v2 parent;
-- there is no single transactional readiness token spanning current memory,
-  capture checkpoint, score evaluation and presentation;
-- the offline history adapters still live in `src/history/repository.py`;
-- production scanner wiring for `prepare_vault_scan_after_capture()` remains
-  absent;
-- no backup, rollback or deployment authorization has been granted for this
-  Draft branch.
-
-Do not enable the allowlist, deploy Vault, mark the PR ready, merge, auto-merge
-or change production based on this implementation.
+This document records constraints of the former Draft lineage branch. It grants
+no deployment authorization, and it no longer defines a C7 readiness or
+allowlist gate. Current C7 behavior is defined by
+[`evidence_vault_c7_product_contract_v1.md`](evidence_vault_c7_product_contract_v1.md).

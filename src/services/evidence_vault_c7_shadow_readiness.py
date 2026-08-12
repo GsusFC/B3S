@@ -23,9 +23,9 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from src.history.capture_observation import parse_capture_observation
 
-from src.services.evidence_vault_c7_cutover import (
-    EvidenceVaultC7CutoverError,
-    canonicalize_c7_brand,
+from src.services.evidence_vault_brand_identity import (
+    EvidenceVaultBrandIdentityError,
+    canonicalize_vault_brand,
 )
 from src.services.evidence_vault_canonical_core import (
     canonical_fingerprint,
@@ -193,8 +193,8 @@ class EvidenceVaultC7ShadowReadinessEvaluator:
         if self.__registry_json is None:
             return _result(C7ShadowReadinessReason.VERIFICATION_POLICY_INVALID)
         try:
-            brand = canonicalize_c7_brand(canonical_brand, allow_url=False)
-        except EvidenceVaultC7CutoverError:
+            brand = canonicalize_vault_brand(canonical_brand, allow_url=False)
+        except EvidenceVaultBrandIdentityError:
             return _result(C7ShadowReadinessReason.BRAND_IDENTITY_INVALID)
         try:
             registry = PublicKeyRegistry.model_validate_json(

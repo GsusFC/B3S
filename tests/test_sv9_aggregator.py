@@ -179,6 +179,35 @@ class AggregateTests(unittest.TestCase):
         )
         self.assertEqual(result.brand3_score, 100 - 5 - 1)
 
+    def test_c7_scores_as_one_normal_coherencia_tile_without_a_special_gate(self):
+        coherencia = ComponentResult(
+            component="coherencia",
+            status=STATUS_SCORED,
+            score=1,
+            tile_profile=[
+                _tile(tile_id, ESTADO_OK if tile_id == "C7" else ESTADO_NO)
+                for tile_id in tile_ids("coherencia")
+            ],
+        )
+        components = full_components(
+            **{
+                key: scored(key, 0)
+                for key in COMPONENTS
+                if key != "coherencia"
+            },
+            coherencia=coherencia,
+        )
+
+        result = aggregate(
+            components,
+            brand_name="Acme",
+            url="https://acme.test",
+        )
+
+        self.assertEqual(result.components["coherencia"].score, 1)
+        self.assertEqual(result.components["coherencia"].points, 2)
+        self.assertEqual(result.brand3_score, 2)
+
     def test_multipliers_double_magnetism_and_coherencia(self):
         result = aggregate(
             full_components(

@@ -22,10 +22,6 @@ kill_timeout = "30s"
   B3S_CANONICAL_ENFORCEMENT_MODE = "repeated"
   B3S_EVIDENCE_LEDGER_MODE = "shadow"
   B3S_EVIDENCE_CLAIM_TILE_LEDGER_MODE = "shadow"
-  # Operational C7 remains denied until a separate, explicit Vault trial.
-  BRAND3_VAULT_C7_CUTOVER_ENABLED = "false"
-  BRAND3_VAULT_C7_EMERGENCY_DENY = "true"
-  BRAND3_VAULT_C7_ALLOWLIST = ""
   # No acquisition worker is launched by this deployment; shadow stays off.
   BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED = "false"
   BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH = ""

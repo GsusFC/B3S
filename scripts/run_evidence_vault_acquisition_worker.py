@@ -145,13 +145,8 @@ def _operation_plan(
         if planning_context.canonical_memory_version is not None
         else "baseline"
     )
-    # The isolated worker receives no ambient cutover configuration.  C7 is
-    # therefore excluded fail-closed; a later reviewed extension may inject an
-    # explicit safe cutover decision rather than inheriting process state.
     relations = [
-        dict(row)
-        for row in planning_context.accepted_evidence_tile_relations
-        if str(row.get("tile_id") or "") != "C7"
+        dict(row) for row in planning_context.accepted_evidence_tile_relations
     ]
     return build_vault_scan_plan(
         brand_identity=canonical_domain,
