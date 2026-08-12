@@ -23,13 +23,13 @@ ISOLATED_RELEASE_COMMAND = (
     "python scripts/verify_b3s_history_postgres.py && "
     "python scripts/verify_pr71_vault_target.py'"
 )
-TRUSTED_PR_HEAD_SHA = "4210f743660b57cf760a91b353dc775019c9dc90"
-TRUSTED_PR_MERGE_SHA = "5c4c737a17e46c0dc571132b5bd1dfdd63c687cc"
+TRUSTED_PR_HEAD_SHA = "b073112f3e4d89d96e45d225f2398f8a7d4dec7c"
+TRUSTED_PR_MERGE_SHA = "864ef1e304d3bf6cbbc5d3d1ec7651c673e3595f"
 TRUSTED_CI_BLOB_SHA = "c1082f6b5c53a364b8d38e43936b93722c0183d1"
 TRUSTED_REPOSITORY_ID = 1288696741
 TRUSTED_CI_WORKFLOW_ID = 306885838
-TRUSTED_PR_CI_RUN_ID = 31567629360
-TRUSTED_MERGE_CI_RUN_ID = 31568953356
+TRUSTED_PR_CI_RUN_ID = 31613381151
+TRUSTED_MERGE_CI_RUN_ID = 31613697333
 FIXTURE_DEPLOY_SHA = "a" * 40
 HOTFIX_FILES = {
     ".github/workflows/fly-deploy-pr71-vault.yml",
@@ -68,7 +68,7 @@ def _attestation_fixture() -> dict[str, dict]:
     }
     fixture = {
         "PR_FILE": {
-            "number": 76,
+            "number": 78,
             "state": "closed",
             "merged": True,
             "draft": False,
@@ -79,7 +79,7 @@ def _attestation_fixture() -> dict[str, dict]:
                 "repo": repository,
             },
             "head": {
-                "ref": "fix/c7-functional-nonblocking",
+                "ref": "feat/pr71-google-oidc-access",
                 "sha": TRUSTED_PR_HEAD_SHA,
                 "repo": repository,
             },
@@ -123,7 +123,7 @@ def _attestation_fixture() -> dict[str, dict]:
             **common_run,
             "id": TRUSTED_PR_CI_RUN_ID,
             "event": "pull_request",
-            "head_branch": "fix/c7-functional-nonblocking",
+            "head_branch": "feat/pr71-google-oidc-access",
             "head_sha": TRUSTED_PR_HEAD_SHA,
         },
         "MERGE_CI_RUN_FILE": {
@@ -292,7 +292,7 @@ def test_isolated_pr71_vault_workflow_is_manual_post_merge_only():
     assert 'r"[0-9a-f]{40}"' in workflow
     assert 'DISPATCH_REF: ${{ github.ref }}' in workflow
     assert 'os.environ["DISPATCH_REF"] == "refs/heads/main"' in workflow
-    assert '"$API_URL/repos/$GH_REPOSITORY/pulls/76"' in workflow
+    assert '"$API_URL/repos/$GH_REPOSITORY/pulls/78"' in workflow
     assert "persist-credentials: false" in workflow
 
 
@@ -302,12 +302,12 @@ def test_isolated_deploy_attests_exact_pr71_and_current_main_ancestry():
     required_contract = (
         'DISPATCH_SHA: ${{ github.sha }}',
         'deploy_sha == dispatch_sha',
-        'pr.get("number"), 76',
+        'pr.get("number"), 78',
         'pr.get("state") == "closed"',
         'pr.get("merged") is True',
         'pr.get("draft") is False',
         'base.get("ref") == "main"',
-        'head.get("ref") == "fix/c7-functional-nonblocking"',
+        'head.get("ref") == "feat/pr71-google-oidc-access"',
         'head.get("sha") == trusted_head',
         'pr.get("merge_commit_sha") == trusted_merge',
         'repo.get("id"), trusted_repository_id',

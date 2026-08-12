@@ -133,9 +133,9 @@ password, or prints a DSN/driver error.
 Do not use `fly.toml`, `fly.vault.toml`, `b3s`, `b3s-vault`, their volumes, or
 their database branches in this workflow. The manual GitHub workflow is a
 **post-merge-only** deployment mechanism for the isolated `b3s-pr71-vault`
-target. Its current reviewed application baseline is PR #76 at head
-`4210f743660b57cf760a91b353dc775019c9dc90` and merge commit
-`5c4c737a17e46c0dc571132b5bd1dfdd63c687cc`. Neither merging the reviewed
+target. Its current reviewed application baseline is PR #78 at head
+`b073112f3e4d89d96e45d225f2398f8a7d4dec7c` and merge commit
+`864ef1e304d3bf6cbbc5d3d1ec7651c673e3595f`. Neither merging the reviewed
 PR, the presence of `workflow_dispatch`, the confirmation input, nor a
 successful attestation authorizes a merge or deployment. Merge approval and
 the deployment GO remain separate operator decisions.
@@ -152,7 +152,7 @@ step successfully at `1b1df547ef52c49674a3705411361d84473956b3`. Both temporary 
 Any future deployment requires a new exact-SHA GO and fresh secret provisioning.
 
 Before checkout, dependency installation, or deployment-secret use,
-runner-owned code fetches PR #76 and requires `state=closed`, `merged=true`, and `draft=false`, base `main`, head `fix/c7-functional-nonblocking`, repository ID
+runner-owned code fetches PR #78 and requires `state=closed`, `merged=true`, and `draft=false`, base `main`, head `feat/pr71-google-oidc-access`, repository ID
 `1288696741` and name `GsusFC/B3S`, exact reviewed head, and exact `merge_commit_sha`.
 It proves reviewed-head-to-merge and merge-to-current-main ancestry from complete
 GitHub Compare responses. For the deployment-attestation follow-up, the latter
@@ -162,20 +162,19 @@ comparison must contain the exact three audited files listed above; those are th
 - `docs/deployment/b3s_pr71_vault.md`
 - `tests/test_deploy_provenance.py`
 
-Any runtime, database, CI-workflow, config, or other source change after PR #76
-is outside the attestation allowlist and fails closed. In particular, the Google
-OIDC implementation changes runtime and Fly configuration and therefore cannot
-be deployed by this PR76-pinned workflow. After the OIDC implementation PR is
-reviewed, green, and merged, a separate three-file control-plane PR must re-pin
-the deployment workflow and this runbook to that new reviewed PR, head, merge,
-and exact CI runs before any OIDC deployment is authorized.
+Any runtime, database, CI-workflow, config, or other source change after PR #78
+is outside the attestation allowlist and fails closed. This three-file
+control-plane follow-up re-pins the workflow to the reviewed, merged, green OIDC
+baseline without changing runtime code or configuration. Deployment is still a
+separate operator decision and also requires the Google client and all temporary
+capabilities described below.
 
 The trusted CI identity is pinned to workflow ID `306885838`, path
 `.github/workflows/ci.yml`, and blob
 `c1082f6b5c53a364b8d38e43936b93722c0183d1`. The workflow must remain active;
 the reviewed head, merge, and deployment Contents responses must carry that
-exact blob. Exact successful CI runs `31567629360` (reviewed PR #76 head) and
-`31568953356` (PR #76 merge on `main`) are pinned. The current exact-main push run is fetched without filtering away non-successful runs; exactly one completed,
+exact blob. Exact successful CI runs `31613381151` (reviewed PR #78 head) and
+`31613697333` (PR #78 merge on `main`) are pinned. The current exact-main push run is fetched without filtering away non-successful runs; exactly one completed,
 successful, first-attempt run with the expected repository and SHA is accepted.
 The `pull_requests` array may be empty. Missing, pending, failed, foreign, stale,
 wrong-event, workflow-modified, truncated, or ambiguous objects fail closed.
@@ -245,12 +244,10 @@ or deny C7 and are never a deployment or publication gate.
 
 ## Rollback and NO-GO
 
-Deployment remains **NO-GO** for the OIDC source change while the workflow is
-pinned to PR #76 and its exact three-file post-baseline comparison. The OIDC PR
-must first merge with green CI, then a separate reviewed control-plane PR must
-re-pin the workflow to that new baseline and its immutable CI objects. After
-that reauthorization, the requested SHA must equal dispatched and live `main`,
-all new OIDC app secrets must validate, the separate deployment GO and temporary
+Deployment remains **NO-GO** until this three-file control-plane follow-up is
+reviewed, green, and merged, producing the exact deploy SHA. After that
+reauthorization, the requested SHA must equal dispatched and live `main`, all
+new OIDC app secrets must validate, the separate deployment GO and temporary
 deployment-secret provisioning must be complete, the external migration target
 assertion must pass before DDL, head `024` must verify exactly, and the idempotent
 runtime-role contract must pass.

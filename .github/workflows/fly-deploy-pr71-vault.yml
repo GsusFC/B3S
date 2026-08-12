@@ -39,13 +39,13 @@ jobs:
           DISPATCH_SHA: ${{ github.sha }}
           GH_REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
-          TRUSTED_PR_HEAD_SHA: 4210f743660b57cf760a91b353dc775019c9dc90
-          TRUSTED_PR_MERGE_SHA: 5c4c737a17e46c0dc571132b5bd1dfdd63c687cc
+          TRUSTED_PR_HEAD_SHA: b073112f3e4d89d96e45d225f2398f8a7d4dec7c
+          TRUSTED_PR_MERGE_SHA: 864ef1e304d3bf6cbbc5d3d1ec7651c673e3595f
           TRUSTED_CI_BLOB_SHA: c1082f6b5c53a364b8d38e43936b93722c0183d1
           TRUSTED_REPOSITORY_ID: "1288696741"
           TRUSTED_CI_WORKFLOW_ID: "306885838"
-          TRUSTED_PR_CI_RUN_ID: "31567629360"
-          TRUSTED_MERGE_CI_RUN_ID: "31568953356"
+          TRUSTED_PR_CI_RUN_ID: "31613381151"
+          TRUSTED_MERGE_CI_RUN_ID: "31613697333"
         run: |
           set -euo pipefail
           umask 077
@@ -75,7 +75,7 @@ jobs:
           merge_ci_run_file="$attestation_dir/merge-ci-run.json"
           deployment_ci_runs_file="$attestation_dir/deployment-ci-runs.json"
 
-          api_get "$pr_file" "$API_URL/repos/$GH_REPOSITORY/pulls/76"
+          api_get "$pr_file" "$API_URL/repos/$GH_REPOSITORY/pulls/78"
           api_get "$main_ref_file" "$API_URL/repos/$GH_REPOSITORY/git/ref/heads/main"
           api_get "$workflow_file" "$API_URL/repos/$GH_REPOSITORY/actions/workflows/ci.yml"
           api_get "$head_ci_file" "$API_URL/repos/$GH_REPOSITORY/contents/.github/workflows/ci.yml?ref=$TRUSTED_PR_HEAD_SHA"
@@ -152,7 +152,7 @@ jobs:
           require(deploy_sha == dispatch_sha, "deployment_sha is not the dispatched main SHA")
 
           pr = load_object("PR_FILE")
-          exact_int(pr.get("number"), 76, "unexpected pull request object")
+          exact_int(pr.get("number"), 78, "unexpected pull request object")
           require(pr.get("state") == "closed", "reviewed PR must be closed")
           require(pr.get("merged") is True, "reviewed PR must be merged")
           require(pr.get("draft") is False, "reviewed PR must not be a draft")
@@ -161,7 +161,7 @@ jobs:
           require(isinstance(base, dict), "reviewed PR base must be present")
           require(isinstance(head, dict), "reviewed PR head must be present")
           require(base.get("ref") == "main", "reviewed PR base ref must be main")
-          require(head.get("ref") == "fix/c7-functional-nonblocking", "reviewed PR head ref is not exact")
+          require(head.get("ref") == "feat/pr71-google-oidc-access", "reviewed PR head ref is not exact")
           require(head.get("sha") == trusted_head, "reviewed PR head SHA is not exact")
           require(pr.get("merge_commit_sha") == trusted_merge, "reviewed PR merge commit SHA is not exact")
           for label, side in (("base", base), ("head", head)):
@@ -184,7 +184,7 @@ jobs:
 
           for label, env_name in (
               ("reviewed head", "HEAD_CI_FILE"),
-              ("PR76 merge", "MERGE_CI_FILE"),
+              ("PR78 merge", "MERGE_CI_FILE"),
               ("deployment", "DEPLOY_CI_FILE"),
           ):
               blob = load_object(env_name)
@@ -246,17 +246,17 @@ jobs:
           }
           attest_run(
               load_object("PR_CI_RUN_FILE"),
-              {"label": "reviewed PR76", "fields": {
+              {"label": "reviewed PR78", "fields": {
                   **common,
                   "id": trusted_pr_run_id,
                   "event": "pull_request",
-                  "head_branch": "fix/c7-functional-nonblocking",
+                  "head_branch": "feat/pr71-google-oidc-access",
                   "head_sha": trusted_head,
               }},
           )
           attest_run(
               load_object("MERGE_CI_RUN_FILE"),
-              {"label": "PR76 merge", "fields": {
+              {"label": "PR78 merge", "fields": {
                   **common,
                   "id": trusted_merge_run_id,
                   "event": "push",
