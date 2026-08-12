@@ -23,22 +23,18 @@ ISOLATED_RELEASE_COMMAND = (
     "python scripts/verify_b3s_history_postgres.py && "
     "python scripts/verify_pr71_vault_target.py'"
 )
-TRUSTED_PR_HEAD_SHA = "377364784ee9b4554acd074a7013e870191654e0"
-TRUSTED_PR_MERGE_SHA = "05393b5eac7fa7be68f5739eba92becb40619a50"
+TRUSTED_PR_HEAD_SHA = "4210f743660b57cf760a91b353dc775019c9dc90"
+TRUSTED_PR_MERGE_SHA = "5c4c737a17e46c0dc571132b5bd1dfdd63c687cc"
 TRUSTED_CI_BLOB_SHA = "c1082f6b5c53a364b8d38e43936b93722c0183d1"
 TRUSTED_REPOSITORY_ID = 1288696741
 TRUSTED_CI_WORKFLOW_ID = 306885838
-TRUSTED_PR_CI_RUN_ID = 31496647341
-TRUSTED_MERGE_CI_RUN_ID = 31506929921
+TRUSTED_PR_CI_RUN_ID = 31567629360
+TRUSTED_MERGE_CI_RUN_ID = 31568953356
 FIXTURE_DEPLOY_SHA = "a" * 40
 HOTFIX_FILES = {
     ".github/workflows/fly-deploy-pr71-vault.yml",
     "docs/deployment/b3s_pr71_vault.md",
-    "scripts/pr71_vault_database_target.py",
-    "tests/test_configure_b3s_runtime_role.py",
     "tests/test_deploy_provenance.py",
-    "tests/test_pr71_vault_deploy_target.py",
-    "tests/test_pr71_vault_migration_target.py",
 }
 
 
@@ -72,7 +68,7 @@ def _attestation_fixture() -> dict[str, dict]:
     }
     fixture = {
         "PR_FILE": {
-            "number": 71,
+            "number": 76,
             "state": "closed",
             "merged": True,
             "draft": False,
@@ -83,7 +79,7 @@ def _attestation_fixture() -> dict[str, dict]:
                 "repo": repository,
             },
             "head": {
-                "ref": "fix/vault-v2-cumulative-landing",
+                "ref": "fix/c7-functional-nonblocking",
                 "sha": TRUSTED_PR_HEAD_SHA,
                 "repo": repository,
             },
@@ -127,7 +123,7 @@ def _attestation_fixture() -> dict[str, dict]:
             **common_run,
             "id": TRUSTED_PR_CI_RUN_ID,
             "event": "pull_request",
-            "head_branch": "fix/vault-v2-cumulative-landing",
+            "head_branch": "fix/c7-functional-nonblocking",
             "head_sha": TRUSTED_PR_HEAD_SHA,
         },
         "MERGE_CI_RUN_FILE": {
@@ -265,7 +261,7 @@ def test_isolated_pr71_vault_workflow_is_manual_post_merge_only():
 
     assert "workflow_dispatch:" in workflow
     assert "workflow_run:" not in workflow
-    assert "Deploy isolated PR71 Vault after merge" in workflow
+    assert "Deploy isolated PR71 Vault" in workflow
     assert "github.ref == 'refs/heads/main'" in workflow
     assert "name: pr71-vault" in workflow
     assert "b3s-pr71-vault" in workflow
@@ -281,7 +277,7 @@ def test_isolated_pr71_vault_workflow_is_manual_post_merge_only():
     assert f"actions/checkout@{CHECKOUT_V7_SHA}" in workflow
     assert f"actions/setup-python@{SETUP_PYTHON_V7_SHA}" in workflow
     assert "setup-flyctl@master" not in workflow
-    attest = workflow.index("Attest PR71 ancestry and current main before checkout")
+    attest = workflow.index("Attest reviewed deployment ancestry and current main before checkout")
     checkout = workflow.index(f"actions/checkout@{CHECKOUT_V7_SHA}")
     install = workflow.index("Install release package")
     migration_secret = workflow.index("secrets.B3S_MIGRATION_DATABASE_URL")
@@ -290,7 +286,7 @@ def test_isolated_pr71_vault_workflow_is_manual_post_merge_only():
     assert 'r"[0-9a-f]{40}"' in workflow
     assert 'DISPATCH_REF: ${{ github.ref }}' in workflow
     assert 'os.environ["DISPATCH_REF"] == "refs/heads/main"' in workflow
-    assert '"$API_URL/repos/$GH_REPOSITORY/pulls/71"' in workflow
+    assert '"$API_URL/repos/$GH_REPOSITORY/pulls/76"' in workflow
     assert "persist-credentials: false" in workflow
 
 
@@ -300,12 +296,12 @@ def test_isolated_deploy_attests_exact_pr71_and_current_main_ancestry():
     required_contract = (
         'DISPATCH_SHA: ${{ github.sha }}',
         'deploy_sha == dispatch_sha',
-        'pr.get("number"), 71',
+        'pr.get("number"), 76',
         'pr.get("state") == "closed"',
         'pr.get("merged") is True',
         'pr.get("draft") is False',
         'base.get("ref") == "main"',
-        'head.get("ref") == "fix/vault-v2-cumulative-landing"',
+        'head.get("ref") == "fix/c7-functional-nonblocking"',
         'head.get("sha") == trusted_head',
         'pr.get("merge_commit_sha") == trusted_merge',
         'repo.get("id"), trusted_repository_id',
@@ -382,7 +378,7 @@ def test_pr71_attestation_fixture_accepts_only_current_allowlisted_main(tmp_path
 @pytest.mark.parametrize(
     ("target", "path", "value", "error"),
     [
-        ("PR_FILE", ("head", "sha"), "f" * 40, "reviewed head SHA"),
+        ("PR_FILE", ("head", "sha"), "f" * 40, "reviewed PR head SHA"),
         ("PR_FILE", ("merge_commit_sha",), "f" * 40, "merge commit SHA"),
         ("MAIN_REF_FILE", ("object", "sha"), "f" * 40, "not current main"),
         ("WORKFLOW_FILE", ("id",), 1, "workflow id"),
@@ -541,7 +537,7 @@ def test_pr71_runbook_marks_workflow_post_merge_and_separately_authorized():
     runbook = _read("docs/deployment/b3s_pr71_vault.md")
 
     assert "**post-merge-only**" in runbook
-    assert "authorizes a merge or a deployment" in runbook
+    assert "authorizes a merge or deployment" in runbook
     assert "deployment GO remain separate operator decisions" in runbook
     assert "`state=closed`, `merged=true`, and `draft=false`" in runbook
     assert "`merge_commit_sha`" in runbook
@@ -557,7 +553,7 @@ def test_pr71_runbook_marks_workflow_post_merge_and_separately_authorized():
     assert "completed every attestation, migration/ACL" in runbook
     assert "Both temporary deployment secrets were then removed" in runbook
     assert "Any future deployment requires a new exact-SHA GO" in runbook
-    assert "exact seven audited files listed above" in runbook
+    assert "exact three audited files listed above" in runbook
     assert "without filtering" in runbook
     assert "non-successful runs" in runbook
     assert "`pull_requests` array may be empty" in runbook
