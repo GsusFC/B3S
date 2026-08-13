@@ -165,6 +165,33 @@ Scanner. No demuestra todavía que el pipeline operational de Vault haya
 separado assessment de verification; ese cierre queda bloqueado por las deudas
 de la sección 9.
 
+### 6.1 Vault operational: adaptador semántico shadow enlazado
+
+`build_operational_semantic_shadow_assessment()` recibe un packet operational
+v2 completo **y** su source candidate packet completo. Valida ambos, su
+fingerprint, marca, parent y políticas, y exige que las 80
+`candidate_semantic_state` de `scoring_projection.tiles` sean exactamente los
+estados del source packet. Solo entonces adapta ese vector al kernel. El
+resultado es `evidence-vault-operational-semantic-assessment-shadow-v1`, no
+tiene autoridad ni efectos de runtime, y no se persiste.
+
+`authority_coverage` permanece como observación separada: no filtra ni cambia
+el vector. El resultado incorpora un `semantic_provenance_fingerprint` que
+vincula source candidate, vector canónico y fingerprints de registry/reducer/
+aggregation, sin incluir authority, review, lifecycle ni candidate overlay.
+Por eso una transición de autoridad/verification no altera los fingerprints del
+kernel ni el de procedencia semántica.
+
+Si el parent esperado no coincide, el resultado queda unavailable con
+`stale_candidate_parent`. Si una baldosa es `contradiction`, queda unavailable
+con `contradiction_requires_semantic_reassessment`: no se inventa score,
+vector ni fingerprints. C7 y C8 siguen siendo baldosas semánticas ordinarias
+para aritmética; su `verification_requirement` es respectivamente
+`owned_web_plus_external_social` y `human_required`. Con los datos actuales no
+se puede afirmar su verification como `verified`, aunque exista authority
+accepted. Esos requirements, y los estados pending/verified/disputed/stale/
+unverifiable, no participan en aritmética.
+
 ## 7. Assessment y verification son ejes ortogonales
 
 ```text
@@ -222,6 +249,7 @@ verificación humana se registra aparte.
 Este ADR introduce kernel, adaptadores, paridad y tests. No:
 
 - migra scores históricos ni rellena fingerprints nuevos;
+- persiste el adapter operational semantic shadow o lo incorpora a repository;
 - cambia schemas de store/model o payloads públicos existentes;
 - cambia el read path de Scanner o Vault;
 - activa un cutover, deploy gate o runtime de producción;
