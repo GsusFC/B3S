@@ -11,6 +11,7 @@ from src.services.evidence_vault_candidate_resolver import (
 from src.services.evidence_vault_canonical_core import (
     build_candidate_packet,
     build_candidate_tile,
+    build_incremental_candidate_tiles,
     build_tile_contract_registry,
     canonical_fingerprint,
 )
@@ -43,7 +44,7 @@ def test_complete_candidate_vector_scores_pending_tiles_independently_of_authori
     )
 
 
-def test_authority_changes_only_verification_not_semantic_assessment_fingerprints() -> None:
+def test_authority_does_not_change_semantic_assessment_or_pending_verification() -> None:
     source, pending = _artifacts(ok_tile_ids={"M1"})
     _, accepted = _artifacts(
         source=source,
@@ -60,8 +61,82 @@ def test_authority_changes_only_verification_not_semantic_assessment_fingerprint
         == accepted_shadow["semantic_provenance_fingerprint"]
     )
     assert _requirement(pending_shadow, "M1")["verification_state"] == "pending"
-    assert _requirement(accepted_shadow, "M1")["verification_state"] == "verified"
+    # Authority coverage is not an evidence-verification binding.
+    assert _requirement(accepted_shadow, "M1")["verification_state"] == "pending"
 
+
+
+def test_incremental_no_change_refresh_retains_prior_accepted_authority() -> None:
+    original_source, initial_packet = _artifacts(
+        ok_tile_ids={"M1"}, accepted_ids={"M1"}
+    )
+    refreshed_tiles = build_incremental_candidate_tiles(
+        previous_candidate_tiles=original_source["candidate_tiles"]
+    )
+    refreshed_source = build_candidate_packet(
+        brand_identity="example.com",
+        parent_canonical_memory_version=initial_packet[
+            "proposed_canonical_memory_version"
+        ],
+        candidate_memory_version=_digest("refreshed-candidate-memory"),
+        accepted_memory_candidate_version=_digest("refreshed-accepted-memory"),
+        reviewed_memory_candidate_version=_digest("refreshed-reviewed-memory"),
+        review_packet_set_fingerprint=_digest("refreshed-review-set"),
+        aggregation_policy_fingerprint=original_source["manifest"][
+            "aggregation_policy_fingerprint"
+        ],
+        candidate_tiles=refreshed_tiles,
+    )
+    refreshed_packet = build_operational_memory_packet(
+        brand_identity="example.com",
+        source_candidate_packet_fingerprint=refreshed_source[
+            "candidate_packet_fingerprint"
+        ],
+        aggregation_policy_fingerprint=refreshed_source["manifest"][
+            "aggregation_policy_fingerprint"
+        ],
+        candidate_tiles=refreshed_source["candidate_tiles"],
+        current_accepted_tiles=initial_packet["accepted_memory"]["accepted_tiles"],
+        parent_canonical_memory_version=initial_packet[
+            "proposed_canonical_memory_version"
+        ],
+        dispositions={
+            "M1": {
+                "authority_state": "accepted",
+                "review_state": "resolved",
+                "authority_profile_id": "human-reviewed-test-v1",
+                "authority_source": "human",
+                "decision_event_id": "refresh-review-M1",
+            }
+        },
+    )
+
+    shadow = _build(refreshed_packet, refreshed_source)
+    accepted = next(
+        row
+        for row in refreshed_packet["accepted_memory"]["accepted_tiles"]
+        if row["tile_id"] == "M1"
+    )
+
+    assert accepted["source_candidate_packet_fingerprint"] == original_source[
+        "candidate_packet_fingerprint"
+    ]
+    assert accepted["source_delta_kind"] == "baseline"
+    assert _projection_tile(refreshed_packet, "M1")["authority_state"] == "accepted"
+    assert _projection_tile(refreshed_packet, "M1")["review_state"] == "resolved"
+    assert _requirement(shadow, "M1")["verification_state"] == "pending"
+
+
+def test_accepted_human_row_without_decision_event_is_rejected() -> None:
+    source, packet = _artifacts(ok_tile_ids={"M1"}, accepted_ids={"M1"})
+    accepted = next(
+        row for row in packet["accepted_memory"]["accepted_tiles"] if row["tile_id"] == "M1"
+    )
+    accepted["decision_event_id"] = ""
+    _rehash_accepted_memory(packet)
+
+    with pytest.raises(EvidenceVaultOperationalAssessmentShadowError):
+        _build(packet, source)
 
 
 def test_pending_rejected_and_accepted_do_not_change_candidate_kernel_score() -> None:
@@ -86,7 +161,7 @@ def test_pending_rejected_and_accepted_do_not_change_candidate_kernel_score() ->
     assert [_requirement(shadow, "M1")["verification_state"] for shadow in shadows] == [
         "pending",
         "unverifiable",
-        "verified",
+        "pending",
     ]
 
 def test_c7_and_c8_are_ordinary_semantic_tiles_with_only_c8_human_requirement() -> None:
@@ -117,7 +192,7 @@ def test_verification_mapping_table_keeps_c7_c8_pending_without_its_owned_proof(
 
     shadow = _build(packet, source)
 
-    assert _requirement(shadow, "M1")["verification_state"] == "verified"
+    assert _requirement(shadow, "M1")["verification_state"] == "pending"
     assert _requirement(shadow, "M2")["verification_state"] == "unverifiable"
     assert _requirement(shadow, "M3")["verification_state"] == "pending"
     assert _requirement(shadow, "C7") == {
@@ -383,6 +458,16 @@ def _projection_tile(packet: dict, tile_id: str) -> dict:
 
 def _requirement(shadow: dict, tile_id: str) -> dict:
     return next(row for row in shadow["verification_requirements"]["tiles"] if row["tile_id"] == tile_id)
+
+
+def _rehash_accepted_memory(packet: dict) -> None:
+    accepted = packet["accepted_memory"]
+    accepted_version = canonical_fingerprint(accepted["schema_version"], accepted)
+    packet["accepted_memory_candidate_version"] = accepted_version
+    packet["proposed_canonical_memory_version"] = accepted_version
+    packet["scoring_projection"]["accepted_memory_candidate_version"] = accepted_version
+    packet["scoring_projection"]["proposed_canonical_memory_version"] = accepted_version
+    _rehash_operational_packet(packet)
 
 
 def _rehash_operational_packet(packet: dict) -> None:

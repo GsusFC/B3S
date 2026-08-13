@@ -172,8 +172,15 @@ v2 completo **y** su source candidate packet completo. Valida ambos, su
 fingerprint, marca, parent y políticas. `scoring_projection` no es una fuente
 de autoridad: sus 80 filas, incluidos canonical/authority/review/lifecycle,
 `score_eligible`, overlay y coverage, se rederivan íntegramente desde
-`accepted_memory`, `candidate_overlay` y el source candidate. Si una
-disposición no está disponible en esos artefactos, o si la proyección no
+`accepted_memory`, `candidate_overlay` y el source candidate. Para el único
+caso sin overlay permitido —un refresh incremental `no_change` de una baldosa
+ya accepted— la fila accepted anterior aporta la autoridad y debe coincidir en
+contenido canónico (`semantic_state`, `basis`, `coverage_refs`,
+`unresolved_refs`) con el candidate nuevo. Conserva deliberadamente su
+fingerprint de source y su `source_delta_kind` anteriores; no se exige que
+coincidan con el packet refresh. El `review_state` de la proyección se conserva
+solo si es `none` o `resolved`; cualquier otro valor falla. Fuera de ese caso,
+si una disposición no está disponible en esos artefactos, o si la proyección no
 coincide exactamente, falla cerrada. En particular, una proyección que declare
 M1 `accepted` y canónica `ok` no es válida si `accepted_memory` no contiene M1.
 Solo entonces adapta el vector del source al kernel. El resultado es
@@ -197,10 +204,21 @@ actual sea `None`, y cualquier otro valor distinto devuelve
 con `contradiction_requires_semantic_reassessment`: no se inventa score,
 vector ni fingerprints. C7 y C8 siguen siendo baldosas semánticas ordinarias
 para aritmética; su `verification_requirement` es respectivamente
-`owned_web_plus_external_social` y `human_required`. Con los datos actuales no
-se puede afirmar su verification como `verified`, aunque exista authority
-accepted. Esos requirements, y los estados pending/verified/disputed/stale/
-unverifiable, no participan en aritmética.
+`owned_web_plus_external_social` y `human_required`. Ninguna baldosa accepted,
+incluidas las ordinarias, pasa a `verified` solo por authority: este packet no
+contiene un binding de verificación de evidencia. Salvo `contradiction`
+(`disputed`), lifecycle `superseded` (`stale`) o authority `rejected`
+(`unverifiable`), el estado queda `pending`. Esos requirements, y los estados
+pending/verified/disputed/stale/unverifiable, no participan en aritmética.
+
+Una fila accepted de origen `human` exige un `decision_event_id` no vacío. Una
+de origen `policy` exige `authority_matrix_fingerprint` y
+`authority_decision_fingerprint` SHA-256 válidos, sin `decision_event_id`; el
+profile no puede estar vacío ni ser `unassigned`. Esto es validación estructural
+conservadora, no validación completa de la decisión policy: el packet conserva
+sus digests, pero no el registro inmutable de decisión ni un binding que permita
+recalcular que autorizó ese candidate histórico. Esa limitación es irreducible
+en este adaptador y requiere consultar/verificar ese registro externo.
 
 ## 7. Assessment y verification son ejes ortogonales
 

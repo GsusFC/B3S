@@ -309,6 +309,7 @@ def _validated_inputs(
         )
     expected_projection = _rederive_projection(
         packet=packet,
+        declared_projection=projection,
         source_by_id=source_by_id,
         source_manifest=source_manifest,
     )
@@ -322,6 +323,7 @@ def _validated_inputs(
 def _rederive_projection(
     *,
     packet: Mapping[str, Any],
+    declared_projection: Mapping[str, Any],
     source_by_id: Mapping[str, Mapping[str, Any]],
     source_manifest: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -356,6 +358,9 @@ def _rederive_projection(
                 f"accepted memory {field} differs from source candidate"
             )
 
+    declared_projection_by_id = _projection_tiles_by_id(
+        declared_projection, source_by_id
+    )
     accepted_by_id = _accepted_tiles_by_id(accepted, source_by_id)
     overlay_by_id = _overlay_tiles_by_id(overlay, source_by_id, accepted_by_id)
     pending_reassessment_ids = _pending_reassessment_ids(
@@ -380,23 +385,27 @@ def _rederive_projection(
         disposition = overlay_by_id.get(tile_id)
         pending_reassessment = tile_id in pending_reassessment_ids
         if disposition is None:
-            # Without an overlay, the only non-ambiguous authority source is an
-            # accepted record created from this exact source packet.  A prior
-            # accepted tile plus a later no-change candidate otherwise loses
-            # the current disposition and must not be guessed from projection.
+            # An incrementally rebuilt no-change candidate legitimately retains
+            # the earlier accepted row (including its source identity).  Its
+            # authority comes from that row, while the current packet's resolved
+            # review disposition is represented only in the projection.
             if previous is None or pending_reassessment:
                 raise EvidenceVaultOperationalAssessmentShadowError(
                     f"missing disposition source for {tile_id}"
                 )
-            if not _same_accepted_candidate(previous, candidate) or (
-                previous["source_candidate_packet_fingerprint"]
-                != packet["source_candidate_packet_fingerprint"]
-            ):
+            if not _same_accepted_content(previous, candidate):
                 raise EvidenceVaultOperationalAssessmentShadowError(
                     f"ambiguous disposition source for {tile_id}"
                 )
+            declared_review_state = declared_projection_by_id[tile_id].get(
+                "review_state"
+            )
+            if declared_review_state not in {"none", "resolved"}:
+                raise EvidenceVaultOperationalAssessmentShadowError(
+                    f"invalid no-overlay accepted review state for {tile_id}"
+                )
             authority_state = "accepted"
-            review_state = "none"
+            review_state = declared_review_state
         else:
             authority_state = disposition["authority_state"]
             review_state = disposition["review_state"]
@@ -454,6 +463,33 @@ def _rederive_projection(
     }
 
 
+def _projection_tiles_by_id(
+    projection: Mapping[str, Any],
+    source_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    """Index the declared projection only to retain its constrained review axis.
+
+    The expected projection is still fully rederived and compared by the caller;
+    this index prevents a duplicated or missing row from selecting an arbitrary
+    review state for the no-overlay accepted path.
+    """
+
+    rows = projection.get("tiles")
+    if not isinstance(rows, list) or len(rows) != len(source_by_id):
+        raise EvidenceVaultOperationalAssessmentShadowError(
+            "scoring projection must contain exactly one row per source tile"
+        )
+    result: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        tile_id = str(row.get("tile_id") or "") if isinstance(row, Mapping) else ""
+        if not isinstance(row, Mapping) or tile_id not in source_by_id or tile_id in result:
+            raise EvidenceVaultOperationalAssessmentShadowError(
+                "scoring projection tile is unknown or duplicated"
+            )
+        result[tile_id] = row
+    return result
+
+
 def _accepted_tiles_by_id(
     accepted: Mapping[str, Any],
     source_by_id: Mapping[str, Mapping[str, Any]],
@@ -480,14 +516,40 @@ def _accepted_tiles_by_id(
             row.get("component_key") != source["component_key"]
             or row.get("tile_key") != source["tile_key"]
             or row.get("semantic_state") not in {"ok", "no", "sin_evidencia"}
-            or row.get("authority_source") not in {"policy", "human"}
-            or not isinstance(row.get("authority_profile_id"), str)
-            or not row["authority_profile_id"]
             or not _is_sha256(row.get("source_candidate_packet_fingerprint"))
+            or not _accepted_authority_is_valid(row)
         ):
             raise EvidenceVaultOperationalAssessmentShadowError("accepted tile is invalid")
         result[tile_id] = row
     return result
+
+
+def _accepted_authority_is_valid(row: Mapping[str, Any]) -> bool:
+    """Check only the authority binding fields retained on an accepted row.
+
+    This proves the row is structurally attributable; validating whether a
+    policy decision actually authorized this historical candidate requires the
+    immutable decision record, which is not carried by this packet.
+    """
+
+    profile = row.get("authority_profile_id")
+    if (
+        not isinstance(profile, str)
+        or not profile.strip()
+        or profile.strip().casefold() == "unassigned"
+    ):
+        return False
+    source = row.get("authority_source")
+    if source == "human":
+        event_id = row.get("decision_event_id")
+        return isinstance(event_id, str) and bool(event_id.strip())
+    if source == "policy":
+        return (
+            row.get("decision_event_id") is None
+            and _is_sha256(row.get("authority_matrix_fingerprint"))
+            and _is_sha256(row.get("authority_decision_fingerprint"))
+        )
+    return False
 
 
 def _overlay_tiles_by_id(
@@ -578,21 +640,6 @@ def _same_accepted_content(
     )
 
 
-def _same_accepted_candidate(
-    accepted: Mapping[str, Any], candidate: Mapping[str, Any]
-) -> bool:
-    return all(
-        accepted.get(accepted_field) == candidate.get(candidate_field)
-        for accepted_field, candidate_field in (
-            ("semantic_state", "candidate_state"),
-            ("basis", "basis"),
-            ("coverage_refs", "coverage_refs"),
-            ("unresolved_refs", "unresolved_refs"),
-            ("source_delta_kind", "delta_kind"),
-        )
-    )
-
-
 def _authority_coverage_from_rows(
     projection_tiles: list[Mapping[str, Any]],
     source_by_id: Mapping[str, Mapping[str, Any]],
@@ -668,17 +715,15 @@ def _verification_requirements(
             if tile_id == "C7"
             else "human_required" if tile_id == "C8" else "ordinary"
         )
-        # C7 and C8 need proof/binding unavailable in this projection.  Their
-        # policy authority alone therefore never becomes a verification claim.
-        # These observations remain wholly outside assessment arithmetic.
+        # This packet carries authority lineage, not a binding between the
+        # candidate and independently verified evidence.  Accepted authority
+        # must therefore remain pending too (including ordinary tiles); C7/C8
+        # have no special exception.  These observations remain wholly outside
+        # assessment arithmetic.
         if row["candidate_semantic_state"] == "contradiction":
             state = "disputed"
         elif row["lifecycle_state"] == "superseded":
             state = "stale"
-        elif tile_id in {"C7", "C8"}:
-            state = "pending"
-        elif row["authority_state"] == "accepted":
-            state = "verified"
         elif row["authority_state"] == "rejected":
             state = "unverifiable"
         else:
