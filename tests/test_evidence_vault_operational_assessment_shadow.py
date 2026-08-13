@@ -39,6 +39,7 @@ def test_complete_candidate_vector_scores_pending_tiles_independently_of_authori
         shadow,
         operational_packet=packet,
         source_candidate_packet=source,
+        expected_parent_canonical_memory_version=packet["current_canonical_memory_version"],
     )
 
 
@@ -142,26 +143,48 @@ def test_contradiction_is_disputed_but_does_not_make_up_a_kernel_score() -> None
     assert _requirement(shadow, "C8")["verification_state"] == "disputed"
 
 
-def test_stale_reopen_changes_only_verification_not_semantic_vector() -> None:
-    source, active = _artifacts(ok_tile_ids={"M1"})
-    stale = deepcopy(active)
-    tile = _projection_tile(stale, "M1")
-    tile["lifecycle_state"] = "superseded"
-    tile["score_eligible"] = False
-    stale["scoring_projection"]["coverage"]["pending_initial_tile_count"] = 79
-    stale["scoring_projection"]["coverage"]["pending_change_tile_count"] = 1
-    stale["scoring_projection"]["coverage"]["canonical_score_status"] = "pending_reassessment"
-    _rehash_operational_packet(stale)
-
-    active_shadow = _build(active, source)
-    stale_shadow = _build(stale, source)
-
-    assert active_shadow["assessment_output"] == stale_shadow["assessment_output"]
-    assert (
-        active_shadow["semantic_provenance_fingerprint"]
-        == stale_shadow["semantic_provenance_fingerprint"]
+def test_forged_projection_authority_cannot_replace_empty_accepted_memory() -> None:
+    source, empty_accepted_memory = _artifacts(ok_tile_ids={"M1"})
+    _, authoritative = _artifacts(
+        source=source,
+        ok_tile_ids={"M1"},
+        accepted_ids={"M1"},
     )
-    assert _requirement(stale_shadow, "M1")["verification_state"] == "stale"
+    forged = deepcopy(empty_accepted_memory)
+    # The forged projection says M1 is accepted and canonically OK, but its
+    # actual accepted_memory remains empty.  Packet hashing alone cannot make
+    # that projection authoritative.
+    forged["scoring_projection"]["tiles"] = deepcopy(
+        authoritative["scoring_projection"]["tiles"]
+    )
+    forged["scoring_projection"]["coverage"] = deepcopy(
+        authoritative["scoring_projection"]["coverage"]
+    )
+    _rehash_operational_packet(forged)
+
+    with pytest.raises(EvidenceVaultOperationalAssessmentShadowError):
+        _build(forged, source)
+
+
+def test_semantic_provenance_excludes_source_review_basis_metadata() -> None:
+    source_a, packet_a = _artifacts(
+        ok_tile_ids={"M1"},
+        accepted_ids={"M1"},
+        basis_review_event_prefix="review-a",
+    )
+    source_b, packet_b = _artifacts(
+        ok_tile_ids={"M1"},
+        accepted_ids={"M1"},
+        basis_review_event_prefix="review-b",
+    )
+
+    shadow_a = _build(packet_a, source_a)
+    shadow_b = _build(packet_b, source_b)
+
+    assert source_a["candidate_packet_fingerprint"] != source_b["candidate_packet_fingerprint"]
+    assert shadow_a["source_candidate_packet_fingerprint"] != shadow_b["source_candidate_packet_fingerprint"]
+    assert shadow_a["assessment_output"] == shadow_b["assessment_output"]
+    assert shadow_a["semantic_provenance_fingerprint"] == shadow_b["semantic_provenance_fingerprint"]
 
 
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "state_mismatch"])
@@ -179,6 +202,24 @@ def test_projection_must_match_exact_complete_source_candidate(mutation: str) ->
 
     with pytest.raises(EvidenceVaultOperationalAssessmentShadowError):
         _build(tampered, source)
+
+
+def test_expected_parent_is_required_and_explicit_none_accepts_only_initial_parent() -> None:
+    source, packet = _artifacts(ok_tile_ids={"M1"}, accepted_ids={"M1"})
+
+    omitted = build_operational_semantic_shadow_assessment(
+        operational_packet=packet,
+        source_candidate_packet=source,
+    )
+    explicit_initial = build_operational_semantic_shadow_assessment(
+        operational_packet=packet,
+        source_candidate_packet=source,
+        expected_parent_canonical_memory_version=None,
+    )
+
+    assert omitted["assessment_status"] == "assessment_unavailable"
+    assert omitted["reason"] == "expected_parent_required"
+    assert explicit_initial["assessment_status"] == "available"
 
 
 def test_parent_mismatch_is_an_unavailable_stale_candidate_not_a_score() -> None:
@@ -213,6 +254,7 @@ def _build(packet: dict, source: dict) -> dict:
     return build_operational_semantic_shadow_assessment(
         operational_packet=packet,
         source_candidate_packet=source,
+        expected_parent_canonical_memory_version=packet["current_canonical_memory_version"],
     )
 
 
@@ -223,8 +265,14 @@ def _artifacts(
     accepted_ids: set[str] | None = None,
     rejected_ids: set[str] | None = None,
     source: dict | None = None,
+    review_packet_set_seed: str = "review-set",
+    basis_review_event_prefix: str = "review",
 ) -> tuple[dict, dict]:
-    candidates = _candidates(ok_tile_ids, contradiction_tile_id=contradiction_tile_id)
+    candidates = _candidates(
+        ok_tile_ids,
+        contradiction_tile_id=contradiction_tile_id,
+        basis_review_event_prefix=basis_review_event_prefix,
+    )
     if source is None:
         source = build_candidate_packet(
             brand_identity="example.com",
@@ -232,7 +280,7 @@ def _artifacts(
             candidate_memory_version=_digest("candidate-memory"),
             accepted_memory_candidate_version=_digest("accepted-memory"),
             reviewed_memory_candidate_version=_digest("reviewed-memory"),
-            review_packet_set_fingerprint=_digest("review-set"),
+            review_packet_set_fingerprint=_digest(review_packet_set_seed),
             aggregation_policy_fingerprint=canonical_aggregation_policy_fingerprint(),
             candidate_tiles=candidates,
             unresolved_items=(
@@ -279,12 +327,20 @@ def _artifacts(
     return source, packet
 
 
-def _candidates(ok_tile_ids: set[str], *, contradiction_tile_id: str | None) -> list[dict]:
+def _candidates(
+    ok_tile_ids: set[str],
+    *,
+    contradiction_tile_id: str | None,
+    basis_review_event_prefix: str = "review",
+) -> list[dict]:
     rows = []
     for contract in build_tile_contract_registry()["tiles"]:
         tile_id = str(contract["tile_id"])
         if tile_id == contradiction_tile_id:
-            basis = [_basis(tile_id, "supports"), _basis(f"{tile_id}-counter", "contradicts")]
+            basis = [
+                _basis(tile_id, "supports", basis_review_event_prefix),
+                _basis(f"{tile_id}-counter", "contradicts", basis_review_event_prefix),
+            ]
             rows.append(
                 build_candidate_tile(
                     tile_id=tile_id,
@@ -296,13 +352,15 @@ def _candidates(ok_tile_ids: set[str], *, contradiction_tile_id: str | None) -> 
             rows.append(
                 build_candidate_tile(
                     tile_id=tile_id,
-                    basis=[_basis(tile_id, "supports")] if tile_id in ok_tile_ids else [],
+                    basis=[_basis(tile_id, "supports", basis_review_event_prefix)]
+                    if tile_id in ok_tile_ids
+                    else [],
                 )
             )
     return rows
 
 
-def _basis(seed: str, polarity: str) -> dict:
+def _basis(seed: str, polarity: str, review_event_prefix: str = "review") -> dict:
     return {
         "relation_id": _digest(f"{seed}-relation"),
         "evidence_id": _digest(f"{seed}-evidence"),
@@ -310,7 +368,7 @@ def _basis(seed: str, polarity: str) -> dict:
         "claim_id": None,
         "polarity": polarity,
         "review_status": "accepted",
-        "decision_event_id": f"review-{seed}",
+        "decision_event_id": f"{review_event_prefix}-{seed}",
         "absence_test_contract_id": None,
         "coverage_assessment_id": None,
         "coverage_status": None,

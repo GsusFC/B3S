@@ -169,20 +169,30 @@ de la sección 9.
 
 `build_operational_semantic_shadow_assessment()` recibe un packet operational
 v2 completo **y** su source candidate packet completo. Valida ambos, su
-fingerprint, marca, parent y políticas, y exige que las 80
-`candidate_semantic_state` de `scoring_projection.tiles` sean exactamente los
-estados del source packet. Solo entonces adapta ese vector al kernel. El
-resultado es `evidence-vault-operational-semantic-assessment-shadow-v1`, no
-tiene autoridad ni efectos de runtime, y no se persiste.
+fingerprint, marca, parent y políticas. `scoring_projection` no es una fuente
+de autoridad: sus 80 filas, incluidos canonical/authority/review/lifecycle,
+`score_eligible`, overlay y coverage, se rederivan íntegramente desde
+`accepted_memory`, `candidate_overlay` y el source candidate. Si una
+disposición no está disponible en esos artefactos, o si la proyección no
+coincide exactamente, falla cerrada. En particular, una proyección que declare
+M1 `accepted` y canónica `ok` no es válida si `accepted_memory` no contiene M1.
+Solo entonces adapta el vector del source al kernel. El resultado es
+`evidence-vault-operational-semantic-assessment-shadow-v1`, no tiene autoridad
+ni efectos de runtime, y no se persiste.
 
 `authority_coverage` permanece como observación separada: no filtra ni cambia
-el vector. El resultado incorpora un `semantic_provenance_fingerprint` que
-vincula source candidate, vector canónico y fingerprints de registry/reducer/
-aggregation, sin incluir authority, review, lifecycle ni candidate overlay.
-Por eso una transición de autoridad/verification no altera los fingerprints del
+el vector. `semantic_provenance_fingerprint` nombra exclusivamente la identidad
+semántica del kernel (vector/kernel fingerprint) y los IDs estáticos de contrato
+semántico (registry/reducer/aggregation). No incorpora source candidate packet
+fingerprint, basis, review, authority, lifecycle ni candidate overlay. El
+fingerprint del source packet permanece en su campo separado; por eso cambios
+de review o autoridad sin cambio semántico no alteran los fingerprints del
 kernel ni el de procedencia semántica.
 
-Si el parent esperado no coincide, el resultado queda unavailable con
+El caller debe proporcionar explícitamente
+`expected_parent_canonical_memory_version`. Su omisión devuelve unavailable con
+`expected_parent_required`; `None` explícito solo acepta un packet cuyo parent
+actual sea `None`, y cualquier otro valor distinto devuelve
 `stale_candidate_parent`. Si una baldosa es `contradiction`, queda unavailable
 con `contradiction_requires_semantic_reassessment`: no se inventa score,
 vector ni fingerprints. C7 y C8 siguen siendo baldosas semánticas ordinarias

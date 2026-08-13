@@ -20,6 +20,11 @@ from src.services.evidence_vault_operational_authority import (
     EvidenceVaultOperationalAuthorityError,
     validate_operational_memory_packet,
 )
+from src.services.evidence_vault_operational_memory import (
+    EVIDENCE_VAULT_ACCEPTED_MEMORY_VERSION,
+    EVIDENCE_VAULT_CANDIDATE_OVERLAY_VERSION,
+    EVIDENCE_VAULT_SCORING_PROJECTION_VERSION,
+)
 from src.sv9.assessment_kernel import (
     Sv9AssessmentError,
     build_sv9_assessment,
@@ -109,6 +114,7 @@ _REQUIREMENT_TILE_FIELDS = frozenset(
 _VERIFICATION_STATES = frozenset(
     {"pending", "verified", "disputed", "stale", "unverifiable"}
 )
+_EXPECTED_PARENT_UNSET = object()
 
 
 class EvidenceVaultOperationalAssessmentShadowError(ValueError):
@@ -119,7 +125,7 @@ def build_operational_semantic_shadow_assessment(
     *,
     operational_packet: Mapping[str, Any],
     source_candidate_packet: Mapping[str, Any],
-    expected_parent_canonical_memory_version: str | None = None,
+    expected_parent_canonical_memory_version: str | None | object = _EXPECTED_PARENT_UNSET,
 ) -> dict[str, Any]:
     """Build a non-persistent semantic assessment from exact 80-tile inputs.
 
@@ -141,17 +147,17 @@ def build_operational_semantic_shadow_assessment(
         }
         for row in projection["tiles"]
     ]
-    coverage = _validated_authority_coverage(
-        projection["coverage"],
-        projection_tiles=projection["tiles"],
-        source_by_id=source_by_id,
-    )
+    coverage = dict(projection["coverage"])
     requirements = _verification_requirements(projection["tiles"])
     parent = packet["current_canonical_memory_version"]
-    if (
-        expected_parent_canonical_memory_version is not None
-        and expected_parent_canonical_memory_version != parent
-    ):
+    if expected_parent_canonical_memory_version is _EXPECTED_PARENT_UNSET:
+        return _unavailable_output(
+            packet=packet,
+            coverage=coverage,
+            requirements=requirements,
+            reason="expected_parent_required",
+        )
+    if expected_parent_canonical_memory_version != parent:
         return _unavailable_output(
             packet=packet,
             coverage=coverage,
@@ -174,11 +180,18 @@ def build_operational_semantic_shadow_assessment(
     semantic_provenance_fingerprint = canonical_fingerprint(
         EVIDENCE_VAULT_OPERATIONAL_SEMANTIC_PROVENANCE_VERSION,
         {
-            "source_candidate_packet_fingerprint": packet[
-                "source_candidate_packet_fingerprint"
+            # This identity deliberately excludes packet, basis, review, and
+            # authority lineage.  Those are separately bound by the source
+            # packet fingerprint; this fingerprint names only the semantics
+            # consumed by the kernel and its static semantic contracts.
+            "kernel_assessment_fingerprint": assessment_output["assessment_fingerprint"],
+            "assessment_vector_version": assessment_output["assessment_vector_version"],
+            "scoring_policy_version": assessment_output["scoring_policy_version"],
+            "rubric_version": assessment_output["rubric_version"],
+            "kernel_tile_contract_registry_fingerprint": assessment_output[
+                "tile_contract_registry_fingerprint"
             ],
-            "tiles": assessment_output["tiles"],
-            "tile_contract_registry_fingerprint": projection[
+            "vault_tile_contract_registry_fingerprint": projection[
                 "tile_contract_registry_fingerprint"
             ],
             "reducer_policy_fingerprint": projection["reducer_policy_fingerprint"],
@@ -210,7 +223,7 @@ def validate_operational_semantic_shadow_assessment(
     *,
     operational_packet: Mapping[str, Any],
     source_candidate_packet: Mapping[str, Any],
-    expected_parent_canonical_memory_version: str | None = None,
+    expected_parent_canonical_memory_version: str | None | object = _EXPECTED_PARENT_UNSET,
 ) -> None:
     """Fail closed unless a result exactly rederives from both source artifacts."""
 
@@ -241,6 +254,14 @@ def _validated_inputs(
     operational_packet: Mapping[str, Any],
     source_candidate_packet: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, dict[str, Any]]]:
+    """Validate and independently rederive every operational projection axis.
+
+    ``scoring_projection`` is a convenience projection, never an authority
+    source.  Its canonical/authority/review/lifecycle axes must be reproduced
+    from accepted memory plus the candidate overlay (the only disposition
+    records retained in this packet), or the adapter refuses the packet.
+    """
+
     if not isinstance(operational_packet, Mapping) or not isinstance(
         source_candidate_packet, Mapping
     ):
@@ -280,71 +301,302 @@ def _validated_inputs(
             raise EvidenceVaultOperationalAssessmentShadowError(
                 f"operational projection {field} differs from source candidate"
             )
-    rows = projection.get("tiles")
-    if not isinstance(rows, list) or len(rows) != 80:
-        raise EvidenceVaultOperationalAssessmentShadowError(
-            "scoring projection must contain exactly 80 tiles"
-        )
+
     source_by_id = {str(row["tile_id"]): row for row in source["candidate_tiles"]}
     if len(source_by_id) != 80:
         raise EvidenceVaultOperationalAssessmentShadowError(
             "source candidate must contain exactly 80 unique tiles"
         )
-    seen: set[str] = set()
-    for row in rows:
-        if not isinstance(row, Mapping) or set(row) != _PROJECTION_TILE_FIELDS:
-            raise EvidenceVaultOperationalAssessmentShadowError(
-                "scoring projection tile fields mismatch"
-            )
-        tile_id = str(row.get("tile_id") or "")
-        source_row = source_by_id.get(tile_id)
-        if tile_id in seen or source_row is None:
-            raise EvidenceVaultOperationalAssessmentShadowError(
-                "projection has an unknown or duplicate source tile"
-            )
-        seen.add(tile_id)
-        if (
-            row.get("component_key") != source_row["component_key"]
-            or row.get("tile_key") != source_row["tile_key"]
-            or row.get("candidate_semantic_state") != source_row["candidate_state"]
-        ):
-            raise EvidenceVaultOperationalAssessmentShadowError(
-                f"projection semantic state mismatches source candidate for {tile_id}"
-            )
-        _validate_projection_axes(row)
-    if seen != set(source_by_id):
-        raise EvidenceVaultOperationalAssessmentShadowError("projection is missing source tiles")
-    return packet, source, projection, source_by_id
+    expected_projection = _rederive_projection(
+        packet=packet,
+        source_by_id=source_by_id,
+        source_manifest=source_manifest,
+    )
+    if projection != expected_projection:
+        raise EvidenceVaultOperationalAssessmentShadowError(
+            "scoring projection does not match accepted memory and candidate overlay"
+        )
+    return packet, source, expected_projection, source_by_id
 
 
-def _validate_projection_axes(row: Mapping[str, Any]) -> None:
-    if row["candidate_semantic_state"] not in {
-        "ok",
-        "no",
-        "sin_evidencia",
-        "contradiction",
-    }:
-        raise EvidenceVaultOperationalAssessmentShadowError("invalid candidate semantic state")
-    if row["authority_state"] not in {"pending", "accepted", "rejected"}:
-        raise EvidenceVaultOperationalAssessmentShadowError("invalid authority state")
-    if row["review_state"] not in {"none", "required", "in_review", "resolved"}:
-        raise EvidenceVaultOperationalAssessmentShadowError("invalid review state")
-    if row["lifecycle_state"] not in {"active", "superseded"}:
-        raise EvidenceVaultOperationalAssessmentShadowError("invalid lifecycle state")
-    if not isinstance(row["has_candidate_overlay"], bool) or not isinstance(
-        row["score_eligible"], bool
-    ):
-        raise EvidenceVaultOperationalAssessmentShadowError("invalid projection booleans")
-
-
-def _validated_authority_coverage(
-    coverage: Any,
+def _rederive_projection(
     *,
+    packet: Mapping[str, Any],
+    source_by_id: Mapping[str, Mapping[str, Any]],
+    source_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    accepted = packet["accepted_memory"]
+    overlay = packet["candidate_overlay"]
+    if (
+        not isinstance(accepted, Mapping)
+        or accepted.get("schema_version") != EVIDENCE_VAULT_ACCEPTED_MEMORY_VERSION
+        or not isinstance(overlay, Mapping)
+        or overlay.get("schema_version") != EVIDENCE_VAULT_CANDIDATE_OVERLAY_VERSION
+    ):
+        raise EvidenceVaultOperationalAssessmentShadowError(
+            "accepted memory or candidate overlay schema mismatch"
+        )
+    parent = packet["current_canonical_memory_version"]
+    if (
+        accepted.get("brand_identity") != packet["brand_identity"]
+        or overlay.get("brand_identity") != packet["brand_identity"]
+        or accepted.get("parent_canonical_memory_version") != parent
+        or overlay.get("parent_canonical_memory_version") != parent
+    ):
+        raise EvidenceVaultOperationalAssessmentShadowError(
+            "operational memory artifacts do not bind the packet parent"
+        )
+    for field in (
+        "tile_contract_registry_fingerprint",
+        "reducer_policy_fingerprint",
+        "aggregation_policy_fingerprint",
+    ):
+        if accepted.get(field) != source_manifest[field]:
+            raise EvidenceVaultOperationalAssessmentShadowError(
+                f"accepted memory {field} differs from source candidate"
+            )
+
+    accepted_by_id = _accepted_tiles_by_id(accepted, source_by_id)
+    overlay_by_id = _overlay_tiles_by_id(overlay, source_by_id, accepted_by_id)
+    pending_reassessment_ids = _pending_reassessment_ids(
+        accepted,
+        source_by_id=source_by_id,
+        accepted_by_id=accepted_by_id,
+        overlay_by_id=overlay_by_id,
+    )
+    for tile_id, disposition in overlay_by_id.items():
+        previous = accepted_by_id.get(tile_id)
+        material_change = previous is None or not _same_accepted_content(
+            previous, source_by_id[tile_id]
+        )
+        if not material_change and tile_id not in pending_reassessment_ids:
+            raise EvidenceVaultOperationalAssessmentShadowError(
+                f"overlay disposition has no candidate change for {tile_id}"
+            )
+
+    rows: list[dict[str, Any]] = []
+    for tile_id, candidate in source_by_id.items():
+        previous = accepted_by_id.get(tile_id)
+        disposition = overlay_by_id.get(tile_id)
+        pending_reassessment = tile_id in pending_reassessment_ids
+        if disposition is None:
+            # Without an overlay, the only non-ambiguous authority source is an
+            # accepted record created from this exact source packet.  A prior
+            # accepted tile plus a later no-change candidate otherwise loses
+            # the current disposition and must not be guessed from projection.
+            if previous is None or pending_reassessment:
+                raise EvidenceVaultOperationalAssessmentShadowError(
+                    f"missing disposition source for {tile_id}"
+                )
+            if not _same_accepted_candidate(previous, candidate) or (
+                previous["source_candidate_packet_fingerprint"]
+                != packet["source_candidate_packet_fingerprint"]
+            ):
+                raise EvidenceVaultOperationalAssessmentShadowError(
+                    f"ambiguous disposition source for {tile_id}"
+                )
+            authority_state = "accepted"
+            review_state = "none"
+        else:
+            authority_state = disposition["authority_state"]
+            review_state = disposition["review_state"]
+
+        canonical_state = previous["semantic_state"] if previous is not None else None
+        effective_state = canonical_state if canonical_state is not None else "sin_evidencia"
+        multiplier = int(COMPONENTS[candidate["component_key"]]["multiplier"])
+        candidate_state = candidate["candidate_state"]
+        rows.append(
+            {
+                "component_key": candidate["component_key"],
+                "tile_id": tile_id,
+                "tile_key": candidate["tile_key"],
+                "canonical_semantic_state": canonical_state,
+                "effective_scoring_state": effective_state,
+                "canonical_effective_points": (
+                    multiplier if effective_state == "ok" else 0
+                ),
+                "candidate_semantic_state": candidate_state,
+                "candidate_preview_points": (
+                    None if candidate_state == "contradiction"
+                    else multiplier if candidate_state == "ok" else 0
+                ),
+                "authority_state": authority_state,
+                "review_state": review_state,
+                "lifecycle_state": (
+                    "superseded" if pending_reassessment else "active"
+                ),
+                "score_eligible": (
+                    not pending_reassessment
+                    and previous is not None
+                    and effective_state == "ok"
+                ),
+                "has_candidate_overlay": disposition is not None,
+            }
+        )
+    coverage = _authority_coverage_from_rows(rows, source_by_id)
+    return {
+        "schema_version": EVIDENCE_VAULT_SCORING_PROJECTION_VERSION,
+        "accepted_memory_candidate_version": packet[
+            "accepted_memory_candidate_version"
+        ],
+        "proposed_canonical_memory_version": packet[
+            "proposed_canonical_memory_version"
+        ],
+        "tile_contract_registry_fingerprint": source_manifest[
+            "tile_contract_registry_fingerprint"
+        ],
+        "reducer_policy_fingerprint": source_manifest["reducer_policy_fingerprint"],
+        "aggregation_policy_fingerprint": source_manifest[
+            "aggregation_policy_fingerprint"
+        ],
+        "tiles": rows,
+        "coverage": coverage,
+    }
+
+
+def _accepted_tiles_by_id(
+    accepted: Mapping[str, Any],
+    source_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    rows = accepted.get("accepted_tiles")
+    if not isinstance(rows, list):
+        raise EvidenceVaultOperationalAssessmentShadowError("accepted tiles must be an array")
+    fields = {
+        "component_key", "tile_id", "tile_key", "semantic_state", "basis",
+        "coverage_refs", "unresolved_refs", "source_delta_kind",
+        "source_candidate_packet_fingerprint", "authority_profile_id",
+        "authority_source", "decision_event_id", "authority_matrix_fingerprint",
+        "authority_decision_fingerprint",
+    }
+    result: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) != fields:
+            raise EvidenceVaultOperationalAssessmentShadowError("accepted tile fields mismatch")
+        tile_id = str(row.get("tile_id") or "")
+        source = source_by_id.get(tile_id)
+        if tile_id in result or source is None:
+            raise EvidenceVaultOperationalAssessmentShadowError("accepted tile is unknown or duplicated")
+        if (
+            row.get("component_key") != source["component_key"]
+            or row.get("tile_key") != source["tile_key"]
+            or row.get("semantic_state") not in {"ok", "no", "sin_evidencia"}
+            or row.get("authority_source") not in {"policy", "human"}
+            or not isinstance(row.get("authority_profile_id"), str)
+            or not row["authority_profile_id"]
+            or not _is_sha256(row.get("source_candidate_packet_fingerprint"))
+        ):
+            raise EvidenceVaultOperationalAssessmentShadowError("accepted tile is invalid")
+        result[tile_id] = row
+    return result
+
+
+def _overlay_tiles_by_id(
+    overlay: Mapping[str, Any],
+    source_by_id: Mapping[str, Mapping[str, Any]],
+    accepted_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    rows = overlay.get("candidate_tiles")
+    if not isinstance(rows, list):
+        raise EvidenceVaultOperationalAssessmentShadowError("candidate overlay tiles must be an array")
+    fields = {
+        "component_key", "tile_id", "tile_key", "semantic_state", "authority_state",
+        "review_state", "lifecycle_state", "authority_profile_id", "authority_source",
+        "decision_event_id", "basis", "coverage_refs", "unresolved_refs", "delta_kind",
+        "previous_canonical_state",
+    }
+    result: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) != fields:
+            raise EvidenceVaultOperationalAssessmentShadowError("candidate overlay tile fields mismatch")
+        tile_id = str(row.get("tile_id") or "")
+        source = source_by_id.get(tile_id)
+        if tile_id in result or source is None:
+            raise EvidenceVaultOperationalAssessmentShadowError("overlay tile is unknown or duplicated")
+        previous = accepted_by_id.get(tile_id)
+        if (
+            row.get("component_key") != source["component_key"]
+            or row.get("tile_key") != source["tile_key"]
+            or row.get("semantic_state") != source["candidate_state"]
+            or row.get("basis") != source["basis"]
+            or row.get("coverage_refs") != source["coverage_refs"]
+            or row.get("unresolved_refs") != source["unresolved_refs"]
+            or row.get("delta_kind") != source["delta_kind"]
+            or row.get("previous_canonical_state") != (
+                previous["semantic_state"] if previous is not None else None
+            )
+            or row.get("authority_state") not in {"pending", "rejected"}
+            or row.get("review_state") not in {"none", "required", "in_review", "resolved"}
+            or row.get("lifecycle_state") != "active"
+        ):
+            raise EvidenceVaultOperationalAssessmentShadowError("candidate overlay tile is invalid")
+        result[tile_id] = row
+    return result
+
+
+def _pending_reassessment_ids(
+    accepted: Mapping[str, Any],
+    *,
+    source_by_id: Mapping[str, Mapping[str, Any]],
+    accepted_by_id: Mapping[str, Mapping[str, Any]],
+    overlay_by_id: Mapping[str, Mapping[str, Any]],
+) -> set[str]:
+    rows = accepted.get("pending_reassessments", [])
+    if not isinstance(rows, list):
+        raise EvidenceVaultOperationalAssessmentShadowError("pending reassessments must be an array")
+    fields = {
+        "tile_id", "lifecycle_state", "reopen_policy_fingerprint", "prior_group_id",
+        "trigger_fingerprint", "superseded_member_evidence_fingerprints",
+    }
+    result: set[str] = set()
+    for row in rows:
+        tile_id = str(row.get("tile_id") or "") if isinstance(row, Mapping) else ""
+        if (
+            not isinstance(row, Mapping)
+            or set(row) != fields
+            or tile_id in result
+            or tile_id not in source_by_id
+            or tile_id in accepted_by_id
+            or tile_id not in overlay_by_id
+            or row.get("lifecycle_state") != "pending_reassessment"
+        ):
+            raise EvidenceVaultOperationalAssessmentShadowError("pending reassessment is invalid")
+        result.add(tile_id)
+    return result
+
+
+def _same_accepted_content(
+    accepted: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> bool:
+    return all(
+        accepted.get(accepted_field) == candidate.get(candidate_field)
+        for accepted_field, candidate_field in (
+            ("semantic_state", "candidate_state"),
+            ("basis", "basis"),
+            ("coverage_refs", "coverage_refs"),
+            ("unresolved_refs", "unresolved_refs"),
+        )
+    )
+
+
+def _same_accepted_candidate(
+    accepted: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> bool:
+    return all(
+        accepted.get(accepted_field) == candidate.get(candidate_field)
+        for accepted_field, candidate_field in (
+            ("semantic_state", "candidate_state"),
+            ("basis", "basis"),
+            ("coverage_refs", "coverage_refs"),
+            ("unresolved_refs", "unresolved_refs"),
+            ("source_delta_kind", "delta_kind"),
+        )
+    )
+
+
+def _authority_coverage_from_rows(
     projection_tiles: list[Mapping[str, Any]],
     source_by_id: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
-    if not isinstance(coverage, Mapping) or set(coverage) != _COVERAGE_FIELDS:
-        raise EvidenceVaultOperationalAssessmentShadowError("authority coverage fields mismatch")
     accepted = [row for row in projection_tiles if row["canonical_semantic_state"] is not None]
     accepted_ids = {str(row["tile_id"]) for row in accepted}
     reopened_ids = {
@@ -352,10 +604,6 @@ def _validated_authority_coverage(
         for row in projection_tiles
         if row["lifecycle_state"] == "superseded"
     }
-    accepted_count = len(accepted)
-    states = ("ok", "no", "sin_evidencia")
-    if any(row["canonical_semantic_state"] not in states for row in accepted):
-        raise EvidenceVaultOperationalAssessmentShadowError("invalid canonical semantic state")
     pending_initial = []
     pending_change = []
     contradiction_accepted = []
@@ -364,8 +612,7 @@ def _validated_authority_coverage(
         tile_id = str(row["tile_id"])
         delta_kind = source_by_id[tile_id]["delta_kind"]
         if row["authority_state"] == "pending" and delta_kind not in {
-            "no_change",
-            "coverage_loss",
+            "no_change", "coverage_loss",
         }:
             if tile_id in accepted_ids or tile_id in reopened_ids:
                 pending_change.append(row)
@@ -380,35 +627,33 @@ def _validated_authority_coverage(
         int(COMPONENTS[row["component_key"]]["multiplier"])
         for row in projection_tiles
     )
-    expected = {
+    return {
         "tile_count": 80,
-        "accepted_tile_count": accepted_count,
+        "accepted_tile_count": len(accepted),
         "accepted_ok_count": sum(row["canonical_semantic_state"] == "ok" for row in accepted),
         "accepted_no_count": sum(row["canonical_semantic_state"] == "no" for row in accepted),
         "accepted_sin_evidencia_count": sum(
             row["canonical_semantic_state"] == "sin_evidencia" for row in accepted
         ),
-        "unresolved_tile_count": 80 - accepted_count,
+        "unresolved_tile_count": 80 - len(accepted),
         "pending_initial_tile_count": len(pending_initial),
         "pending_change_tile_count": len(pending_change),
         "contradiction_on_accepted_count": len(contradiction_accepted),
         "contradiction_on_unresolved_count": len(contradiction_unresolved),
         "contradiction_count": len(contradiction_accepted) + len(contradiction_unresolved),
-        "tile_authority_coverage_ratio": round(accepted_count / 80, 6),
+        "tile_authority_coverage_ratio": round(len(accepted) / 80, 6),
         "score_weight_authority_coverage_ratio": round(accepted_weight / total_weight, 6),
-        "score_completeness": "complete" if accepted_count == 80 else "partial",
+        "score_completeness": "complete" if len(accepted) == 80 else "partial",
         "canonical_score_status": (
-            "pending_reassessment"
-            if pending_change or contradiction_accepted
-            else "current"
+            "pending_reassessment" if pending_change or contradiction_accepted else "current"
         ),
     }
-    if dict(coverage) != expected:
-        raise EvidenceVaultOperationalAssessmentShadowError(
-            "authority coverage does not match operational projection"
-        )
-    return expected
 
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        char in "0123456789abcdef" for char in value
+    )
 
 def _verification_requirements(
     projection_tiles: list[Mapping[str, Any]],
