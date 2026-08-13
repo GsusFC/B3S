@@ -4,7 +4,7 @@
 - **Fecha:** 2026-08-13
 - **Ámbito:** aritmética SV9 compartida por Scanner y Evidence Vault
 - **Rúbrica fija de este incremento:** `baldosas-v3-1`
-- **No implica:** backfill, writer o read path de repository, API, cambio de producto ni cutover. La migración 025 solo define un ledger append-only no autoritativo.
+- **No implica:** backfill, read path, API pública, worker, cambio de producto ni cutover. La migración 025 solo define un ledger append-only no autoritativo; la 027 añade un único writer interno y no cambia esa autoridad.
 
 ## 1. Decisión
 
@@ -278,7 +278,7 @@ verificación humana se registra aparte.
 Este ADR introduce kernel, adaptadores, paridad y tests. No:
 
 - migra scores históricos ni rellena fingerprints nuevos;
-- añade un writer/read path de repository, API o exposición para el ledger shadow;
+- añade un read path, API pública, worker o exposición para el ledger shadow;
 - cambia schemas de store/model o payloads públicos existentes;
 - cambia el read path de Scanner o Vault;
 - activa un cutover, deploy gate o runtime de producción;
@@ -325,3 +325,33 @@ kernel en SQL. No existe writer ni consumer público; un writer futuro de
 confianza deberá ejecutar `validate_sv9_assessment_output` y rederivar el
 shadow operacional completo antes de insertar. Esa condición no es una nueva
 capacidad concedida por esta migración.
+
+
+## 11. Writer interno append-only (migración 027)
+
+La migración 027 añade únicamente
+`PostgresHistoryRepository.append_evidence_vault_operational_sv9_shadow_assessment`.
+El caller aporta el dominio, el fingerprint del packet operational y el parent
+esperado explícito (incluido `None`); no aporta vector, output, requirements ni
+identidad. El repository bloquea la misma llave de adopción operational,
+recupera los dos packets exactos, compara el parent durable actual, rederiva y
+valida el shadow y el output del kernel, y persiste una identidad UUID estable.
+Un replay solo devuelve el receipt si todo el contenido inmutable coincide.
+
+La capability PostgreSQL dedicada
+`b3s_history_vault_sv9_shadow_writer` es `NOLOGIN NOINHERIT`, no posee objetos
+ni hereda roles. Tiene `USAGE` de schema, `SELECT` solo sobre el journal de migraciones,
+workspace, brand, packets/adopciones necesarios y el ledger para comparar
+replay, y `INSERT` solo
+sobre el ledger. No obtiene `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`,
+`TRIGGER` ni ejecución de los dos trigger functions privados. PostgreSQL exige
+`EXECUTE` sobre los tres predicados inmutables usados por CHECK al insertar; no
+son un read ni write path adicional. La tabla y esos
+helpers/trigger functions se transfieren al owner estable
+`b3s_history_vault_provenance_owner`; el runtime-read y el scanner no reciben
+membresía ni grants de esta capability.
+
+La migración 027 añade únicamente el writer interno: no añade read path, API pública, worker ni cutover. El receipt es acotado y no devuelve packet payload,
+vector semántico ni requirements como una vía de lectura. El ledger conserva
+`authority = false` y ambos runtime effects en `false`; no es una evaluación
+canónica ni autoriza su consumo por Scanner o producto.

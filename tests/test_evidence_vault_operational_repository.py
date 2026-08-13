@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 import time
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -178,6 +178,123 @@ def test_capture_watermark_is_commit_ordered_idempotent_and_append_only() -> Non
                 "DELETE FROM b3s_history.evidence_vault_capture_watermark_events"
             )
 
+
+def test_sv9_shadow_writer_rederives_append_replays_and_has_minimum_acl() -> None:
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from src.history.repository import PostgresHistoryRepository
+
+    if os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1":
+        pytest.fail("B3S_TEST_ALLOW_SCHEMA_DROP=1 is required")
+    dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    writer_role = "b3s_history_vault_sv9_shadow_writer"
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        admin.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+
+    repository = PostgresHistoryRepository(dsn)
+    repository.migrate()
+    repository.persist_capture_observation(_capture(source_scan_id="sv9-shadow-writer"))
+    candidates = _candidates([_basis("sv9-shadow-writer-m1")])
+    source = _source_packet(candidates, seed="sv9-shadow-writer")
+    repository.register_evidence_vault_canonical_memory_packet(
+        "example.com", source, resolved_references=_references(source)
+    )
+    repository.append_evidence_vault_canonical_memory_promotion(
+        "example.com", _canonical_command(source)
+    )
+    operational = _packet(candidates, current=None, source=source)
+    repository.register_evidence_vault_operational_memory_packet(
+        "example.com", operational
+    )
+    # The legacy canonical source above makes the operational packet storeable,
+    # but this writer only accepts the current operational-source/reviewed
+    # source kinds.  Materialize the exact immutable source record a completed
+    # operation would have persisted; it is inserted after the packet so the
+    # legacy registration lookup remains unambiguous.
+    source_resolution = {
+        "schema_version": "evidence-vault-operational-source-resolution-v1",
+        "operation_plan_fingerprint": _digest("sv9-shadow-writer-plan"),
+        "observation_hash": _digest("sv9-shadow-writer-observation"),
+        "result_fingerprint": _digest("sv9-shadow-writer-result"),
+        "source_candidate_packet_fingerprint": source["candidate_packet_fingerprint"],
+    }
+    source_resolution_fingerprint = canonical_fingerprint(
+        "evidence-vault-operational-source-resolution-v1", source_resolution
+    )
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        brand_id = admin.execute(
+            "SELECT id FROM b3s_history.brands WHERE canonical_domain = 'example.com'"
+        ).fetchone()[0]
+        admin.execute(
+            """
+            INSERT INTO b3s_history.evidence_vault_canonical_memory_packets (
+                id, brand_id, packet_fingerprint, schema_version, brand_identity,
+                parent_canonical_memory_version, reference_resolution_fingerprint,
+                reference_resolution, manifest, candidate_tiles, authority_state,
+                authority, production_runtime_effect, scanner_runtime_effect,
+                packet_kind, packet_payload
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
+                'pending_review', false, false, false, 'operational_source_v2', %s::jsonb
+            )
+            """,
+            (
+                uuid4(), brand_id, source["candidate_packet_fingerprint"],
+                source["manifest"]["schema_version"], "example.com", None,
+                source_resolution_fingerprint, json.dumps(source_resolution),
+                json.dumps(source["manifest"]), json.dumps(source["candidate_tiles"]),
+                json.dumps(source),
+            ),
+        )
+        admin.execute(f"GRANT {writer_role} TO CURRENT_USER")
+
+    def writer_connect(*_args, **_kwargs):
+        connection = psycopg.connect(dsn, row_factory=dict_row)
+        connection.execute(f"SET ROLE {writer_role}")
+        return connection
+
+    try:
+        writer = PostgresHistoryRepository(dsn, connect=writer_connect)
+        # The restricted writer verifies the exact release head but has no DDL
+        # capability; the append method must not call migrate().
+        receipt, replayed = writer.append_evidence_vault_operational_sv9_shadow_assessment(
+            "example.com",
+            operational_packet_fingerprint=operational["candidate_packet_fingerprint"],
+            expected_parent_canonical_memory_version=None,
+        )
+        assert replayed is False
+        assert receipt["assessment_status"] == "available"
+        assert receipt["authority"] is False
+        assert receipt["production_runtime_effect"] is False
+        assert receipt["scanner_runtime_effect"] is False
+        replay, replayed = writer.append_evidence_vault_operational_sv9_shadow_assessment(
+            "https://example.com/path",
+            operational_packet_fingerprint=operational["candidate_packet_fingerprint"],
+            expected_parent_canonical_memory_version=None,
+        )
+        assert replayed is True
+        assert replay == receipt
+
+        with psycopg.connect(dsn) as connection:
+            connection.execute(f"SET ROLE {writer_role}")
+            assert connection.execute(
+                "SELECT has_table_privilege(current_user, "
+                "'b3s_history.evidence_vault_operational_sv9_shadow_assessments', "
+                "'INSERT')"
+            ).fetchone()[0]
+            assert not connection.execute(
+                "SELECT has_table_privilege(current_user, "
+                "'b3s_history.evidence_vault_operational_sv9_shadow_assessments', "
+                "'UPDATE,DELETE,TRUNCATE')"
+            ).fetchone()[0]
+            with pytest.raises(psycopg.Error):
+                connection.execute(
+                    "DELETE FROM b3s_history.evidence_vault_operational_sv9_shadow_assessments"
+                )
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(f"REVOKE {writer_role} FROM CURRENT_USER")
 
 def test_operational_v2_reuses_existing_ledgers_and_survives_restart() -> None:
     import psycopg

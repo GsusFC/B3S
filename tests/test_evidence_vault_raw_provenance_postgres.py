@@ -478,6 +478,7 @@ def test_postgres_upgrade_from_committed_019_applies_later_migrations() -> None:
             "024_evidence_vault_raw_accepted_relation_projection.sql",
             "025_evidence_vault_operational_sv9_shadow_assessments.sql",
             "026_evidence_vault_operational_sv9_shadow_hardening.sql",
+            "027_evidence_vault_operational_sv9_shadow_writer.sql",
         ]
         assert repository.migrate() == []
     finally:
@@ -546,7 +547,7 @@ def test_postgres16_createrole_migrator_can_set_owner_before_transfer() -> None:
     )
     try:
         applied = PostgresHistoryRepository(migrator_dsn).migrate()
-        assert applied[-1] == "026_evidence_vault_operational_sv9_shadow_hardening.sql"
+        assert applied[-1] == "027_evidence_vault_operational_sv9_shadow_writer.sql"
         with psycopg.connect(dsn) as admin:
             assert admin.execute(
                 "SELECT pg_has_role(%s, %s, 'SET')", (migrator, owner)
@@ -756,7 +757,7 @@ def test_postgres_fixed_owner_fail_closed_and_preprovisioned_migrator() -> None:
         )
     try:
         applied = PostgresHistoryRepository(provisioned_dsn).migrate()
-        assert applied[-1] == "026_evidence_vault_operational_sv9_shadow_hardening.sql"
+        assert applied[-1] == "027_evidence_vault_operational_sv9_shadow_writer.sql"
         with psycopg.connect(dsn) as admin:
             journal_owners = admin.execute("""
                 SELECT array_agg(DISTINCT owners.rolname), count(*)
@@ -887,7 +888,7 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
             )
     try:
         applied = PostgresHistoryRepository(dsn).migrate()
-        assert applied[-1] == "026_evidence_vault_operational_sv9_shadow_hardening.sql"
+        assert applied[-1] == "027_evidence_vault_operational_sv9_shadow_writer.sql"
         receipt = _signed_owned_receipt()
         dumped = receipt.model_dump(mode="json")
         with psycopg.connect(dsn) as conn:

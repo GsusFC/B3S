@@ -1,4 +1,4 @@
-"""Static contract for migrations 025/026's storage-only SV9 shadow ledger."""
+"""Static contract for migrations 025–027's trusted append-only SV9 shadow ledger."""
 
 from __future__ import annotations
 
@@ -16,6 +16,9 @@ _MIGRATION = Path(
 _HARDENING_MIGRATION = Path(
     "src/history/migrations/026_evidence_vault_operational_sv9_shadow_hardening.sql"
 )
+_WRITER_MIGRATION = Path(
+    "src/history/migrations/027_evidence_vault_operational_sv9_shadow_writer.sql"
+)
 
 
 def _sql() -> str:
@@ -31,9 +34,10 @@ def test_sv9_shadow_ledger_is_the_forward_only_migration_head() -> None:
 
     filenames = [filename for filename, _sql_text in _migration_files()]
 
-    assert filenames[-1] == _HARDENING_MIGRATION.name
+    assert filenames[-1] == _WRITER_MIGRATION.name
     assert filenames.count(_MIGRATION.name) == 1
     assert filenames.count(_HARDENING_MIGRATION.name) == 1
+    assert filenames.count(_WRITER_MIGRATION.name) == 1
 
 
 def test_sv9_shadow_ledger_binds_exact_operational_source_packets() -> None:
@@ -89,7 +93,8 @@ def test_adr_limits_persistence_to_the_non_authoritative_ledger() -> None:
     )
 
     assert "migración 025 solo define un ledger append-only no autoritativo" in adr
-    assert "no añade writer, read path ni exposición" in adr
+    assert "La migración 027 añade únicamente el writer interno" in adr
+    assert "no añade read path, API pública, worker ni cutover" in adr
 
 
 def test_sv9_shadow_hardening_uses_exact_null_identity_and_private_functions() -> None:
@@ -128,6 +133,29 @@ def test_sv9_shadow_hardening_derives_exact_requirements_and_validates_output_sh
     assert "validate_sv9_assessment_output()" in sql
 
 
+def test_sv9_shadow_writer_capability_is_narrow_and_owned_by_provenance() -> None:
+    sql = _WRITER_MIGRATION.read_text(encoding="utf-8")
+
+    assert "CREATE ROLE b3s_history_vault_sv9_shadow_writer" in sql
+    assert "NOLOGIN NOINHERIT" in sql
+    assert "ALTER TABLE b3s_history.evidence_vault_operational_sv9_shadow_assessments" in sql
+    assert "OWNER TO b3s_history_vault_provenance_owner" in sql
+    for function in (
+        "evidence_vault_sv9_shadow_semantic_tiles_are_valid(jsonb)",
+        "evidence_vault_sv9_shadow_verification_is_valid(jsonb)",
+        "evidence_vault_sv9_shadow_assessment_output_is_structurally_valid(jsonb)",
+        "validate_vault_operational_sv9_shadow_assessment_insert()",
+        "reject_vault_operational_sv9_shadow_assessment_mutation()",
+    ):
+        assert function in sql
+    assert "GRANT INSERT ON b3s_history.evidence_vault_operational_sv9_shadow_assessments" in sql
+    assert "b3s_history.schema_migrations" in sql
+    assert "b3s_history.workspaces" in sql
+    assert "FROM b3s_history_vault_runtime_read" in sql
+    assert "FROM b3s_pr71_scanner_ingest" in sql
+    assert "UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER" in sql
+
+
 @pytest.mark.skipif(
     not os.environ.get("B3S_TEST_DATABASE_URL")
     or os.environ.get("B3S_ALLOW_SCHEMA_DROP") != "1",
@@ -146,6 +174,7 @@ def test_postgres_sv9_shadow_hardening_revokes_public_execute_and_rejects_bad_ou
         for role in (
             "b3s_history_vault_runtime_read",
             "b3s_history_vault_provenance_owner",
+            "b3s_history_vault_sv9_shadow_writer",
         ):
             if conn.execute(
                 "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = %s)",
@@ -156,7 +185,7 @@ def test_postgres_sv9_shadow_hardening_revokes_public_execute_and_rejects_bad_ou
                 conn.execute(f"DROP ROLE {role}")
     try:
         applied = PostgresHistoryRepository(dsn).migrate()
-        assert applied[-1] == _HARDENING_MIGRATION.name
+        assert applied[-1] == _WRITER_MIGRATION.name
         rows = [
             {
                 "component_key": component_key,
@@ -202,6 +231,68 @@ def test_postgres_sv9_shadow_hardening_revokes_public_execute_and_rejects_bad_ou
         forged_verified["counts"]["pending"] = 79
         forged_verified["counts"]["verified"] = 1
         with psycopg.connect(dsn) as conn:
+            writer = "b3s_history_vault_sv9_shadow_writer"
+            attributes = conn.execute(
+                """
+                SELECT rolcanlogin, rolinherit, rolsuper, rolcreaterole,
+                       rolcreatedb, rolreplication, rolbypassrls
+                FROM pg_roles WHERE rolname = %s
+                """,
+                (writer,),
+            ).fetchone()
+            assert attributes == (False, False, False, False, False, False, False)
+            assert conn.execute(
+                """
+                SELECT roles.rolname
+                FROM pg_class AS relations
+                JOIN pg_roles AS roles ON roles.oid = relations.relowner
+                WHERE relations.oid =
+                    'b3s_history.evidence_vault_operational_sv9_shadow_assessments'::regclass
+                """
+            ).fetchone()[0] == "b3s_history_vault_provenance_owner"
+            assert conn.execute(
+                """
+                SELECT has_table_privilege(%s,
+                    'b3s_history.evidence_vault_operational_sv9_shadow_assessments',
+                    'SELECT,INSERT')
+                   AND NOT has_table_privilege(%s,
+                    'b3s_history.evidence_vault_operational_sv9_shadow_assessments',
+                    'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                """,
+                (writer, writer),
+            ).fetchone()[0]
+            for forbidden_role in (
+                "b3s_history_vault_runtime_read",
+                "b3s_pr71_scanner_ingest",
+            ):
+                exists = conn.execute(
+                    "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = %s)",
+                    (forbidden_role,),
+                ).fetchone()[0]
+                if exists:
+                    assert not conn.execute(
+                        """
+                        SELECT has_table_privilege(%s,
+                            'b3s_history.evidence_vault_operational_sv9_shadow_assessments',
+                            'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                        """,
+                        (forbidden_role,),
+                    ).fetchone()[0]
+            assert conn.execute(
+                """
+                SELECT NOT EXISTS (
+                    SELECT 1 FROM pg_roles AS principals
+                    WHERE principals.rolname IN (
+                        'b3s_history_vault_runtime_read',
+                        'b3s_pr71_scanner_ingest'
+                    ) AND pg_has_role(
+                        principals.oid,
+                        'b3s_history_vault_sv9_shadow_writer'::regrole,
+                        'MEMBER'
+                    )
+                )
+                """
+            ).fetchone()[0]
             for signature in (
                 "b3s_history.evidence_vault_sv9_shadow_semantic_tiles_are_valid(jsonb)",
                 "b3s_history.evidence_vault_sv9_shadow_verification_is_valid(jsonb)",
