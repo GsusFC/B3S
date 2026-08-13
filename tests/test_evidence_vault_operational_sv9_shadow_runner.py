@@ -51,8 +51,39 @@ def test_legacy_projection_is_best_effort_and_unavailable_does_not_raise() -> No
     assert _best_effort_legacy_operational_projection({"scoring_projection": {}}) is None
 
 
-def test_runner_defaults_to_dry_run_and_whitelists_receipt(monkeypatch, capsys) -> None:
+def _receipt(*, shadow_score: int | None = 5, legacy_score: int | None = 3) -> dict:
+    return {
+        "schema_version": "shadow-v1",
+        "assessment_id": "assessment-id",
+        "evaluation_identity": _SHA,
+        "operational_packet_fingerprint": _SHA,
+        "source_candidate_packet_fingerprint": _SHA,
+        "expected_parent_canonical_memory_version": None,
+        "candidate_overlay_version": _SHA,
+        "assessment_status": "available" if shadow_score is not None else "assessment_unavailable",
+        "assessment_fingerprint": _SHA if shadow_score is not None else None,
+        "score_fingerprint": _SHA if shadow_score is not None else None,
+        "sv9_score": shadow_score,
+        "base_average": 1.0 if shadow_score is not None else None,
+        "magnetism_capped": False if shadow_score is not None else None,
+        "legacy_operational_projection": (
+            {"score": legacy_score, "component_breakdown": []}
+            if legacy_score is not None
+            else None
+        ),
+        "semantic_provenance_fingerprint": _SHA if shadow_score is not None else None,
+        "authority": False,
+        "production_runtime_effect": False,
+        "scanner_runtime_effect": False,
+        "created_at": None,
+        "candidate_semantic_tiles": [{"secret": "must not print"}],
+        "verification_requirements": {"secret": "must not print"},
+    }
+
+
+def test_runner_defaults_to_dry_run_and_emits_exact_sanitized_schema(monkeypatch, tmp_path) -> None:
     calls: list[dict] = []
+    output = tmp_path / "admin-run.json"
 
     class FakeRepository:
         def __init__(self, dsn: str, *, schema_policy: str) -> None:
@@ -61,32 +92,7 @@ def test_runner_defaults_to_dry_run_and_whitelists_receipt(monkeypatch, capsys) 
 
         def append_evidence_vault_operational_sv9_shadow_assessment(self, domain, **kwargs):
             calls.append({"domain": domain, **kwargs})
-            return (
-                {
-                    "schema_version": "shadow-v1",
-                    "assessment_id": "assessment-id",
-                    "evaluation_identity": _SHA,
-                    "operational_packet_fingerprint": _SHA,
-                    "source_candidate_packet_fingerprint": _SHA,
-                    "expected_parent_canonical_memory_version": None,
-                    "candidate_overlay_version": _SHA,
-                    "assessment_status": "assessment_unavailable",
-                    "assessment_fingerprint": None,
-                    "score_fingerprint": None,
-                    "sv9_score": None,
-                    "base_average": None,
-                    "magnetism_capped": None,
-                    "legacy_operational_projection": {"score": 0},
-                    "semantic_provenance_fingerprint": None,
-                    "authority": False,
-                    "production_runtime_effect": False,
-                    "scanner_runtime_effect": False,
-                    "created_at": None,
-                    "candidate_semantic_tiles": [{"secret": "must not print"}],
-                    "verification_requirements": {"secret": "must not print"},
-                },
-                False,
-            )
+            return _receipt(), False
 
     monkeypatch.setattr(runner, "PostgresHistoryRepository", FakeRepository)
     monkeypatch.setenv("B3S_DATABASE_URL", "postgresql://writer:secret@example.test/b3s")
@@ -94,28 +100,55 @@ def test_runner_defaults_to_dry_run_and_whitelists_receipt(monkeypatch, capsys) 
     assert runner.main(
         [
             "--domain",
-            "example.com",
+            "https://www.Example.com/path",
             "--operational-packet-fingerprint",
             _SHA,
             "--expected-parent-canonical-memory-version",
             "none",
+            "--output",
+            str(output),
         ]
     ) == 0
 
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "ok"
-    assert payload["dry_run"] is True
+    payload = json.loads(output.read_text())
+    assert set(payload) == {
+        "schema_version",
+        "input",
+        "mode",
+        "authority",
+        "production_runtime_effect",
+        "scanner_runtime_effect",
+        "replayed",
+        "shadow_receipt",
+        "comparison",
+    }
+    assert payload["schema_version"] == runner.ADMIN_RUN_SCHEMA_VERSION
+    assert payload["input"] == {
+        "domain": "example.com",
+        "operational_packet_fingerprint": _SHA,
+        "expected_parent_canonical_memory_version": None,
+    }
+    assert payload["mode"] == "dry_run"
+    assert payload["authority"] is False
+    assert payload["production_runtime_effect"] is False
+    assert payload["scanner_runtime_effect"] is False
     assert payload["replayed"] is False
-    assert payload["receipt"]["legacy_operational_projection"] == {"score": 0}
-    assert "candidate_semantic_tiles" not in json.dumps(payload)
-    assert "verification_requirements" not in json.dumps(payload)
-    assert "secret" not in json.dumps(payload)
+    assert payload["comparison"] == {
+        "shadow_score": 5,
+        "legacy_operational_projection": {"score": 3, "component_breakdown": []},
+        "score_delta": 2,
+    }
+    encoded = output.read_text()
+    assert "candidate_semantic_tiles" not in encoded
+    assert "verification_requirements" not in encoded
+    assert "secret" not in encoded
+    assert calls[0]["domain"] == "example.com"
     assert calls[0]["dry_run"] is True
-    assert calls[0]["expected_parent_canonical_memory_version"] is None
 
 
-def test_runner_append_is_explicit(monkeypatch, capsys) -> None:
+def test_runner_append_is_explicit_and_writes_mode(tmp_path, monkeypatch) -> None:
     calls: list[bool] = []
+    output = tmp_path / "append.json"
 
     class FakeRepository:
         def __init__(self, _dsn: str, *, schema_policy: str) -> None:
@@ -123,7 +156,7 @@ def test_runner_append_is_explicit(monkeypatch, capsys) -> None:
 
         def append_evidence_vault_operational_sv9_shadow_assessment(self, _domain, **kwargs):
             calls.append(kwargs["dry_run"])
-            return ({"schema_version": "shadow-v1"}, True)
+            return _receipt(shadow_score=None, legacy_score=0), True
 
     monkeypatch.setattr(runner, "PostgresHistoryRepository", FakeRepository)
     assert runner.main(
@@ -137,16 +170,24 @@ def test_runner_append_is_explicit(monkeypatch, capsys) -> None:
             "--append",
             "--database-url",
             "postgresql://writer:secret@example.test/b3s",
+            "--output",
+            str(output),
         ]
     ) == 0
 
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["dry_run"] is False
+    payload = json.loads(output.read_text())
+    assert payload["mode"] == "append"
     assert payload["replayed"] is True
+    assert payload["comparison"] == {
+        "shadow_score": None,
+        "legacy_operational_projection": {"score": 0, "component_breakdown": []},
+        "score_delta": None,
+    }
     assert calls == [False]
 
 
-def test_runner_rejects_non_sha_or_missing_database_without_connecting(monkeypatch, capsys) -> None:
+def test_runner_rejects_non_sha_or_missing_database_without_connecting(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "invalid.json"
     monkeypatch.delenv("B3S_DATABASE_URL", raising=False)
     monkeypatch.setattr(
         runner,
@@ -162,9 +203,87 @@ def test_runner_rejects_non_sha_or_missing_database_without_connecting(monkeypat
             "not-a-sha",
             "--expected-parent-canonical-memory-version",
             "none",
+            "--output",
+            str(output),
         ]
     ) == 2
-    assert json.loads(capsys.readouterr().out) == {
+    assert json.loads(output.read_text()) == {
         "status": "error",
         "error": "invalid fingerprint arguments",
     }
+
+
+def test_runner_validates_domain_dsn_and_output_before_connecting(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        runner,
+        "PostgresHistoryRepository",
+        lambda *_args, **_kwargs: pytest.fail("database must not be opened"),
+    )
+
+    assert runner.main(
+        [
+            "--domain",
+            "https:///missing-host",
+            "--operational-packet-fingerprint",
+            _SHA,
+            "--expected-parent-canonical-memory-version",
+            "none",
+            "--database-url",
+            "postgresql://writer:secret@example.test/b3s",
+            "--output",
+            str(tmp_path / "domain-invalid.json"),
+        ]
+    ) == 2
+    assert json.loads((tmp_path / "domain-invalid.json").read_text())["error"] == (
+        "invalid domain argument"
+    )
+
+    assert runner.main(
+        [
+            "--domain",
+            "example.com",
+            "--operational-packet-fingerprint",
+            _SHA,
+            "--expected-parent-canonical-memory-version",
+            "none",
+            "--database-url",
+            "not-a-postgresql-url",
+            "--output",
+            str(tmp_path / "dsn-invalid.json"),
+        ]
+    ) == 2
+    assert json.loads((tmp_path / "dsn-invalid.json").read_text())["error"] == (
+        "invalid PostgreSQL URL"
+    )
+    assert capsys.readouterr().out == ""
+
+
+def test_output_replace_is_atomic_and_preserves_existing_file_on_failure(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "existing.json"
+    output.write_text("old-content", encoding="utf-8")
+
+    class FakeRepository:
+        def __init__(self, _dsn: str, *, schema_policy: str) -> None:
+            assert schema_policy == "verify_head"
+
+        def append_evidence_vault_operational_sv9_shadow_assessment(self, _domain, **_kwargs):
+            return _receipt(), False
+
+    monkeypatch.setattr(runner, "PostgresHistoryRepository", FakeRepository)
+    monkeypatch.setattr(runner.os, "replace", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("fail")))
+
+    assert runner.main(
+        [
+            "--domain",
+            "example.com",
+            "--operational-packet-fingerprint",
+            _SHA,
+            "--expected-parent-canonical-memory-version",
+            "none",
+            "--database-url",
+            "postgresql://writer:secret@example.test/b3s",
+            "--output",
+            str(output),
+        ]
+    ) == 1
+    assert output.read_text(encoding="utf-8") == "old-content"
