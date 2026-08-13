@@ -38,6 +38,11 @@ _VAULT_ACTIVATIONS: set[str] = set()
 _LOCK = threading.Lock()
 _LOG = logging.getLogger(__name__)
 
+
+class ScanBlockedForClientError(RuntimeError):
+    """The requesting client cannot approve a blocked acquisition gate."""
+
+
 _PHASES = (
     ("capture", "Capture: owned pages, Exa, GitHub proof, SearchAPI fallback, visual evidence"),
     ("interpret", "Evidence pack → shortlists → gated LLM interpretation"),
@@ -66,6 +71,7 @@ def start_scan(
     allow_degraded_fallback: bool = False,
     scan_id: str | None = None,
     client_id: str = "",
+    fail_blocked_scan: bool = False,
 ) -> str:
     url = normalize_url(url)
     brand_name = (brand_name or "").strip() or default_brand_name(url)
@@ -106,7 +112,13 @@ def start_scan(
         raise
     thread = threading.Thread(
         target=_run,
-        args=(scan_id, url, brand_name, bool(allow_degraded_fallback)),
+        args=(
+            scan_id,
+            url,
+            brand_name,
+            bool(allow_degraded_fallback),
+            bool(fail_blocked_scan),
+        ),
         daemon=True,
     )
     thread.start()
@@ -325,7 +337,13 @@ def _vault_operational_pipeline_enabled() -> bool:
     )
 
 
-def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool) -> None:
+def _run(
+    scan_id: str,
+    url: str,
+    brand_name: str,
+    allow_degraded_fallback: bool,
+    fail_blocked_scan: bool = False,
+) -> None:
     try:
         vault_repository = None
         vault_preparation: dict[str, Any] | None = None
@@ -359,6 +377,8 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS
             ),
         )
+        if gate["state"] == "blocked" and fail_blocked_scan:
+            raise ScanBlockedForClientError("acquisition_gate_blocked_for_client")
         if gate["state"] == "blocked" and allow_degraded_fallback and gate.get("can_continue"):
             gate = _approve_acquisition_gate(gate, decision_source="preapproved")
         snapshot["acquisition_gate"] = gate
@@ -660,7 +680,11 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 status["state"] = "error"
                 status["phase"] = "error"
                 status["error"] = f"{type(exc).__name__}: {exc}"
-                status["error_code"] = "scan_execution_failed"
+                status["error_code"] = (
+                    "acquisition_gate_blocked_for_client"
+                    if isinstance(exc, ScanBlockedForClientError)
+                    else "scan_execution_failed"
+                )
                 status["completed_at"] = datetime.now(timezone.utc).isoformat()
                 _mark_pending_phases_locked(status, "error")
                 persisted_status = _status_copy_locked(status)

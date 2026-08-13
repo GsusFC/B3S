@@ -41,10 +41,24 @@ OpenAPI document are public.
 Authorization: Bearer <token>
 ```
 
-The current server token is configured with `BRAND3_SCANNER_API_TOKEN`.
+The primary server token is configured with `BRAND3_SCANNER_API_TOKEN`.
 `B3S_SCANNER_API_TOKEN` is accepted as a forward-compatible alias. Never put a
 real token in source code, browser JavaScript, logs, or committed environment
 files.
+
+The separately revocable Eclipse Scan server-side credential is configured
+with `B3S_ECLIPSE_SCAN_API_TOKEN`. It is fixed to the `eclipse-scan` client and
+can only:
+
+- list scans for a brand domain;
+- create a scan;
+- read scan status, result, and evidence.
+
+It cannot continue or cancel jobs, read internal evidence-memory shadow routes,
+or adjudicate evidence. It requires an `Idempotency-Key` and is limited to 40
+newly reserved scans per UTC day. An idempotent replay does not consume another
+slot. The token is deliberately separate from `BRAND3_SCANNER_API_TOKEN` so it
+can be revoked without affecting B3S Leads.
 
 The v1 dependency model separates `scans:read`, `scans:write`, and
 `evidence:adjudicate`. The scanner environment token receives the scan scopes

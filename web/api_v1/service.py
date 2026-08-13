@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from src.config import BRAND3_DB_PATH
@@ -67,6 +68,9 @@ def create_scan_job(
     *,
     client_id: str,
     idempotency_key: str | None,
+    daily_scan_limit: int | None = None,
+    require_idempotency: bool = False,
+    fail_blocked_scan: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     try:
         normalized_url = normalize_url(str(request_payload.get("url") or ""))
@@ -80,7 +84,17 @@ def create_scan_job(
         "language": str(request_payload.get("language") or "es"),
         "allow_degraded_fallback": bool(request_payload.get("allow_degraded_fallback")),
     }
-    key_hash = _idempotency_key_hash(idempotency_key)
+    if require_idempotency and not str(idempotency_key or "").strip():
+        raise ApiError(
+            400,
+            "idempotency_key_required",
+            "Idempotency-Key is required for this API credential.",
+        )
+    idempotency_namespace = client_id if client_id != "environment-token" else None
+    key_hash = _idempotency_key_hash(
+        idempotency_key,
+        namespace=idempotency_namespace,
+    )
     fingerprint = _request_fingerprint(normalized_request)
     proposed_scan_id = new_scan_id()
     initial_status = {
@@ -108,6 +122,7 @@ def create_scan_job(
             client_id=client_id,
             idempotency_key_hash=key_hash,
             request_fingerprint=fingerprint,
+            daily_scan_limit=daily_scan_limit,
         )
     except Exception as exc:
         raise ApiError(
@@ -118,6 +133,17 @@ def create_scan_job(
     finally:
         store.close()
 
+    if reservation["outcome"] == "quota_exceeded":
+        raise ApiError(
+            429,
+            "daily_scan_quota_exceeded",
+            "This API credential has reached its daily new-scan quota.",
+            details={
+                "daily_scan_limit": daily_scan_limit,
+                "quota_resets_at": reservation.get("quota_resets_at"),
+            },
+            headers={"Retry-After": _retry_after_quota_reset(reservation.get("quota_resets_at"))},
+        )
     if reservation["outcome"] == "conflict":
         raise ApiError(
             409,
@@ -143,6 +169,7 @@ def create_scan_job(
             allow_degraded_fallback=normalized_request["allow_degraded_fallback"],
             scan_id=proposed_scan_id,
             client_id=client_id,
+            fail_blocked_scan=fail_blocked_scan,
         )
     except Exception as exc:
         failed_status = {
@@ -774,7 +801,11 @@ def get_evidence_scoring_recovery_reviews(
         ) from exc
 
 
-def _idempotency_key_hash(value: str | None) -> str | None:
+def _idempotency_key_hash(
+    value: str | None,
+    *,
+    namespace: str | None = None,
+) -> str | None:
     if value is None:
         return None
     key = value.strip()
@@ -784,7 +815,19 @@ def _idempotency_key_hash(value: str | None) -> str | None:
             "invalid_idempotency_key",
             "Idempotency-Key must contain 1-200 visible ASCII characters.",
         )
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+    material = f"{namespace}\0{key}" if namespace else key
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _retry_after_quota_reset(reset_at: str | None) -> str:
+    if not reset_at:
+        return "3600"
+    try:
+        reset = datetime.fromisoformat(reset_at)
+        seconds = int((reset - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError):
+        return "3600"
+    return str(max(1, seconds))
 
 
 def _request_fingerprint(payload: dict[str, Any]) -> str:

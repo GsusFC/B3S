@@ -314,6 +314,8 @@ def _public_failure_message(code: str) -> str:
         return "The scan was interrupted by a process restart."
     if code == "scan_start_failed":
         return "The scanner job could not be started."
+    if code == "acquisition_gate_blocked_for_client":
+        return "The scan could not continue because its evidence gate was blocked."
     return "The scan failed during execution."
 
 

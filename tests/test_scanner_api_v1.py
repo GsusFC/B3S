@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import tempfile
+import time
+
+import pytest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -17,6 +23,13 @@ REVIEW_TOKEN = "test-b3s-evidence-review-token"
 REVIEWER_ID = "gsus"
 REVIEW_AUTH = {"Authorization": f"Bearer {REVIEW_TOKEN}"}
 REVIEW_PACKET_FINGERPRINT = "9" * 64
+LEAD_TOKEN = "test-eclipse-scan-token-0000000000000000"
+LEAD_AUTH = {"Authorization": f"Bearer {LEAD_TOKEN}"}
+
+
+def _configure_lead_client(monkeypatch, *, daily_scan_limit: int = 40) -> None:
+    assert daily_scan_limit == 40
+    monkeypatch.setenv("B3S_ECLIPSE_SCAN_API_TOKEN", LEAD_TOKEN)
 
 
 def _configure_evidence_reviewer(monkeypatch) -> None:
@@ -166,6 +179,21 @@ def test_api_requires_bearer_token(monkeypatch):
     }
 
 
+def test_non_ascii_bearer_token_is_rejected_without_server_error(monkeypatch):
+    from fastapi.security import HTTPAuthorizationCredentials
+    from web.api_v1.auth import authenticate
+    from web.api_v1.errors import ApiError
+
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="é")
+
+    with pytest.raises(ApiError) as caught:
+        asyncio.run(authenticate(credentials))
+
+    assert caught.value.status_code == 401
+    assert caught.value.code == "invalid_api_token"
+
+
 def test_api_reports_unconfigured_auth(monkeypatch):
     monkeypatch.delenv("B3S_SCANNER_API_TOKEN", raising=False)
     monkeypatch.delenv("BRAND3_SCANNER_API_TOKEN", raising=False)
@@ -180,8 +208,23 @@ def test_create_scan_returns_async_contract_and_idempotency_header(monkeypatch):
     monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
     captured = {}
 
-    def fake_create(payload, *, client_id, idempotency_key):
-        captured.update(payload=payload, client_id=client_id, idempotency_key=idempotency_key)
+    def fake_create(
+        payload,
+        *,
+        client_id,
+        idempotency_key,
+        daily_scan_limit=None,
+        require_idempotency=False,
+        fail_blocked_scan=False,
+    ):
+        captured.update(
+            payload=payload,
+            client_id=client_id,
+            idempotency_key=idempotency_key,
+            daily_scan_limit=daily_scan_limit,
+            require_idempotency=require_idempotency,
+            fail_blocked_scan=fail_blocked_scan,
+        )
         return _running_scan(), True
 
     monkeypatch.setattr("web.api_v1.router.create_scan_job", fake_create)
@@ -200,6 +243,158 @@ def test_create_scan_returns_async_contract_and_idempotency_header(monkeypatch):
     assert response.json()["progress"] == 0.25
     assert captured["idempotency_key"] == "lead-example-2026-07-20"
     assert captured["client_id"] == "environment-token"
+    assert captured["daily_scan_limit"] is None
+    assert captured["require_idempotency"] is False
+    assert captured["fail_blocked_scan"] is False
+
+
+def test_lead_capture_token_is_named_limited_and_quota_aware(monkeypatch):
+    _configure_lead_client(monkeypatch)
+    captured = {}
+
+    def fake_create(
+        payload,
+        *,
+        client_id,
+        idempotency_key,
+        daily_scan_limit=None,
+        require_idempotency=False,
+        fail_blocked_scan=False,
+    ):
+        captured.update(
+            payload=payload,
+            client_id=client_id,
+            idempotency_key=idempotency_key,
+            daily_scan_limit=daily_scan_limit,
+            require_idempotency=require_idempotency,
+            fail_blocked_scan=fail_blocked_scan,
+        )
+        return _running_scan(), False
+
+    monkeypatch.setattr("web.api_v1.router.create_scan_job", fake_create)
+    monkeypatch.setattr("web.api_v1.router.get_scan", lambda _scan_id: _running_scan())
+    monkeypatch.setattr("web.api_v1.router.get_completed_report", lambda _scan_id: _report())
+    monkeypatch.setattr("web.api_v1.router.list_reports_for_domain", lambda _domain: [])
+
+    create_response = TestClient(app).post(
+        "/api/v1/scans",
+        headers={**LEAD_AUTH, "Idempotency-Key": "eclipse-scan:example.com:2026-08-13"},
+        json={"url": "https://example.com", "brand_name": "Example"},
+    )
+    status_response = TestClient(app).get("/api/v1/scans/scan123", headers=LEAD_AUTH)
+    result_response = TestClient(app).get("/api/v1/scans/scan123/result", headers=LEAD_AUTH)
+    evidence_response = TestClient(app).get("/api/v1/scans/scan123/evidence", headers=LEAD_AUTH)
+    history_response = TestClient(app).get(
+        "/api/v1/brands/example.com/scans?limit=1",
+        headers=LEAD_AUTH,
+    )
+    denied_cancel = TestClient(app).post("/api/v1/scans/scan123/cancel", headers=LEAD_AUTH)
+    denied_shadow = TestClient(app).get(
+        "/api/v1/brands/example.com/evidence-ledger-shadow",
+        headers=LEAD_AUTH,
+    )
+
+    assert create_response.status_code == 202
+    assert status_response.status_code == 200
+    assert result_response.status_code == 200
+    assert evidence_response.status_code == 200
+    assert history_response.status_code == 200
+    assert captured == {
+        "payload": {
+            "url": "https://example.com",
+            "brand_name": "Example",
+            "language": "es",
+            "allow_degraded_fallback": False,
+        },
+        "client_id": "eclipse-scan",
+        "idempotency_key": "eclipse-scan:example.com:2026-08-13",
+        "daily_scan_limit": 40,
+        "require_idempotency": True,
+        "fail_blocked_scan": True,
+    }
+    assert denied_cancel.status_code == 403
+    assert denied_shadow.status_code == 403
+
+
+def test_lead_capture_token_requires_idempotency_key(monkeypatch):
+    _configure_lead_client(monkeypatch)
+
+    response = TestClient(app).post(
+        "/api/v1/scans",
+        headers=LEAD_AUTH,
+        json={"url": "https://example.com", "brand_name": "Example"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "idempotency_key_required"
+
+
+def test_weak_eclipse_token_config_fails_closed(monkeypatch):
+    monkeypatch.setenv("B3S_ECLIPSE_SCAN_API_TOKEN", "weak-token")
+
+    response = TestClient(app).get("/api/v1/scans/scan123", headers=LEAD_AUTH)
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "api_token_configuration_invalid"
+
+
+def test_invalid_or_duplicate_eclipse_token_config_fails_closed(monkeypatch):
+    monkeypatch.setenv("B3S_ECLIPSE_SCAN_API_TOKEN", "é" * 32)
+    invalid = TestClient(app).get("/api/v1/scans/scan123", headers=LEAD_AUTH)
+
+    _configure_lead_client(monkeypatch)
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", LEAD_TOKEN)
+    duplicate = TestClient(app).get("/api/v1/scans/scan123", headers=LEAD_AUTH)
+
+    assert invalid.status_code == 503
+    assert invalid.json()["error"]["code"] == "api_token_configuration_invalid"
+    assert duplicate.status_code == 503
+    assert duplicate.json()["error"]["code"] == "api_token_configuration_conflict"
+
+
+def test_eclipse_blocked_scan_fails_without_waiting_for_user_decision(monkeypatch, tmp_path):
+    from src import config
+
+    db_path = str(tmp_path / "blocked-scan.sqlite3")
+    monkeypatch.setattr(config, "BRAND3_DB_PATH", db_path)
+    monkeypatch.setattr(
+        scan_runner,
+        "_capture_snapshot",
+        lambda *_args, **_kwargs: {"run": {"id": 1}, "acquisition_steps": {}},
+    )
+    monkeypatch.setattr(
+        scan_runner,
+        "_build_acquisition_gate",
+        lambda *_args, **_kwargs: {"state": "blocked", "can_continue": True},
+    )
+    monkeypatch.setattr(
+        scan_runner,
+        "_wait_for_acquisition_decision",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Eclipse scans must not wait for a user decision")
+        ),
+    )
+
+    scan_id = "eclipse-blocked-regression"
+    scan_runner.start_scan(
+        "https://example.com",
+        allow_degraded_fallback=True,
+        scan_id=scan_id,
+        client_id="eclipse-scan",
+        fail_blocked_scan=True,
+    )
+    deadline = time.monotonic() + 3
+    status = None
+    while time.monotonic() < deadline:
+        status = scan_runner.scan_status(scan_id)
+        if status and status.get("state") == "error":
+            break
+        time.sleep(0.02)
+
+    assert status is not None
+    assert status["state"] == "error"
+    assert status["error_code"] == "acquisition_gate_blocked_for_client"
+    assert "acquisition_gate_blocked_for_client" in status["error"]
 
 
 def test_create_scan_rejects_unknown_fields_with_stable_error(monkeypatch):
@@ -2486,6 +2681,99 @@ def test_scanner_job_store_persists_idempotency_and_marks_restart_interruption()
     assert interrupted_count == 1
     assert persisted["state"] == "error"
     assert persisted["error_code"] == "process_restarted"
+
+
+def test_scanner_job_quota_is_atomic_per_client_and_replays_do_not_count():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = str(Path(tmpdir) / "scanner-quota.sqlite3")
+        store = SQLiteStore(db_path)
+        first = store.reserve_scanner_api_job(
+            scan_id="quota-first",
+            request_payload={"url": "https://example.com"},
+            status_payload={**_running_scan("quota-first"), "state": "accepted"},
+            client_id="eclipse-scan",
+            idempotency_key_hash="quota-key-1",
+            request_fingerprint="request-a",
+            daily_scan_limit=1,
+        )
+        replay = store.reserve_scanner_api_job(
+            scan_id="quota-replay-ignored",
+            request_payload={"url": "https://example.com"},
+            status_payload={**_running_scan("quota-replay-ignored"), "state": "accepted"},
+            client_id="eclipse-scan",
+            idempotency_key_hash="quota-key-1",
+            request_fingerprint="request-a",
+            daily_scan_limit=1,
+        )
+        blocked = store.reserve_scanner_api_job(
+            scan_id="quota-blocked",
+            request_payload={"url": "https://other.example"},
+            status_payload={**_running_scan("quota-blocked"), "state": "accepted"},
+            client_id="eclipse-scan",
+            idempotency_key_hash="quota-key-2",
+            request_fingerprint="request-b",
+            daily_scan_limit=1,
+        )
+        other_client = store.reserve_scanner_api_job(
+            scan_id="other-client",
+            request_payload={"url": "https://other.example"},
+            status_payload={**_running_scan("other-client"), "state": "accepted"},
+            client_id="b3s-leads",
+            idempotency_key_hash="quota-key-3",
+            request_fingerprint="request-b",
+            daily_scan_limit=1,
+        )
+        store.close()
+
+    assert first["outcome"] == "created"
+    assert replay["outcome"] == "replay"
+    assert blocked["outcome"] == "quota_exceeded"
+    assert other_client["outcome"] == "created"
+
+
+def test_scanner_job_quota_is_atomic_under_concurrent_reservations():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = str(Path(tmpdir) / "scanner-quota-concurrent.sqlite3")
+
+        open_lock = threading.Lock()
+        ready = threading.Barrier(8)
+
+        def reserve(index: int):
+            # SQLiteStore negotiates WAL during construction; serialize only
+            # that setup, then exercise the reservation transaction together.
+            with open_lock:
+                store = SQLiteStore(db_path)
+            try:
+                ready.wait()
+                return store.reserve_scanner_api_job(
+                    scan_id=f"concurrent-{index}",
+                    request_payload={"url": "https://example.com"},
+                    status_payload={**_running_scan(f"concurrent-{index}"), "state": "accepted"},
+                    client_id="eclipse-scan",
+                    idempotency_key_hash=f"concurrent-key-{index}",
+                    request_fingerprint=f"request-{index}",
+                    daily_scan_limit=3,
+                )
+            finally:
+                store.close()
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            reservations = list(pool.map(reserve, range(8)))
+
+    assert sum(item["outcome"] == "created" for item in reservations) == 3
+    assert sum(item["outcome"] == "quota_exceeded" for item in reservations) == 5
+
+
+def test_scanner_job_quota_window_is_utc_half_open():
+    from src.storage.scanner_api_jobs import _utc_day_window
+
+    start, end = _utc_day_window("2026-08-13T23:59:59.999999+00:00")
+    assert start == "2026-08-13T00:00:00+00:00"
+    assert end == "2026-08-14T00:00:00+00:00"
+
+    next_start, next_end = _utc_day_window("2026-08-14T00:00:00+00:00")
+    assert next_start == end
+    assert next_end == "2026-08-15T00:00:00+00:00"
 
 
 def test_scanner_job_terminal_status_wins_over_stale_nonterminal_upserts():

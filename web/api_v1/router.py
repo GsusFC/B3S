@@ -23,7 +23,13 @@ from web.report_store import (
 )
 from web.scan_runner import approve_degraded_scan, cancel_scan
 
-from .auth import AdjudicationPrincipal, ReadPrincipal, WritePrincipal
+from .auth import (
+    AdjudicationPrincipal,
+    ReadPrincipal,
+    ScanCreatePrincipal,
+    ScanOutputPrincipal,
+    WritePrincipal,
+)
 from .errors import ApiError
 from .models import (
     ApiCapabilitiesResponse,
@@ -81,6 +87,7 @@ _ERRORS = {
     404: {"model": ApiErrorResponse, "description": "Resource not found"},
     409: {"model": ApiErrorResponse, "description": "Resource state conflict"},
     422: {"model": ApiErrorResponse, "description": "Request validation failed"},
+    429: {"model": ApiErrorResponse, "description": "Daily scan quota exceeded"},
     503: {"model": ApiErrorResponse, "description": "Scanner temporarily unavailable"},
 }
 
@@ -146,13 +153,16 @@ def capabilities(_principal: ReadPrincipal) -> dict[str, Any]:
 def create_scan(
     payload: ScanCreateRequest,
     response: Response,
-    principal: WritePrincipal,
+    principal: ScanCreatePrincipal,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
     scan, replayed = create_scan_job(
         payload.model_dump(),
         client_id=principal.client_id,
         idempotency_key=idempotency_key,
+        daily_scan_limit=principal.daily_scan_limit,
+        require_idempotency=principal.require_idempotency,
+        fail_blocked_scan=principal.fail_blocked_scan,
     )
     response.headers["Location"] = f"/api/v1/scans/{scan['id']}"
     response.headers["Retry-After"] = "5"
@@ -168,7 +178,7 @@ def create_scan(
     operation_id="getScan",
     responses=_ERRORS,
 )
-def read_scan(scan_id: str, response: Response, _principal: ReadPrincipal) -> dict[str, Any]:
+def read_scan(scan_id: str, response: Response, _principal: ScanOutputPrincipal) -> dict[str, Any]:
     scan = get_scan(scan_id)
     if scan is None:
         raise ApiError(404, "scan_not_found", f"Scan {scan_id} was not found.")
@@ -243,7 +253,7 @@ def read_result(
     scan_id: str,
     request: Request,
     response: Response,
-    _principal: ReadPrincipal,
+    _principal: ScanOutputPrincipal,
 ):
     report = get_completed_report(scan_id)
     etag = report_etag(report)
@@ -265,7 +275,7 @@ def read_evidence(
     scan_id: str,
     request: Request,
     response: Response,
-    _principal: ReadPrincipal,
+    _principal: ScanOutputPrincipal,
 ):
     report = get_completed_report(scan_id)
     etag = report_etag(report).removesuffix('"') + "-evidence\""
@@ -285,7 +295,7 @@ def read_evidence(
 )
 def brand_scan_history(
     domain: str,
-    _principal: ReadPrincipal,
+    _principal: ScanOutputPrincipal,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, Any]:

@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Literal, TypedDict
+from datetime import datetime, timedelta, timezone
+from typing import Any, Literal, NotRequired, TypedDict
 
 from .json_payloads import json_dumps, safe_json_loads
 
 
 class IdempotencyReservation(TypedDict):
-    outcome: Literal["created", "replay", "conflict"]
+    outcome: Literal["created", "replay", "conflict", "quota_exceeded"]
     scan_id: str
     request_fingerprint: str
+    quota_resets_at: NotRequired[str]
 
 
 _TERMINAL_STATES = {"done", "error", "cancelled"}
@@ -34,6 +35,7 @@ class ScannerApiJobsStoreMixin:
         client_id: str,
         idempotency_key_hash: str | None,
         request_fingerprint: str,
+        daily_scan_limit: int | None = None,
     ) -> IdempotencyReservation:
         """Atomically reserve an idempotency key and scan id.
 
@@ -41,7 +43,6 @@ class ScannerApiJobsStoreMixin:
         scan. Reusing a key for a different request is a conflict.
         """
 
-        now = _utc_now()
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             if idempotency_key_hash:
@@ -63,6 +64,37 @@ class ScannerApiJobsStoreMixin:
                         "request_fingerprint": existing_fingerprint,
                     }
 
+            reservation_now = _utc_now()
+            quota_window_end = None
+            if daily_scan_limit is not None:
+                if daily_scan_limit < 1:
+                    raise ValueError("daily scan quota requires a positive limit")
+                quota_window_start, quota_window_end = _utc_day_window(reservation_now)
+                created_count = int(
+                    self.conn.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM b3s_scanner_jobs
+                        WHERE client_id = ?
+                          AND created_at >= ?
+                          AND created_at < ?
+                        """,
+                        (
+                            str(client_id or ""),
+                            quota_window_start,
+                            quota_window_end,
+                        ),
+                    ).fetchone()[0]
+                )
+                if created_count >= daily_scan_limit:
+                    self.conn.commit()
+                    return {
+                        "outcome": "quota_exceeded",
+                        "scan_id": str(scan_id),
+                        "request_fingerprint": str(request_fingerprint or ""),
+                        "quota_resets_at": quota_window_end,
+                    }
+
             self.conn.execute(
                 """
                 INSERT INTO b3s_scanner_jobs (
@@ -78,8 +110,8 @@ class ScannerApiJobsStoreMixin:
                     str(client_id or ""),
                     idempotency_key_hash,
                     str(request_fingerprint or ""),
-                    now,
-                    now,
+                    reservation_now,
+                    reservation_now,
                 ),
             )
             self.conn.commit()
@@ -222,3 +254,10 @@ class ScannerApiJobsStoreMixin:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _utc_day_window(timestamp: str) -> tuple[str, str]:
+    now = datetime.fromisoformat(timestamp)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return start.isoformat(), end.isoformat()
