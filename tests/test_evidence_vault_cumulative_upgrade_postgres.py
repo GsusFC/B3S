@@ -27,7 +27,7 @@ from src.services.evidence_vault_canonical_scoring import (
 )
 
 
-_HEAD_MIGRATION = "024_evidence_vault_raw_accepted_relation_projection.sql"
+_HEAD_MIGRATION = "025_evidence_vault_operational_sv9_shadow_assessments.sql"
 _CLUSTER_ROLES = (
     "b3s_history_vault_runtime_read",
     "b3s_history_vault_provenance_owner",

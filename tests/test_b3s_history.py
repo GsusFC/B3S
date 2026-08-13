@@ -561,6 +561,7 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
         "022_evidence_vault_raw_incremental_planning.sql",
         "023_evidence_vault_raw_replay_projection.sql",
         "024_evidence_vault_raw_accepted_relation_projection.sql",
+        "025_evidence_vault_operational_sv9_shadow_assessments.sql",
     ]
     assert "packet_kind" in operational_memory_sql
     assert "operational_source_v2" in operational_memory_sql
@@ -957,6 +958,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "022_evidence_vault_raw_incremental_planning.sql",
             "023_evidence_vault_raw_replay_projection.sql",
             "024_evidence_vault_raw_accepted_relation_projection.sql",
+            "025_evidence_vault_operational_sv9_shadow_assessments.sql",
         ]
         assert repository.migrate() == []
 
@@ -1893,6 +1895,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "022_evidence_vault_raw_incremental_planning.sql",
             "023_evidence_vault_raw_replay_projection.sql",
             "024_evidence_vault_raw_accepted_relation_projection.sql",
+            "025_evidence_vault_operational_sv9_shadow_assessments.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0

@@ -4,7 +4,7 @@
 - **Fecha:** 2026-08-13
 - **Ámbito:** aritmética SV9 compartida por Scanner y Evidence Vault
 - **Rúbrica fija de este incremento:** `baldosas-v3-1`
-- **No implica:** migración, backfill, cambio de read path ni cutover de producto
+- **No implica:** backfill, writer o read path de repository, API, cambio de producto ni cutover. La migración 025 solo define un ledger append-only no autoritativo.
 
 ## 1. Decisión
 
@@ -185,7 +185,8 @@ coincide exactamente, falla cerrada. En particular, una proyección que declare
 M1 `accepted` y canónica `ok` no es válida si `accepted_memory` no contiene M1.
 Solo entonces adapta el vector del source al kernel. El resultado es
 `evidence-vault-operational-semantic-assessment-shadow-v1`, no tiene autoridad
-ni efectos de runtime, y no se persiste.
+ni efectos de runtime. La migración 025 puede conservar una observación exacta en
+un ledger append-only no autoritativo; no añade writer, read path ni exposición.
 
 `authority_coverage` permanece como observación separada: no filtra ni cambia
 el vector. `semantic_provenance_fingerprint` nombra exclusivamente la identidad
@@ -277,7 +278,7 @@ verificación humana se registra aparte.
 Este ADR introduce kernel, adaptadores, paridad y tests. No:
 
 - migra scores históricos ni rellena fingerprints nuevos;
-- persiste el adapter operational semantic shadow o lo incorpora a repository;
+- añade un writer/read path de repository, API o exposición para el ledger shadow;
 - cambia schemas de store/model o payloads públicos existentes;
 - cambia el read path de Scanner o Vault;
 - activa un cutover, deploy gate o runtime de producción;
@@ -298,10 +299,10 @@ Este ADR introduce kernel, adaptadores, paridad y tests. No:
 - El preview de `evidence_scoring_memory_preview._aggregate_scores()` sigue con
   aritmética legacy y no consume el snapshot v3.
 
-Estas deudas bloquean migración, exposición en read paths y cutover. Cada una
+Estas deudas bloquean writer, exposición en read paths y cutover. Cada una
 requiere un incremento con fixtures de paridad y decisión de autoridad. Hasta
 entonces no debe afirmarse que el Vault operational ya separa score de
 verification.
 
-Cualquier migración, exposición pública o cutover necesita una decisión y
-validación separadas.
+Cualquier writer, exposición pública o cutover necesita una decisión y validación
+separadas. La migración 025 no autoriza ninguno de ellos.

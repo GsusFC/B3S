@@ -93,8 +93,8 @@ class _Connection:
             return _Result(
                 rows=[
                     {
-                        "version": "024",
-                        "filename": "024_evidence_vault_raw_accepted_relation_projection.sql",
+                        "version": "025",
+                        "filename": "025_evidence_vault_operational_sv9_shadow_assessments.sql",
                         "checksum": "a" * 64,
                     }
                 ]
@@ -174,6 +174,7 @@ def _relations():
         *((name, "r") for name in sorted(runtime_role.EXPECTED_APPLICATION_TABLES)),
         *((name, "v") for name in sorted(runtime_role.EXPECTED_READ_ONLY_VIEWS)),
         *((name, "r") for name in sorted(runtime_role.RAW_MIGRATION_019_RELATIONS)),
+        *((name, "r") for name in sorted(runtime_role.PRIVATE_SHADOW_LEDGER_RELATIONS)),
     ]
     return [
         {"oid": index, "relname": name, "relkind": kind, "columns": ["id", "payload"]}
@@ -214,8 +215,8 @@ def _effective_relation_privileges(relations):
 def _install_contract(monkeypatch):
     manifest = [
         (
-            "024",
-            "024_evidence_vault_raw_accepted_relation_projection.sql",
+            "025",
+            "025_evidence_vault_operational_sv9_shadow_assessments.sql",
             "a" * 64,
             "SELECT 1",
         )
@@ -225,8 +226,8 @@ def _install_contract(monkeypatch):
         assert expected == manifest
         assert actual == [
             {
-                "version": "024",
-                "filename": "024_evidence_vault_raw_accepted_relation_projection.sql",
+                "version": "025",
+                "filename": "025_evidence_vault_operational_sv9_shadow_assessments.sql",
                 "checksum": "a" * 64,
             }
         ]
@@ -252,7 +253,7 @@ def test_configures_exact_runtime_contract_in_one_transaction(monkeypatch, capsy
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
         "status": "ok",
-        "head": "024_evidence_vault_raw_accepted_relation_projection.sql",
+        "head": "025_evidence_vault_operational_sv9_shadow_assessments.sql",
     }
     assert dsn not in json.dumps(payload)
     assert connected[0][0] == dsn
@@ -329,6 +330,7 @@ def test_configures_exact_runtime_contract_in_one_transaction(monkeypatch, capsy
         if statement.startswith("REVOKE ALL PRIVILEGES ON TABLE")
     )
     assert all(name in raw_revoke for name in runtime_role.RAW_MIGRATION_019_RELATIONS)
+    assert all(name in raw_revoke for name in runtime_role.PRIVATE_SHADOW_LEDGER_RELATIONS)
 
 
 def test_rejects_unsafe_role_and_never_prints_driver_or_dsn(monkeypatch, capsys) -> None:
@@ -418,9 +420,12 @@ def test_requires_only_migration_database_url(monkeypatch, capsys) -> None:
 
 
 def test_raw_relation_and_journal_contract_is_pinned() -> None:
-    assert runtime_role.EXPECTED_HEAD_VERSION == "024"
+    assert runtime_role.EXPECTED_HEAD_VERSION == "025"
     assert runtime_role.MIGRATION_JOURNAL == "schema_migrations"
     assert runtime_role.WATERMARK_TABLE not in runtime_role.RAW_MIGRATION_019_RELATIONS
+    assert runtime_role.PRIVATE_SHADOW_LEDGER_RELATIONS == {
+        "evidence_vault_operational_sv9_shadow_assessments"
+    }
     assert runtime_role.RAW_MIGRATION_019_RELATIONS == {
         "evidence_vault_raw_acquisition_receipts",
         "evidence_vault_raw_evidence_bindings",
@@ -475,6 +480,7 @@ def test_packaged_head_relation_allowlists_are_exact() -> None:
         runtime_role.EXPECTED_APPLICATION_TABLES
         | runtime_role.EXPECTED_READ_ONLY_VIEWS
         | runtime_role.RAW_MIGRATION_019_RELATIONS
+        | runtime_role.PRIVATE_SHADOW_LEDGER_RELATIONS
         | {runtime_role.MIGRATION_JOURNAL}
     )
 
