@@ -281,7 +281,13 @@ def test_runner_validates_domain_dsn_and_output_before_connecting(tmp_path, monk
         "invalid PostgreSQL URL"
     )
 
-    for invalid_domain in ("https://example.com/path", "ftp://example.com", "example\\.com", "example .com"):
+    for invalid_domain in (
+        "https://example.com/path",
+        "ftp://example.com",
+        "example\\.com",
+        "example .com",
+        "example%2ecom",
+    ):
         output = tmp_path / f"domain-{len(invalid_domain)}.json"
         assert runner.main(
             [
@@ -303,6 +309,10 @@ def test_runner_validates_domain_dsn_and_output_before_connecting(tmp_path, monk
         "postgresql://writer:secret@bad\\host/b3s",
         "postgresql://writer:secret@bad host/b3s",
         "postgresql://writer:secret@example.test/b3s?x=%ZZ",
+        "postgresql://writer:sec%ZZret@example.test/b3s",
+        "postgresql://writer:secret@example.test%ZZ/b3s",
+        "postgresql://writer:secret@example.test/b%ZZs",
+        "postgresql://writer:secret@example.test/b3s\t",
     ):
         output = tmp_path / f"dsn-{len(invalid_dsn)}.json"
         assert runner.main(

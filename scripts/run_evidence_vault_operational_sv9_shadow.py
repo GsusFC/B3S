@@ -32,6 +32,7 @@ from src.history.repository import PostgresHistoryRepository  # noqa: E402
 ADMIN_RUN_SCHEMA_VERSION = "evidence-vault-operational-sv9-shadow-admin-run-v1"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _MALFORMED_PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_FORBIDDEN_URL_CHAR_RE = re.compile(r"[\s\\\x00-\x1f\x7f]")
 _SAFE_RECEIPT_FIELDS = (
     "schema_version",
     "assessment_id",
@@ -98,13 +99,8 @@ def _normalize_input_domain(value: str) -> str:
     if (
         not raw
         or raw != raw.strip()
-        or any(
-            character.isspace()
-            or ord(character) < 0x20
-            or ord(character) == 0x7F
-            or character == "\\"
-            for character in raw
-        )
+        or "%" in raw
+        or _FORBIDDEN_URL_CHAR_RE.search(raw)
     ):
         raise RunnerInputError("invalid domain argument")
     candidate = raw if "://" in raw else f"https://{raw}"
@@ -119,6 +115,7 @@ def _normalize_input_domain(value: str) -> str:
     if (
         parsed.scheme not in {"http", "https"}
         or not parsed.hostname
+        or "%" in parsed.hostname
         or parsed.path
         or parsed.query
         or parsed.fragment
@@ -131,7 +128,10 @@ def _normalize_input_domain(value: str) -> str:
 
 
 def _validate_database_url(value: str) -> str:
-    dsn = str(value or "").strip()
+    raw = str(value or "")
+    if raw != raw.strip() or _FORBIDDEN_URL_CHAR_RE.search(raw):
+        raise RunnerInputError("invalid PostgreSQL URL")
+    dsn = raw
     try:
         parsed = urlsplit(dsn)
         _ = parsed.port
@@ -139,17 +139,13 @@ def _validate_database_url(value: str) -> str:
     except (TypeError, ValueError):
         raise RunnerInputError("invalid PostgreSQL URL") from None
     host = parsed.hostname
+    authority_and_path = f"{parsed.netloc}{parsed.path}"
     if (
         parsed.scheme not in {"postgres", "postgresql"}
         or not host
-        or any(
-            character.isspace()
-            or ord(character) < 0x20
-            or ord(character) == 0x7F
-            or character == "\\"
-            for character in host
-        )
-        or _MALFORMED_PERCENT_ESCAPE_RE.search(parsed.query)
+        or _MALFORMED_PERCENT_ESCAPE_RE.search(dsn)
+        or _FORBIDDEN_URL_CHAR_RE.search(authority_and_path)
+        or "%" in host
         or not parsed.path.removeprefix("/")
         or parsed.fragment
     ):
@@ -302,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         database_candidate = str(
             args.database_url or os.environ.get("B3S_DATABASE_URL") or ""
-        ).strip()
+        )
         if not database_candidate:
             raise RunnerInputError("B3S_DATABASE_URL is required")
         database_url = _validate_database_url(database_candidate)
