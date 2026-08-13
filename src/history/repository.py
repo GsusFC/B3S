@@ -140,6 +140,7 @@ from src.services.evidence_vault_coverage_supplement import (
 from src.services.evidence_vault_canonical_scoring import (
     EvidenceVaultCanonicalScoringError,
     build_canonical_score_evaluation,
+    calculate_score_from_tile_states,
     validate_canonical_score_evaluation,
 )
 from src.services.evidence_vault_composite_group_lifecycle import (
@@ -5743,6 +5744,7 @@ class PostgresHistoryRepository:
         operational_packet_fingerprint: str,
         expected_parent_canonical_memory_version: str | None,
         workspace_slug: str = "b3s",
+        dry_run: bool = False,
     ) -> tuple[dict[str, Any], bool]:
         """Append one fully rederived, non-authoritative SV9 shadow observation.
 
@@ -5920,61 +5922,118 @@ class PostgresHistoryRepository:
                 "evidence-vault-operational-semantic-assessment-shadow",
                 evaluation_identity,
             )
-            inserted = conn.execute(
-                f"""
-                INSERT INTO {_SCHEMA}.evidence_vault_operational_sv9_shadow_assessments (
-                    id, brand_id, operational_packet_id, operational_packet_fingerprint,
-                    operational_packet_kind, source_packet_id,
-                    source_candidate_packet_fingerprint, source_packet_kind,
-                    expected_parent_canonical_memory_version, candidate_overlay_version,
-                    evaluation_identity, schema_version, authority,
-                    production_runtime_effect, scanner_runtime_effect, assessment_status,
-                    candidate_semantic_tiles, assessment_output,
-                    semantic_provenance_fingerprint, verification_requirements
-                ) VALUES (
-                    %s, %s, %s, %s, 'operational_v2', %s, %s, %s, %s, %s,
-                    %s, 'evidence-vault-operational-semantic-assessment-shadow-v1',
-                    false, false, false, %s, %s, %s, %s, %s
-                )
-                ON CONFLICT (brand_id, evaluation_identity) DO NOTHING
-                RETURNING *
-                """,
-                (
-                    assessment_id,
-                    brand_id,
-                    operational_rows[0]["id"],
-                    fingerprint,
-                    source_row["id"],
-                    source_fingerprint,
-                    source_row["packet_kind"],
-                    expected_parent_canonical_memory_version,
-                    assessment["candidate_overlay_version"],
-                    evaluation_identity,
-                    status,
-                    _jsonb(semantic_tiles),
-                    _jsonb(assessment["assessment_output"])
-                    if assessment["assessment_output"] is not None
-                    else None,
-                    assessment["semantic_provenance_fingerprint"],
-                    _jsonb(assessment["verification_requirements"]),
-                ),
-            ).fetchone()
-            replayed = inserted is None
-            row = inserted
-            if row is None:
+            # Keep the legacy operational score strictly diagnostic.  It is
+            # derived only from the already-persisted effective scoring state;
+            # no candidate, authority, review, or verification field enters it.
+            legacy_operational_projection = _best_effort_legacy_operational_projection(
+                operational_packet
+            )
+            inserted = None
+            replayed = False
+            row = None
+            if dry_run:
+                # Dry-run still performs the same identity lookup under the CAS
+                # lock, but never issues INSERT (including ON CONFLICT).
                 row = conn.execute(
                     f"""
                     SELECT *
                     FROM {_SCHEMA}.evidence_vault_operational_sv9_shadow_assessments
                     WHERE brand_id = %s AND evaluation_identity = %s
-                        """,
+                    """,
                     (brand_id, evaluation_identity),
                 ).fetchone()
+                replayed = row is not None
+                if row is None:
+                    row = {
+                        "id": assessment_id,
+                        "brand_id": brand_id,
+                        "operational_packet_id": operational_rows[0]["id"],
+                        "operational_packet_fingerprint": fingerprint,
+                        "source_packet_id": source_row["id"],
+                        "source_candidate_packet_fingerprint": source_fingerprint,
+                        "expected_parent_canonical_memory_version": (
+                            expected_parent_canonical_memory_version
+                        ),
+                        "candidate_overlay_version": assessment[
+                            "candidate_overlay_version"
+                        ],
+                        "evaluation_identity": evaluation_identity,
+                        "schema_version": (
+                            "evidence-vault-operational-semantic-assessment-shadow-v1"
+                        ),
+                        "authority": False,
+                        "production_runtime_effect": False,
+                        "scanner_runtime_effect": False,
+                        "assessment_status": status,
+                        "candidate_semantic_tiles": semantic_tiles,
+                        "assessment_output": assessment["assessment_output"],
+                        "semantic_provenance_fingerprint": assessment[
+                            "semantic_provenance_fingerprint"
+                        ],
+                        "verification_requirements": assessment[
+                            "verification_requirements"
+                        ],
+                        "created_at": None,
+                    }
+            else:
+                inserted = conn.execute(
+                    f"""
+                    INSERT INTO {_SCHEMA}.evidence_vault_operational_sv9_shadow_assessments (
+                        id, brand_id, operational_packet_id, operational_packet_fingerprint,
+                        operational_packet_kind, source_packet_id,
+                        source_candidate_packet_fingerprint, source_packet_kind,
+                        expected_parent_canonical_memory_version, candidate_overlay_version,
+                        evaluation_identity, schema_version, authority,
+                        production_runtime_effect, scanner_runtime_effect, assessment_status,
+                        candidate_semantic_tiles, assessment_output,
+                        semantic_provenance_fingerprint, verification_requirements
+                    ) VALUES (
+                        %s, %s, %s, %s, 'operational_v2', %s, %s, %s, %s, %s,
+                        %s, 'evidence-vault-operational-semantic-assessment-shadow-v1',
+                        false, false, false, %s, %s, %s, %s, %s
+                    )
+                    ON CONFLICT (brand_id, evaluation_identity) DO NOTHING
+                    RETURNING *
+                    """,
+                    (
+                        assessment_id,
+                        brand_id,
+                        operational_rows[0]["id"],
+                        fingerprint,
+                        source_row["id"],
+                        source_fingerprint,
+                        source_row["packet_kind"],
+                        expected_parent_canonical_memory_version,
+                        assessment["candidate_overlay_version"],
+                        evaluation_identity,
+                        status,
+                        _jsonb(semantic_tiles),
+                        _jsonb(assessment["assessment_output"])
+                        if assessment["assessment_output"] is not None
+                        else None,
+                        assessment["semantic_provenance_fingerprint"],
+                        _jsonb(assessment["verification_requirements"]),
+                    ),
+                ).fetchone()
+                replayed = inserted is None
+                row = inserted
+                if row is None:
+                    row = conn.execute(
+                        f"""
+                        SELECT *
+                        FROM {_SCHEMA}.evidence_vault_operational_sv9_shadow_assessments
+                        WHERE brand_id = %s AND evaluation_identity = %s
+                        """,
+                        (brand_id, evaluation_identity),
+                    ).fetchone()
             if row is None:
                 raise EvidenceVaultOperationalAssessmentShadowError(
                     "The shadow assessment could not be persisted."
                 )
-            receipt, stored_identity = _vault_operational_sv9_shadow_receipt(row)
+            receipt, stored_identity = _vault_operational_sv9_shadow_receipt(
+                row,
+                legacy_operational_projection=legacy_operational_projection,
+            )
             if stored_identity != identity_content or str(row["id"]) != str(assessment_id):
                 raise EvidenceVaultOperationalAssessmentShadowError(
                     "The immutable shadow assessment identity resolves to different content."
@@ -12160,8 +12219,39 @@ def _validate_operational_packet_lineage_for_storage(
                 )
 
 
+def _best_effort_legacy_operational_projection(
+    operational_packet: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Derive the legacy score from effective projection states only.
+
+    This is a diagnostic compatibility field, not an authority surface.  Any
+    malformed projection or scoring drift is intentionally represented as
+    unavailable rather than blocking the SV9 shadow append.
+    """
+
+    try:
+        projection = operational_packet.get("scoring_projection")
+        rows = projection.get("tiles") if isinstance(projection, Mapping) else None
+        if not isinstance(rows, list):
+            return None
+        tile_states = [
+            {
+                "component_key": row["component_key"],
+                "tile_id": row["tile_id"],
+                "tile_key": row["tile_key"],
+                "state": row["effective_scoring_state"],
+            }
+            for row in rows
+        ]
+        return calculate_score_from_tile_states(tile_states)
+    except Exception:
+        return None
+
+
 def _vault_operational_sv9_shadow_receipt(
     row: Mapping[str, Any],
+    *,
+    legacy_operational_projection: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return the append receipt and the immutable identity content for one row.
 
@@ -12214,6 +12304,14 @@ def _vault_operational_sv9_shadow_receipt(
             str(output["assessment_fingerprint"]) if output is not None else None
         ),
         "score_fingerprint": str(output["score_fingerprint"]) if output is not None else None,
+        "sv9_score": output.get("sv9_score") if output is not None else None,
+        "base_average": output.get("base_average") if output is not None else None,
+        "magnetism_capped": output.get("magnetism_capped") if output is not None else None,
+        "legacy_operational_projection": (
+            dict(legacy_operational_projection)
+            if isinstance(legacy_operational_projection, Mapping)
+            else None
+        ),
         "semantic_provenance_fingerprint": identity_content[
             "semantic_provenance_fingerprint"
         ],
@@ -12221,7 +12319,9 @@ def _vault_operational_sv9_shadow_receipt(
         "production_runtime_effect": bool(row["production_runtime_effect"]),
         "scanner_runtime_effect": bool(row["scanner_runtime_effect"]),
         "created_at": (
-            created_at.astimezone(timezone.utc).isoformat()
+            None
+            if created_at is None
+            else created_at.astimezone(timezone.utc).isoformat()
             if hasattr(created_at, "astimezone")
             else str(created_at)
         ),

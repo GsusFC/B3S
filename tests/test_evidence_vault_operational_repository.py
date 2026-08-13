@@ -256,6 +256,27 @@ def test_sv9_shadow_writer_rederives_append_replays_and_has_minimum_acl() -> Non
 
     try:
         writer = PostgresHistoryRepository(dsn, connect=writer_connect)
+        # Dry-run takes the same lock/CAS and replay lookup but must not issue
+        # INSERT or create a ledger row.
+        preview, replayed = writer.append_evidence_vault_operational_sv9_shadow_assessment(
+            "example.com",
+            operational_packet_fingerprint=operational["candidate_packet_fingerprint"],
+            expected_parent_canonical_memory_version=None,
+            dry_run=True,
+        )
+        assert replayed is False
+        assert preview["assessment_status"] == "available"
+        assert preview["sv9_score"] is not None
+        assert preview["base_average"] is not None
+        assert preview["magnetism_capped"] is False
+        assert preview["legacy_operational_projection"]["score"] is not None
+
+        with psycopg.connect(dsn) as connection:
+            connection.execute(f"SET ROLE {writer_role}")
+            assert connection.execute(
+                "SELECT count(*) FROM b3s_history.evidence_vault_operational_sv9_shadow_assessments"
+            ).fetchone()[0] == 0
+
         # The restricted writer verifies the exact release head but has no DDL
         # capability; the append method must not call migrate().
         receipt, replayed = writer.append_evidence_vault_operational_sv9_shadow_assessment(
