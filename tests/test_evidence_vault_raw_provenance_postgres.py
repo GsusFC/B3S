@@ -413,10 +413,11 @@ def test_postgres_upgrade_from_committed_019_applies_later_migrations() -> None:
     dsn = os.environ["B3S_TEST_DATABASE_URL"]
     owner = "b3s_history_vault_provenance_owner"
     runtime_read = "b3s_history_vault_runtime_read"
+    writer = "b3s_history_vault_sv9_shadow_writer"
 
     def reset(admin) -> None:
         admin.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
-        for role in (runtime_read, owner):
+        for role in (runtime_read, owner, writer):
             if admin.execute(
                 "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = %s)",
                 (role,),
@@ -476,6 +477,9 @@ def test_postgres_upgrade_from_committed_019_applies_later_migrations() -> None:
             "022_evidence_vault_raw_incremental_planning.sql",
             "023_evidence_vault_raw_replay_projection.sql",
             "024_evidence_vault_raw_accepted_relation_projection.sql",
+            "025_evidence_vault_operational_sv9_shadow_assessments.sql",
+            "026_evidence_vault_operational_sv9_shadow_hardening.sql",
+            "027_evidence_vault_operational_sv9_shadow_writer.sql",
         ]
         assert repository.migrate() == []
     finally:
@@ -488,7 +492,7 @@ def test_postgres_upgrade_from_committed_019_applies_later_migrations() -> None:
     or os.environ.get("B3S_ALLOW_SCHEMA_DROP") != "1",
     reason="destructive PostgreSQL integration requires B3S_TEST_DATABASE_URL and B3S_ALLOW_SCHEMA_DROP=1",
 )
-def test_postgres16_createrole_migrator_can_set_owner_before_transfer() -> None:
+def test_postgres16_createrole_migrator_migrates_with_preexisting_unadministrable_writer() -> None:
     import psycopg
     from psycopg import sql as psycopg_sql
     from psycopg.conninfo import make_conninfo
@@ -498,10 +502,11 @@ def test_postgres16_createrole_migrator_can_set_owner_before_transfer() -> None:
     migrator = "b3s_provenance_pg16_migrator_test"
     owner = "b3s_history_vault_provenance_owner"
     runtime_read = "b3s_history_vault_runtime_read"
+    writer = "b3s_history_vault_sv9_shadow_writer"
 
     def reset_roles(conn) -> None:
         conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
-        for role in (migrator, runtime_read, owner):
+        for role in (migrator, runtime_read, owner, writer):
             if conn.execute(
                 "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = %s)",
                 (role,),
@@ -526,6 +531,15 @@ def test_postgres16_createrole_migrator_can_set_owner_before_transfer() -> None:
         if admin.execute("SHOW server_version_num").fetchone()[0] < "160000":
             pytest.skip("SET membership capability exists on PostgreSQL 16+")
         reset_roles(admin)
+        # This role belongs to another cluster administrator.  The CREATEROLE
+        # migrator below has neither membership nor ADMIN on it; migration 027
+        # must still grant its table capability without trying to mutate global
+        # role membership.
+        admin.execute(
+            psycopg_sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(
+                psycopg_sql.Identifier(writer)
+            )
+        )
         admin.execute(
             psycopg_sql.SQL("CREATE ROLE {} LOGIN CREATEROLE PASSWORD {}").format(
                 psycopg_sql.Identifier(migrator),
@@ -544,8 +558,36 @@ def test_postgres16_createrole_migrator_can_set_owner_before_transfer() -> None:
     )
     try:
         applied = PostgresHistoryRepository(migrator_dsn).migrate()
-        assert applied[-1] == "024_evidence_vault_raw_accepted_relation_projection.sql"
+        assert applied[-1] == "027_evidence_vault_operational_sv9_shadow_writer.sql"
         with psycopg.connect(dsn) as admin:
+            assert admin.execute(
+                """
+                SELECT NOT EXISTS (
+                    SELECT 1
+                    FROM pg_auth_members AS memberships
+                    WHERE memberships.roleid = %s::regrole
+                      AND memberships.member = %s::regrole
+                )
+                """,
+                (writer, migrator),
+            ).fetchone()[0]
+            assert admin.execute(
+                """
+                SELECT NOT EXISTS (
+                    SELECT 1
+                    FROM pg_auth_members AS memberships
+                    WHERE memberships.roleid = %s::regrole
+                      AND memberships.member IN (
+                          SELECT oid FROM pg_roles
+                          WHERE rolname IN (
+                              'b3s_history_vault_runtime_read',
+                              'b3s_pr71_scanner_ingest'
+                          )
+                      )
+                )
+                """,
+                (writer,),
+            ).fetchone()[0]
             assert admin.execute(
                 "SELECT pg_has_role(%s, %s, 'SET')", (migrator, owner)
             ).fetchone()[0]
@@ -582,6 +624,7 @@ def test_postgres_fixed_owner_fail_closed_and_preprovisioned_migrator() -> None:
     migrator = "b3s_preprovisioned_migrator_test"
     owner = "b3s_history_vault_provenance_owner"
     runtime_read = "b3s_history_vault_runtime_read"
+    writer = "b3s_history_vault_sv9_shadow_writer"
     password = "preprovisioned-migrator-password"
 
     def reset(admin) -> None:
@@ -589,7 +632,7 @@ def test_postgres_fixed_owner_fail_closed_and_preprovisioned_migrator() -> None:
         admin.execute(
             "DROP FUNCTION IF EXISTS public.b3s_runtime_preexisting_definer()"
         )
-        for role in (migrator, runtime_read, owner):
+        for role in (migrator, runtime_read, owner, writer):
             if admin.execute(
                 "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = %s)",
                 (role,),
@@ -746,6 +789,10 @@ def test_postgres_fixed_owner_fail_closed_and_preprovisioned_migrator() -> None:
                 psycopg_sql.Identifier(runtime_read)
             )
         )
+        admin.execute(
+            "CREATE ROLE b3s_history_vault_sv9_shadow_writer "
+            "NOLOGIN NOINHERIT"
+        )
         provisioned_dsn = create_migrator(admin)
         admin.execute(
             psycopg_sql.SQL("GRANT {} TO {}").format(
@@ -754,7 +801,7 @@ def test_postgres_fixed_owner_fail_closed_and_preprovisioned_migrator() -> None:
         )
     try:
         applied = PostgresHistoryRepository(provisioned_dsn).migrate()
-        assert applied[-1] == "024_evidence_vault_raw_accepted_relation_projection.sql"
+        assert applied[-1] == "027_evidence_vault_operational_sv9_shadow_writer.sql"
         with psycopg.connect(dsn) as admin:
             journal_owners = admin.execute("""
                 SELECT array_agg(DISTINCT owners.rolname), count(*)
@@ -875,9 +922,10 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
     execute_only_role = "b3s_raw_execute_only_test"
     governance_role = "b3s_provenance_governance_test"
     runtime_read = "b3s_history_vault_runtime_read"
+    writer = "b3s_history_vault_sv9_shadow_writer"
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
-        for role in (execute_only_role, governance_role, runtime_read):
+        for role in (execute_only_role, governance_role, runtime_read, writer):
             conn.execute(
                 psycopg_sql.SQL("DROP ROLE IF EXISTS {}").format(
                     psycopg_sql.Identifier(role)
@@ -885,7 +933,7 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
             )
     try:
         applied = PostgresHistoryRepository(dsn).migrate()
-        assert applied[-1] == "024_evidence_vault_raw_accepted_relation_projection.sql"
+        assert applied[-1] == "027_evidence_vault_operational_sv9_shadow_writer.sql"
         receipt = _signed_owned_receipt()
         dumped = receipt.model_dump(mode="json")
         with psycopg.connect(dsn) as conn:
@@ -3232,7 +3280,7 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
-            for role in (execute_only_role, governance_role, runtime_read):
+            for role in (execute_only_role, governance_role, runtime_read, writer):
                 conn.execute(
                     psycopg_sql.SQL("DROP ROLE IF EXISTS {}").format(
                         psycopg_sql.Identifier(role)

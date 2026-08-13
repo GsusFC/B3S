@@ -13,7 +13,6 @@ from typing import Any
 from uuid import UUID
 
 from src.services.evidence_vault_candidate_resolver import (
-    build_canonical_aggregation_policy,
     canonical_aggregation_policy_fingerprint,
 )
 from src.services.evidence_vault_canonical_authority import (
@@ -29,7 +28,12 @@ from src.services.evidence_vault_canonical_core import (
     reducer_policy_fingerprint,
     tile_contract_registry_fingerprint,
 )
-from src.sv9.rubric import BASE_COMPONENTS, COMPONENTS, PRESENTATION_ORDER, RUBRIC_VERSION
+from src.sv9.assessment_kernel import (
+    Sv9AssessmentError,
+    build_sv9_assessment,
+    validate_sv9_calculation,
+)
+from src.sv9.rubric import RUBRIC_VERSION
 
 
 EVIDENCE_VAULT_CANONICAL_SCORE_EVALUATION_VERSION = (
@@ -107,20 +111,6 @@ _EVALUATION_FIELDS = frozenset(
         "authority_scope",
         "production_runtime_effect",
         "scanner_runtime_effect",
-    }
-)
-_COMPONENT_BREAKDOWN_FIELDS = frozenset(
-    {
-        "component_key",
-        "tile_count",
-        "ok_count",
-        "no_count",
-        "sin_evidencia_count",
-        "raw_score",
-        "effective_score",
-        "multiplier",
-        "points",
-        "max_points",
     }
 )
 
@@ -216,14 +206,13 @@ def build_canonical_score_evaluation(
     return evaluation
 
 
-def calculate_score_from_tile_states(
+def build_vault_sv9_assessment_from_tile_states(
     tile_states: list[dict[str, str]],
 ) -> dict[str, Any]:
-    """Calculate SV9 from one complete, authority-filtered tile projection.
+    """Validate Vault rows and return the complete neutral kernel snapshot.
 
-    This is the shared deterministic calculation boundary.  Callers remain
-    responsible for proving authority; this function only validates the exact
-    80-tile registry and performs the versioned arithmetic.
+    Callers remain responsible for proving authority.  This adapter preserves
+    the exact legacy Vault row contract before delegating to the shared kernel.
     """
 
     registry = build_tile_contract_registry()["tiles"]
@@ -275,7 +264,21 @@ def calculate_score_from_tile_states(
         )
     order = {str(row["tile_id"]): index for index, row in enumerate(registry)}
     normalized.sort(key=lambda row: order[row["tile_id"]])
-    return _calculate(normalized)
+    return _build_kernel_assessment(normalized)
+
+
+def calculate_score_from_tile_states(
+    tile_states: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Preserve the legacy Vault calculation format over the shared kernel."""
+
+    assessment = build_vault_sv9_assessment_from_tile_states(tile_states)
+    return {
+        "score": assessment["sv9_score"],
+        "component_breakdown": assessment["component_breakdown"],
+        "base_average": assessment["base_average"],
+        "magnetism_capped": assessment["magnetism_capped"],
+    }
 
 
 def validate_canonical_score_evaluation(evaluation: dict[str, Any]) -> None:
@@ -512,174 +515,56 @@ def _derived_tile_state_fingerprint(tile_states: list[dict[str, str]]) -> str:
     )
 
 
+def _build_kernel_assessment(
+    tile_states: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Adapt validated Vault state rows to the pure SV9 kernel."""
+
+    try:
+        return build_sv9_assessment(
+            [
+                {
+                    "component_key": row["component_key"],
+                    "tile_id": row["tile_id"],
+                    "tile_key": row["tile_key"],
+                    "assessment_state": row["state"],
+                }
+                for row in tile_states
+            ]
+        )
+    except (KeyError, TypeError, Sv9AssessmentError) as exc:
+        raise EvidenceVaultCanonicalScoringError(
+            f"SV9 assessment kernel rejected canonical tile states: {exc}"
+        ) from exc
+
+
 def _calculate(tile_states: list[dict[str, str]]) -> dict[str, Any]:
-    policy = build_canonical_aggregation_policy()
-    states_by_component: dict[str, list[str]] = {
-        component_key: [] for component_key in PRESENTATION_ORDER
-    }
-    for tile in tile_states:
-        states_by_component[tile["component_key"]].append(tile["state"])
-
-    raw_scores = {
-        component_key: states_by_component[component_key].count(TileState.OK.value)
-        for component_key in PRESENTATION_ORDER
-    }
-    base_average = round(
-        sum(
-            raw_scores[component_key]
-            * (10 / int(COMPONENTS[component_key]["scale"]))
-            for component_key in BASE_COMPONENTS
-        )
-        / len(BASE_COMPONENTS),
-        2,
-    )
-    magnetism_policy = policy["magnetism_cap"]
-    magnetism_capped = (
-        base_average < float(magnetism_policy["base_average_below"])
-        and raw_scores["magnetism"]
-        > int(magnetism_policy["maximum_lit_tiles"])
-    )
-
-    breakdown: list[dict[str, Any]] = []
-    for component_key in PRESENTATION_ORDER:
-        states = states_by_component[component_key]
-        raw_score = raw_scores[component_key]
-        effective_score = (
-            int(magnetism_policy["maximum_lit_tiles"])
-            if component_key == "magnetism" and magnetism_capped
-            else raw_score
-        )
-        multiplier = int(COMPONENTS[component_key]["multiplier"])
-        breakdown.append(
-            {
-                "component_key": component_key,
-                "tile_count": len(states),
-                "ok_count": states.count(TileState.OK.value),
-                "no_count": states.count(TileState.NO.value),
-                "sin_evidencia_count": states.count(
-                    TileState.SIN_EVIDENCIA.value
-                ),
-                "raw_score": raw_score,
-                "effective_score": effective_score,
-                "multiplier": multiplier,
-                "points": effective_score * multiplier,
-                "max_points": len(states) * multiplier,
-            }
-        )
+    assessment = _build_kernel_assessment(tile_states)
     return {
-        "score": sum(component["points"] for component in breakdown),
-        "component_breakdown": breakdown,
-        "base_average": base_average,
-        "magnetism_capped": magnetism_capped,
+        "score": assessment["sv9_score"],
+        "component_breakdown": assessment["component_breakdown"],
+        "base_average": assessment["base_average"],
+        "magnetism_capped": assessment["magnetism_capped"],
     }
 
 
 def _validate_breakdown(evaluation: dict[str, Any]) -> None:
-    breakdown = evaluation.get("component_breakdown")
-    if not isinstance(breakdown, list) or len(breakdown) != len(PRESENTATION_ORDER):
+    try:
+        validate_sv9_calculation(
+            sv9_score=evaluation.get("score"),
+            component_breakdown=evaluation.get("component_breakdown"),
+            base_average=evaluation.get("base_average"),
+            magnetism_capped=evaluation.get("magnetism_capped"),
+        )
+    except Sv9AssessmentError as exc:
+        detail = str(exc)
+        # Preserve the established Vault error category while all arithmetic is
+        # re-derived by the neutral kernel.
+        if detail == "SV9 calculation is inconsistent":
+            detail = "total is inconsistent"
         raise EvidenceVaultCanonicalScoringError(
-            "canonical score component breakdown is incomplete"
-        )
-    for position, component_key in enumerate(PRESENTATION_ORDER):
-        row = breakdown[position]
-        if not isinstance(row, dict) or set(row) != _COMPONENT_BREAKDOWN_FIELDS:
-            raise EvidenceVaultCanonicalScoringError(
-                "canonical score component breakdown fields mismatch"
-            )
-        expected_tile_count = len(COMPONENTS[component_key]["tiles"])
-        expected_multiplier = int(COMPONENTS[component_key]["multiplier"])
-        if (
-            row.get("component_key") != component_key
-            or row.get("tile_count") != expected_tile_count
-            or row.get("multiplier") != expected_multiplier
-            or row.get("max_points") != expected_tile_count * expected_multiplier
-        ):
-            raise EvidenceVaultCanonicalScoringError(
-                "canonical score component metadata mismatch"
-            )
-        counts = [
-            row.get("ok_count"),
-            row.get("no_count"),
-            row.get("sin_evidencia_count"),
-        ]
-        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in counts):
-            raise EvidenceVaultCanonicalScoringError(
-                "canonical score component counts are invalid"
-            )
-        if sum(counts) != expected_tile_count or row.get("raw_score") != counts[0]:
-            raise EvidenceVaultCanonicalScoringError(
-                "canonical score component counts are inconsistent"
-            )
-        effective_score = row.get("effective_score")
-        if (
-            not isinstance(effective_score, int)
-            or isinstance(effective_score, bool)
-            or effective_score < 0
-            or effective_score > row["raw_score"]
-            or row.get("points") != effective_score * expected_multiplier
-        ):
-            raise EvidenceVaultCanonicalScoringError(
-                "canonical score component points are inconsistent"
-            )
-    base_average = evaluation.get("base_average")
-    if (
-        not isinstance(base_average, (int, float))
-        or isinstance(base_average, bool)
-        or not 0 <= float(base_average) <= 10
-    ):
-        raise EvidenceVaultCanonicalScoringError(
-            "canonical score base average is invalid"
-        )
-    expected_base_average = round(
-        sum(
-            breakdown[PRESENTATION_ORDER.index(component_key)]["raw_score"]
-            * (10 / int(COMPONENTS[component_key]["scale"]))
-            for component_key in BASE_COMPONENTS
-        )
-        / len(BASE_COMPONENTS),
-        2,
-    )
-    if float(base_average) != expected_base_average:
-        raise EvidenceVaultCanonicalScoringError(
-            "canonical score base average is inconsistent"
-        )
-    magnetism_capped = evaluation.get("magnetism_capped")
-    if not isinstance(magnetism_capped, bool):
-        raise EvidenceVaultCanonicalScoringError(
-            "canonical score magnetism cap flag is invalid"
-        )
-    policy = build_canonical_aggregation_policy()["magnetism_cap"]
-    magnetism = breakdown[PRESENTATION_ORDER.index("magnetism")]
-    expected_capped = (
-        expected_base_average < float(policy["base_average_below"])
-        and magnetism["raw_score"] > int(policy["maximum_lit_tiles"])
-    )
-    if magnetism_capped != expected_capped:
-        raise EvidenceVaultCanonicalScoringError(
-            "canonical score magnetism cap flag is inconsistent"
-        )
-    for row in breakdown:
-        expected_effective = (
-            int(policy["maximum_lit_tiles"])
-            if row["component_key"] == "magnetism" and expected_capped
-            else row["raw_score"]
-        )
-        if row["effective_score"] != expected_effective:
-            raise EvidenceVaultCanonicalScoringError(
-                "canonical score effective component score is inconsistent"
-            )
-    total = sum(row["points"] for row in breakdown)
-    score = evaluation.get("score")
-    if (
-        not isinstance(score, int)
-        or isinstance(score, bool)
-        or score < 0
-        or score > 100
-        or score != total
-    ):
-        raise EvidenceVaultCanonicalScoringError(
-            "canonical score total is inconsistent"
-        )
+            f"canonical score {detail}"
+        ) from exc
 
 
 def _timestamp(value: Any) -> str:
@@ -721,6 +606,7 @@ __all__ = [
     "EVIDENCE_VAULT_SCORE_INPUT_VERSION",
     "EvidenceVaultCanonicalScoringError",
     "build_canonical_score_evaluation",
+    "build_vault_sv9_assessment_from_tile_states",
     "calculate_score_from_tile_states",
     "validate_canonical_score_evaluation",
 ]

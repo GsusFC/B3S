@@ -31,8 +31,11 @@ from scripts.pr71_vault_database_target import (  # noqa: E402
 
 SCHEMA = "b3s_history"
 MIGRATION_JOURNAL = "schema_migrations"
-EXPECTED_HEAD_VERSION = "024"
+EXPECTED_HEAD_VERSION = "027"
 WATERMARK_TABLE = "evidence_vault_capture_watermark_events"
+PRIVATE_SHADOW_LEDGER_RELATIONS = frozenset(
+    {"evidence_vault_operational_sv9_shadow_assessments"}
+)
 RAW_MIGRATION_019_RELATIONS = frozenset(
     {
         "evidence_vault_raw_acquisition_receipts",
@@ -88,6 +91,7 @@ EXPECTED_HEAD_RELATIONS = (
     EXPECTED_APPLICATION_TABLES
     | EXPECTED_READ_ONLY_VIEWS
     | RAW_MIGRATION_019_RELATIONS
+    | PRIVATE_SHADOW_LEDGER_RELATIONS
     | {MIGRATION_JOURNAL}
 )
 
@@ -149,7 +153,7 @@ def _verify_exact_head(
     verifier: Callable[[Iterable[tuple[str, str, str, str]], Iterable[Mapping[str, Any]]], None],
 ) -> str:
     if not manifest or manifest[-1][0] != EXPECTED_HEAD_VERSION:
-        raise RuntimeRoleConfigurationError("this runtime grant tool requires packaged migration head 024")
+        raise RuntimeRoleConfigurationError("this runtime grant tool requires packaged migration head 027")
     rows = conn.execute(
         sql.SQL(
             """
@@ -273,6 +277,7 @@ def _load_relations(conn: Any) -> list[Relation]:
     expected_tables = (
         EXPECTED_APPLICATION_TABLES
         | RAW_MIGRATION_019_RELATIONS
+        | PRIVATE_SHADOW_LEDGER_RELATIONS
         | {MIGRATION_JOURNAL}
     )
     if any(by_name[name].kind != "r" for name in expected_tables) or any(
@@ -433,11 +438,13 @@ def _reset_and_grant(
             role_identifier,
         )
     )
-    # Keep the five raw migration-019 relations visibly denied even after the
-    # schema-wide reset, so future edits cannot accidentally fold them into DML.
+    # Keep private provenance and shadow-ledger relations visibly denied even
+    # after the schema-wide reset, so future edits cannot fold them into DML.
     conn.execute(
         sql.SQL("REVOKE ALL PRIVILEGES ON TABLE {} FROM {}").format(
-            _relation_list(RAW_MIGRATION_019_RELATIONS),
+            _relation_list(
+                RAW_MIGRATION_019_RELATIONS | PRIVATE_SHADOW_LEDGER_RELATIONS
+            ),
             role_identifier,
         )
     )
@@ -541,12 +548,14 @@ def _verify_effective_privileges(
     write_or_reference_columns = ("column_insert", "column_update", "column_reference")
     read_only_names = set(view_names) | {MIGRATION_JOURNAL}
     for name, row in actual.items():
-        if name in RAW_MIGRATION_019_RELATIONS:
+        if name in RAW_MIGRATION_019_RELATIONS | PRIVATE_SHADOW_LEDGER_RELATIONS:
             if any(bool(row[key]) for key in table_privileges) or any(
                 bool(row[key])
                 for key in ("column_select",) + write_or_reference_columns
             ):
-                raise RuntimeRoleConfigurationError("runtime role retains effective raw-table access")
+                raise RuntimeRoleConfigurationError(
+                    "runtime role retains effective private-ledger access"
+                )
             continue
         if name in app_table_names:
             if not all(bool(row[key]) for key in ("can_select", "can_insert", "can_update", "can_delete")):
