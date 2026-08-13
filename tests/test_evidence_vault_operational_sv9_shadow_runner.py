@@ -42,13 +42,20 @@ def test_legacy_projection_uses_only_effective_scoring_state() -> None:
 
     projection = _best_effort_legacy_operational_projection(packet)
 
-    assert projection is not None
-    assert projection["score"] == 100
-    assert projection["magnetism_capped"] is False
+    assert projection == {
+        "availability": "available",
+        "score": 100,
+        "base_average": 10.0,
+        "magnetism_capped": False,
+    }
 
 
 def test_legacy_projection_is_best_effort_and_unavailable_does_not_raise() -> None:
-    assert _best_effort_legacy_operational_projection({"scoring_projection": {}}) is None
+    assert _best_effort_legacy_operational_projection({"scoring_projection": {}}) == {
+        "availability": "unavailable",
+        "reason": "not_safely_derivable",
+        "score": None,
+    }
 
 
 def _receipt(*, shadow_score: int | None = 5, legacy_score: int | None = 3) -> dict:
@@ -67,9 +74,18 @@ def _receipt(*, shadow_score: int | None = 5, legacy_score: int | None = 3) -> d
         "base_average": 1.0 if shadow_score is not None else None,
         "magnetism_capped": False if shadow_score is not None else None,
         "legacy_operational_projection": (
-            {"score": legacy_score, "component_breakdown": []}
+            {
+                "availability": "available",
+                "score": legacy_score,
+                "base_average": 1.0,
+                "magnetism_capped": False,
+            }
             if legacy_score is not None
-            else None
+            else {
+                "availability": "unavailable",
+                "reason": "not_safely_derivable",
+                "score": None,
+            }
         ),
         "semantic_provenance_fingerprint": _SHA if shadow_score is not None else None,
         "authority": False,
@@ -135,7 +151,12 @@ def test_runner_defaults_to_dry_run_and_emits_exact_sanitized_schema(monkeypatch
     assert payload["replayed"] is False
     assert payload["comparison"] == {
         "shadow_score": 5,
-        "legacy_operational_projection": {"score": 3, "component_breakdown": []},
+        "legacy_operational_projection": {
+            "availability": "available",
+            "score": 3,
+            "base_average": 1.0,
+            "magnetism_capped": False,
+        },
         "score_delta": 2,
     }
     encoded = output.read_text()
@@ -180,7 +201,12 @@ def test_runner_append_is_explicit_and_writes_mode(tmp_path, monkeypatch) -> Non
     assert payload["replayed"] is True
     assert payload["comparison"] == {
         "shadow_score": None,
-        "legacy_operational_projection": {"score": 0, "component_breakdown": []},
+        "legacy_operational_projection": {
+            "availability": "available",
+            "score": 0,
+            "base_average": 1.0,
+            "magnetism_capped": False,
+        },
         "score_delta": None,
     }
     assert calls == [False]

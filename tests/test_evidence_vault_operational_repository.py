@@ -269,6 +269,13 @@ def test_sv9_shadow_writer_rederives_append_replays_and_has_minimum_acl() -> Non
         assert preview["sv9_score"] is not None
         assert preview["base_average"] is not None
         assert preview["magnetism_capped"] is False
+        assert preview["legacy_operational_projection"]["availability"] == "available"
+        assert set(preview["legacy_operational_projection"]) == {
+            "availability",
+            "score",
+            "base_average",
+            "magnetism_capped",
+        }
         assert preview["legacy_operational_projection"]["score"] is not None
 
         with psycopg.connect(dsn) as connection:

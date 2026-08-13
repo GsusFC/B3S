@@ -12221,19 +12221,24 @@ def _validate_operational_packet_lineage_for_storage(
 
 def _best_effort_legacy_operational_projection(
     operational_packet: Mapping[str, Any],
-) -> dict[str, Any] | None:
-    """Derive the legacy score from effective projection states only.
+) -> dict[str, Any]:
+    """Derive a bounded legacy score object from effective states only.
 
     This is a diagnostic compatibility field, not an authority surface.  Any
-    malformed projection or scoring drift is intentionally represented as
-    unavailable rather than blocking the SV9 shadow append.
+    malformed projection or scoring drift is intentionally represented by the
+    fixed unavailable object rather than blocking the SV9 shadow append.
     """
 
+    unavailable = {
+        "availability": "unavailable",
+        "reason": "not_safely_derivable",
+        "score": None,
+    }
     try:
         projection = operational_packet.get("scoring_projection")
         rows = projection.get("tiles") if isinstance(projection, Mapping) else None
         if not isinstance(rows, list):
-            return None
+            return unavailable
         tile_states = [
             {
                 "component_key": row["component_key"],
@@ -12243,9 +12248,15 @@ def _best_effort_legacy_operational_projection(
             }
             for row in rows
         ]
-        return calculate_score_from_tile_states(tile_states)
+        calculation = calculate_score_from_tile_states(tile_states)
+        return {
+            "availability": "available",
+            "score": calculation["score"],
+            "base_average": calculation["base_average"],
+            "magnetism_capped": calculation["magnetism_capped"],
+        }
     except Exception:
-        return None
+        return unavailable
 
 
 def _vault_operational_sv9_shadow_receipt(
