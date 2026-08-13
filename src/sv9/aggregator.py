@@ -9,6 +9,7 @@ derived from its `sin_evidencia` tiles.
 
 from __future__ import annotations
 
+from src.sv9.assessment_kernel import build_scanner_sv9_assessment
 from src.sv9.models import (
     ComponentResult,
     ESTADO_OK,
@@ -124,8 +125,29 @@ def aggregate(
         raise ValueError(f"SV9 aggregate requires every component; missing: {sorted(missing)}")
 
     apply_source_policy(components)
-    avg, capped = apply_magnetism_cap(components)
-    brand3_score = sum(c.points for c in components.values())
+    assessment = build_scanner_sv9_assessment(components)
+    if assessment["availability"] == "available":
+        # Complete Scanner assessments share the exact arithmetic used by the
+        # Vault.  Preserve the legacy public model by reflecting the effective
+        # Magnetism cap in its mutable ComponentResult.
+        avg = float(assessment["base_average"])
+        capped = bool(assessment["magnetism_capped"])
+        brand3_score = int(assessment["sv9_score"])
+        if capped:
+            magnetism_breakdown = next(
+                row
+                for row in assessment["component_breakdown"]
+                if row["component_key"] == "magnetism"
+            )
+            components["magnetism"].score = int(
+                magnetism_breakdown["effective_score"]
+            )
+    else:
+        # Temporary compatibility path: legacy incomplete scans keep their
+        # historical zero-status behavior.  The shadow assessment itself stays
+        # unavailable/null and never manufactures tile judgments.
+        avg, capped = apply_magnetism_cap(components)
+        brand3_score = sum(c.points for c in components.values())
     coherencia = components["coherencia"]
     needs_review = (
         coherencia.status == STATUS_SCORED
