@@ -168,11 +168,11 @@ AS $$
        AND jsonb_typeof(assessment_output -> 'component_breakdown')
             IS NOT DISTINCT FROM 'array'
        AND jsonb_array_length(assessment_output -> 'component_breakdown')
-            IS NOT DISTINCT FROM 9
+            IS NOT DISTINCT FROM 10
        AND (
            SELECT count(DISTINCT rows.value ->> 'component_key')
            FROM jsonb_array_elements(assessment_output -> 'component_breakdown') AS rows(value)
-       ) IS NOT DISTINCT FROM 9
+       ) IS NOT DISTINCT FROM 10
        AND NOT EXISTS (
            SELECT 1
            FROM jsonb_array_elements(assessment_output -> 'component_breakdown')
@@ -212,14 +212,16 @@ ALTER TABLE b3s_history.evidence_vault_operational_sv9_shadow_assessments
     );
 
 -- The old UNIQUE treats every NULL parent as distinct.  The observation
--- identity has one explicit NULL-parent meaning, so PostgreSQL 16's NULLS NOT
--- DISTINCT is required to prevent duplicate initial-parent observations.
+-- identity has one explicit NULL-parent meaning.  An empty string cannot pass
+-- the parent fingerprint CHECK, so this portable expression makes NULL initial
+-- parents idempotent on all supported PostgreSQL versions.
 CREATE UNIQUE INDEX uq_b3s_vault_sv9_shadow_observation_identity
     ON b3s_history.evidence_vault_operational_sv9_shadow_assessments (
         brand_id, operational_packet_id, operational_packet_fingerprint,
         source_packet_id, source_candidate_packet_fingerprint,
-        expected_parent_canonical_memory_version, candidate_overlay_version
-    ) NULLS NOT DISTINCT;
+        COALESCE(expected_parent_canonical_memory_version, ''),
+        candidate_overlay_version
+    );
 
 CREATE OR REPLACE FUNCTION b3s_history.validate_vault_operational_sv9_shadow_assessment_insert()
 RETURNS trigger

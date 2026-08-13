@@ -310,9 +310,10 @@ separadas. La migración 025 no autoriza ninguno de ellos.
 
 ## 10. Hardening forward-only del ledger (migración 026)
 
-La migración 026 no modifica 025: añade una identidad única PostgreSQL 16 con
-`NULLS NOT DISTINCT`, por lo que dos observaciones del mismo parent inicial
-`NULL` no pueden coexistir. También revoca `EXECUTE` público de los helpers de
+La migración 026 no modifica 025: añade una identidad única portable con
+`COALESCE(expected_parent_canonical_memory_version, '')`; el valor vacío no
+pasa el CHECK de fingerprint, por lo que dos observaciones del mismo parent
+inicial `NULL` no pueden coexistir. También revoca `EXECUTE` público de los helpers de
 validación y de los trigger functions.
 
 La base valida el shape exacto de vector, requirements, counts y output, y que

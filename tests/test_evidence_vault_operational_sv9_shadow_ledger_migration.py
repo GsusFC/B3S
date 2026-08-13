@@ -95,7 +95,8 @@ def test_adr_limits_persistence_to_the_non_authoritative_ledger() -> None:
 def test_sv9_shadow_hardening_uses_exact_null_identity_and_private_functions() -> None:
     sql = _hardening_sql()
 
-    assert "NULLS NOT DISTINCT" in sql
+    assert "COALESCE(expected_parent_canonical_memory_version, '')" in sql
+    assert "NULLS NOT DISTINCT" not in sql
     assert "expected_parent_canonical_memory_version" in sql
     for function in (
         "evidence_vault_sv9_shadow_semantic_tiles_are_valid(jsonb)",
