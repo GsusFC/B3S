@@ -562,6 +562,7 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
         "023_evidence_vault_raw_replay_projection.sql",
         "024_evidence_vault_raw_accepted_relation_projection.sql",
         "025_evidence_vault_operational_sv9_shadow_assessments.sql",
+        "026_evidence_vault_operational_sv9_shadow_hardening.sql",
     ]
     assert "packet_kind" in operational_memory_sql
     assert "operational_source_v2" in operational_memory_sql
@@ -872,7 +873,7 @@ def test_concurrent_release_migration_is_database_serialized() -> None:
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(lambda _index: migrate_concurrently(), range(2)))
-        assert sorted(len(result) for result in results) == [0, 24]
+        assert sorted(len(result) for result in results) == [0, 26]
         assert sorted({filename for result in results for filename in result}) == [
             f"{index:03d}_" + name
             for index, name in enumerate(
@@ -901,6 +902,8 @@ def test_concurrent_release_migration_is_database_serialized() -> None:
                     "evidence_vault_raw_incremental_planning.sql",
                     "evidence_vault_raw_replay_projection.sql",
                     "evidence_vault_raw_accepted_relation_projection.sql",
+                    "evidence_vault_operational_sv9_shadow_assessments.sql",
+                    "evidence_vault_operational_sv9_shadow_hardening.sql",
                 ],
                 start=1,
             )
@@ -959,6 +962,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "023_evidence_vault_raw_replay_projection.sql",
             "024_evidence_vault_raw_accepted_relation_projection.sql",
             "025_evidence_vault_operational_sv9_shadow_assessments.sql",
+            "026_evidence_vault_operational_sv9_shadow_hardening.sql",
         ]
         assert repository.migrate() == []
 
@@ -1896,6 +1900,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "023_evidence_vault_raw_replay_projection.sql",
             "024_evidence_vault_raw_accepted_relation_projection.sql",
             "025_evidence_vault_operational_sv9_shadow_assessments.sql",
+            "026_evidence_vault_operational_sv9_shadow_hardening.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0

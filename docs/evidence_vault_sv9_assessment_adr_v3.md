@@ -306,3 +306,21 @@ verification.
 
 Cualquier writer, exposición pública o cutover necesita una decisión y validación
 separadas. La migración 025 no autoriza ninguno de ellos.
+
+
+## 10. Hardening forward-only del ledger (migración 026)
+
+La migración 026 no modifica 025: añade una identidad única PostgreSQL 16 con
+`NULLS NOT DISTINCT`, por lo que dos observaciones del mismo parent inicial
+`NULL` no pueden coexistir. También revoca `EXECUTE` público de los helpers de
+validación y de los trigger functions.
+
+La base valida el shape exacto de vector, requirements, counts y output, y que
+las `tiles` del output sean exactamente el vector semántico persistido. Deriva
+los requirements desde ese vector y desde `scoring_projection`: C7/C8, y los
+estados contradiction/superseded/rejected, tienen las reglas de la sección 6.
+No implementa ni declara implementar el cálculo canónico ni fingerprints del
+kernel en SQL. No existe writer ni consumer público; un writer futuro de
+confianza deberá ejecutar `validate_sv9_assessment_output` y rederivar el
+shadow operacional completo antes de insertar. Esa condición no es una nueva
+capacidad concedida por esta migración.
