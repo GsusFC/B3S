@@ -17,7 +17,7 @@ not authorize either existing app, a production migration, or any later deployme
 - Public hostname: `b3s-pr71-vault.fly.dev`
 
 The release command runs `verify_release_build.py`, the SELECT-only exact schema
-head-024 verifier, and `verify_pr71_vault_target.py`. The final verifier checks
+head-027 verifier, and `verify_pr71_vault_target.py`. The final verifier checks
 the Fly app, base URL, authenticated TLS session, exact host/database/runtime
 role/project/branch identity, the operational-pipeline capability, and access
 gate. A mismatch aborts before an app Machine is updated. The
@@ -70,7 +70,7 @@ migration versions, filenames, and checksums. The isolated release verifier
 also requires `current_user = b3s_pr71_app_runtime`; an owner or migration
 credential on the same branch is rejected before the Machine update.
 
-Migration 024 preserves the strict replay behavior from migration 023 and additionally projects exact active accepted evidence relations into fresh planning. Migration 023 keeps the worker replay reader strict after a report upgrades mutable `scan_runs` presentation fields: it reconstructs the frozen raw scan projection from the immutable request and plan, while retaining current source-run/status/error/requested/started and non-lifecycle metadata so contamination still fails closed.
+Migrations 025–027 add the non-authoritative SV9 shadow assessment ledger, structural hardening, and the identity-only append writer. The writer is append-only, parent-CAS protected, dry-run by default, and does not alter public scoring, ranking, API/UI, or cutover. Migration 024 preserves the strict replay behavior from migration 023 and additionally projects exact active accepted evidence relations into fresh planning. Migration 023 keeps the worker replay reader strict after a report upgrades mutable `scan_runs` presentation fields: it reconstructs the frozen raw scan projection from the immutable request and plan, while retaining current source-run/status/error/requested/started and non-lifecycle metadata so contamination still fails closed.
 
 The isolated L2 logins are fixed and distinct:
 
@@ -133,9 +133,9 @@ password, or prints a DSN/driver error.
 Do not use `fly.toml`, `fly.vault.toml`, `b3s`, `b3s-vault`, their volumes, or
 their database branches in this workflow. The manual GitHub workflow is a
 **post-merge-only** deployment mechanism for the isolated `b3s-pr71-vault`
-target. Its current reviewed application baseline is PR #78 at head
-`b073112f3e4d89d96e45d225f2398f8a7d4dec7c` and merge commit
-`864ef1e304d3bf6cbbc5d3d1ec7651c673e3595f`. Neither merging the reviewed
+target. Its current reviewed application baseline is PR #80 at head
+`c1c5e79a01f7311b72d1faba0951582dfab053d9` and merge commit
+`f51372b1a2f345d610e47cd7a2ed5d03b285ca2c`. Neither merging the reviewed
 PR, the presence of `workflow_dispatch`, the confirmation input, nor a
 successful attestation authorizes a merge or deployment. Merge approval and
 the deployment GO remain separate operator decisions.
@@ -152,7 +152,7 @@ step successfully at `1b1df547ef52c49674a3705411361d84473956b3`. Both temporary 
 Any future deployment requires a new exact-SHA GO and fresh secret provisioning.
 
 Before checkout, dependency installation, or deployment-secret use,
-runner-owned code fetches PR #78 and requires `state=closed`, `merged=true`, and `draft=false`, base `main`, head `feat/pr71-google-oidc-access`, repository ID
+runner-owned code fetches PR #80 and requires `state=closed`, `merged=true`, and `draft=false`, base `main`, head `feat/vault-semantic-assessment-shadow`, repository ID
 `1288696741` and name `GsusFC/B3S`, exact reviewed head, and exact `merge_commit_sha`.
 It proves reviewed-head-to-merge and merge-to-current-main ancestry from complete
 GitHub Compare responses. For the deployment-attestation follow-up, the latter
@@ -162,19 +162,21 @@ comparison must contain the exact three audited files listed above; those are th
 - `docs/deployment/b3s_pr71_vault.md`
 - `tests/test_deploy_provenance.py`
 
-Any runtime, database, CI-workflow, config, or other source change after PR #78
+Any runtime, database, CI-workflow, config, or other source change after PR #80
 is outside the attestation allowlist and fails closed. This three-file
 control-plane follow-up re-pins the workflow to the reviewed, merged, green OIDC
 baseline without changing runtime code or configuration. Deployment is still a
 separate operator decision and also requires the Google client and all temporary
 capabilities described below.
 
+The reauthorization baseline is PR #80: feature head `c1c5e79a01f7311b72d1faba0951582dfab053d9`, feature merge `f51372b1a2f345d610e47cd7a2ed5d03b285ca2c`, and CI runs `31697919580` and `31698864592`.
+
 The trusted CI identity is pinned to workflow ID `306885838`, path
 `.github/workflows/ci.yml`, and blob
 `c1082f6b5c53a364b8d38e43936b93722c0183d1`. The workflow must remain active;
 the reviewed head, merge, and deployment Contents responses must carry that
-exact blob. Exact successful CI runs `31613381151` (reviewed PR #78 head) and
-`31613697333` (PR #78 merge on `main`) are pinned. The current exact-main push run is fetched without filtering away non-successful runs; exactly one completed,
+exact blob. Exact successful CI runs `31697919580` (reviewed PR #80 head) and
+`31698864592` (PR #80 merge on `main`) are pinned. The current exact-main push run is fetched without filtering away non-successful runs; exactly one completed,
 successful, first-attempt run with the expected repository and SHA is accepted.
 The `pull_requests` array may be empty. Missing, pending, failed, foreign, stale,
 wrong-event, workflow-modified, truncated, or ambiguous objects fail closed.
@@ -249,12 +251,12 @@ reviewed, green, and merged, producing the exact deploy SHA. After that
 reauthorization, the requested SHA must equal dispatched and live `main`, all
 new OIDC app secrets must validate, the separate deployment GO and temporary
 deployment-secret provisioning must be complete, the external migration target
-assertion must pass before DDL, head `024` must verify exactly, and the idempotent
+assertion must pass before DDL, head `027` must verify exactly, and the idempotent
 runtime-role contract must pass.
 `b3s` and `b3s-vault` must remain on their SELECT-only release verifiers and may
 not be used as fallback migration targets.
 
-No older application image is assumed compatible with schema head `024`, and
+No older application image is assumed compatible with schema head `027`, and
 this runbook pre-authorizes no image rollback. Engage the access and scan holds first,
 stop new scans, and drain the single active scan. Prefer a reviewed forward fix;
 any coordinated image-plus-Neon-restore plan requires separate authorization and
