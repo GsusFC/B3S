@@ -31,6 +31,7 @@ from src.history.repository import PostgresHistoryRepository  # noqa: E402
 
 ADMIN_RUN_SCHEMA_VERSION = "evidence-vault-operational-sv9-shadow-admin-run-v1"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_MALFORMED_PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _SAFE_RECEIPT_FIELDS = (
     "schema_version",
     "assessment_id",
@@ -93,8 +94,18 @@ def _parse_fingerprint(value: str, *, allow_none: bool = False) -> str | None:
 
 
 def _normalize_input_domain(value: str) -> str:
-    raw = str(value or "").strip()
-    if not raw:
+    raw = str(value or "")
+    if (
+        not raw
+        or raw != raw.strip()
+        or any(
+            character.isspace()
+            or ord(character) < 0x20
+            or ord(character) == 0x7F
+            or character == "\\"
+            for character in raw
+        )
+    ):
         raise RunnerInputError("invalid domain argument")
     candidate = raw if "://" in raw else f"https://{raw}"
     try:
@@ -106,8 +117,11 @@ def _normalize_input_domain(value: str) -> str:
     except (TypeError, ValueError):
         raise RunnerInputError("invalid domain argument") from None
     if (
-        not parsed.hostname
-        or any(character.isspace() for character in parsed.hostname)
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
         or parsed.username is not None
         or parsed.password is not None
         or not normalized
@@ -124,9 +138,18 @@ def _validate_database_url(value: str) -> str:
         parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
     except (TypeError, ValueError):
         raise RunnerInputError("invalid PostgreSQL URL") from None
+    host = parsed.hostname
     if (
         parsed.scheme not in {"postgres", "postgresql"}
-        or not parsed.hostname
+        or not host
+        or any(
+            character.isspace()
+            or ord(character) < 0x20
+            or ord(character) == 0x7F
+            or character == "\\"
+            for character in host
+        )
+        or _MALFORMED_PERCENT_ESCAPE_RE.search(parsed.query)
         or not parsed.path.removeprefix("/")
         or parsed.fragment
     ):
@@ -156,17 +179,15 @@ def _comparison(receipt: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(legacy_projection, Mapping)
         else None
     )
-    return {
+    comparison = {
         "shadow_score": shadow_score,
         "legacy_operational_projection": (
             dict(legacy_projection) if isinstance(legacy_projection, Mapping) else None
         ),
-        "score_delta": (
-            shadow_score - legacy_score
-            if shadow_score is not None and legacy_score is not None
-            else None
-        ),
     }
+    if shadow_score is not None and legacy_score is not None:
+        comparison["score_delta"] = shadow_score - legacy_score
+    return comparison
 
 
 def _success_payload(

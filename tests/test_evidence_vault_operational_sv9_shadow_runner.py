@@ -116,7 +116,7 @@ def test_runner_defaults_to_dry_run_and_emits_exact_sanitized_schema(monkeypatch
     assert runner.main(
         [
             "--domain",
-            "https://www.Example.com/path",
+            "https://www.Example.com",
             "--operational-packet-fingerprint",
             _SHA,
             "--expected-parent-canonical-memory-version",
@@ -207,7 +207,6 @@ def test_runner_append_is_explicit_and_writes_mode(tmp_path, monkeypatch) -> Non
             "base_average": 1.0,
             "magnetism_capped": False,
         },
-        "score_delta": None,
     }
     assert calls == [False]
 
@@ -281,6 +280,46 @@ def test_runner_validates_domain_dsn_and_output_before_connecting(tmp_path, monk
     assert json.loads((tmp_path / "dsn-invalid.json").read_text())["error"] == (
         "invalid PostgreSQL URL"
     )
+
+    for invalid_domain in ("https://example.com/path", "ftp://example.com", "example\\.com", "example .com"):
+        output = tmp_path / f"domain-{len(invalid_domain)}.json"
+        assert runner.main(
+            [
+                "--domain",
+                invalid_domain,
+                "--operational-packet-fingerprint",
+                _SHA,
+                "--expected-parent-canonical-memory-version",
+                "none",
+                "--database-url",
+                "postgresql://writer:secret@example.test/b3s",
+                "--output",
+                str(output),
+            ]
+        ) == 2
+        assert json.loads(output.read_text())["error"] == "invalid domain argument"
+
+    for invalid_dsn in (
+        "postgresql://writer:secret@bad\\host/b3s",
+        "postgresql://writer:secret@bad host/b3s",
+        "postgresql://writer:secret@example.test/b3s?x=%ZZ",
+    ):
+        output = tmp_path / f"dsn-{len(invalid_dsn)}.json"
+        assert runner.main(
+            [
+                "--domain",
+                "example.com",
+                "--operational-packet-fingerprint",
+                _SHA,
+                "--expected-parent-canonical-memory-version",
+                "none",
+                "--database-url",
+                invalid_dsn,
+                "--output",
+                str(output),
+            ]
+        ) == 2
+        assert json.loads(output.read_text())["error"] == "invalid PostgreSQL URL"
     assert capsys.readouterr().out == ""
 
 
