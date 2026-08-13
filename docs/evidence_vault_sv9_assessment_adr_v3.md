@@ -199,11 +199,14 @@ kernel ni el de procedencia semántica.
 
 El caller debe proporcionar explícitamente
 `expected_parent_canonical_memory_version`. Su omisión devuelve unavailable con
-`expected_parent_required`; `None` explícito solo acepta un packet cuyo parent
-actual sea `None`, y cualquier otro valor distinto devuelve
-`stale_candidate_parent`. El writer confiable adquiere el lock de adopción y
-comprueba este parent como CAS antes de insertar: si no coincide, lanza y no
-inserta ninguna fila. Por tanto, una fila `stale_candidate_parent` solo podría
+`expected_parent_required`; el valor explícito, incluido `None`, debe ser siempre
+el parent inmutable del packet. El writer confiable adquiere el lock de adopción
+y admite solo dos estados: el packet todavía está construido sobre el current
+durable, o el último evento de adopción validado adoptó exactamente ese packet y
+produjo exactamente el current durable. Antes de la adopción, cualquier packet
+exacto construido sobre el current conserva el CAS original. Una vez que el
+current avanza, compartir parent o source no basta: un sibling y cualquier
+productor anterior quedan stale y fallan antes del kernel y del lookup de replay. Por tanto, una fila `stale_candidate_parent` solo podría
 provenir de un futuro camino de importación auditado de forma independiente, no
 de este writer CAS confiable. Si una baldosa es `contradiction`, queda unavailable
 con `contradiction_requires_semantic_reassessment`: no se inventa score,
@@ -303,13 +306,16 @@ Este ADR introduce kernel, adaptadores, paridad y tests. No:
 - El preview de `evidence_scoring_memory_preview._aggregate_scores()` sigue con
   aritmética legacy y no consume el snapshot v3.
 
-Estas deudas bloquean writer, exposición en read paths y cutover. Cada una
-requiere un incremento con fixtures de paridad y decisión de autoridad. Hasta
-entonces no debe afirmarse que el Vault operational ya separa score de
-verification.
+Estas deudas bloquean cualquier writer canónico/público, exposición en read
+paths y cutover. No bloquean el writer administrativo interno de la migración
+027, que solo conserva observaciones shadow sin autoridad ni runtime effect.
+Cada deuda requiere un incremento con fixtures de paridad y decisión de
+autoridad. Hasta entonces no debe afirmarse que el Vault operational ya separa
+score de verification en su producto público.
 
-Cualquier writer, exposición pública o cutover necesita una decisión y validación
-separadas. La migración 025 no autoriza ninguno de ellos.
+Cualquier writer canónico/público, exposición pública o cutover necesita una
+decisión y validación separadas. La migración 025 no autoriza ninguno de ellos;
+la capability privada de 027 tampoco los añade.
 
 
 ## 10. Hardening forward-only del ledger (migración 026)
@@ -336,11 +342,17 @@ capacidad concedida por esta migración.
 La migración 027 añade únicamente
 `PostgresHistoryRepository.append_evidence_vault_operational_sv9_shadow_assessment`.
 El caller aporta el dominio, el fingerprint del packet operational y el parent
-esperado explícito (incluido `None`); no aporta vector, output, requirements ni
-identidad. El repository bloquea la misma llave de adopción operational,
-recupera los dos packets exactos, compara el parent durable actual, rederiva y
-valida el shadow y el output del kernel, y persiste una identidad UUID estable.
-Un replay solo devuelve el receipt si todo el contenido inmutable coincide.
+inmutable del packet explícito (incluido `None`); no aporta evento, current,
+vector, output, requirements ni identidad. El repository bloquea la misma llave
+de schema migration en modo shared y verifica el head exacto dentro de la misma
+transacción; el migrator usa el modo exclusivo de esa llave. Después bloquea la
+llave de adopción operational, recupera los dos packets exactos y proyecta la
+cadena de autoridad completa. Admite el packet como candidato del current o como su
+productor directo solo cuando el último evento lo adoptó exactamente; después
+rederiva y valida el shadow y el output del kernel, y persiste una identidad UUID
+estable. El mismo packet evaluado antes o justo después de su adopción conserva
+la misma identidad; un replay solo devuelve el receipt si todo el contenido
+inmutable coincide. Un sibling o un evento posterior fallan cerrados.
 
 La capability PostgreSQL dedicada
 `b3s_history_vault_sv9_shadow_writer` es `NOLOGIN NOINHERIT`, no posee objetos
