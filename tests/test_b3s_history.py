@@ -905,6 +905,7 @@ def test_concurrent_release_migration_is_database_serialized() -> None:
                     "evidence_vault_raw_accepted_relation_projection.sql",
                     "evidence_vault_operational_sv9_shadow_assessments.sql",
                     "evidence_vault_operational_sv9_shadow_hardening.sql",
+                    "evidence_vault_operational_sv9_shadow_writer.sql",
                 ],
                 start=1,
             )

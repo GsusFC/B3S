@@ -789,6 +789,10 @@ def test_postgres_fixed_owner_fail_closed_and_preprovisioned_migrator() -> None:
                 psycopg_sql.Identifier(runtime_read)
             )
         )
+        admin.execute(
+            "CREATE ROLE b3s_history_vault_sv9_shadow_writer "
+            "NOLOGIN NOINHERIT"
+        )
         provisioned_dsn = create_migrator(admin)
         admin.execute(
             psycopg_sql.SQL("GRANT {} TO {}").format(
