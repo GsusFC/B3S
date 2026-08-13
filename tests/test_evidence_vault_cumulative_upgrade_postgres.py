@@ -92,7 +92,7 @@ def test_populated_v1_upgrade_through_cumulative_head_is_lossless() -> None:
     filenames = [filename for filename, _sql_text in migration_files]
     assert filenames[-1] == _HEAD_MIGRATION
     assert [filename.split("_", 1)[0] for filename in filenames] == [
-        f"{version:03d}" for version in range(1, 25)
+        f"{version:03d}" for version in range(1, 26)
     ]
 
     fixture = _v1_fixture()
@@ -129,7 +129,7 @@ def test_populated_v1_upgrade_through_cumulative_head_is_lossless() -> None:
             assert after == before
             assert conn.execute(
                 "SELECT count(*) AS count FROM b3s_history.schema_migrations"
-            ).fetchone()["count"] == 24
+            ).fetchone()["count"] == 25
             assert [
                 row["filename"]
                 for row in conn.execute(
@@ -196,7 +196,7 @@ def test_populated_v1_upgrade_through_cumulative_head_is_lossless() -> None:
             assert _v1_snapshot(conn) == before
             assert conn.execute(
                 "SELECT count(*) AS count FROM b3s_history.schema_migrations"
-            ).fetchone()["count"] == 24
+            ).fetchone()["count"] == 25
 
         _assert_v1_destructive_mutations_are_denied(dsn)
     finally:
