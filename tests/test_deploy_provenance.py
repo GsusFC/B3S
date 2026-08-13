@@ -23,13 +23,14 @@ ISOLATED_RELEASE_COMMAND = (
     "python scripts/verify_b3s_history_postgres.py && "
     "python scripts/verify_pr71_vault_target.py'"
 )
-TRUSTED_PR_HEAD_SHA = "b073112f3e4d89d96e45d225f2398f8a7d4dec7c"
-TRUSTED_PR_MERGE_SHA = "864ef1e304d3bf6cbbc5d3d1ec7651c673e3595f"
+TRUSTED_PR_HEAD_SHA = "c1c5e79a01f7311b72d1faba0951582dfab053d9"
+TRUSTED_PR_MERGE_SHA = "f51372b1a2f345d610e47cd7a2ed5d03b285ca2c"
 TRUSTED_CI_BLOB_SHA = "c1082f6b5c53a364b8d38e43936b93722c0183d1"
 TRUSTED_REPOSITORY_ID = 1288696741
 TRUSTED_CI_WORKFLOW_ID = 306885838
-TRUSTED_PR_CI_RUN_ID = 31613381151
-TRUSTED_MERGE_CI_RUN_ID = 31613697333
+TRUSTED_PR_CI_RUN_ID = 31697919580
+TRUSTED_MERGE_CI_RUN_ID = 31698864592
+TRUSTED_DEPLOY_WORKFLOW_BLOB_SHA = "d" * 40
 FIXTURE_DEPLOY_SHA = "a" * 40
 HOTFIX_FILES = {
     ".github/workflows/fly-deploy-pr71-vault.yml",
@@ -68,7 +69,7 @@ def _attestation_fixture() -> dict[str, dict]:
     }
     fixture = {
         "PR_FILE": {
-            "number": 78,
+            "number": 80,
             "state": "closed",
             "merged": True,
             "draft": False,
@@ -79,7 +80,7 @@ def _attestation_fixture() -> dict[str, dict]:
                 "repo": repository,
             },
             "head": {
-                "ref": "feat/pr71-google-oidc-access",
+                "ref": "feat/vault-semantic-assessment-shadow",
                 "sha": TRUSTED_PR_HEAD_SHA,
                 "repo": repository,
             },
@@ -96,6 +97,11 @@ def _attestation_fixture() -> dict[str, dict]:
         "HEAD_CI_FILE": dict(ci_blob),
         "MERGE_CI_FILE": dict(ci_blob),
         "DEPLOY_CI_FILE": dict(ci_blob),
+        "DEPLOY_WORKFLOW_BLOB_FILE": {
+            "type": "file",
+            "path": ".github/workflows/fly-deploy-pr71-vault.yml",
+            "sha": TRUSTED_DEPLOY_WORKFLOW_BLOB_SHA,
+        },
         "HEAD_MERGE_COMPARE_FILE": {
             "status": "ahead",
             "ahead_by": 1,
@@ -123,7 +129,7 @@ def _attestation_fixture() -> dict[str, dict]:
             **common_run,
             "id": TRUSTED_PR_CI_RUN_ID,
             "event": "pull_request",
-            "head_branch": "feat/pr71-google-oidc-access",
+            "head_branch": "feat/vault-semantic-assessment-shadow",
             "head_sha": TRUSTED_PR_HEAD_SHA,
         },
         "MERGE_CI_RUN_FILE": {
@@ -168,6 +174,7 @@ def _run_attestation(
         "TRUSTED_CI_WORKFLOW_ID": str(TRUSTED_CI_WORKFLOW_ID),
         "TRUSTED_PR_CI_RUN_ID": str(TRUSTED_PR_CI_RUN_ID),
         "TRUSTED_MERGE_CI_RUN_ID": str(TRUSTED_MERGE_CI_RUN_ID),
+        "TRUSTED_DEPLOY_WORKFLOW_BLOB_SHA": TRUSTED_DEPLOY_WORKFLOW_BLOB_SHA,
     }
     for name, payload in fixture.items():
         path = tmp_path / f"{name}.json"
@@ -292,8 +299,11 @@ def test_isolated_pr71_vault_workflow_is_manual_post_merge_only():
     assert 'r"[0-9a-f]{40}"' in workflow
     assert 'DISPATCH_REF: ${{ github.ref }}' in workflow
     assert 'os.environ["DISPATCH_REF"] == "refs/heads/main"' in workflow
-    assert '"$API_URL/repos/$GH_REPOSITORY/pulls/78"' in workflow
+    assert '"$API_URL/repos/$GH_REPOSITORY/pulls/80"' in workflow
     assert "persist-credentials: false" in workflow
+    assert "TRUSTED_DEPLOY_WORKFLOW_BLOB_SHA: ${{ vars.PR71_DEPLOY_WORKFLOW_BLOB_SHA }}" in workflow
+    assert "deploy_workflow_blob_file" in workflow
+    assert "deployment workflow blob is not the protected environment baseline" in workflow
 
 
 def test_isolated_deploy_attests_exact_pr71_and_current_main_ancestry():
@@ -302,12 +312,12 @@ def test_isolated_deploy_attests_exact_pr71_and_current_main_ancestry():
     required_contract = (
         'DISPATCH_SHA: ${{ github.sha }}',
         'deploy_sha == dispatch_sha',
-        'pr.get("number"), 78',
+        'pr.get("number"), 80',
         'pr.get("state") == "closed"',
         'pr.get("merged") is True',
         'pr.get("draft") is False',
         'base.get("ref") == "main"',
-        'head.get("ref") == "feat/pr71-google-oidc-access"',
+        'head.get("ref") == "feat/vault-semantic-assessment-shadow"',
         'head.get("sha") == trusted_head',
         'pr.get("merge_commit_sha") == trusted_merge',
         'repo.get("id"), trusted_repository_id',
@@ -391,6 +401,7 @@ def test_pr71_attestation_fixture_accepts_only_current_allowlisted_main(tmp_path
         ("HEAD_CI_FILE", ("sha",), "f" * 40, "blob SHA"),
         ("MERGE_CI_FILE", ("sha",), "f" * 40, "blob SHA"),
         ("DEPLOY_CI_FILE", ("sha",), "f" * 40, "blob SHA"),
+        ("DEPLOY_WORKFLOW_BLOB_FILE", ("sha",), "f" * 40, "deployment workflow blob"),
         (
             "HEAD_MERGE_COMPARE_FILE",
             ("merge_base_commit", "sha"),
