@@ -5755,9 +5755,9 @@ class PostgresHistoryRepository:
         comparison a compare-and-swap with operational adoption.
         """
 
-        # A writer capability must never attempt release DDL.  It verifies the
-        # exact immutable head using its one additional migration-journal read.
-        self.verify_migration_head()
+        # A writer capability must never attempt release DDL. The exact head is
+        # verified below on the append transaction while holding the shared
+        # counterpart of the migrator's exclusive schema lock.
         domain = normalize_domain(domain_or_url)
         fingerprint = str(operational_packet_fingerprint or "").strip().lower()
         if not domain or not _is_sha256(fingerprint):
@@ -5776,6 +5776,25 @@ class PostgresHistoryRepository:
             )
 
         with self._connect() as conn:
+            try:
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock_shared(%s)",
+                    (_advisory_lock_key(_SCHEMA, "schema-migrations-v1"),),
+                )
+                rows = conn.execute(
+                    f"""
+                    SELECT version, filename, checksum
+                    FROM {_SCHEMA}.schema_migrations
+                    ORDER BY version
+                    """
+                ).fetchall()
+                _require_exact_migration_manifest(_migration_manifest(), rows)
+            except SchemaHeadMismatchError:
+                raise
+            except Exception:
+                raise SchemaHeadMismatchError(
+                    "history schema migration manifest is unavailable"
+                ) from None
             brand = conn.execute(
                 f"""
                 SELECT brands.id
@@ -5832,17 +5851,23 @@ class PostgresHistoryRepository:
             source_record = _vault_operational_source_packet_record(source_row)
             source_packet = source_record["packet"]
 
-            current = _project_vault_operational_memory(conn, brand_id)
-            current_parent = (
-                current["canonical_memory_version"] if current is not None else None
+            authority_chain = _project_vault_operational_memory_authority_chain(
+                conn, brand_id
             )
-            if expected_parent_canonical_memory_version != current_parent:
+            current, latest_adoption = (
+                authority_chain[-1] if authority_chain else (None, None)
+            )
+            if not _vault_operational_sv9_shadow_parent_is_admissible(
+                operational_packet=operational_packet,
+                operational_packet_fingerprint=fingerprint,
+                expected_parent_canonical_memory_version=(
+                    expected_parent_canonical_memory_version
+                ),
+                current_memory=current,
+                latest_adoption_event=latest_adoption,
+            ):
                 raise EvidenceVaultOperationalAssessmentShadowError(
-                    "The current operational parent changed before assessment."
-                )
-            if operational_packet["current_canonical_memory_version"] != current_parent:
-                raise EvidenceVaultOperationalAssessmentShadowError(
-                    "The operational packet is not built on the durable current parent."
+                    "The operational packet is neither current nor the direct current producer."
                 )
 
             try:
@@ -12257,6 +12282,41 @@ def _best_effort_legacy_operational_projection(
         }
     except Exception:
         return unavailable
+
+
+def _vault_operational_sv9_shadow_parent_is_admissible(
+    *,
+    operational_packet: Mapping[str, Any],
+    operational_packet_fingerprint: str,
+    expected_parent_canonical_memory_version: str | None,
+    current_memory: Mapping[str, Any] | None,
+    latest_adoption_event: Mapping[str, Any] | None,
+) -> bool:
+    """Accept a packet at its parent or as the direct producer of current."""
+
+    packet_parent = operational_packet["current_canonical_memory_version"]
+    if expected_parent_canonical_memory_version != packet_parent:
+        return False
+    current_version = (
+        current_memory["canonical_memory_version"]
+        if current_memory is not None
+        else None
+    )
+    if current_version == packet_parent:
+        return True
+    return bool(
+        current_memory is not None
+        and latest_adoption_event is not None
+        and latest_adoption_event["candidate_packet_fingerprint"]
+        == operational_packet_fingerprint
+        and latest_adoption_event["parent_canonical_memory_version"] == packet_parent
+        and latest_adoption_event["promoted_canonical_memory_version"]
+        == current_version
+        and operational_packet["proposed_canonical_memory_version"]
+        == current_version
+        and current_memory["adoption_event_id"]
+        == latest_adoption_event["event_id"]
+    )
 
 
 def _vault_operational_sv9_shadow_receipt(

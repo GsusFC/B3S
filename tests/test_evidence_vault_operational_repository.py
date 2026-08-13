@@ -56,6 +56,9 @@ from src.services.evidence_vault_lineage_replay import (
     build_historical_report_capture_observation,
     build_lineage_seed_export_v2,
 )
+from src.services.evidence_vault_operational_assessment_shadow import (
+    EvidenceVaultOperationalAssessmentShadowError,
+)
 from src.services.evidence_vault_operational_authority import (
     EvidenceVaultOperationalAuthorityError,
     adoption_request_fingerprint,
@@ -183,7 +186,10 @@ def test_sv9_shadow_writer_rederives_append_replays_and_has_minimum_acl() -> Non
     import psycopg
     from psycopg.rows import dict_row
 
-    from src.history.repository import PostgresHistoryRepository
+    from src.history.repository import (
+        PostgresHistoryRepository,
+        _advisory_lock_key,
+    )
 
     if os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1":
         pytest.fail("B3S_TEST_ALLOW_SCHEMA_DROP=1 is required")
@@ -206,6 +212,24 @@ def test_sv9_shadow_writer_rederives_append_replays_and_has_minimum_acl() -> Non
     operational = _packet(candidates, current=None, source=source)
     repository.register_evidence_vault_operational_memory_packet(
         "example.com", operational
+    )
+    sibling = build_operational_memory_packet(
+        brand_identity="example.com",
+        source_candidate_packet_fingerprint=source["candidate_packet_fingerprint"],
+        aggregation_policy_fingerprint=canonical_aggregation_policy_fingerprint(),
+        candidate_tiles=candidates,
+        dispositions={
+            "M1": {
+                "authority_state": "accepted",
+                "review_state": "none",
+                "authority_profile_id": REVIEWED_BASIS_PROFILE_ID,
+                "authority_source": "human",
+                "decision_event_id": "review-sv9-shadow-writer-m1",
+            }
+        },
+    )
+    repository.register_evidence_vault_operational_memory_packet(
+        "example.com", sibling
     )
     # The legacy canonical source above makes the operational packet storeable,
     # but this writer only accepts the current operational-source/reviewed
@@ -256,16 +280,171 @@ def test_sv9_shadow_writer_rederives_append_replays_and_has_minimum_acl() -> Non
 
     try:
         writer = PostgresHistoryRepository(dsn, connect=writer_connect)
-        # Dry-run takes the same lock/CAS and replay lookup but must not issue
-        # INSERT or create a ledger row.
+        # The writer's head attestation is transactionally bound to the append:
+        # it must wait while a migrator-equivalent exclusive lock is held.
+        with psycopg.connect(dsn) as schema_blocker:
+            schema_blocker.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        "b3s_history",
+                        "schema-migrations-v1",
+                    ),
+                ),
+            )
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    writer.append_evidence_vault_operational_sv9_shadow_assessment,
+                    "example.com",
+                    operational_packet_fingerprint=operational[
+                        "candidate_packet_fingerprint"
+                    ],
+                    expected_parent_canonical_memory_version=None,
+                    dry_run=True,
+                )
+                for _ in range(100):
+                    schema_blocker.execute("SELECT pg_stat_clear_snapshot()")
+                    wait_state = schema_blocker.execute(
+                        """
+                        SELECT wait_event_type
+                        FROM pg_stat_activity
+                        WHERE datname = current_database()
+                          AND pid <> pg_backend_pid()
+                          AND wait_event_type = 'Lock'
+                        ORDER BY backend_start DESC
+                        LIMIT 1
+                        """
+                    ).fetchone()
+                    if wait_state is not None:
+                        break
+                    time.sleep(0.02)
+                else:
+                    pytest.fail("SV9 writer did not wait on the schema migration lock")
+                schema_blocker.commit()
+                pre_adoption_preview, pre_adoption_replayed = future.result(
+                    timeout=5
+                )
+        assert pre_adoption_replayed is False
+        with psycopg.connect(dsn) as connection:
+            connection.execute(f"SET ROLE {writer_role}")
+            assert connection.execute(
+                "SELECT count(*) FROM "
+                "b3s_history.evidence_vault_operational_sv9_shadow_assessments"
+            ).fetchone()[0] == 0
+        receipt, receipt_replayed = (
+            writer.append_evidence_vault_operational_sv9_shadow_assessment(
+                "example.com",
+                operational_packet_fingerprint=operational[
+                    "candidate_packet_fingerprint"
+                ],
+                expected_parent_canonical_memory_version=None,
+            )
+        )
+        assert receipt_replayed is False
+        assert {
+            key: value for key, value in receipt.items() if key != "created_at"
+        } == {
+            key: value
+            for key, value in pre_adoption_preview.items()
+            if key != "created_at"
+        }
+
+        # Prove the writer itself queues on the exact promotion lock. Releasing
+        # the blocker lets the writer-linearized replay complete before N+1.
+        with psycopg.connect(dsn) as blocker:
+            blocker.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        "evidence-vault-canonical-promotion",
+                    ),
+                ),
+            )
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    writer.append_evidence_vault_operational_sv9_shadow_assessment,
+                    "example.com",
+                    operational_packet_fingerprint=operational[
+                        "candidate_packet_fingerprint"
+                    ],
+                    expected_parent_canonical_memory_version=None,
+                    dry_run=True,
+                )
+                for _ in range(100):
+                    blocker.execute("SELECT pg_stat_clear_snapshot()")
+                    wait_state = blocker.execute(
+                        """
+                        SELECT wait_event_type
+                        FROM pg_stat_activity
+                        WHERE datname = current_database()
+                          AND pid <> pg_backend_pid()
+                          AND wait_event_type = 'Lock'
+                        ORDER BY backend_start DESC
+                        LIMIT 1
+                        """
+                    ).fetchone()
+                    if wait_state is not None:
+                        break
+                    time.sleep(0.02)
+                else:
+                    pytest.fail("SV9 shadow writer did not wait on the promotion lock")
+                blocker.commit()
+                queued_receipt, queued_replayed = future.result(timeout=5)
+        assert queued_replayed is True
+        assert queued_receipt == receipt
+
+        adoption, adoption_replayed = repository.append_evidence_vault_operational_adoption(
+            "example.com",
+            _command(operational, parent=None, seed="sv9-shadow-writer-adoption"),
+        )
+        assert adoption_replayed is False
+        assert adoption["candidate_packet_fingerprint"] == operational[
+            "candidate_packet_fingerprint"
+        ]
+        current = repository.get_evidence_vault_operational_memory("example.com")
+        assert current is not None
+        assert current["canonical_memory_version"] == adoption[
+            "promoted_canonical_memory_version"
+        ]
+
+        # The exact packet that directly produced current remains admissible
+        # against its immutable packet parent. Dry-run must issue no INSERT.
         preview, replayed = writer.append_evidence_vault_operational_sv9_shadow_assessment(
             "example.com",
             operational_packet_fingerprint=operational["candidate_packet_fingerprint"],
             expected_parent_canonical_memory_version=None,
             dry_run=True,
         )
-        assert replayed is False
+        assert replayed is True
+        assert preview == receipt
         assert preview["assessment_status"] == "available"
+        with pytest.raises(
+            EvidenceVaultOperationalAssessmentShadowError,
+            match="neither current nor the direct current producer",
+        ):
+            writer.append_evidence_vault_operational_sv9_shadow_assessment(
+                "example.com",
+                operational_packet_fingerprint=sibling[
+                    "candidate_packet_fingerprint"
+                ],
+                expected_parent_canonical_memory_version=None,
+                dry_run=True,
+            )
+        with pytest.raises(
+            EvidenceVaultOperationalAssessmentShadowError,
+            match="neither current nor the direct current producer",
+        ):
+            writer.append_evidence_vault_operational_sv9_shadow_assessment(
+                "example.com",
+                operational_packet_fingerprint=operational[
+                    "candidate_packet_fingerprint"
+                ],
+                expected_parent_canonical_memory_version=current[
+                    "canonical_memory_version"
+                ],
+                dry_run=True,
+            )
         assert preview["sv9_score"] is not None
         assert preview["base_average"] is not None
         assert preview["magnetism_capped"] is False
@@ -281,17 +460,12 @@ def test_sv9_shadow_writer_rederives_append_replays_and_has_minimum_acl() -> Non
         with psycopg.connect(dsn) as connection:
             connection.execute(f"SET ROLE {writer_role}")
             assert connection.execute(
-                "SELECT count(*) FROM b3s_history.evidence_vault_operational_sv9_shadow_assessments"
-            ).fetchone()[0] == 0
+                "SELECT count(*) FROM "
+                "b3s_history.evidence_vault_operational_sv9_shadow_assessments"
+            ).fetchone()[0] == 1
 
         # The restricted writer verifies the exact release head but has no DDL
         # capability; the append method must not call migrate().
-        receipt, replayed = writer.append_evidence_vault_operational_sv9_shadow_assessment(
-            "example.com",
-            operational_packet_fingerprint=operational["candidate_packet_fingerprint"],
-            expected_parent_canonical_memory_version=None,
-        )
-        assert replayed is False
         assert receipt["assessment_status"] == "available"
         assert receipt["authority"] is False
         assert receipt["production_runtime_effect"] is False
@@ -303,6 +477,101 @@ def test_sv9_shadow_writer_rederives_append_replays_and_has_minimum_acl() -> Non
         )
         assert replayed is True
         assert replay == receipt
+
+        next_candidates = build_incremental_candidate_tiles(
+            previous_candidate_tiles=source["candidate_tiles"],
+            tile_updates=[
+                {
+                    "tile_id": "M1",
+                    "delta_kind": "strengthened",
+                    "basis": [
+                        _basis("sv9-shadow-writer-m1"),
+                        _basis("sv9-shadow-writer-m1-next"),
+                    ],
+                }
+            ],
+        )
+        next_source = _source_packet(
+            next_candidates,
+            seed="sv9-shadow-writer-next",
+            parent=current["canonical_memory_version"],
+        )
+        repository.register_evidence_vault_canonical_memory_packet(
+            "example.com",
+            next_source,
+            resolved_references=_references(next_source),
+        )
+        next_packet = _packet(
+            next_candidates,
+            current=current,
+            source=next_source,
+        )
+        repository.register_evidence_vault_operational_memory_packet(
+            "example.com", next_packet
+        )
+        next_command = _command(
+            next_packet,
+            parent=current["canonical_memory_version"],
+            seed="sv9-shadow-writer-next-adoption",
+        )
+        with psycopg.connect(dsn) as blocker:
+            blocker.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (
+                    _advisory_lock_key(
+                        brand_id,
+                        "evidence-vault-canonical-promotion",
+                    ),
+                ),
+            )
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    repository.append_evidence_vault_operational_adoption,
+                    "example.com",
+                    next_command,
+                )
+                for _ in range(100):
+                    blocker.execute("SELECT pg_stat_clear_snapshot()")
+                    wait_state = blocker.execute(
+                        """
+                        SELECT wait_event_type
+                        FROM pg_stat_activity
+                        WHERE datname = current_database()
+                          AND pid <> pg_backend_pid()
+                          AND wait_event_type = 'Lock'
+                        ORDER BY backend_start DESC
+                        LIMIT 1
+                        """
+                    ).fetchone()
+                    if wait_state is not None:
+                        break
+                    time.sleep(0.02)
+                else:
+                    pytest.fail("next adoption did not wait on the promotion lock")
+
+                # Release the test-held boundary and let N+2 commit before
+                # the next writer call, exercising the adoption-first order.
+                blocker.commit()
+                next_adoption, next_replayed = future.result(timeout=5)
+        assert next_replayed is False
+        assert next_adoption["sequence"] == adoption["sequence"] + 1
+        with pytest.raises(
+            EvidenceVaultOperationalAssessmentShadowError,
+            match="neither current nor the direct current producer",
+        ):
+            writer.append_evidence_vault_operational_sv9_shadow_assessment(
+                "example.com",
+                operational_packet_fingerprint=operational[
+                    "candidate_packet_fingerprint"
+                ],
+                expected_parent_canonical_memory_version=None,
+            )
+        with psycopg.connect(dsn) as connection:
+            connection.execute(f"SET ROLE {writer_role}")
+            assert connection.execute(
+                "SELECT count(*) FROM "
+                "b3s_history.evidence_vault_operational_sv9_shadow_assessments"
+            ).fetchone()[0] == 1
 
         with psycopg.connect(dsn) as connection:
             connection.execute(f"SET ROLE {writer_role}")
