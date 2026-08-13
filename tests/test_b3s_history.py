@@ -874,7 +874,7 @@ def test_concurrent_release_migration_is_database_serialized() -> None:
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(lambda _index: migrate_concurrently(), range(2)))
-        assert sorted(len(result) for result in results) == [0, 26]
+        assert sorted(len(result) for result in results) == [0, 27]
         assert sorted({filename for result in results for filename in result}) == [
             f"{index:03d}_" + name
             for index, name in enumerate(

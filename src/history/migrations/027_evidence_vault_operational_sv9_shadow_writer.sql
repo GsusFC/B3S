@@ -158,22 +158,41 @@ GRANT EXECUTE ON FUNCTION
     TO b3s_history_vault_sv9_shadow_writer;
 
 -- Do not accidentally extend this capability to the existing shadow runtime or
--- scanner ingest role.  Some disposable upgrade fixtures do not provision the
--- scanner login, so revoke only when that role exists.
+-- scanner ingest role.  Direct table ACLs are migration-owned and may safely be
+-- revoked here.  Role memberships are cluster-global: a CREATEROLE migrator
+-- without ADMIN on a pre-existing writer cannot revoke them, so never attempt
+-- to mutate them.  Fail closed and require a role administrator to remediate.
 REVOKE ALL ON b3s_history.evidence_vault_operational_sv9_shadow_assessments
     FROM b3s_history_vault_runtime_read;
 DO $$
+DECLARE
+    writer_oid oid;
 BEGIN
+    SELECT oid INTO writer_oid
+    FROM pg_catalog.pg_roles
+    WHERE rolname = 'b3s_history_vault_sv9_shadow_writer';
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_auth_members AS memberships
+        JOIN pg_catalog.pg_roles AS principals ON principals.oid = memberships.member
+        WHERE memberships.roleid = writer_oid
+          AND principals.rolname IN (
+              'b3s_history_vault_runtime_read', 'b3s_pr71_scanner_ingest'
+          )
+    ) THEN
+        RAISE EXCEPTION
+            'runtime or scanner has direct SV9 shadow writer membership; a role administrator must revoke it before migration';
+    END IF;
+
     IF EXISTS (
         SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'b3s_pr71_scanner_ingest'
     ) THEN
         REVOKE ALL ON b3s_history.evidence_vault_operational_sv9_shadow_assessments
             FROM b3s_pr71_scanner_ingest;
-        REVOKE b3s_history_vault_sv9_shadow_writer FROM b3s_pr71_scanner_ingest;
     END IF;
 END;
 $$;
-REVOKE b3s_history_vault_sv9_shadow_writer FROM b3s_history_vault_runtime_read;
 
 DO $$
 DECLARE

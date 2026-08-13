@@ -153,6 +153,10 @@ def test_sv9_shadow_writer_capability_is_narrow_and_owned_by_provenance() -> Non
     assert "b3s_history.workspaces" in sql
     assert "FROM b3s_history_vault_runtime_read" in sql
     assert "FROM b3s_pr71_scanner_ingest" in sql
+    assert "FROM pg_catalog.pg_auth_members AS memberships" in sql
+    assert "memberships.roleid = writer_oid" in sql
+    assert "a role administrator must revoke it before migration" in sql
+    assert "REVOKE b3s_history_vault_sv9_shadow_writer FROM" not in sql
     assert "UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER" in sql
 
 

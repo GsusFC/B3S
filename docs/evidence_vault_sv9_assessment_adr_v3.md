@@ -201,7 +201,11 @@ El caller debe proporcionar explícitamente
 `expected_parent_canonical_memory_version`. Su omisión devuelve unavailable con
 `expected_parent_required`; `None` explícito solo acepta un packet cuyo parent
 actual sea `None`, y cualquier otro valor distinto devuelve
-`stale_candidate_parent`. Si una baldosa es `contradiction`, queda unavailable
+`stale_candidate_parent`. El writer confiable adquiere el lock de adopción y
+comprueba este parent como CAS antes de insertar: si no coincide, lanza y no
+inserta ninguna fila. Por tanto, una fila `stale_candidate_parent` solo podría
+provenir de un futuro camino de importación auditado de forma independiente, no
+de este writer CAS confiable. Si una baldosa es `contradiction`, queda unavailable
 con `contradiction_requires_semantic_reassessment`: no se inventa score,
 vector ni fingerprints. C7 y C8 siguen siendo baldosas semánticas ordinarias
 para aritmética; su `verification_requirement` es respectivamente
