@@ -448,6 +448,16 @@ def test_sv9_shadow_writer_rederives_append_replays_and_has_minimum_acl() -> Non
         assert preview["sv9_score"] is not None
         assert preview["base_average"] is not None
         assert preview["magnetism_capped"] is False
+        diagnostics = repository.list_evidence_vault_operational_sv9_shadow_diagnostics(
+            "example.com",
+            limit=1,
+        )
+        assert diagnostics["count"] == 1
+        assert diagnostics["has_more"] is False
+        assert diagnostics["items"][0]["sv9_score"] == preview["sv9_score"]
+        assert diagnostics["items"][0]["authority"] is False
+        assert "candidate_semantic_tiles" not in diagnostics["items"][0]
+        assert "verification_requirements" not in diagnostics["items"][0]
         assert preview["legacy_operational_projection"]["availability"] == "available"
         assert set(preview["legacy_operational_projection"]) == {
             "availability",

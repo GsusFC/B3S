@@ -82,6 +82,22 @@ def test_exact_isolated_target_passes_read_only(monkeypatch, capsys):
     )
 
 
+
+
+def test_enabled_sv9_shadow_diagnostics_fails_before_database_connection(
+    monkeypatch,
+) -> None:
+    _environment(monkeypatch)
+    monkeypatch.setenv("B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED", "true")
+    monkeypatch.setattr(
+        target.psycopg,
+        "connect",
+        lambda *_a, **_kw: pytest.fail("database must not be contacted"),
+    )
+    with pytest.raises(SystemExit, match="target verification failed"):
+        target.main()
+
+
 def test_wrong_app_fails_before_database_connection(monkeypatch):
     _environment(monkeypatch)
     monkeypatch.setenv("FLY_APP_NAME", "b3s-vault")

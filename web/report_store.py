@@ -14,7 +14,7 @@ import uuid
 from functools import lru_cache
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlparse
 
 from src.history.models import ReportConflictError
@@ -113,6 +113,64 @@ def _postgres_repository_for_url(database_url: str):
     from src.history.repository import PostgresHistoryRepository
 
     return PostgresHistoryRepository(database_url, schema_policy="verify_head")
+
+
+def vault_sv9_shadow_diagnostics_enabled(
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """Enable diagnostic reads only in the isolated Vault and only explicitly."""
+
+    values = os.environ if environment is None else environment
+    return (
+        str(values.get("BRAND3_ENVIRONMENT") or "").strip().casefold() == "vault"
+        and str(
+            values.get("B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED") or ""
+        ).strip().casefold()
+        == "true"
+    )
+
+
+def vault_sv9_shadow_diagnostics_for_domain(
+    domain: str,
+    *,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Return a bounded diagnostic history without falling back to raw reports."""
+
+    if not vault_sv9_shadow_diagnostics_enabled():
+        return {"enabled": False, "available": False, "items": []}
+    normalized = domain_key(domain)
+    repository = _postgres_repository()
+    if not normalized or repository is None:
+        return {
+            "enabled": True,
+            "available": False,
+            "domain": normalized,
+            "items": [],
+            "message": "SV9 shadow diagnostics are temporarily unavailable.",
+        }
+    try:
+        result = repository.list_evidence_vault_operational_sv9_shadow_diagnostics(
+            normalized,
+            limit=limit,
+        )
+    except Exception:
+        _LOG.error(
+            "failed to read protected SV9 shadow diagnostics",
+            extra={"domain": normalized},
+        )
+        return {
+            "enabled": True,
+            "available": False,
+            "domain": normalized,
+            "items": [],
+            "message": "SV9 shadow diagnostics are temporarily unavailable.",
+        }
+    return {
+        "enabled": True,
+        "available": True,
+        **result,
+    }
 
 
 def new_scan_id() -> str:

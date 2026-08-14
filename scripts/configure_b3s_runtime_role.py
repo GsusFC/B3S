@@ -31,7 +31,7 @@ from scripts.pr71_vault_database_target import (  # noqa: E402
 
 SCHEMA = "b3s_history"
 MIGRATION_JOURNAL = "schema_migrations"
-EXPECTED_HEAD_VERSION = "027"
+EXPECTED_HEAD_VERSION = "028"
 WATERMARK_TABLE = "evidence_vault_capture_watermark_events"
 PRIVATE_SHADOW_LEDGER_RELATIONS = frozenset(
     {"evidence_vault_operational_sv9_shadow_assessments"}
@@ -86,7 +86,13 @@ EXPECTED_APPLICATION_TABLES = frozenset(
         "workspaces",
     }
 )
-EXPECTED_READ_ONLY_VIEWS = frozenset({"brand_current_state", "brand_history"})
+EXPECTED_READ_ONLY_VIEWS = frozenset(
+    {
+        "brand_current_state",
+        "brand_history",
+        "evidence_vault_operational_sv9_shadow_diagnostics_v1",
+    }
+)
 EXPECTED_HEAD_RELATIONS = (
     EXPECTED_APPLICATION_TABLES
     | EXPECTED_READ_ONLY_VIEWS
@@ -153,7 +159,7 @@ def _verify_exact_head(
     verifier: Callable[[Iterable[tuple[str, str, str, str]], Iterable[Mapping[str, Any]]], None],
 ) -> str:
     if not manifest or manifest[-1][0] != EXPECTED_HEAD_VERSION:
-        raise RuntimeRoleConfigurationError("this runtime grant tool requires packaged migration head 027")
+        raise RuntimeRoleConfigurationError("this runtime grant tool requires packaged migration head 028")
     rows = conn.execute(
         sql.SQL(
             """

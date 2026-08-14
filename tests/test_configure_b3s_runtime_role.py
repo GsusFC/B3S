@@ -93,8 +93,8 @@ class _Connection:
             return _Result(
                 rows=[
                     {
-                        "version": "027",
-                        "filename": "027_evidence_vault_operational_sv9_shadow_writer.sql",
+                        "version": "028",
+                        "filename": "028_evidence_vault_operational_sv9_shadow_diagnostics.sql",
                         "checksum": "a" * 64,
                     }
                 ]
@@ -215,8 +215,8 @@ def _effective_relation_privileges(relations):
 def _install_contract(monkeypatch):
     manifest = [
         (
-            "027",
-            "027_evidence_vault_operational_sv9_shadow_writer.sql",
+            "028",
+            "028_evidence_vault_operational_sv9_shadow_diagnostics.sql",
             "a" * 64,
             "SELECT 1",
         )
@@ -226,8 +226,8 @@ def _install_contract(monkeypatch):
         assert expected == manifest
         assert actual == [
             {
-                "version": "027",
-                "filename": "027_evidence_vault_operational_sv9_shadow_writer.sql",
+                "version": "028",
+                "filename": "028_evidence_vault_operational_sv9_shadow_diagnostics.sql",
                 "checksum": "a" * 64,
             }
         ]
@@ -253,7 +253,7 @@ def test_configures_exact_runtime_contract_in_one_transaction(monkeypatch, capsy
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
         "status": "ok",
-        "head": "027_evidence_vault_operational_sv9_shadow_writer.sql",
+        "head": "028_evidence_vault_operational_sv9_shadow_diagnostics.sql",
     }
     assert dsn not in json.dumps(payload)
     assert connected[0][0] == dsn
@@ -311,6 +311,11 @@ def test_configures_exact_runtime_contract_in_one_transaction(monkeypatch, capsy
     journal_and_views = next(statement for statement in statements if statement.startswith("GRANT SELECT ON TABLE"))
     assert '"b3s_history"."schema_migrations"' in journal_and_views
     assert '"b3s_history"."brand_history"' in journal_and_views
+    assert (
+        '"b3s_history"."evidence_vault_operational_sv9_shadow_diagnostics_v1"'
+        in journal_and_views
+    )
+    assert "evidence_vault_operational_sv9_shadow_assessments" not in journal_and_views
     assert "INSERT" not in journal_and_views
     assert any(
         statement
@@ -420,12 +425,15 @@ def test_requires_only_migration_database_url(monkeypatch, capsys) -> None:
 
 
 def test_raw_relation_and_journal_contract_is_pinned() -> None:
-    assert runtime_role.EXPECTED_HEAD_VERSION == "027"
+    assert runtime_role.EXPECTED_HEAD_VERSION == "028"
     assert runtime_role.MIGRATION_JOURNAL == "schema_migrations"
     assert runtime_role.WATERMARK_TABLE not in runtime_role.RAW_MIGRATION_019_RELATIONS
     assert runtime_role.PRIVATE_SHADOW_LEDGER_RELATIONS == {
         "evidence_vault_operational_sv9_shadow_assessments"
     }
+    assert "evidence_vault_operational_sv9_shadow_diagnostics_v1" in (
+        runtime_role.EXPECTED_READ_ONLY_VIEWS
+    )
     assert runtime_role.RAW_MIGRATION_019_RELATIONS == {
         "evidence_vault_raw_acquisition_receipts",
         "evidence_vault_raw_evidence_bindings",
@@ -474,6 +482,7 @@ def test_packaged_head_relation_allowlists_are_exact() -> None:
     assert runtime_role.EXPECTED_READ_ONLY_VIEWS == {
         "brand_current_state",
         "brand_history",
+        "evidence_vault_operational_sv9_shadow_diagnostics_v1",
     }
     assert runtime_role.WATERMARK_TABLE in runtime_role.EXPECTED_APPLICATION_TABLES
     assert runtime_role.EXPECTED_HEAD_RELATIONS == (
@@ -571,6 +580,27 @@ def test_postgres_runtime_configuration_rejects_unjournaled_escape_surfaces() ->
             assert can_connect
             assert not can_create
             assert not can_create_temporary
+            assert conn.execute(
+                "SELECT pg_catalog.has_table_privilege(%s, %s, 'SELECT')",
+                (
+                    role,
+                    "b3s_history.evidence_vault_operational_sv9_shadow_diagnostics_v1",
+                ),
+            ).fetchone()[0]
+            assert not conn.execute(
+                "SELECT pg_catalog.has_table_privilege(%s, %s, 'SELECT')",
+                (
+                    role,
+                    "b3s_history.evidence_vault_operational_sv9_shadow_assessments",
+                ),
+            ).fetchone()[0]
+            assert not conn.execute(
+                "SELECT pg_catalog.has_table_privilege(%s, %s, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')",
+                (
+                    role,
+                    "b3s_history.evidence_vault_operational_sv9_shadow_diagnostics_v1",
+                ),
+            ).fetchone()[0]
             database_owner = conn.execute(
                 """
                 SELECT pg_catalog.pg_get_userbyid(datdba)

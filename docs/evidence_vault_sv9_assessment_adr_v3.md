@@ -282,7 +282,7 @@ verificación humana se registra aparte.
 
 ## 9. Límites de este incremento
 
-Este ADR introduce kernel, adaptadores, paridad y tests. No:
+El incremento inicial de este ADR introdujo kernel, adaptadores, paridad y tests. No:
 
 - migra scores históricos ni rellena fingerprints nuevos;
 - añade un read path, API pública, worker o exposición para el ledger shadow;
@@ -307,8 +307,10 @@ Este ADR introduce kernel, adaptadores, paridad y tests. No:
   aritmética legacy y no consume el snapshot v3.
 
 Estas deudas bloquean cualquier writer canónico/público, exposición en read
-paths y cutover. No bloquean el writer administrativo interno de la migración
-027, que solo conserva observaciones shadow sin autoridad ni runtime effect.
+paths de producto y cutover. No bloquean el writer administrativo interno de la
+migración 027 ni la vista escalar protegida y default-off de la migración 028:
+ambos conservan observaciones shadow sin autoridad ni runtime effect y no
+alimentan ningún selector de score, report o ranking.
 Cada deuda requiere un incremento con fixtures de paridad y decisión de
 autoridad. Hasta entonces no debe afirmarse que el Vault operational ya separa
 score de verification en su producto público.
@@ -430,3 +432,29 @@ La pausa consiste en retirar el secreto o deshabilitar el workflow; la revocaci�
 rota el password del LOGIN. Ninguna de las dos operaciones elimina filas del
 ledger. Un cambio futuro de frecuencia, alcance, credencial, consumidor o
 selector de score requiere revisión independiente.
+
+## 14. Lectura diagnóstica protegida (migración 028)
+
+La fase 2 añade exclusivamente una observación de lectura. La migración 028 crea
+`evidence_vault_operational_sv9_shadow_diagnostics_v1`, una vista con barrera de
+seguridad y columnas escalares: hashes inmutables, estado, score shadow,
+promedio base, cap de magnetismo, cinco contadores de verification, timestamp y
+los tres flags persistidos en `false`. La vista omite el vector de 80 baldosas,
+los JSON completos de assessment y verification, evidencias, payloads, IDs de
+packet/source, reviewer y UUID de assessment. El runtime web conserva denegado
+el ledger base y recibe `SELECT` únicamente sobre la vista por medio del
+configurador del LOGIN exacto de PR71; Scanner, writer, `PUBLIC` y la capability
+runtime-read genérica no reciben acceso a la vista.
+
+`B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED` vale `false` por defecto y solo puede
+ser efectivo junto con `BRAND3_ENVIRONMENT=vault`. La API oculta exige el bearer
+dedicado del revisor y la UI separada exige una sesión Google real; ninguna se
+enlaza desde report, brand, score o ranking. Ambas lecturas están acotadas a 20
+filas, son `no-store`, y declaran de forma explícita que no tienen autoridad ni
+efecto en producción, Scanner, selección canónica, score público o ranking.
+
+Esta decisión no resuelve ni reduce las deudas bloqueantes de la sección 9. No
+crea selector de score, compare mode, publicación, ranking, writer canónico,
+RPC, trigger ni función `SECURITY DEFINER`. Mergear el código tampoco autoriza
+migración, despliegue ni activación del flag: el attestation actual de PR71 no
+admite estos archivos y necesita una reautorización separada y exacta.

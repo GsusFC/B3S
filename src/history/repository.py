@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
+from decimal import Decimal
 from importlib import resources
 import logging
+import math
 import re
 from threading import Lock
 from typing import Any, Callable, Iterable, Literal, Mapping
@@ -222,6 +224,7 @@ _CONNECT_TIMEOUT_SECONDS = 5
 _LOG = logging.getLogger(__name__)
 _SCHEMA_POLICIES = frozenset({"migrate", "verify_head"})
 EVIDENCE_VAULT_OPERATIONAL_SV9_SHADOW_WORK_ITEM_MAX_LIMIT = 100
+EVIDENCE_VAULT_OPERATIONAL_SV9_SHADOW_DIAGNOSTIC_MAX_LIMIT = 20
 
 
 class SchemaHeadMismatchError(RuntimeError):
@@ -5737,6 +5740,89 @@ class PostgresHistoryRepository:
                 "The operational packet does not exist."
             )
         return _vault_operational_packet_record(row)
+
+    def list_evidence_vault_operational_sv9_shadow_diagnostics(
+        self,
+        domain_or_url: str,
+        *,
+        limit: int = 10,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any]:
+        """Read a bounded scalar-only history from the sanitized shadow view."""
+
+        domain = normalize_domain(domain_or_url)
+        if not domain:
+            raise EvidenceVaultOperationalAssessmentShadowError(
+                "The diagnostic domain is invalid."
+            )
+        if type(limit) is not int or not (
+            1 <= limit <= EVIDENCE_VAULT_OPERATIONAL_SV9_SHADOW_DIAGNOSTIC_MAX_LIMIT
+        ):
+            raise EvidenceVaultOperationalAssessmentShadowError(
+                "The diagnostic limit is invalid."
+            )
+        if (
+            not isinstance(workspace_slug, str)
+            or not workspace_slug
+            or workspace_slug != workspace_slug.strip()
+        ):
+            raise EvidenceVaultOperationalAssessmentShadowError(
+                "The diagnostic workspace identity is invalid."
+            )
+
+        self._ensure_migrated()
+        with self._connect() as conn:
+            conn.execute(
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+            )
+            rows = conn.execute(
+                f"""
+                SELECT diagnostics.schema_version,
+                       diagnostics.evaluation_identity,
+                       diagnostics.operational_packet_fingerprint,
+                       diagnostics.assessment_status,
+                       diagnostics.sv9_score,
+                       diagnostics.base_average,
+                       diagnostics.magnetism_capped,
+                       diagnostics.assessment_fingerprint,
+                       diagnostics.score_fingerprint,
+                       diagnostics.semantic_provenance_fingerprint,
+                       diagnostics.verification_pending_count,
+                       diagnostics.verification_verified_count,
+                       diagnostics.verification_disputed_count,
+                       diagnostics.verification_stale_count,
+                       diagnostics.verification_unverifiable_count,
+                       diagnostics.authority,
+                       diagnostics.production_runtime_effect,
+                       diagnostics.scanner_runtime_effect,
+                       diagnostics.created_at
+                FROM {_SCHEMA}.evidence_vault_operational_sv9_shadow_diagnostics_v1
+                     AS diagnostics
+                JOIN {_SCHEMA}.brands AS brands
+                  ON brands.id = diagnostics.brand_id
+                JOIN {_SCHEMA}.workspaces AS workspaces
+                  ON workspaces.id = brands.workspace_id
+                WHERE workspaces.slug = %s
+                  AND brands.canonical_domain = %s
+                ORDER BY diagnostics.created_at DESC,
+                         diagnostics.evaluation_identity DESC
+                LIMIT %s
+                """,
+                (workspace_slug, domain, limit + 1),
+            ).fetchall()
+
+        has_more = len(rows) > limit
+        items = [
+            _vault_operational_sv9_shadow_diagnostic_record(row)
+            for row in rows[:limit]
+        ]
+        return {
+            "domain": domain,
+            "items": items,
+            "limit": limit,
+            "count": len(items),
+            "has_more": has_more,
+        }
 
     def discover_evidence_vault_operational_sv9_shadow_work_items(
         self,
@@ -12458,6 +12544,143 @@ def _vault_operational_sv9_shadow_parent_is_admissible(
         and current_memory["adoption_event_id"]
         == latest_adoption_event["event_id"]
     )
+
+
+def _vault_operational_sv9_shadow_diagnostic_record(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one scalar-only row from the migration-owned diagnostic view."""
+
+    schema_version = row["schema_version"]
+    evaluation_identity = row["evaluation_identity"]
+    packet_fingerprint = row["operational_packet_fingerprint"]
+    status = row["assessment_status"]
+    if schema_version != "evidence-vault-operational-semantic-assessment-shadow-v1":
+        raise EvidenceVaultOperationalAssessmentShadowError(
+            "The diagnostic schema version is invalid."
+        )
+    if not _is_sha256(evaluation_identity) or not _is_sha256(packet_fingerprint):
+        raise EvidenceVaultOperationalAssessmentShadowError(
+            "The diagnostic identity is invalid."
+        )
+    if status not in {
+        "available",
+        "stale_candidate_parent",
+        "contradiction_requires_semantic_reassessment",
+    }:
+        raise EvidenceVaultOperationalAssessmentShadowError(
+            "The diagnostic assessment status is invalid."
+        )
+    if any(
+        type(row[name]) is not bool or row[name] is not False
+        for name in (
+            "authority",
+            "production_runtime_effect",
+            "scanner_runtime_effect",
+        )
+    ):
+        raise EvidenceVaultOperationalAssessmentShadowError(
+            "The diagnostic authority boundary is invalid."
+        )
+
+    count_names = (
+        "verification_pending_count",
+        "verification_verified_count",
+        "verification_disputed_count",
+        "verification_stale_count",
+        "verification_unverifiable_count",
+    )
+    counts = {name: row[name] for name in count_names}
+    if any(type(value) is not int or not 0 <= value <= 80 for value in counts.values()) or sum(
+        counts.values()
+    ) != 80:
+        raise EvidenceVaultOperationalAssessmentShadowError(
+            "The diagnostic verification counts are invalid."
+        )
+
+    score = row["sv9_score"]
+    base_average = row["base_average"]
+    capped = row["magnetism_capped"]
+    assessment_fingerprint = row["assessment_fingerprint"]
+    score_fingerprint = row["score_fingerprint"]
+    semantic_fingerprint = row["semantic_provenance_fingerprint"]
+    if status == "available":
+        if type(score) is not int or not 0 <= score <= 100:
+            raise EvidenceVaultOperationalAssessmentShadowError(
+                "The diagnostic score is invalid."
+            )
+        if isinstance(base_average, bool) or not isinstance(
+            base_average, (int, float, Decimal)
+        ):
+            raise EvidenceVaultOperationalAssessmentShadowError(
+                "The diagnostic base average is invalid."
+            )
+        normalized_average = float(base_average)
+        if not math.isfinite(normalized_average) or not 0 <= normalized_average <= 10:
+            raise EvidenceVaultOperationalAssessmentShadowError(
+                "The diagnostic base average is invalid."
+            )
+        if type(capped) is not bool or not all(
+            _is_sha256(value)
+            for value in (
+                assessment_fingerprint,
+                score_fingerprint,
+                semantic_fingerprint,
+            )
+        ):
+            raise EvidenceVaultOperationalAssessmentShadowError(
+                "The diagnostic score identity is invalid."
+            )
+    else:
+        if any(
+            value is not None
+            for value in (
+                score,
+                base_average,
+                capped,
+                assessment_fingerprint,
+                score_fingerprint,
+                semantic_fingerprint,
+            )
+        ):
+            raise EvidenceVaultOperationalAssessmentShadowError(
+                "The unavailable diagnostic contains score material."
+            )
+        normalized_average = None
+
+    created_at = row["created_at"]
+    if (
+        not isinstance(created_at, datetime)
+        or created_at.tzinfo is None
+        or created_at.utcoffset() is None
+    ):
+        raise EvidenceVaultOperationalAssessmentShadowError(
+            "The diagnostic timestamp is invalid."
+        )
+
+    return {
+        "schema_version": str(schema_version),
+        "evaluation_identity": str(evaluation_identity),
+        "operational_packet_fingerprint": str(packet_fingerprint),
+        "assessment_status": str(status),
+        "sv9_score": score,
+        "base_average": normalized_average,
+        "magnetism_capped": capped,
+        "assessment_fingerprint": assessment_fingerprint,
+        "score_fingerprint": score_fingerprint,
+        "semantic_provenance_fingerprint": semantic_fingerprint,
+        "verification_counts": {
+            "pending": counts["verification_pending_count"],
+            "verified": counts["verification_verified_count"],
+            "disputed": counts["verification_disputed_count"],
+            "stale": counts["verification_stale_count"],
+            "unverifiable": counts["verification_unverifiable_count"],
+        },
+        "authority": False,
+        "production_runtime_effect": False,
+        "scanner_runtime_effect": False,
+        "created_at": created_at.astimezone(timezone.utc).isoformat(),
+    }
 
 
 def _vault_operational_sv9_shadow_receipt(

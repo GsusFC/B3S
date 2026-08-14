@@ -254,6 +254,7 @@ def test_isolated_pr71_vault_config_is_exact_and_fail_closed():
     assert config["env"]["B3S_EXPECTED_RUNTIME_ROLE"] == "b3s_pr71_app_runtime"
     assert config["env"]["B3S_POSTGRES_REQUIRED"] == "true"
     assert config["env"]["BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED"] == "true"
+    assert config["env"]["B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED"] == "false"
     assert config["env"]["B3S_GOOGLE_OIDC_ENABLED"] == "true"
     assert "B3S_SITE_BASIC_AUTH_ENABLED" not in config["env"]
     assert "B3S_SITE_BASIC_AUTH_USERNAME" not in config["env"]
