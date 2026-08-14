@@ -172,12 +172,19 @@ password, or prints a DSN/driver error.
 Do not use `fly.toml`, `fly.vault.toml`, `b3s`, `b3s-vault`, their volumes, or
 their database branches in this workflow. The manual GitHub workflow is a
 **post-merge-only** deployment mechanism for the isolated `b3s-pr71-vault`
-target. Its current reviewed application baseline is PR #82 at head
-`5555934e63dd1a71c69016a4e3db3e80ba5f2edc` and merge commit
-`28472f35b9a45fdcaa6892de47842ba065c022ae`. Neither merging the reviewed
+target. Its current reviewed application baseline is PR #86 at head
+`fecc2ede8a15f98fe6f8682c55be77bf2db964dd` and merge commit
+`4557ed34a681c90546253a37a3b53c688a0c19d4`. Neither merging the reviewed
 PR, the presence of `workflow_dispatch`, the confirmation input, nor a
 successful attestation authorizes a merge or deployment. Merge approval and
-the deployment GO remain separate operator decisions.
+the deployment GO remain separate operator decisions. The currently authorized
+Phase 2 deployment scope is migration `028` plus the exact reviewed application
+image with `B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED=false`; it does not activate
+the diagnostic surface, scoring, ranking, canonical selection, Scanner, or
+production authority. Workflow `Process isolated PR71 SV9 shadow work` is
+manually paused before deployment because its exact-head check would otherwise
+reject schema head `027`. Reactivating that scheduler remains a separate
+authorization after head `028` and ACLs are proven live.
 
 Dispatch only from exact `refs/heads/main` through the GitHub environment
 `pr71-vault`. The input SHA must equal both the immutable dispatch SHA and the
@@ -185,9 +192,9 @@ live REST `main` ref. The environment has a custom deployment branch policy conf
 
 The `pr71-vault` environment currently contains zero deployment secrets.
 `B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN` were provisioned only for the
-previous authorized deployment and then removed. Deployment run `31732437748`
+previous authorized deployment and then removed. Deployment run `31767099481`
 completed every attestation, migration/ACL, deploy, and exact-commit liveness
-step successfully at `e36c695755c8b8bb681e9f0a9b34ee30547adfcd`. Both temporary deployment secrets were then removed.
+step successfully at `9151a381a56a2a58894bd8a5b377bbc608a86d39`. Both temporary deployment secrets were then removed.
 Any future deployment requires a new exact-SHA GO and fresh secret provisioning.
 The reviewed workflow source is trusted in this control-plane model.
 The self-blob comparison is defense in depth against a stale or mismatched
@@ -201,7 +208,7 @@ secrets. Any mismatch is a hard NO-GO. A compromised-maintainer threat model
 would require an immutable external deployment controller and is not claimed here.
 
 Before checkout, dependency installation, or deployment-secret use, pre-check
-code embedded in the reviewed repository workflow fetches PR #82 and requires `state=closed`, `merged=true`, and `draft=false`, base `main`, head `feat/sv9-shadow-post-adoption-current-packet`, repository ID
+code embedded in the reviewed repository workflow fetches PR #86 and requires `state=closed`, `merged=true`, and `draft=false`, base `main`, head `feat/sv9-shadow-diagnostics`, repository ID
 `1288696741` and name `GsusFC/B3S`, exact reviewed head, and exact `merge_commit_sha`.
 It proves reviewed-head-to-merge and merge-to-current-main ancestry from complete
 GitHub Compare responses. For the deployment-attestation follow-up, the latter
@@ -212,21 +219,21 @@ comparison must contain the exact three audited files listed above; those are th
 - `tests/test_deploy_provenance.py`
 
 Under that trusted-source model, any runtime, database, CI-workflow, config, or
-other source change after PR #82 is outside the attestation allowlist and fails
+other source change after PR #86 is outside the attestation allowlist and fails
 closed. This three-file control-plane follow-up records the reviewed, merged,
-green SV9 post-adoption shadow-writer baseline consumed by the defense-in-depth
+green protected SV9 shadow-diagnostics baseline consumed by the defense-in-depth
 attestation without changing runtime code or configuration. Deployment is still a
 separate operator decision and also requires the Google client and all temporary
 capabilities described below.
 
-The reauthorization baseline is PR #82: feature head `5555934e63dd1a71c69016a4e3db3e80ba5f2edc`, feature merge `28472f35b9a45fdcaa6892de47842ba065c022ae`, and CI runs `31749515573` and `31749771977`.
+The reauthorization baseline is PR #86: feature head `fecc2ede8a15f98fe6f8682c55be77bf2db964dd`, feature merge `4557ed34a681c90546253a37a3b53c688a0c19d4`, and CI runs `31835201991` and `31836021418`.
 
 The trusted CI identity is pinned to workflow ID `306885838`, path
 `.github/workflows/ci.yml`, and blob
 `c1082f6b5c53a364b8d38e43936b93722c0183d1`. The workflow must remain active;
 the reviewed head, merge, and deployment Contents responses must carry that
-exact blob. Exact successful CI runs `31749515573` (reviewed PR #82 head) and
-`31749771977` (PR #82 merge on `main`) are pinned. The current exact-main push run is fetched without filtering away non-successful runs; exactly one completed,
+exact blob. Exact successful CI runs `31835201991` (reviewed PR #86 head) and
+`31836021418` (PR #86 merge on `main`) are pinned. The current exact-main push run is fetched without filtering away non-successful runs; exactly one completed,
 successful, first-attempt run with the expected repository and SHA is accepted.
 The `pull_requests` array may be empty. Missing, pending, failed, foreign, stale,
 wrong-event, workflow-modified, truncated, or ambiguous objects fail closed.
@@ -316,13 +323,16 @@ runtime ACL, and deploying an image are separate authorization boundaries.
 
 ## Rollback and NO-GO
 
-Deployment of migration 028 and the diagnostic image remains **NO-GO** under the
-current PR71 attestation. A separate post-merge deployment reauthorization must
-pin the exact feature/merge/CI/workflow identities; it must not weaken the current
-allowlist. Only then may the exact current `main` SHA be migrated and deployed.
-The external migration-target assertion must pass before DDL, head `028` must
-verify exactly, the runtime-role contract must prove view-only `SELECT`, and the
-feature flag must remain `false` until a separately authorized activation.
+This exact three-file reauthorization replaces the former deployment NO-GO only
+for the reviewed PR #86 baseline. It becomes effective after it is merged, its
+exact current-main CI succeeds, the independently reviewed deployment-workflow
+blob is pinned in the protected environment, that environment is reconfirmed to
+contain zero deployment secrets, and the operator records an exact-SHA deployment
+GO. The allowlist must not be weakened. The authorized deployment may then apply
+migration 028, configure the runtime's view-only `SELECT`, and deploy that exact
+image with the feature flag still `false`. The external migration-target assertion
+must pass before DDL and head `028` must verify exactly. Flag activation and
+scheduler reactivation remain separately unauthorized.
 `b3s` and `b3s-vault` must remain on their SELECT-only release verifiers and may
 not be used as fallback migration targets.
 

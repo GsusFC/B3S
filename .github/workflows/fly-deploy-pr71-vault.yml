@@ -43,13 +43,13 @@ jobs:
           DISPATCH_SHA: ${{ github.sha }}
           GH_REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
-          TRUSTED_PR_HEAD_SHA: 5555934e63dd1a71c69016a4e3db3e80ba5f2edc
-          TRUSTED_PR_MERGE_SHA: 28472f35b9a45fdcaa6892de47842ba065c022ae
+          TRUSTED_PR_HEAD_SHA: fecc2ede8a15f98fe6f8682c55be77bf2db964dd
+          TRUSTED_PR_MERGE_SHA: 4557ed34a681c90546253a37a3b53c688a0c19d4
           TRUSTED_CI_BLOB_SHA: c1082f6b5c53a364b8d38e43936b93722c0183d1
           TRUSTED_REPOSITORY_ID: "1288696741"
           TRUSTED_CI_WORKFLOW_ID: "306885838"
-          TRUSTED_PR_CI_RUN_ID: "31749515573"
-          TRUSTED_MERGE_CI_RUN_ID: "31749771977"
+          TRUSTED_PR_CI_RUN_ID: "31835201991"
+          TRUSTED_MERGE_CI_RUN_ID: "31836021418"
           # Provisioned outside the repository in the protected pr71-vault environment.
           # This value is deliberately not self-pinned in the workflow source.
           EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA: ${{ vars.PR71_DEPLOY_WORKFLOW_BLOB_SHA }}
@@ -83,7 +83,7 @@ jobs:
           deployment_ci_runs_file="$attestation_dir/deployment-ci-runs.json"
           deploy_workflow_blob_file="$attestation_dir/deploy-workflow-blob.json"
 
-          api_get "$pr_file" "$API_URL/repos/$GH_REPOSITORY/pulls/82"
+          api_get "$pr_file" "$API_URL/repos/$GH_REPOSITORY/pulls/86"
           api_get "$main_ref_file" "$API_URL/repos/$GH_REPOSITORY/git/ref/heads/main"
           api_get "$workflow_file" "$API_URL/repos/$GH_REPOSITORY/actions/workflows/ci.yml"
           api_get "$head_ci_file" "$API_URL/repos/$GH_REPOSITORY/contents/.github/workflows/ci.yml?ref=$TRUSTED_PR_HEAD_SHA"
@@ -163,7 +163,7 @@ jobs:
           require(deploy_sha == dispatch_sha, "deployment_sha is not the dispatched main SHA")
 
           pr = load_object("PR_FILE")
-          exact_int(pr.get("number"), 82, "unexpected pull request object")
+          exact_int(pr.get("number"), 86, "unexpected pull request object")
           require(pr.get("state") == "closed", "reviewed PR must be closed")
           require(pr.get("merged") is True, "reviewed PR must be merged")
           require(pr.get("draft") is False, "reviewed PR must not be a draft")
@@ -172,7 +172,7 @@ jobs:
           require(isinstance(base, dict), "reviewed PR base must be present")
           require(isinstance(head, dict), "reviewed PR head must be present")
           require(base.get("ref") == "main", "reviewed PR base ref must be main")
-          require(head.get("ref") == "feat/sv9-shadow-post-adoption-current-packet", "reviewed PR head ref is not exact")
+          require(head.get("ref") == "feat/sv9-shadow-diagnostics", "reviewed PR head ref is not exact")
           require(head.get("sha") == trusted_head, "reviewed PR head SHA is not exact")
           require(pr.get("merge_commit_sha") == trusted_merge, "reviewed PR merge commit SHA is not exact")
           for label, side in (("base", base), ("head", head)):
@@ -195,7 +195,7 @@ jobs:
 
           for label, env_name in (
               ("reviewed head", "HEAD_CI_FILE"),
-              ("PR82 merge", "MERGE_CI_FILE"),
+              ("PR86 merge", "MERGE_CI_FILE"),
               ("deployment", "DEPLOY_CI_FILE"),
           ):
               blob = load_object(env_name)
@@ -268,17 +268,17 @@ jobs:
           }
           attest_run(
               load_object("PR_CI_RUN_FILE"),
-              {"label": "reviewed PR82", "fields": {
+              {"label": "reviewed PR86", "fields": {
                   **common,
                   "id": trusted_pr_run_id,
                   "event": "pull_request",
-                  "head_branch": "feat/sv9-shadow-post-adoption-current-packet",
+                  "head_branch": "feat/sv9-shadow-diagnostics",
                   "head_sha": trusted_head,
               }},
           )
           attest_run(
               load_object("MERGE_CI_RUN_FILE"),
-              {"label": "PR82 merge", "fields": {
+              {"label": "PR86 merge", "fields": {
                   **common,
                   "id": trusted_merge_run_id,
                   "event": "push",

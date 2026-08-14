@@ -23,13 +23,13 @@ ISOLATED_RELEASE_COMMAND = (
     "python scripts/verify_b3s_history_postgres.py && "
     "python scripts/verify_pr71_vault_target.py'"
 )
-TRUSTED_PR_HEAD_SHA = "5555934e63dd1a71c69016a4e3db3e80ba5f2edc"
-TRUSTED_PR_MERGE_SHA = "28472f35b9a45fdcaa6892de47842ba065c022ae"
+TRUSTED_PR_HEAD_SHA = "fecc2ede8a15f98fe6f8682c55be77bf2db964dd"
+TRUSTED_PR_MERGE_SHA = "4557ed34a681c90546253a37a3b53c688a0c19d4"
 TRUSTED_CI_BLOB_SHA = "c1082f6b5c53a364b8d38e43936b93722c0183d1"
 TRUSTED_REPOSITORY_ID = 1288696741
 TRUSTED_CI_WORKFLOW_ID = 306885838
-TRUSTED_PR_CI_RUN_ID = 31749515573
-TRUSTED_MERGE_CI_RUN_ID = 31749771977
+TRUSTED_PR_CI_RUN_ID = 31835201991
+TRUSTED_MERGE_CI_RUN_ID = 31836021418
 EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA = "d" * 40
 FIXTURE_DEPLOY_SHA = "a" * 40
 HOTFIX_FILES = {
@@ -69,7 +69,7 @@ def _attestation_fixture() -> dict[str, dict]:
     }
     fixture = {
         "PR_FILE": {
-            "number": 82,
+            "number": 86,
             "state": "closed",
             "merged": True,
             "draft": False,
@@ -80,7 +80,7 @@ def _attestation_fixture() -> dict[str, dict]:
                 "repo": repository,
             },
             "head": {
-                "ref": "feat/sv9-shadow-post-adoption-current-packet",
+                "ref": "feat/sv9-shadow-diagnostics",
                 "sha": TRUSTED_PR_HEAD_SHA,
                 "repo": repository,
             },
@@ -129,7 +129,7 @@ def _attestation_fixture() -> dict[str, dict]:
             **common_run,
             "id": TRUSTED_PR_CI_RUN_ID,
             "event": "pull_request",
-            "head_branch": "feat/sv9-shadow-post-adoption-current-packet",
+            "head_branch": "feat/sv9-shadow-diagnostics",
             "head_sha": TRUSTED_PR_HEAD_SHA,
         },
         "MERGE_CI_RUN_FILE": {
@@ -300,7 +300,7 @@ def test_isolated_pr71_vault_workflow_is_manual_post_merge_only():
     assert 'r"[0-9a-f]{40}"' in workflow
     assert 'DISPATCH_REF: ${{ github.ref }}' in workflow
     assert 'os.environ["DISPATCH_REF"] == "refs/heads/main"' in workflow
-    assert '"$API_URL/repos/$GH_REPOSITORY/pulls/82"' in workflow
+    assert '"$API_URL/repos/$GH_REPOSITORY/pulls/86"' in workflow
     assert "persist-credentials: false" in workflow
     assert "EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA: ${{ vars.PR71_DEPLOY_WORKFLOW_BLOB_SHA }}" in workflow
     assert "deploy_workflow_blob_file" in workflow
@@ -313,12 +313,12 @@ def test_isolated_deploy_attests_exact_pr71_and_current_main_ancestry():
     required_contract = (
         'DISPATCH_SHA: ${{ github.sha }}',
         'deploy_sha == dispatch_sha',
-        'pr.get("number"), 82',
+        'pr.get("number"), 86',
         'pr.get("state") == "closed"',
         'pr.get("merged") is True',
         'pr.get("draft") is False',
         'base.get("ref") == "main"',
-        'head.get("ref") == "feat/sv9-shadow-post-adoption-current-packet"',
+        'head.get("ref") == "feat/sv9-shadow-diagnostics"',
         'head.get("sha") == trusted_head',
         'pr.get("merge_commit_sha") == trusted_merge',
         'repo.get("id"), trusted_repository_id',
@@ -563,11 +563,20 @@ def test_pr71_runbook_marks_workflow_post_merge_and_separately_authorized():
     assert "custom deployment branch policy configured to allow only `main`" in runbook
     assert "currently contains zero deployment secrets" in runbook
     assert "`B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN` were provisioned only" in runbook
-    assert "Deployment run `31732437748`" in runbook
+    assert "Deployment run `31767099481`" in runbook
     assert "completed every attestation, migration/ACL" in runbook
-    assert "`e36c695755c8b8bb681e9f0a9b34ee30547adfcd`" in runbook
+    assert "`9151a381a56a2a58894bd8a5b377bbc608a86d39`" in runbook
     assert "Both temporary deployment secrets were then removed" in runbook
     assert "Any future deployment requires a new exact-SHA GO" in runbook
+    assert "migration `028` plus the exact reviewed application" in runbook
+    assert "`B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED=false`" in runbook
+    assert "manually paused before deployment" in runbook
+    assert "Reactivating that scheduler remains a separate" in runbook
+    assert "replaces the former deployment NO-GO only" in runbook
+    assert "records an exact-SHA deployment" in runbook
+    assert "scheduler reactivation remain separately unauthorized" in runbook
+    assert "remains **NO-GO** under the" not in runbook
+    assert "A separate post-merge deployment reauthorization must" not in runbook
     assert "self-blob comparison is defense in depth" in runbook
     assert "mutable repository source an immutable root of trust" in runbook
     assert "Before provisioning either" in runbook
