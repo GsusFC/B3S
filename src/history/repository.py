@@ -221,6 +221,7 @@ _SCHEMA = "b3s_history"
 _CONNECT_TIMEOUT_SECONDS = 5
 _LOG = logging.getLogger(__name__)
 _SCHEMA_POLICIES = frozenset({"migrate", "verify_head"})
+EVIDENCE_VAULT_OPERATIONAL_SV9_SHADOW_WORK_ITEM_MAX_LIMIT = 100
 
 
 class SchemaHeadMismatchError(RuntimeError):
@@ -5737,6 +5738,140 @@ class PostgresHistoryRepository:
             )
         return _vault_operational_packet_record(row)
 
+    def discover_evidence_vault_operational_sv9_shadow_work_items(
+        self,
+        *,
+        limit: int = 1,
+        workspace_slug: str = "b3s",
+    ) -> list[dict[str, str | None]]:
+        """Return bounded identities for unassessed direct current producers.
+
+        Discovery is advisory.  It exposes only the three values needed to call
+        the append capability; append independently repeats all authority and
+        packet checks under the operational promotion lock.
+        """
+
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= EVIDENCE_VAULT_OPERATIONAL_SV9_SHADOW_WORK_ITEM_MAX_LIMIT
+        ):
+            raise EvidenceVaultOperationalAssessmentShadowError(
+                "The work-item discovery limit is invalid."
+            )
+        if (
+            not isinstance(workspace_slug, str)
+            or not workspace_slug
+            or workspace_slug != workspace_slug.strip()
+        ):
+            raise EvidenceVaultOperationalAssessmentShadowError(
+                "The workspace identity is invalid."
+            )
+
+        with self._connect() as conn:
+            _verify_exact_migration_head_under_shared_lock(conn)
+            rows = conn.execute(
+                f"""
+                SELECT brands.id AS brand_id,
+                       brands.canonical_domain,
+                       latest.candidate_packet_fingerprint,
+                       latest.parent_canonical_memory_version,
+                       latest.id AS adoption_event_id
+                FROM {_SCHEMA}.brands AS brands
+                JOIN {_SCHEMA}.workspaces AS workspaces
+                  ON workspaces.id = brands.workspace_id
+                JOIN LATERAL (
+                    SELECT events.id,
+                           events.candidate_packet_fingerprint,
+                           events.parent_canonical_memory_version,
+                           events.sequence
+                    FROM {_SCHEMA}.evidence_vault_canonical_memory_promotion_events
+                         AS events
+                    WHERE events.brand_id = brands.id
+                      AND events.adoption_kind = 'operational_v2'
+                    ORDER BY events.sequence DESC
+                    LIMIT 1
+                ) AS latest ON true
+                WHERE workspaces.slug = %s
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM {_SCHEMA}.evidence_vault_operational_sv9_shadow_assessments
+                           AS assessments
+                      WHERE assessments.brand_id = brands.id
+                        AND assessments.operational_packet_fingerprint =
+                            latest.candidate_packet_fingerprint
+                        AND assessments.expected_parent_canonical_memory_version
+                            IS NOT DISTINCT FROM
+                            latest.parent_canonical_memory_version
+                  )
+                ORDER BY brands.canonical_domain, brands.id
+                LIMIT %s
+                """,
+                (workspace_slug, limit),
+            ).fetchall()
+
+            work_items: list[dict[str, str | None]] = []
+            for row in rows:
+                authority_chain = _project_vault_operational_memory_authority_chain(
+                    conn,
+                    row["brand_id"],
+                )
+                if not authority_chain:
+                    raise EvidenceVaultOperationalAssessmentShadowError(
+                        "The operational authority chain is unavailable."
+                    )
+                current_memory, latest_adoption = authority_chain[-1]
+                fingerprint = str(row["candidate_packet_fingerprint"])
+                expected_parent = (
+                    str(row["parent_canonical_memory_version"])
+                    if row["parent_canonical_memory_version"] is not None
+                    else None
+                )
+                if (
+                    latest_adoption["event_id"] != str(row["adoption_event_id"])
+                    or latest_adoption["candidate_packet_fingerprint"] != fingerprint
+                    or latest_adoption["parent_canonical_memory_version"]
+                    != expected_parent
+                ):
+                    raise EvidenceVaultOperationalAssessmentShadowError(
+                        "The latest operational adoption changed during discovery."
+                    )
+                packet_rows = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                    WHERE brand_id = %s
+                      AND packet_fingerprint = %s
+                      AND packet_kind = 'operational_v2'
+                    """,
+                    (row["brand_id"], fingerprint),
+                ).fetchall()
+                if len(packet_rows) != 1:
+                    raise EvidenceVaultOperationalAssessmentShadowError(
+                        "The direct producer packet is unavailable."
+                    )
+                operational_packet = _vault_operational_packet_record(packet_rows[0])[
+                    "packet"
+                ]
+                if not _vault_operational_sv9_shadow_parent_is_admissible(
+                    operational_packet=operational_packet,
+                    operational_packet_fingerprint=fingerprint,
+                    expected_parent_canonical_memory_version=expected_parent,
+                    current_memory=current_memory,
+                    latest_adoption_event=latest_adoption,
+                ):
+                    raise EvidenceVaultOperationalAssessmentShadowError(
+                        "The latest operational packet did not directly produce current."
+                    )
+                work_items.append(
+                    {
+                        "domain": str(row["canonical_domain"]),
+                        "operational_packet_fingerprint": fingerprint,
+                        "expected_parent_canonical_memory_version": expected_parent,
+                    }
+                )
+            return work_items
+
     def append_evidence_vault_operational_sv9_shadow_assessment(
         self,
         domain_or_url: str,
@@ -5776,25 +5911,7 @@ class PostgresHistoryRepository:
             )
 
         with self._connect() as conn:
-            try:
-                conn.execute(
-                    "SELECT pg_advisory_xact_lock_shared(%s)",
-                    (_advisory_lock_key(_SCHEMA, "schema-migrations-v1"),),
-                )
-                rows = conn.execute(
-                    f"""
-                    SELECT version, filename, checksum
-                    FROM {_SCHEMA}.schema_migrations
-                    ORDER BY version
-                    """
-                ).fetchall()
-                _require_exact_migration_manifest(_migration_manifest(), rows)
-            except SchemaHeadMismatchError:
-                raise
-            except Exception:
-                raise SchemaHeadMismatchError(
-                    "history schema migration manifest is unavailable"
-                ) from None
+            _verify_exact_migration_head_under_shared_lock(conn)
             brand = conn.execute(
                 f"""
                 SELECT brands.id
@@ -10197,6 +10314,30 @@ def _require_exact_migration_manifest(
             "history schema is not at the packaged migration head: "
             + "; ".join(problems)
         )
+
+
+def _verify_exact_migration_head_under_shared_lock(conn: Any) -> None:
+    """Fence release DDL and verify the exact packaged schema in one transaction."""
+
+    try:
+        conn.execute(
+            "SELECT pg_advisory_xact_lock_shared(%s)",
+            (_advisory_lock_key(_SCHEMA, "schema-migrations-v1"),),
+        )
+        rows = conn.execute(
+            f"""
+            SELECT version, filename, checksum
+            FROM {_SCHEMA}.schema_migrations
+            ORDER BY version
+            """
+        ).fetchall()
+        _require_exact_migration_manifest(_migration_manifest(), rows)
+    except SchemaHeadMismatchError:
+        raise
+    except Exception:
+        raise SchemaHeadMismatchError(
+            "history schema migration manifest is unavailable"
+        ) from None
 
 
 def _stable_uuid(*parts: Any) -> UUID:
