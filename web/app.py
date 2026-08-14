@@ -42,6 +42,8 @@ from web.report_store import (
     list_reports_for_domain,
     load_report,
     verify_postgres_runtime_ready,
+    vault_sv9_shadow_diagnostics_enabled,
+    vault_sv9_shadow_diagnostics_for_domain,
 )
 from web.report_view_model import build_report_view_model
 from web.scan_runner import approve_degraded_scan, cancel_scan, recover_interrupted_scans, scan_status, start_scan
@@ -1686,6 +1688,40 @@ def brand_view(request: Request, domain: str, lang: str = "es"):
         {"brand": _brand_profile(domain), "lang": lang},
     )
     response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@app.get("/vault/diagnostics/sv9/{domain}")
+def vault_sv9_shadow_diagnostics_view(
+    request: Request,
+    domain: str,
+    limit: int = 10,
+):
+    if not vault_sv9_shadow_diagnostics_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    if getattr(request.state, "google_site_user", None) is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    if type(limit) is not int or not 1 <= limit <= 20:
+        raise HTTPException(status_code=422, detail="Invalid diagnostic limit")
+    normalized = domain_key(domain)
+    if not normalized:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    diagnostics = vault_sv9_shadow_diagnostics_for_domain(
+        normalized,
+        limit=limit,
+    )
+    status_code = 200 if diagnostics.get("available") is True else 503
+    response = templates.TemplateResponse(
+        request,
+        "vault_sv9_shadow_diagnostics.html.j2",
+        {
+            "domain": normalized,
+            "diagnostics": diagnostics,
+        },
+        status_code=status_code,
+    )
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = "Cookie"
     return response
 
 

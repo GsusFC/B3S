@@ -17,7 +17,7 @@ not authorize either existing app, a production migration, or any later deployme
 - Public hostname: `b3s-pr71-vault.fly.dev`
 
 The release command runs `verify_release_build.py`, the SELECT-only exact schema
-head-027 verifier, and `verify_pr71_vault_target.py`. The final verifier checks
+head-028 verifier, and `verify_pr71_vault_target.py`. The final verifier checks
 the Fly app, base URL, authenticated TLS session, exact host/database/runtime
 role/project/branch identity, the operational-pipeline capability, and access
 gate. A mismatch aborts before an app Machine is updated. The
@@ -70,9 +70,11 @@ migration versions, filenames, and checksums. The isolated release verifier
 also requires `current_user = b3s_pr71_app_runtime`; an owner or migration
 credential on the same branch is rejected before the Machine update.
 
-Migrations 025–027 add the non-authoritative SV9 shadow assessment ledger,
-structural hardening, and the identity-only append writer; migration head remains
-027. The writer is append-only, and the single-item administrative runner is
+Migrations 025–028 add the non-authoritative SV9 shadow assessment ledger,
+structural hardening, the identity-only append writer, and one sanitized scalar-only
+diagnostic view; the packaged migration head is 028. The raw ledger remains denied
+to the web runtime. Only the exact PR71 runtime login receives `SELECT` on the view
+when the separately controlled runtime-role configurator runs. The writer is append-only, and the single-item administrative runner is
 dry-run by default (`--append` is the only persistent runner mode). Its expected
 parent is the immutable packet parent. Under the adoption lock, a packet whose
 parent is still current remains admissible by the original CAS contract; after
@@ -88,8 +90,8 @@ and plan, while retaining current source-run/status/error/requested/started and
 non-lifecycle metadata so contamination still fails closed.
 
 `run_evidence_vault_operational_sv9_shadow_work_items.py` is a one-shot external
-administrative control-plane command, not an in-app worker or an activated
-scheduler. It discovers only an unassessed latest adoption whose exact packet
+administrative control-plane command, not an in-app worker. The separately reviewed
+hourly scheduler invokes it through GitHub Actions. It discovers only an unassessed latest adoption whose exact packet
 directly produced current memory; discovery returns only domain, packet
 fingerprint, and immutable parent. The append method repeats all checks under the
 promotion lock, so a discovery/adoption race fails closed. The command reads only
@@ -292,19 +294,39 @@ review/adoption, governance bindings, and the private probe apply only when an
 operator wants the optional verified-raw diagnostic result. They do not enable
 or deny C7 and are never a deployment or publication gate.
 
+
+## SV9 shadow diagnostic read (default off)
+
+`B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED` is pinned to `false`. Even if set to
+`true`, the gate also requires `BRAND3_ENVIRONMENT=vault`. Migration 028 exposes
+only `evidence_vault_operational_sv9_shadow_diagnostics_v1`: scalar score
+observations, immutable hashes, five verification-state counts, timestamps, and
+the persisted false authority/effect flags. It omits the 80-tile vector, raw
+assessment/verification JSON, evidence, packet/source IDs, reviewer material, and
+assessment UUIDs. The raw table receives no runtime `SELECT` grant.
+
+The hidden `/api/v1/brands/{domain}/vault-sv9-shadow-diagnostics` route requires
+the dedicated evidence-reviewer bearer, not the scanner bearer. The separate
+`/vault/diagnostics/sv9/{domain}` page additionally requires an actual Google site
+session and is not linked from product/report/ranking pages. Both are bounded to
+20 rows, use no-store caching, and remain diagnostic-only: they cannot select a
+canonical score, change public scoring or ranking, write the ledger, or grant
+runtime authority. Enabling the flag, applying migration 028, reconfiguring the
+runtime ACL, and deploying an image are separate authorization boundaries.
+
 ## Rollback and NO-GO
 
-Deployment remains **NO-GO** until this three-file control-plane follow-up is
-reviewed, green, and merged, producing the exact deploy SHA. After that
-reauthorization, the requested SHA must equal dispatched and live `main`, all
-new OIDC app secrets must validate, the separate deployment GO and temporary
-deployment-secret provisioning must be complete, the external migration target
-assertion must pass before DDL, head `027` must verify exactly, and the idempotent
-runtime-role contract must pass.
+Deployment of migration 028 and the diagnostic image remains **NO-GO** under the
+current PR71 attestation. A separate post-merge deployment reauthorization must
+pin the exact feature/merge/CI/workflow identities; it must not weaken the current
+allowlist. Only then may the exact current `main` SHA be migrated and deployed.
+The external migration-target assertion must pass before DDL, head `028` must
+verify exactly, the runtime-role contract must prove view-only `SELECT`, and the
+feature flag must remain `false` until a separately authorized activation.
 `b3s` and `b3s-vault` must remain on their SELECT-only release verifiers and may
 not be used as fallback migration targets.
 
-No older application image is assumed compatible with schema head `027`, and
+No older application image is assumed compatible with schema head `028`, and
 this runbook pre-authorizes no image rollback. Engage the access and scan holds first,
 stop new scans, and drain the single active scan. Prefer a reviewed forward fix;
 any coordinated image-plus-Neon-restore plan requires separate authorization and

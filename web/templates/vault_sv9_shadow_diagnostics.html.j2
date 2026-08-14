@@ -1,0 +1,77 @@
+{% extends "base.html.j2" %}
+{% block title %}Diagnóstico SV9 shadow — {{ domain }}{% endblock %}
+{% block content %}
+<p><a href="/">← Volver</a></p>
+
+<section class="brand-profile-hero">
+  <div class="brand-profile-headline">
+    <span class="label">sv9_shadow_diagnostics</span>
+    <h1 class="brand-profile-title text-balance">{{ domain }}</h1>
+    <p class="prose text-pretty">
+      Lectura diagnóstica protegida del ledger shadow. No es autoritativa y no
+      modifica el score público, el ranking ni la selección canónica.
+    </p>
+  </div>
+</section>
+
+<section class="brand-profile-block">
+  <div class="section-head">
+    <span class="label">observaciones</span>
+    <span class="tag">// shadow · solo lectura · authority=false</span>
+  </div>
+  {% if diagnostics.available %}
+    {% if diagnostics["items"] %}
+    <div class="overflow panel vault-memory-table-wrap">
+      <table class="vault-memory-table">
+        <thead>
+          <tr>
+            <th>fecha</th>
+            <th>estado</th>
+            <th>score shadow</th>
+            <th>base</th>
+            <th>verificación</th>
+            <th>identidad</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for item in diagnostics["items"] %}
+          <tr>
+            <td class="mono">{{ item.created_at[:19] }}</td>
+            <td><span class="chip {{ 'ok' if item.assessment_status == 'available' else 'warn' }}">{{ item.assessment_status }}</span></td>
+            <td class="mono">{{ item.sv9_score if item.sv9_score is not none else '—' }}</td>
+            <td class="mono">{{ item.base_average if item.base_average is not none else '—' }}</td>
+            <td class="mono muted">
+              p {{ item.verification_counts.pending }} ·
+              v {{ item.verification_counts.verified }} ·
+              d {{ item.verification_counts.disputed }} ·
+              s {{ item.verification_counts.stale }} ·
+              u {{ item.verification_counts.unverifiable }}
+            </td>
+            <td class="mono muted">{{ item.evaluation_identity[:12] }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="panel vault-memory-empty">
+      <p class="text-pretty">Todavía no hay observaciones shadow para este dominio.</p>
+      <a href="/">Volver al índice</a>
+    </div>
+    {% endif %}
+    <p class="mono muted">
+      {{ diagnostics.count }} mostradas · límite {{ diagnostics.limit }}{% if diagnostics.has_more %} · hay más{% endif %}
+    </p>
+  {% else %}
+    <div class="panel vault-memory-empty">
+      <p class="text-pretty">El diagnóstico protegido no está disponible temporalmente.</p>
+      <a href="/">Volver al índice</a>
+    </div>
+  {% endif %}
+  <p class="mono muted">
+    diagnostic_only=true · authority=false · production_runtime_effect=false ·
+    scanner_runtime_effect=false · canonical_selection_effect=false ·
+    public_scoring_effect=false · ranking_effect=false
+  </p>
+</section>
+{% endblock %}

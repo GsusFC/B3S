@@ -18,6 +18,8 @@ kill_timeout = "30s"
   BRAND3_ENVIRONMENT = "vault"
   # Explicit capability for the isolated, manually attested PR71 deployment.
   BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED = "true"
+  # Deployment and activation require a separate reviewed authorization.
+  B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED = "false"
   BRAND3_SCREENSHOT_DIR = "/data/screenshots"
   B3S_REPORTS_DIR = "/data/reports"
   B3S_SCORING_DB_PATH = "/data/b3s_scoring.sqlite3"

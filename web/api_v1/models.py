@@ -702,6 +702,71 @@ class EvidenceScoringRecoveryReviewJournalResponse(StrictModel):
     pagination: Pagination
 
 
+class VaultSv9ShadowStrictModel(StrictModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class VaultSv9ShadowVerificationCounts(VaultSv9ShadowStrictModel):
+    pending: int = Field(ge=0, le=80)
+    verified: int = Field(ge=0, le=80)
+    disputed: int = Field(ge=0, le=80)
+    stale: int = Field(ge=0, le=80)
+    unverifiable: int = Field(ge=0, le=80)
+
+
+class VaultSv9ShadowDiagnosticItem(VaultSv9ShadowStrictModel):
+    schema_version: Literal[
+        "evidence-vault-operational-semantic-assessment-shadow-v1"
+    ]
+    evaluation_identity: str = Field(pattern=r"^[0-9a-f]{64}$")
+    operational_packet_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    assessment_status: Literal[
+        "available",
+        "stale_candidate_parent",
+        "contradiction_requires_semantic_reassessment",
+    ]
+    sv9_score: int | None = Field(default=None, ge=0, le=100)
+    base_average: float | None = Field(default=None, ge=0, le=10)
+    magnetism_capped: bool | None = None
+    assessment_fingerprint: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    score_fingerprint: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    semantic_provenance_fingerprint: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    verification_counts: VaultSv9ShadowVerificationCounts
+    authority: Literal[False] = False
+    production_runtime_effect: Literal[False] = False
+    scanner_runtime_effect: Literal[False] = False
+    created_at: str
+
+
+class VaultSv9ShadowDiagnosticsPagination(VaultSv9ShadowStrictModel):
+    limit: int = Field(ge=1, le=20)
+    count: int = Field(ge=0, le=20)
+    has_more: bool
+
+
+class VaultSv9ShadowDiagnosticsResponse(VaultSv9ShadowStrictModel):
+    object: Literal["vault_sv9_shadow_diagnostics"] = (
+        "vault_sv9_shadow_diagnostics"
+    )
+    api_version: Literal["v1"] = "v1"
+    domain: str
+    diagnostic_only: Literal[True] = True
+    authority: Literal[False] = False
+    production_runtime_effect: Literal[False] = False
+    scanner_runtime_effect: Literal[False] = False
+    canonical_selection_effect: Literal[False] = False
+    public_scoring_effect: Literal[False] = False
+    ranking_effect: Literal[False] = False
+    items: list[VaultSv9ShadowDiagnosticItem] = Field(max_length=20)
+    pagination: VaultSv9ShadowDiagnosticsPagination
+
+
 class ApiCapabilitiesResponse(StrictModel):
     object: Literal["api_capabilities"] = "api_capabilities"
     api_version: Literal["v1"] = "v1"

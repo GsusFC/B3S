@@ -20,6 +20,8 @@ from web.report_store import (
     evidence_memory_identity_v2_for_domain,
     evidence_scoring_memory_preview_for_domain,
     list_reports_for_domain,
+    vault_sv9_shadow_diagnostics_enabled,
+    vault_sv9_shadow_diagnostics_for_domain,
 )
 from web.scan_runner import approve_degraded_scan, cancel_scan
 
@@ -52,6 +54,7 @@ from .models import (
     ScanEvidenceResponse,
     ScanResultResponse,
     ScanStatusResponse,
+    VaultSv9ShadowDiagnosticsResponse,
 )
 from .presenters import evidence_payload, report_etag, result_payload, status_payload
 from .service import (
@@ -630,6 +633,55 @@ def list_brand_evidence_claim_tile_reviews(
             "has_more": (
                 journal["offset"] + len(events) < journal["total"]
             ),
+        },
+    }
+
+
+@router.get(
+    "/brands/{domain}/vault-sv9-shadow-diagnostics",
+    response_model=VaultSv9ShadowDiagnosticsResponse,
+    include_in_schema=False,
+    responses=_ERRORS,
+)
+def brand_vault_sv9_shadow_diagnostics(
+    domain: str,
+    response: Response,
+    _principal: AdjudicationPrincipal,
+    limit: Annotated[int, Query(ge=1, le=20)] = 10,
+) -> dict[str, Any]:
+    if not vault_sv9_shadow_diagnostics_enabled():
+        raise ApiError(404, "not_found", "Resource not found.")
+    normalized = domain_key(domain)
+    if not normalized:
+        raise ApiError(400, "invalid_domain", "A valid brand domain is required.")
+    diagnostics = vault_sv9_shadow_diagnostics_for_domain(
+        normalized,
+        limit=limit,
+    )
+    if diagnostics.get("available") is not True:
+        raise ApiError(
+            503,
+            "diagnostics_unavailable",
+            "SV9 shadow diagnostics are temporarily unavailable.",
+        )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Vary"] = "Authorization"
+    return {
+        "object": "vault_sv9_shadow_diagnostics",
+        "api_version": "v1",
+        "domain": normalized,
+        "diagnostic_only": True,
+        "authority": False,
+        "production_runtime_effect": False,
+        "scanner_runtime_effect": False,
+        "canonical_selection_effect": False,
+        "public_scoring_effect": False,
+        "ranking_effect": False,
+        "items": diagnostics["items"],
+        "pagination": {
+            "limit": diagnostics["limit"],
+            "count": diagnostics["count"],
+            "has_more": diagnostics["has_more"],
         },
     }
 

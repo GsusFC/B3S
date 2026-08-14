@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 _API_PREFIX = "/api/v1"
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,100}$")
 _MAX_VALIDATION_ERRORS = 20
+_VAULT_SV9_SHADOW_DIAGNOSTIC_SUFFIX = "/vault-sv9-shadow-diagnostics"
 _LOG = logging.getLogger(__name__)
 
 
@@ -112,4 +113,7 @@ def install_api_error_handlers(app: FastAPI) -> None:
             )
         response.headers.setdefault("X-Request-ID", correlation_id)
         response.headers.setdefault("X-B3S-API-Version", "v1")
+        if request.url.path.endswith(_VAULT_SV9_SHADOW_DIAGNOSTIC_SUFFIX):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Vary"] = "Authorization"
         return response

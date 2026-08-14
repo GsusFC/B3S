@@ -19,6 +19,9 @@ _HARDENING_MIGRATION = Path(
 _WRITER_MIGRATION = Path(
     "src/history/migrations/027_evidence_vault_operational_sv9_shadow_writer.sql"
 )
+_DIAGNOSTIC_MIGRATION = Path(
+    "src/history/migrations/028_evidence_vault_operational_sv9_shadow_diagnostics.sql"
+)
 
 
 def _sql() -> str:
@@ -29,12 +32,13 @@ def _hardening_sql() -> str:
     return _HARDENING_MIGRATION.read_text(encoding="utf-8")
 
 
-def test_sv9_shadow_ledger_is_the_forward_only_migration_head() -> None:
+def test_sv9_shadow_writer_precedes_the_diagnostic_only_head() -> None:
     from src.history.repository import _migration_files
 
     filenames = [filename for filename, _sql_text in _migration_files()]
 
-    assert filenames[-1] == _WRITER_MIGRATION.name
+    assert filenames[-2] == _WRITER_MIGRATION.name
+    assert filenames[-1] == _DIAGNOSTIC_MIGRATION.name
     assert filenames.count(_MIGRATION.name) == 1
     assert filenames.count(_HARDENING_MIGRATION.name) == 1
     assert filenames.count(_WRITER_MIGRATION.name) == 1
@@ -189,7 +193,8 @@ def test_postgres_sv9_shadow_hardening_revokes_public_execute_and_rejects_bad_ou
                 conn.execute(f"DROP ROLE {role}")
     try:
         applied = PostgresHistoryRepository(dsn).migrate()
-        assert applied[-1] == _WRITER_MIGRATION.name
+        assert _WRITER_MIGRATION.name in applied
+        assert applied[-1] == _DIAGNOSTIC_MIGRATION.name
         rows = [
             {
                 "component_key": component_key,
