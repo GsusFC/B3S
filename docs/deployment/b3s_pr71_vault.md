@@ -70,7 +70,35 @@ migration versions, filenames, and checksums. The isolated release verifier
 also requires `current_user = b3s_pr71_app_runtime`; an owner or migration
 credential on the same branch is rejected before the Machine update.
 
-Migrations 025–027 add the non-authoritative SV9 shadow assessment ledger, structural hardening, and the identity-only append writer; migration head remains 027. The writer is append-only, and the administrative runner is dry-run by default (`--append` is the only persistent runner mode). Its expected parent is the immutable packet parent. Under the adoption lock, a packet whose parent is still current remains admissible by the original CAS contract; after current advances, only the exact packet adopted by the latest event that directly produced current remains admissible. At that post-adoption boundary, a sibling sharing parent/source and any earlier producer fail closed. This does not alter public scoring, ranking, API/UI, or cutover. Migration 024 preserves the strict replay behavior from migration 023 and additionally projects exact active accepted evidence relations into fresh planning. Migration 023 keeps the worker replay reader strict after a report upgrades mutable `scan_runs` presentation fields: it reconstructs the frozen raw scan projection from the immutable request and plan, while retaining current source-run/status/error/requested/started and non-lifecycle metadata so contamination still fails closed.
+Migrations 025–027 add the non-authoritative SV9 shadow assessment ledger,
+structural hardening, and the identity-only append writer; migration head remains
+027. The writer is append-only, and the single-item administrative runner is
+dry-run by default (`--append` is the only persistent runner mode). Its expected
+parent is the immutable packet parent. Under the adoption lock, a packet whose
+parent is still current remains admissible by the original CAS contract; after
+current advances, only the exact packet adopted by the latest event that directly
+produced current remains admissible. At that post-adoption boundary, a sibling
+sharing parent/source and any earlier producer fail closed. This does not alter
+public scoring, ranking, API/UI, or cutover. Migration 024 preserves the strict
+replay behavior from migration 023 and additionally projects exact active
+accepted evidence relations into fresh planning. Migration 023 keeps the worker
+replay reader strict after a report upgrades mutable `scan_runs` presentation
+fields: it reconstructs the frozen raw scan projection from the immutable request
+and plan, while retaining current source-run/status/error/requested/started and
+non-lifecycle metadata so contamination still fails closed.
+
+`run_evidence_vault_operational_sv9_shadow_work_items.py` is a one-shot external
+administrative control-plane command, not an in-app worker or an activated
+scheduler. It discovers only an unassessed latest adoption whose exact packet
+directly produced current memory; discovery returns only domain, packet
+fingerprint, and immutable parent. The append method repeats all checks under the
+promotion lock, so a discovery/adoption race fails closed. The command reads only
+`B3S_PR71_SV9_SHADOW_WRITER_DATABASE_URL`, attests every connection to the exact
+PR71 writer login/project/branch/TLS target, defaults to dry-run, and permits only
+one item per explicit `--append` invocation. Its atomic report contains bounded
+identity/status fields, never DSNs, packet payloads, evidence, tiles, score,
+assessment UUID, or requirements. Merging this command does not schedule or run
+it and does not grant any new database capability.
 
 The isolated L2 logins are fixed and distinct:
 
@@ -79,6 +107,8 @@ The isolated L2 logins are fixed and distinct:
   the worker preflight binds the session to this exact role
 - `b3s_pr71_c7_runtime_read` — external private provenance-diagnostic login
 - `b3s_pr71_c7_governance` — external governance/adoption capability
+- `b3s_pr71_sv9_shadow_writer` — external identity-only SV9 shadow append login;
+  never install its URL in the Fly app
 
 Provision these names in the isolated Neon branch only. Never substitute the
 legacy generic role names from the reusable role runbook in this PR71 app.

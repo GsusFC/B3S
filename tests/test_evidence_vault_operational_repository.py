@@ -566,6 +566,22 @@ def test_sv9_shadow_writer_rederives_append_replays_and_has_minimum_acl() -> Non
                 ],
                 expected_parent_canonical_memory_version=None,
             )
+        assert (
+            writer.discover_evidence_vault_operational_sv9_shadow_work_items(
+                limit=10,
+            )
+            == [
+                {
+                    "domain": "example.com",
+                    "operational_packet_fingerprint": next_packet[
+                        "candidate_packet_fingerprint"
+                    ],
+                    "expected_parent_canonical_memory_version": current[
+                        "canonical_memory_version"
+                    ],
+                }
+            ]
+        )
         with psycopg.connect(dsn) as connection:
             connection.execute(f"SET ROLE {writer_role}")
             assert connection.execute(

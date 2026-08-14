@@ -16,6 +16,7 @@ PR71_VAULT_PROJECT_ID = "jolly-river-32467750"
 PR71_VAULT_BRANCH_ID = "br-divine-star-aspobuer"
 PR71_VAULT_RUNTIME_ROLE = "b3s_pr71_app_runtime"
 PR71_VAULT_MIGRATION_ROLE = "neondb_owner"
+PR71_VAULT_SV9_SHADOW_WRITER_ROLE = "b3s_pr71_sv9_shadow_writer"
 
 _LIBPQ_ENV_NAMES = (
     "PGOPTIONS",
@@ -102,6 +103,12 @@ def pr71_vault_runtime_target() -> PR71VaultTarget:
     """Return the immutable isolated application-runtime target profile."""
 
     return PR71VaultTarget(user=PR71_VAULT_RUNTIME_ROLE)
+
+
+def pr71_vault_sv9_shadow_writer_target() -> PR71VaultTarget:
+    """Return the isolated external SV9 shadow-writer login target."""
+
+    return PR71VaultTarget(user=PR71_VAULT_SV9_SHADOW_WRITER_ROLE)
 
 
 def validate_pr71_vault_dsn(dsn: str, *, target: PR71VaultTarget) -> None:

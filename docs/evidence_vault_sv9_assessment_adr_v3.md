@@ -371,3 +371,37 @@ La migración 027 añade únicamente el writer interno: no añade read path, API
 vector semántico ni requirements como una vía de lectura. El ledger conserva
 `authority = false` y ambos runtime effects en `false`; no es una evaluación
 canónica ni autoriza su consumo por Scanner o producto.
+
+## 12. Descubrimiento acotado para un control plane externo
+
+El siguiente incremento no añade una nueva autoridad ni una migración 028.
+`PostgresHistoryRepository.discover_evidence_vault_operational_sv9_shadow_work_items`
+consulta, con el head exacto protegido por el lock shared de migraciones, como
+máximo 100 identidades pendientes. Para cada brand considera solo el último
+evento `operational_v2`, proyecta y valida toda la cadena, recupera el packet
+exacto y exige que ese evento y ese packet hayan producido directamente el
+current. Una observación ya presente para el mismo packet y parent queda fuera
+del resultado. El orden por dominio e identidad de brand es determinista.
+
+El resultado de discovery contiene exclusivamente dominio, fingerprint del
+packet operational y parent inmutable. Es advisory: entre discovery y ejecución
+puede avanzar la adopción. Por eso el append conserva la única decisión de
+freshness y vuelve a verificar head, packets, cadena y causalidad bajo el lock de
+promoción. Una carrera puede terminar en replay o rechazo, nunca convertir un
+sibling o productor histórico en admisible.
+
+El comando one-shot
+`scripts/run_evidence_vault_operational_sv9_shadow_work_items.py` ejecuta esa
+capability desde un límite administrativo externo. Usa únicamente
+`B3S_PR71_SV9_SHADOW_WRITER_DATABASE_URL`, valida el URL y atesta en cada conexión
+TLS, host, database, `current_user`, project y branch exactos de PR71. El modo
+predeterminado es dry-run. `--append` procesa exactamente un work item para que
+un error no oculte persistencia parcial de un batch; un scheduler futuro puede
+invocarlo repetidamente y apoyarse en discovery + replay idempotente.
+
+El output atómico solo expone identidades acotadas, estado y outcome. No incluye
+DSN, payload, evidencia, tiles, score, UUID del assessment ni requirements.
+Este incremento no crea ni activa scheduler, hook de scanner, ruta web/API, RPC,
+trigger, `SECURITY DEFINER`, grant nuevo o integración de scoring/ranking. La
+activación de un scheduler requiere un control plane y secret boundary separados
+del proceso Fly web/scanner, revisión y autorización operativa propias.
