@@ -12,11 +12,10 @@ def test_migration_exposes_only_a_sanitized_owner_view() -> None:
 
     assert "create view b3s_history.evidence_vault_operational_sv9_shadow_diagnostics_v1" in lowered
     assert "with (security_barrier = true, security_invoker = false)" in lowered
-    assert (
-        "alter view b3s_history.evidence_vault_operational_sv9_shadow_diagnostics_v1"
-        in lowered
-    )
-    assert "owner to b3s_history_vault_provenance_owner" in lowered
+    assert "set local role b3s_history_vault_provenance_owner" in lowered
+    assert "grant usage, create on schema b3s_history" in lowered
+    assert "revoke create on schema b3s_history" in lowered
+    assert "sv9 shadow diagnostic owner retains schema create" in lowered
     assert "create function" not in lowered
     assert "security definer" not in lowered
     assert "grant select on b3s_history.evidence_vault_operational_sv9_shadow_assessments" not in lowered

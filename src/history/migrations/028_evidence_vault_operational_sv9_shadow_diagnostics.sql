@@ -4,6 +4,38 @@
 -- scalar observations; it adds no writer, Scanner, score-selection, ranking,
 -- canonical-authority, or production-runtime capability.
 
+-- The fixed NOLOGIN owner already owns the raw ledger.  Create the view while
+-- SET ROLE'd to that owner so a least-privileged migrator never needs raw-table
+-- SELECT.  Schema CREATE exists only inside this migration transaction.
+DO $$
+DECLARE
+    owner_role record;
+BEGIN
+    SELECT * INTO owner_role
+    FROM pg_catalog.pg_roles
+    WHERE rolname = 'b3s_history_vault_provenance_owner';
+    IF owner_role.oid IS NULL
+       OR owner_role.rolcanlogin
+       OR owner_role.rolsuper
+       OR owner_role.rolcreaterole
+       OR owner_role.rolcreatedb
+       OR owner_role.rolreplication
+       OR owner_role.rolbypassrls THEN
+        RAISE EXCEPTION 'SV9 shadow diagnostic owner role is unsafe';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM pg_catalog.pg_auth_members
+        WHERE member = owner_role.oid
+    ) THEN
+        RAISE EXCEPTION 'SV9 shadow diagnostic owner inherits another role';
+    END IF;
+END;
+$$;
+
+GRANT USAGE, CREATE ON SCHEMA b3s_history
+    TO b3s_history_vault_provenance_owner;
+SET LOCAL ROLE b3s_history_vault_provenance_owner;
+
 CREATE VIEW b3s_history.evidence_vault_operational_sv9_shadow_diagnostics_v1
 WITH (security_barrier = true, security_invoker = false)
 AS
@@ -36,8 +68,9 @@ SELECT assessments.brand_id,
        assessments.created_at
 FROM b3s_history.evidence_vault_operational_sv9_shadow_assessments AS assessments;
 
-ALTER VIEW b3s_history.evidence_vault_operational_sv9_shadow_diagnostics_v1
-    OWNER TO b3s_history_vault_provenance_owner;
+RESET ROLE;
+REVOKE CREATE ON SCHEMA b3s_history
+    FROM b3s_history_vault_provenance_owner;
 
 REVOKE ALL ON b3s_history.evidence_vault_operational_sv9_shadow_diagnostics_v1
     FROM PUBLIC,
@@ -68,6 +101,11 @@ BEGIN
         WHERE member = owner_role.oid
     ) THEN
         RAISE EXCEPTION 'SV9 shadow diagnostic owner inherits another role';
+    END IF;
+    IF pg_catalog.has_schema_privilege(
+        'b3s_history_vault_provenance_owner', 'b3s_history', 'CREATE'
+    ) THEN
+        RAISE EXCEPTION 'SV9 shadow diagnostic owner retains schema CREATE';
     END IF;
 
     SELECT roles.rolname INTO actual_owner
