@@ -133,9 +133,9 @@ password, or prints a DSN/driver error.
 Do not use `fly.toml`, `fly.vault.toml`, `b3s`, `b3s-vault`, their volumes, or
 their database branches in this workflow. The manual GitHub workflow is a
 **post-merge-only** deployment mechanism for the isolated `b3s-pr71-vault`
-target. Its current reviewed application baseline is PR #80 at head
-`c1c5e79a01f7311b72d1faba0951582dfab053d9` and merge commit
-`f51372b1a2f345d610e47cd7a2ed5d03b285ca2c`. Neither merging the reviewed
+target. Its current reviewed application baseline is PR #82 at head
+`5555934e63dd1a71c69016a4e3db3e80ba5f2edc` and merge commit
+`28472f35b9a45fdcaa6892de47842ba065c022ae`. Neither merging the reviewed
 PR, the presence of `workflow_dispatch`, the confirmation input, nor a
 successful attestation authorizes a merge or deployment. Merge approval and
 the deployment GO remain separate operator decisions.
@@ -146,13 +146,23 @@ live REST `main` ref. The environment has a custom deployment branch policy conf
 
 The `pr71-vault` environment currently contains zero deployment secrets.
 `B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN` were provisioned only for the
-previous authorized deployment and then removed. Deployment run `31595043741`
+previous authorized deployment and then removed. Deployment run `31732437748`
 completed every attestation, migration/ACL, deploy, and exact-commit liveness
-step successfully at `1b1df547ef52c49674a3705411361d84473956b3`. Both temporary deployment secrets were then removed.
+step successfully at `e36c695755c8b8bb681e9f0a9b34ee30547adfcd`. Both temporary deployment secrets were then removed.
 Any future deployment requires a new exact-SHA GO and fresh secret provisioning.
+The reviewed workflow source is trusted in this control-plane model.
+The self-blob comparison is defense in depth against a stale or mismatched
+dispatch; it does not
+make mutable repository source an immutable root of trust or defend against an
+actor able to merge a malicious workflow change. Before provisioning either
+temporary secret, the operator must independently fetch the workflow blob at live
+`main`, require it to equal both the reviewed expected blob and the protected
+environment baseline, and confirm that the environment still contains zero
+secrets. Any mismatch is a hard NO-GO. A compromised-maintainer threat model
+would require an immutable external deployment controller and is not claimed here.
 
-Before checkout, dependency installation, or deployment-secret use,
-runner-owned code fetches PR #80 and requires `state=closed`, `merged=true`, and `draft=false`, base `main`, head `feat/vault-semantic-assessment-shadow`, repository ID
+Before checkout, dependency installation, or deployment-secret use, pre-check
+code embedded in the reviewed repository workflow fetches PR #82 and requires `state=closed`, `merged=true`, and `draft=false`, base `main`, head `feat/sv9-shadow-post-adoption-current-packet`, repository ID
 `1288696741` and name `GsusFC/B3S`, exact reviewed head, and exact `merge_commit_sha`.
 It proves reviewed-head-to-merge and merge-to-current-main ancestry from complete
 GitHub Compare responses. For the deployment-attestation follow-up, the latter
@@ -162,21 +172,22 @@ comparison must contain the exact three audited files listed above; those are th
 - `docs/deployment/b3s_pr71_vault.md`
 - `tests/test_deploy_provenance.py`
 
-Any runtime, database, CI-workflow, config, or other source change after PR #80
-is outside the attestation allowlist and fails closed. This three-file
-control-plane follow-up re-pins the workflow to the reviewed, merged, green OIDC
-baseline without changing runtime code or configuration. Deployment is still a
+Under that trusted-source model, any runtime, database, CI-workflow, config, or
+other source change after PR #82 is outside the attestation allowlist and fails
+closed. This three-file control-plane follow-up records the reviewed, merged,
+green SV9 post-adoption shadow-writer baseline consumed by the defense-in-depth
+attestation without changing runtime code or configuration. Deployment is still a
 separate operator decision and also requires the Google client and all temporary
 capabilities described below.
 
-The reauthorization baseline is PR #80: feature head `c1c5e79a01f7311b72d1faba0951582dfab053d9`, feature merge `f51372b1a2f345d610e47cd7a2ed5d03b285ca2c`, and CI runs `31697919580` and `31698864592`.
+The reauthorization baseline is PR #82: feature head `5555934e63dd1a71c69016a4e3db3e80ba5f2edc`, feature merge `28472f35b9a45fdcaa6892de47842ba065c022ae`, and CI runs `31749515573` and `31749771977`.
 
 The trusted CI identity is pinned to workflow ID `306885838`, path
 `.github/workflows/ci.yml`, and blob
 `c1082f6b5c53a364b8d38e43936b93722c0183d1`. The workflow must remain active;
 the reviewed head, merge, and deployment Contents responses must carry that
-exact blob. Exact successful CI runs `31697919580` (reviewed PR #80 head) and
-`31698864592` (PR #80 merge on `main`) are pinned. The current exact-main push run is fetched without filtering away non-successful runs; exactly one completed,
+exact blob. Exact successful CI runs `31749515573` (reviewed PR #82 head) and
+`31749771977` (PR #82 merge on `main`) are pinned. The current exact-main push run is fetched without filtering away non-successful runs; exactly one completed,
 successful, first-attempt run with the expected repository and SHA is accepted.
 The `pull_requests` array may be empty. Missing, pending, failed, foreign, stale,
 wrong-event, workflow-modified, truncated, or ambiguous objects fail closed.

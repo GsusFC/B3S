@@ -28,9 +28,13 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      # This step uses only runner-owned code and the GitHub API. Do not check
-      # out, install, or expose deployment secrets until the exact PR, ancestry,
-      # changed-file allowlist, trusted CI blobs, and successful CI runs attest.
+      # This step uses only GitHub-provided runner tools and the GitHub API; its
+      # script remains repository-owned under the trusted reviewed-source model.
+      # The self-blob comparison is defense in depth against a stale or mismatched
+      # dispatch, not an immutable root of trust against a malicious workflow edit.
+      # Keep environment secrets absent until an operator independently verifies
+      # the exact live SHA/blob and gives the separate deployment GO. Do not check
+      # out or install anything before the remaining provenance checks attest.
       - name: Attest reviewed deployment ancestry and current main before checkout
         env:
           API_URL: ${{ github.api_url }}
@@ -39,16 +43,16 @@ jobs:
           DISPATCH_SHA: ${{ github.sha }}
           GH_REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
-          TRUSTED_PR_HEAD_SHA: c1c5e79a01f7311b72d1faba0951582dfab053d9
-          TRUSTED_PR_MERGE_SHA: f51372b1a2f345d610e47cd7a2ed5d03b285ca2c
+          TRUSTED_PR_HEAD_SHA: 5555934e63dd1a71c69016a4e3db3e80ba5f2edc
+          TRUSTED_PR_MERGE_SHA: 28472f35b9a45fdcaa6892de47842ba065c022ae
           TRUSTED_CI_BLOB_SHA: c1082f6b5c53a364b8d38e43936b93722c0183d1
           TRUSTED_REPOSITORY_ID: "1288696741"
           TRUSTED_CI_WORKFLOW_ID: "306885838"
-          TRUSTED_PR_CI_RUN_ID: "31697919580"
-          TRUSTED_MERGE_CI_RUN_ID: "31698864592"
+          TRUSTED_PR_CI_RUN_ID: "31749515573"
+          TRUSTED_MERGE_CI_RUN_ID: "31749771977"
           # Provisioned outside the repository in the protected pr71-vault environment.
           # This value is deliberately not self-pinned in the workflow source.
-          TRUSTED_DEPLOY_WORKFLOW_BLOB_SHA: ${{ vars.PR71_DEPLOY_WORKFLOW_BLOB_SHA }}
+          EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA: ${{ vars.PR71_DEPLOY_WORKFLOW_BLOB_SHA }}
         run: |
           set -euo pipefail
           umask 077
@@ -79,7 +83,7 @@ jobs:
           deployment_ci_runs_file="$attestation_dir/deployment-ci-runs.json"
           deploy_workflow_blob_file="$attestation_dir/deploy-workflow-blob.json"
 
-          api_get "$pr_file" "$API_URL/repos/$GH_REPOSITORY/pulls/80"
+          api_get "$pr_file" "$API_URL/repos/$GH_REPOSITORY/pulls/82"
           api_get "$main_ref_file" "$API_URL/repos/$GH_REPOSITORY/git/ref/heads/main"
           api_get "$workflow_file" "$API_URL/repos/$GH_REPOSITORY/actions/workflows/ci.yml"
           api_get "$head_ci_file" "$API_URL/repos/$GH_REPOSITORY/contents/.github/workflows/ci.yml?ref=$TRUSTED_PR_HEAD_SHA"
@@ -150,7 +154,7 @@ jobs:
           trusted_workflow_id = int(os.environ["TRUSTED_CI_WORKFLOW_ID"])
           trusted_pr_run_id = int(os.environ["TRUSTED_PR_CI_RUN_ID"])
           trusted_merge_run_id = int(os.environ["TRUSTED_MERGE_CI_RUN_ID"])
-          trusted_deploy_workflow_blob = sha_env("TRUSTED_DEPLOY_WORKFLOW_BLOB_SHA")
+          expected_deploy_workflow_blob = sha_env("EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA")
 
           require(
               os.environ["DISPATCH_REF"] == "refs/heads/main",
@@ -159,7 +163,7 @@ jobs:
           require(deploy_sha == dispatch_sha, "deployment_sha is not the dispatched main SHA")
 
           pr = load_object("PR_FILE")
-          exact_int(pr.get("number"), 80, "unexpected pull request object")
+          exact_int(pr.get("number"), 82, "unexpected pull request object")
           require(pr.get("state") == "closed", "reviewed PR must be closed")
           require(pr.get("merged") is True, "reviewed PR must be merged")
           require(pr.get("draft") is False, "reviewed PR must not be a draft")
@@ -168,7 +172,7 @@ jobs:
           require(isinstance(base, dict), "reviewed PR base must be present")
           require(isinstance(head, dict), "reviewed PR head must be present")
           require(base.get("ref") == "main", "reviewed PR base ref must be main")
-          require(head.get("ref") == "feat/vault-semantic-assessment-shadow", "reviewed PR head ref is not exact")
+          require(head.get("ref") == "feat/sv9-shadow-post-adoption-current-packet", "reviewed PR head ref is not exact")
           require(head.get("sha") == trusted_head, "reviewed PR head SHA is not exact")
           require(pr.get("merge_commit_sha") == trusted_merge, "reviewed PR merge commit SHA is not exact")
           for label, side in (("base", base), ("head", head)):
@@ -191,7 +195,7 @@ jobs:
 
           for label, env_name in (
               ("reviewed head", "HEAD_CI_FILE"),
-              ("PR80 merge", "MERGE_CI_FILE"),
+              ("PR82 merge", "MERGE_CI_FILE"),
               ("deployment", "DEPLOY_CI_FILE"),
           ):
               blob = load_object(env_name)
@@ -206,7 +210,7 @@ jobs:
               "deployment workflow path is not exact",
           )
           require(
-              deploy_workflow_blob.get("sha") == trusted_deploy_workflow_blob,
+              deploy_workflow_blob.get("sha") == expected_deploy_workflow_blob,
               "deployment workflow blob is not the protected environment baseline",
           )
 
@@ -264,17 +268,17 @@ jobs:
           }
           attest_run(
               load_object("PR_CI_RUN_FILE"),
-              {"label": "reviewed PR80", "fields": {
+              {"label": "reviewed PR82", "fields": {
                   **common,
                   "id": trusted_pr_run_id,
                   "event": "pull_request",
-                  "head_branch": "feat/vault-semantic-assessment-shadow",
+                  "head_branch": "feat/sv9-shadow-post-adoption-current-packet",
                   "head_sha": trusted_head,
               }},
           )
           attest_run(
               load_object("MERGE_CI_RUN_FILE"),
-              {"label": "PR80 merge", "fields": {
+              {"label": "PR82 merge", "fields": {
                   **common,
                   "id": trusted_merge_run_id,
                   "event": "push",
