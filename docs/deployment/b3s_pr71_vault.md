@@ -97,8 +97,15 @@ promotion lock, so a discovery/adoption race fails closed. The command reads onl
 PR71 writer login/project/branch/TLS target, defaults to dry-run, and permits only
 one item per explicit `--append` invocation. Its atomic report contains bounded
 identity/status fields, never DSNs, packet payloads, evidence, tiles, score,
-assessment UUID, or requirements. Merging this command does not schedule or run
-it and does not grant any new database capability.
+assessment UUID, or requirements. The separate
+`pr71-sv9-shadow-automation.yml` control-plane workflow runs only from `main`,
+processes at most one item on the first attempt of its hourly schedule; manual
+dispatch and scheduled re-runs are dry-run only. It holds the writer URL only in the dedicated
+`pr71-sv9-shadow-automation` GitHub environment. It has `contents: read` only and
+contains no Fly, migration, OIDC, scanner, API, or runtime capability. Remove the
+environment secret or disable that workflow to pause processing; rotate the writer
+password to revoke a disclosed credential. Ledger history is never deleted during
+pause or rollback.
 
 The isolated L2 logins are fixed and distinct:
 

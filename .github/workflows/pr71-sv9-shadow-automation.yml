@@ -1,0 +1,136 @@
+name: Process isolated PR71 SV9 shadow work
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr71-sv9-shadow-automation
+  cancel-in-progress: false
+
+jobs:
+  process-one:
+    if: ${{ github.repository == 'GsusFC/B3S' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pr71-sv9-shadow-automation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11.14"
+
+      - name: Install hash-locked minimal runtime dependency
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes --no-deps -r requirements-pr71-sv9-shadow.txt
+
+      - name: Process at most one shadow work item
+        env:
+          B3S_PR71_SV9_SHADOW_WRITER_DATABASE_URL: ${{ secrets.B3S_PR71_SV9_SHADOW_WRITER_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt_dir="$(mktemp -d "$RUNNER_TEMP/pr71-sv9-shadow.XXXXXX")"
+          receipt="$receipt_dir/receipt.json"
+          trap 'rm -rf "$receipt_dir"' EXIT
+
+          mode_args=(--dry-run)
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" && "$GITHUB_RUN_ATTEMPT" == "1" ]]; then
+            mode_args=(--append)
+          fi
+          python scripts/run_evidence_vault_operational_sv9_shadow_work_items.py "${mode_args[@]}" --limit 1 --output "$receipt"
+
+          python - "$receipt" "$GITHUB_STEP_SUMMARY" "$GITHUB_EVENT_NAME" "$GITHUB_RUN_ATTEMPT" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          receipt_path = Path(sys.argv[1])
+          summary_path = Path(sys.argv[2])
+          event_name = sys.argv[3]
+          run_attempt = sys.argv[4]
+          expected_mode = (
+              "append"
+              if event_name == "schedule" and run_attempt == "1"
+              else "dry_run"
+          )
+          payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+          expected_top_level = {
+              "schema_version",
+              "mode",
+              "limit",
+              "discovered_count",
+              "processed_count",
+              "authority",
+              "production_runtime_effect",
+              "scanner_runtime_effect",
+              "work_items",
+          }
+          items = payload.get("work_items")
+          if set(payload) != expected_top_level or not isinstance(items, list):
+              raise SystemExit("unexpected shadow automation receipt shape")
+          for numeric_field in (
+              "limit",
+              "discovered_count",
+              "processed_count",
+          ):
+              if type(payload[numeric_field]) is not int:
+                  raise SystemExit("invalid shadow automation numeric field")
+          if (
+              payload["schema_version"]
+              != "evidence-vault-operational-sv9-shadow-work-items-admin-run-v1"
+              or payload["mode"] != expected_mode
+              or payload["limit"] != 1
+              or payload["discovered_count"] != len(items)
+              or payload["processed_count"] != len(items)
+              or len(items) > 1
+              or payload["authority"] is not False
+              or payload["production_runtime_effect"] is not False
+              or payload["scanner_runtime_effect"] is not False
+          ):
+              raise SystemExit("unsafe shadow automation receipt")
+          expected_item_keys = {
+              "domain",
+              "operational_packet_fingerprint",
+              "expected_parent_canonical_memory_version",
+              "outcome",
+              "assessment_status",
+              "replayed",
+          }
+          for item in items:
+              if not isinstance(item, dict) or set(item) != expected_item_keys:
+                  raise SystemExit("unexpected shadow work-item receipt shape")
+              allowed_outcomes = (
+                  {"appended", "replayed"}
+                  if expected_mode == "append"
+                  else {"dry_run", "replayed"}
+              )
+              if item["outcome"] not in allowed_outcomes:
+                  raise SystemExit("unexpected shadow work-item outcome")
+              if item["assessment_status"] not in {
+                  "available",
+                  "stale_candidate_parent",
+                  "contradiction_requires_semantic_reassessment",
+                  "unavailable",
+              }:
+                  raise SystemExit("unexpected shadow work-item status")
+              if not isinstance(item["replayed"], bool):
+                  raise SystemExit("unexpected shadow replay flag")
+              if (item["outcome"] == "replayed") is not item["replayed"]:
+                  raise SystemExit("inconsistent shadow replay outcome")
+          outcome = items[0]["outcome"] if items else "no_pending_work"
+          with summary_path.open("a", encoding="utf-8") as summary:
+              summary.write("## PR71 SV9 shadow automation\n")
+              summary.write(f"- processed: {len(items)}\n")
+              summary.write(f"- outcome: {outcome}\n")
+              summary.write("- authority: false\n")
+          PY

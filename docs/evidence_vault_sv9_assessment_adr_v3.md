@@ -405,3 +405,28 @@ Este incremento no crea ni activa scheduler, hook de scanner, ruta web/API, RPC,
 trigger, `SECURITY DEFINER`, grant nuevo o integración de scoring/ranking. La
 activación de un scheduler requiere un control plane y secret boundary separados
 del proceso Fly web/scanner, revisión y autorización operativa propias.
+
+## 13. Scheduler administrativo externo
+
+La activación operativa usa exclusivamente
+`.github/workflows/pr71-sv9-shadow-automation.yml` en la rama default. El trigger
+horario y el dispatch manual comparten concurrencia no cancelable, permisos
+`contents: read`, timeout acotado y el environment separado
+`pr71-sv9-shadow-automation`. El único secreto configurado en ese environment
+es el URL del LOGIN dedicado; no se instala en Fly ni se expone a pasos de
+checkout o instalación. Checkout no persiste el token Git y la única dependencia
+runtime se instala desde un lock mínimo con versiones y hashes exactos.
+
+El primer intento del schedule llama al runner con `--append --limit 1`; el
+dispatch manual y cualquier re-run están forzados a dry-run. Todos validan el
+receipt exacto y publican únicamente count y
+outcome. Las identidades del work item y el receipt
+se conservan solo en un directorio temporal con `umask 077` y se eliminan al
+terminar. Freshness, replay e INSERT siguen perteneciendo al repository bajo los
+locks existentes. El scheduler no obtiene autoridad, read path público, capacidad
+de migración o integración con Scanner/runtime.
+
+La pausa consiste en retirar el secreto o deshabilitar el workflow; la revocación
+rota el password del LOGIN. Ninguna de las dos operaciones elimina filas del
+ledger. Un cambio futuro de frecuencia, alcance, credencial, consumidor o
+selector de score requiere revisión independiente.
