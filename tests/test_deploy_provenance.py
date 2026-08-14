@@ -23,14 +23,14 @@ ISOLATED_RELEASE_COMMAND = (
     "python scripts/verify_b3s_history_postgres.py && "
     "python scripts/verify_pr71_vault_target.py'"
 )
-TRUSTED_PR_HEAD_SHA = "c1c5e79a01f7311b72d1faba0951582dfab053d9"
-TRUSTED_PR_MERGE_SHA = "f51372b1a2f345d610e47cd7a2ed5d03b285ca2c"
+TRUSTED_PR_HEAD_SHA = "5555934e63dd1a71c69016a4e3db3e80ba5f2edc"
+TRUSTED_PR_MERGE_SHA = "28472f35b9a45fdcaa6892de47842ba065c022ae"
 TRUSTED_CI_BLOB_SHA = "c1082f6b5c53a364b8d38e43936b93722c0183d1"
 TRUSTED_REPOSITORY_ID = 1288696741
 TRUSTED_CI_WORKFLOW_ID = 306885838
-TRUSTED_PR_CI_RUN_ID = 31697919580
-TRUSTED_MERGE_CI_RUN_ID = 31698864592
-TRUSTED_DEPLOY_WORKFLOW_BLOB_SHA = "d" * 40
+TRUSTED_PR_CI_RUN_ID = 31749515573
+TRUSTED_MERGE_CI_RUN_ID = 31749771977
+EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA = "d" * 40
 FIXTURE_DEPLOY_SHA = "a" * 40
 HOTFIX_FILES = {
     ".github/workflows/fly-deploy-pr71-vault.yml",
@@ -69,7 +69,7 @@ def _attestation_fixture() -> dict[str, dict]:
     }
     fixture = {
         "PR_FILE": {
-            "number": 80,
+            "number": 82,
             "state": "closed",
             "merged": True,
             "draft": False,
@@ -80,7 +80,7 @@ def _attestation_fixture() -> dict[str, dict]:
                 "repo": repository,
             },
             "head": {
-                "ref": "feat/vault-semantic-assessment-shadow",
+                "ref": "feat/sv9-shadow-post-adoption-current-packet",
                 "sha": TRUSTED_PR_HEAD_SHA,
                 "repo": repository,
             },
@@ -100,7 +100,7 @@ def _attestation_fixture() -> dict[str, dict]:
         "DEPLOY_WORKFLOW_BLOB_FILE": {
             "type": "file",
             "path": ".github/workflows/fly-deploy-pr71-vault.yml",
-            "sha": TRUSTED_DEPLOY_WORKFLOW_BLOB_SHA,
+            "sha": EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA,
         },
         "HEAD_MERGE_COMPARE_FILE": {
             "status": "ahead",
@@ -129,7 +129,7 @@ def _attestation_fixture() -> dict[str, dict]:
             **common_run,
             "id": TRUSTED_PR_CI_RUN_ID,
             "event": "pull_request",
-            "head_branch": "feat/vault-semantic-assessment-shadow",
+            "head_branch": "feat/sv9-shadow-post-adoption-current-packet",
             "head_sha": TRUSTED_PR_HEAD_SHA,
         },
         "MERGE_CI_RUN_FILE": {
@@ -174,7 +174,7 @@ def _run_attestation(
         "TRUSTED_CI_WORKFLOW_ID": str(TRUSTED_CI_WORKFLOW_ID),
         "TRUSTED_PR_CI_RUN_ID": str(TRUSTED_PR_CI_RUN_ID),
         "TRUSTED_MERGE_CI_RUN_ID": str(TRUSTED_MERGE_CI_RUN_ID),
-        "TRUSTED_DEPLOY_WORKFLOW_BLOB_SHA": TRUSTED_DEPLOY_WORKFLOW_BLOB_SHA,
+        "EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA": EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA,
     }
     for name, payload in fixture.items():
         path = tmp_path / f"{name}.json"
@@ -299,9 +299,9 @@ def test_isolated_pr71_vault_workflow_is_manual_post_merge_only():
     assert 'r"[0-9a-f]{40}"' in workflow
     assert 'DISPATCH_REF: ${{ github.ref }}' in workflow
     assert 'os.environ["DISPATCH_REF"] == "refs/heads/main"' in workflow
-    assert '"$API_URL/repos/$GH_REPOSITORY/pulls/80"' in workflow
+    assert '"$API_URL/repos/$GH_REPOSITORY/pulls/82"' in workflow
     assert "persist-credentials: false" in workflow
-    assert "TRUSTED_DEPLOY_WORKFLOW_BLOB_SHA: ${{ vars.PR71_DEPLOY_WORKFLOW_BLOB_SHA }}" in workflow
+    assert "EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA: ${{ vars.PR71_DEPLOY_WORKFLOW_BLOB_SHA }}" in workflow
     assert "deploy_workflow_blob_file" in workflow
     assert "deployment workflow blob is not the protected environment baseline" in workflow
 
@@ -312,12 +312,12 @@ def test_isolated_deploy_attests_exact_pr71_and_current_main_ancestry():
     required_contract = (
         'DISPATCH_SHA: ${{ github.sha }}',
         'deploy_sha == dispatch_sha',
-        'pr.get("number"), 80',
+        'pr.get("number"), 82',
         'pr.get("state") == "closed"',
         'pr.get("merged") is True',
         'pr.get("draft") is False',
         'base.get("ref") == "main"',
-        'head.get("ref") == "feat/vault-semantic-assessment-shadow"',
+        'head.get("ref") == "feat/sv9-shadow-post-adoption-current-packet"',
         'head.get("sha") == trusted_head',
         'pr.get("merge_commit_sha") == trusted_merge',
         'repo.get("id"), trusted_repository_id',
@@ -562,11 +562,17 @@ def test_pr71_runbook_marks_workflow_post_merge_and_separately_authorized():
     assert "custom deployment branch policy configured to allow only `main`" in runbook
     assert "currently contains zero deployment secrets" in runbook
     assert "`B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN` were provisioned only" in runbook
-    assert "Deployment run `31595043741`" in runbook
+    assert "Deployment run `31732437748`" in runbook
     assert "completed every attestation, migration/ACL" in runbook
-    assert "`1b1df547ef52c49674a3705411361d84473956b3`" in runbook
+    assert "`e36c695755c8b8bb681e9f0a9b34ee30547adfcd`" in runbook
     assert "Both temporary deployment secrets were then removed" in runbook
     assert "Any future deployment requires a new exact-SHA GO" in runbook
+    assert "self-blob comparison is defense in depth" in runbook
+    assert "mutable repository source an immutable root of trust" in runbook
+    assert "Before provisioning either" in runbook
+    assert "temporary secret, the operator must independently fetch" in runbook
+    assert "environment still contains zero" in runbook
+    assert "immutable external deployment controller" in runbook
     assert "exact three audited files listed above" in runbook
     assert "without filtering" in runbook
     assert "non-successful runs" in runbook
