@@ -9,6 +9,7 @@ import pytest
 from src.evidence_identity import canonical_evidence_digest
 from src.history.repository import PostgresHistoryRepository
 from src.services.evidence_scoring_memory_preview import (
+    EVIDENCE_SCORING_MEMORY_PREVIEW_POLICY_VERSION,
     EvidenceScoringMemoryPreviewError,
     build_evidence_scoring_memory_preview,
 )
@@ -16,6 +17,7 @@ from src.services.evidence_scoring_recovery_review import (
     EVIDENCE_SCORING_RECOVERY_REVIEW_EVENT_VERSION,
     build_reviewed_scoring_memory_shadow,
 )
+from src.sv9.assessment_kernel import build_sv9_assessment
 from src.sv9.rubric import COMPONENTS, component_points
 
 
@@ -79,6 +81,108 @@ def test_prior_literal_evidence_recovers_only_a_later_blind_spot() -> None:
         "current_score_reproducible": True,
         "magnetism_capped": False,
     }
+
+
+def test_preview_scoring_matches_kernel_including_magnetism_cap() -> None:
+    older = _report("older", "2026-07-01T08:00:00Z", target_state="ok")
+    newer = _report(
+        "newer", "2026-07-02T08:00:00Z", target_state="sin_evidencia"
+    )
+    _set_ok_tiles(
+        newer,
+        component_key="magnetism",
+        tile_ids={"MG2", "MG3", "MG4", "MG5", "MG6"},
+    )
+
+    current = build_sv9_assessment(_assessment_vector(newer))
+    recovered = build_sv9_assessment(
+        _assessment_vector(newer, recovered_tiles={("magnetism", "MG1")})
+    )
+    preview = build_evidence_scoring_memory_preview([older, newer])
+
+    assert current["magnetism_capped"] is False
+    assert recovered["magnetism_capped"] is True
+    assert preview["policy_version"] == (
+        EVIDENCE_SCORING_MEMORY_PREVIEW_POLICY_VERSION
+    )
+    assert preview["scoring"] == {
+        "status": "preview_available",
+        "current_score": current["sv9_score"],
+        "recomputed_current_score": current["sv9_score"],
+        "preview_score": recovered["sv9_score"],
+        "score_delta": recovered["sv9_score"] - current["sv9_score"],
+        "current_score_reproducible": True,
+        "magnetism_capped": recovered["magnetism_capped"],
+    }
+
+
+@pytest.mark.parametrize(
+    "invalid_case",
+    [
+        "duplicate_tile",
+        "missing_tile",
+        "unknown_tile",
+        "invalid_state",
+        "mismatched_component",
+        "non_scored_component",
+        "unsupported_rubric",
+    ],
+)
+def test_invalid_or_incomplete_assessment_vector_is_unavailable(
+    invalid_case: str,
+) -> None:
+    report = _report("latest", "2026-07-02T08:00:00Z", target_state="no")
+    _invalidate_assessment_vector(report, invalid_case)
+
+    preview = build_evidence_scoring_memory_preview([report])
+
+    scoring = preview["scoring"]
+    assert scoring["status"] == "unavailable_incomplete_tile_profile"
+    assert scoring["recomputed_current_score"] is None
+    assert scoring["preview_score"] is None
+    assert scoring["current_score_reproducible"] is False
+
+
+@pytest.mark.parametrize(
+    "invalid_case",
+    [
+        "missing_rubric",
+        "mismatched_component",
+        "non_scored_component",
+        "missing_tile",
+        "conflicting_aliases",
+    ],
+)
+def test_malformed_historical_assessment_cannot_authorize_recovery(
+    invalid_case: str,
+) -> None:
+    older = _report("older", "2026-07-01T08:00:00Z", target_state="ok")
+    newer = _report(
+        "newer", "2026-07-02T08:00:00Z", target_state="sin_evidencia"
+    )
+    _invalidate_assessment_vector(older, invalid_case)
+
+    preview = build_evidence_scoring_memory_preview([older, newer])
+    reviewed = build_reviewed_scoring_memory_shadow([older, newer])
+
+    assert preview["summary"]["recovered_blind_spot_count"] == 0
+    assert preview["recoveries"] == []
+    assert preview["scoring"]["status"] == "preview_available"
+    assert preview["scoring"]["preview_score"] == 0
+    assert reviewed["recovery_review_candidates"] == []
+
+
+def test_current_score_reproducibility_gate_blocks_kernel_preview() -> None:
+    report = _report("latest", "2026-07-02T08:00:00Z", target_state="no")
+    report["score"] = 1
+
+    preview = build_evidence_scoring_memory_preview([report])
+
+    scoring = preview["scoring"]
+    assert scoring["status"] == "blocked_current_score_not_reproducible"
+    assert scoring["recomputed_current_score"] == 0
+    assert scoring["preview_score"] is None
+    assert scoring["current_score_reproducible"] is False
 
 
 def test_explicit_latest_negative_retains_history_without_overriding_it() -> None:
@@ -705,6 +809,75 @@ def test_repository_preview_revocation_and_stale_events_fail_closed(
     assert rebuilt["recovery_review"]["journal"][
         "stale_event_ids"
     ] == [stale["event_id"]]
+
+
+def _assessment_vector(
+    report: dict,
+    *,
+    recovered_tiles: set[tuple[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    recovered = recovered_tiles or set()
+    components = report["raw"]["sv9"]["result"]["components"]
+    return [
+        {
+            "component_key": component_key,
+            "tile_id": str(verdict["id"]),
+            "tile_key": f"{component_key}.{verdict['id']}",
+            "assessment_state": (
+                "ok"
+                if (component_key, str(verdict["id"])) in recovered
+                else str(verdict["estado"])
+            ),
+        }
+        for component_key, component in components.items()
+        for verdict in component["tile_profile"]
+    ]
+
+
+def _set_ok_tiles(
+    report: dict,
+    *,
+    component_key: str,
+    tile_ids: set[str],
+) -> None:
+    result = report["raw"]["sv9"]["result"]
+    component = result["components"][component_key]
+    for verdict in component["tile_profile"]:
+        if verdict["id"] not in tile_ids:
+            continue
+        verdict["estado"] = "ok"
+        verdict["evidencia"] = "The signal survived the next acquisition."
+        verdict["motivo"] = ""
+    assessment = build_sv9_assessment(_assessment_vector(report))
+    component["score"] = len(tile_ids)
+    report["score"] = assessment["sv9_score"]
+    result["brand3_score"] = assessment["sv9_score"]
+
+
+def _invalidate_assessment_vector(report: dict, invalid_case: str) -> None:
+    result = report["raw"]["sv9"]["result"]
+    components = result["components"]
+    mission_profile = components["mission"]["tile_profile"]
+    if invalid_case == "missing_rubric":
+        result.pop("rubric_version")
+    elif invalid_case == "duplicate_tile":
+        mission_profile[-1] = deepcopy(mission_profile[0])
+    elif invalid_case == "missing_tile":
+        mission_profile.pop()
+    elif invalid_case == "unknown_tile":
+        mission_profile[0]["id"] = "UNKNOWN"
+    elif invalid_case == "invalid_state":
+        mission_profile[0]["estado"] = "maybe"
+    elif invalid_case == "mismatched_component":
+        components["mission"]["component"] = "vision"
+    elif invalid_case == "non_scored_component":
+        components["mission"]["status"] = "technical_failure"
+    elif invalid_case == "conflicting_aliases":
+        mission_profile[0]["tile_id"] = "M2"
+    elif invalid_case == "unsupported_rubric":
+        result["rubric_version"] = "baldosas-v0"
+    else:
+        raise AssertionError(f"unknown invalid case: {invalid_case}")
 
 
 def _durable_current_review_event(
