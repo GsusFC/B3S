@@ -300,9 +300,13 @@ El incremento inicial de este ADR introdujo kernel, adaptadores, paridad y tests
   proyección no es todavía un assessment v3 ni un contrato público. En
   particular, no prueba separación entre score y verification operational.
 - Scanner todavía ejecuta `apply_source_policy()` antes del kernel y esa
-  política puede demotar `ok` a `sin_evidencia`. Debe clasificarse
-  explícitamente como política de assessment o moverse fuera del vector si en
-  realidad representa verification/authority.
+  política puede demotar `ok` a `sin_evidencia`. El contrato
+  `sv9-source-policy-axis-classification-v1` clasifica cada regla directa como
+  `assessment_tile_reassessment_required` y el cap posterior de Coherencia como
+  `legacy_compatibility_only`; no introduce transiciones de verification ni de
+  authority. El bloqueo sigue abierto hasta que evidencia ligada a cada baldosa
+  sustituya las demociones/caps legacy y el cutover de Scanner deje de llamar a
+  esta política.
 El bloqueo de aritmética del preview queda cerrado: sus vectores actual y
 recuperado consumen `build_sv9_assessment()` y fallan cerrados ante assessments
 inválidos o incompletos. El gate de reproducibilidad persistido se conserva.
