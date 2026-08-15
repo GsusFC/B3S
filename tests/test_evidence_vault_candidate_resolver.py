@@ -35,6 +35,7 @@ from src.services.evidence_vault_canonical_authority import (
     project_promoted_canonical_memory,
     promotion_request_fingerprint,
 )
+from src.sv9.rubric import COMPONENTS
 
 
 PACKET_FINGERPRINT = "a" * 64
@@ -1128,9 +1129,32 @@ def _direct_report(
     )
     evidence = report["raw"]["flow"]["candidate"]["evidence_pack"]["evidence"]
     report["raw"]["flow"]["candidate"]["evidence_pack"]["evidence"] = [evidence[0]]
-    verdict = report["raw"]["sv9"]["result"]["components"]["mission"]["tile_profile"][0]
-    verdict["estado"] = state
-    verdict["evidencia"] = evidence[0]["content"] if state == "ok" else ""
+    score = int(state == "ok")
+    result = report["raw"]["sv9"]["result"]
+    result["components"] = {
+        key: {
+            "component": key,
+            "status": "scored",
+            "score": score if key == "mission" else 0,
+            "tile_profile": [
+                {
+                    "id": tile["id"],
+                    "estado": (
+                        state if key == "mission" and tile["id"] == "M1" else "no"
+                    ),
+                    "evidencia": (
+                        evidence[0]["content"]
+                        if key == "mission" and tile["id"] == "M1" and score
+                        else ""
+                    ),
+                }
+                for tile in spec["tiles"]
+            ],
+        }
+        for key, spec in COMPONENTS.items()
+    }
+    result["brand3_score"] = report["score"] = score
+    verdict = result["components"]["mission"]["tile_profile"][0]
     report["components"] = [
         {
             "key": "mission",

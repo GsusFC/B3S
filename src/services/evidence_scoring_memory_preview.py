@@ -31,22 +31,18 @@ from src.services.evidence_memory_identity_v2 import (
     build_evidence_memory_identity_v2,
 )
 from src.services.scanner_evidence_comparison import MATERIAL_SOURCE_CLASSES
-from src.sv9.rubric import (
-    BASE_COMPONENTS,
-    COMPONENTS,
-    MAGNETISM_CAP_BASE_THRESHOLD,
-    MAGNETISM_CAP_VALUE,
-    RUBRIC_VERSION,
-    STATUS_SCORED,
-    component_points,
+from src.sv9.assessment_kernel import (
+    Sv9AssessmentError,
+    build_sv9_assessment,
 )
+from src.sv9.rubric import COMPONENTS, RUBRIC_VERSION, STATUS_SCORED
 
 
 EVIDENCE_SCORING_MEMORY_PREVIEW_VERSION = (
     "evidence-scoring-memory-preview-v1"
 )
 EVIDENCE_SCORING_MEMORY_PREVIEW_POLICY_VERSION = (
-    "evidence-scoring-memory-preview-policy-v1"
+    "evidence-scoring-memory-preview-policy-v2"
 )
 EVIDENCE_SCORING_MEMORY_VERSION = "evidence-scoring-memory-v1"
 EVIDENCE_SCORING_MEMORY_ENTRY_VERSION = (
@@ -108,6 +104,11 @@ def build_evidence_scoring_memory_preview(
         for entry in identity_projection.get("entries") or []
         if isinstance(entry, dict)
         and str(entry.get("evidence_id") or "")
+    }
+    recovery_eligible_report_ids = {
+        str(report.get("id") or "")
+        for report in ordered
+        if _has_strict_assessment_vector(report)
     }
 
     entry_accumulators: dict[str, dict[str, Any]] = {}
@@ -238,13 +239,18 @@ def build_evidence_scoring_memory_preview(
     compatible_prior_by_tile: dict[
         tuple[str, str], list[dict[str, Any]]
     ] = {}
-    for entry in entries:
+    eligible_entries = (
+        entries if latest_report_id in recovery_eligible_report_ids else []
+    )
+    for entry in eligible_entries:
         compatible_occurrences = [
             occurrence
             for occurrence in entry.get("occurrences") or []
             if isinstance(occurrence, dict)
             and str(occurrence.get("report_id") or "")
             != latest_report_id
+            and str(occurrence.get("report_id") or "")
+            in recovery_eligible_report_ids
             and str(occurrence.get("rubric_version") or "")
             == latest_rubric_version
         ]
@@ -1088,6 +1094,24 @@ def _match_source_records(
     return accepted, rejected_reasons
 
 
+def _has_strict_assessment_vector(report: dict[str, Any]) -> bool:
+    result = _evaluation_result(report)
+    if str(result.get("rubric_version") or "").strip() != RUBRIC_VERSION:
+        return False
+    components = result.get("components")
+    if not isinstance(components, dict) or set(components) != set(COMPONENTS):
+        return False
+    vectors = _assessment_vectors(components, recovered_tiles=set())
+    if vectors is None:
+        return False
+    current_vector, _ = vectors
+    try:
+        build_sv9_assessment(current_vector)
+    except Sv9AssessmentError:
+        return False
+    return True
+
+
 def _tile_verdicts(
     report: dict[str, Any],
 ) -> list[tuple[str, dict[str, Any]]]:
@@ -1186,46 +1210,26 @@ def _scoring_preview(
             "current_score_reproducible": False,
             "magnetism_capped": None,
         }
+    if str(result.get("rubric_version") or "").strip() != RUBRIC_VERSION:
+        return _unavailable_score(latest, result)
 
-    current_scores: dict[str, int] = {}
-    preview_scores: dict[str, int] = {}
-    for component_key in COMPONENTS:
-        component = components.get(component_key)
-        if not isinstance(component, dict):
-            return _unavailable_score(latest, result)
-        if str(component.get("status") or "") != STATUS_SCORED:
-            current_scores[component_key] = 0
-            preview_scores[component_key] = 0
-            continue
-        profile = (
-            component.get("tile_profile")
-            if isinstance(component.get("tile_profile"), list)
-            else []
-        )
-        if len(profile) != int(COMPONENTS[component_key]["scale"]):
-            return _unavailable_score(latest, result)
-        current_lit = 0
-        preview_lit = 0
-        for verdict in profile:
-            if not isinstance(verdict, dict):
-                return _unavailable_score(latest, result)
-            tile_id = str(
-                verdict.get("id") or verdict.get("tile_id") or ""
-            ).strip()
-            state = str(verdict.get("estado") or "")
-            if state == "ok":
-                current_lit += 1
-                preview_lit += 1
-            elif (
-                state == "sin_evidencia"
-                and (component_key, tile_id) in recovered_tiles
-            ):
-                preview_lit += 1
-        current_scores[component_key] = current_lit
-        preview_scores[component_key] = preview_lit
+    vectors = _assessment_vectors(
+        components,
+        recovered_tiles=recovered_tiles,
+    )
+    if vectors is None:
+        return _unavailable_score(latest, result)
+    current_vector, recovered_vector = vectors
+    try:
+        current_assessment = build_sv9_assessment(current_vector)
+        recovered_assessment = build_sv9_assessment(recovered_vector)
+    except Sv9AssessmentError:
+        return _unavailable_score(latest, result)
 
-    current_total, current_capped = _aggregate_scores(current_scores)
-    preview_total, preview_capped = _aggregate_scores(preview_scores)
+    current_total = int(current_assessment["sv9_score"])
+    preview_total = int(recovered_assessment["sv9_score"])
+    current_capped = bool(current_assessment["magnetism_capped"])
+    preview_capped = bool(recovered_assessment["magnetism_capped"])
     persisted_current = _number(
         latest.get("score", result.get("brand3_score"))
     )
@@ -1254,6 +1258,66 @@ def _scoring_preview(
     }
 
 
+def _assessment_vectors(
+    components: dict[str, Any],
+    *,
+    recovered_tiles: set[tuple[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]] | None:
+    current_vector: list[dict[str, str]] = []
+    for component_key in COMPONENTS:
+        component = components.get(component_key)
+        if not isinstance(component, dict):
+            return None
+        if str(component.get("component") or "") != component_key:
+            return None
+        if str(component.get("status") or "") != STATUS_SCORED:
+            return None
+        profile = component.get("tile_profile")
+        if not isinstance(profile, list):
+            return None
+        for verdict in profile:
+            if not isinstance(verdict, dict):
+                return None
+            verdict_id = verdict.get("id")
+            verdict_tile_id = verdict.get("tile_id")
+            if (
+                verdict_id not in (None, "")
+                and verdict_tile_id not in (None, "")
+                and str(verdict_id) != str(verdict_tile_id)
+            ):
+                return None
+            tile_id = str(verdict_id or verdict_tile_id or "").strip()
+            current_vector.append(
+                {
+                    "component_key": component_key,
+                    "tile_id": tile_id,
+                    "tile_key": f"{component_key}.{tile_id}",
+                    "assessment_state": str(verdict.get("estado") or ""),
+                }
+            )
+
+    recoverable_tiles = {
+        (row["component_key"], row["tile_id"])
+        for row in current_vector
+        if row["assessment_state"] == "sin_evidencia"
+    }
+    if not recovered_tiles <= recoverable_tiles:
+        return None
+    recovered_vector = [
+        {
+            **row,
+            "assessment_state": (
+                "ok"
+                if (row["component_key"], row["tile_id"])
+                in recovered_tiles
+                else row["assessment_state"]
+            ),
+        }
+        for row in current_vector
+    ]
+    return current_vector, recovered_vector
+
+
 def _unavailable_score(
     latest: dict[str, Any],
     result: dict[str, Any],
@@ -1270,27 +1334,6 @@ def _unavailable_score(
         "magnetism_capped": None,
     }
 
-
-def _aggregate_scores(scores: dict[str, int]) -> tuple[int, bool]:
-    normalized_base = [
-        scores[key] * (10 / int(COMPONENTS[key]["scale"]))
-        for key in BASE_COMPONENTS
-    ]
-    base_average = sum(normalized_base) / len(normalized_base)
-    effective_scores = dict(scores)
-    magnetism_capped = (
-        base_average < MAGNETISM_CAP_BASE_THRESHOLD
-        and effective_scores["magnetism"] > MAGNETISM_CAP_VALUE
-    )
-    if magnetism_capped:
-        effective_scores["magnetism"] = MAGNETISM_CAP_VALUE
-    return (
-        sum(
-            component_points(key, effective_scores[key])
-            for key in COMPONENTS
-        ),
-        magnetism_capped,
-    )
 
 
 def _evaluation_result(report: dict[str, Any]) -> dict[str, Any]:

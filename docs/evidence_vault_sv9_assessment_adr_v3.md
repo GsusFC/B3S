@@ -303,16 +303,17 @@ El incremento inicial de este ADR introdujo kernel, adaptadores, paridad y tests
   política puede demotar `ok` a `sin_evidencia`. Debe clasificarse
   explícitamente como política de assessment o moverse fuera del vector si en
   realidad representa verification/authority.
-- El preview de `evidence_scoring_memory_preview._aggregate_scores()` sigue con
-  aritmética legacy y no consume el snapshot v3.
+El bloqueo de aritmética del preview queda cerrado: sus vectores actual y
+recuperado consumen `build_sv9_assessment()` y fallan cerrados ante assessments
+inválidos o incompletos. El gate de reproducibilidad persistido se conserva.
 
-Estas deudas bloquean cualquier writer canónico/público, exposición en read
-paths de producto y cutover. No bloquean el writer administrativo interno de la
+Las dos deudas restantes bloquean cualquier writer canónico/público, exposición
+en read paths de producto y cutover. No bloquean el writer administrativo interno de la
 migración 027 ni la vista escalar protegida y default-off de la migración 028:
 ambos conservan observaciones shadow sin autoridad ni runtime effect y no
 alimentan ningún selector de score, report o ranking.
-Cada deuda requiere un incremento con fixtures de paridad y decisión de
-autoridad. Hasta entonces no debe afirmarse que el Vault operational ya separa
+Cada deuda restante requiere un incremento con fixtures de paridad y decisión
+de autoridad. Hasta entonces no debe afirmarse que el Vault operational ya separa
 score de verification en su producto público.
 
 Cualquier writer canónico/público, exposición pública o cutover necesita una
