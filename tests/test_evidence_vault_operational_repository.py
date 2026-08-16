@@ -720,7 +720,8 @@ def test_operational_v2_reuses_existing_ledgers_and_survives_restart() -> None:
     )
     assert report_projection is not None
     assert report_projection["memory"] == memory
-    assert report_projection["score_evaluation"] == evaluation
+    assert report_projection["legacy_operational_v2"]["score_evaluation"] == evaluation
+    assert report_projection["semantic_scoring_v3"]["assessment_output"]["sv9_score"] == 1
     assert report_projection["promotion_event"]["event_id"] == memory[
         "adoption_event_id"
     ]
