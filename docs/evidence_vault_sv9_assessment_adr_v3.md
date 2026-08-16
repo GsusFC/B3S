@@ -228,6 +228,10 @@ sus digests, pero no el registro inmutable de decisión ni un binding que permit
 recalcular que autorizó ese candidate histórico. Esa limitación es irreducible
 en este adaptador y requiere consultar/verificar ese registro externo.
 
+### 6.2 Vault source-only: scoring semántico v3
+
+`build_evidence_vault_semantic_assessment()` fija y valida una instantánea del candidate packet exacto; extrae solo identidad de baldosa y `candidate_state`; excluye basis, review, metadata, operational packets y autoridad; deja contradicciones unavailable sin inventar output; y permanece inalcanzable, sin migraciones, callers, read paths ni efectos de runtime.
+
 ## 7. Assessment y verification son ejes ortogonales
 
 ```text
@@ -299,6 +303,7 @@ El incremento inicial de este ADR introdujo kernel, adaptadores, paridad y tests
   authority filter y proyecta baldosas no aceptadas como `sin_evidencia`. Esa
   proyección no es todavía un assessment v3 ni un contrato público. En
   particular, no prueba separación entre score y verification operational.
+  El v3 source-only no cierra esta deuda: ningún caller lo alcanza y `_scoring_inputs()` v2 aún filtra por autoridad.
 - Scanner todavía ejecuta `apply_source_policy()` antes del kernel y esa
   política puede demotar `ok` a `sin_evidencia`. El contrato
   `sv9-source-policy-axis-classification-v1` clasifica cada regla directa como
