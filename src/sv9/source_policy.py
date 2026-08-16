@@ -1,18 +1,55 @@
-"""Deterministic source-authority policy for SV9 scores.
+"""Deterministic legacy source policy for SV9 scores.
 
-The evaluator decides tile states from cited evidence. This module applies the
-second contract: which sources are authoritative enough to carry each strategic
-component. External proof may validate traction or a product claim, but it must
-not fully create owned brand expression such as mission, values, purpose, voice
-or vision.
+The evaluator decides tile states from cited evidence. This module freezes the
+existing demotion behavior while classifying it as assessment work that must be
+replaced by tile-local evidence binding. It does not grant verification or
+source-authority transition semantics.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from dataclasses import dataclass
+from types import MappingProxyType
+
 from src.sv9.models import ComponentResult, ESTADO_OK, ESTADO_SIN_EVIDENCIA, STATUS_SCORED, TileVerdict
 from src.sv9.rubric import COMPONENTS
 
-SOURCE_POLICY_VERSION = "sv9-source-authority-v1"
+SOURCE_POLICY_AXIS_CLASSIFICATION_VERSION = "sv9-source-policy-axis-classification-v1"
+ASSESSMENT_TILE_REASSESSMENT_REQUIRED = "assessment_tile_reassessment_required"
+LEGACY_COMPATIBILITY_ONLY = "legacy_compatibility_only"
+
+# Kept in tile motives solely to preserve the current serialized output.
+LEGACY_SOURCE_POLICY_VERSION = "sv9-source-authority-v1"
+SOURCE_POLICY_VERSION = LEGACY_SOURCE_POLICY_VERSION
+
+SOURCE_POLICY_REASON_CLASSIFICATIONS = MappingProxyType(
+    {
+        "source_policy:{component}_owned_expression_verified_absent": ASSESSMENT_TILE_REASSESSMENT_REQUIRED,
+        "source_policy:{component}_implied_not_explicit": ASSESSMENT_TILE_REASSESSMENT_REQUIRED,
+        "source_policy:{component}_requires_owned_expression": ASSESSMENT_TILE_REASSESSMENT_REQUIRED,
+        "source_policy:{component}_external_proof_dominates_owned_expression": ASSESSMENT_TILE_REASSESSMENT_REQUIRED,
+        "source_policy:{component}_derived_strategy_is_not_primary_evidence": ASSESSMENT_TILE_REASSESSMENT_REQUIRED,
+        "source_policy:{component}_external_proof_without_owned_surface": ASSESSMENT_TILE_REASSESSMENT_REQUIRED,
+        "source_policy:coherencia_capped_after_component_authority_caps": LEGACY_COMPATIBILITY_ONLY,
+    }
+)
+
+
+@dataclass(frozen=True)
+class SourcePolicyAction:
+    component: str
+    cap: int
+    reason: str
+    axis_classification: str
+
+
+@dataclass(frozen=True)
+class SourcePolicyPlan:
+    axis_classification_version: str
+    legacy_policy_version: str
+    actions: tuple[SourcePolicyAction, ...]
+
 
 _OWNED_EXPRESSION_CAPS = {
     "mission": 3,
@@ -39,37 +76,53 @@ _EXTERNAL_ONLY_PROOF_CAPS = {
 }
 
 
-def apply_source_policy(components: dict[str, ComponentResult]) -> bool:
-    """Apply source-authority caps in place.
-
-    Returns True when any component was changed. The policy is intentionally
-    conservative: it only lowers scores when the evidence authority is weaker
-    than the component requires.
-    """
-
-    changed = False
-    capped_components: list[str] = []
+def _iter_source_policy_actions(
+    components: dict[str, ComponentResult],
+) -> Iterator[SourcePolicyAction]:
     for key, component in components.items():
         if key == "coherencia":
             continue
-        cap, reason = _cap_for_component(key, component)
-        if cap is None:
-            continue
-        if _cap_component(component, cap, reason):
+        cap, reason, reason_template = _cap_for_component(key, component)
+        if cap is not None:
+            yield SourcePolicyAction(
+                component=key,
+                cap=cap,
+                reason=reason,
+                axis_classification=SOURCE_POLICY_REASON_CLASSIFICATIONS[reason_template],
+            )
+
+
+def build_source_policy_plan(components: dict[str, ComponentResult]) -> SourcePolicyPlan:
+    """Build an immutable description of matching legacy caps without mutating inputs."""
+
+    return SourcePolicyPlan(
+        axis_classification_version=SOURCE_POLICY_AXIS_CLASSIFICATION_VERSION,
+        legacy_policy_version=LEGACY_SOURCE_POLICY_VERSION,
+        actions=tuple(_iter_source_policy_actions(components)),
+    )
+
+
+def apply_source_policy(components: dict[str, ComponentResult]) -> bool:
+    """Apply the frozen legacy plan in place and report whether it changed."""
+
+    changed = False
+    capped_components = 0
+    for action in _iter_source_policy_actions(components):
+        if _cap_component(components[action.component], action.cap, action.reason):
             changed = True
-            capped_components.append(key)
+            capped_components += 1
 
     if capped_components:
-        coherence_cap = 6 if len(capped_components) < 3 else 5
         reason = "source_policy:coherencia_capped_after_component_authority_caps"
+        coherence_cap = 6 if capped_components < 3 else 5
         if _cap_component(components["coherencia"], coherence_cap, reason):
             changed = True
     return changed
 
 
-def _cap_for_component(key: str, component: ComponentResult) -> tuple[int | None, str]:
+def _cap_for_component(key: str, component: ComponentResult) -> tuple[int | None, str, str]:
     if component.status != STATUS_SCORED:
-        return None, ""
+        return None, "", ""
     summary = component.evidence_source_summary or {}
     limitations = [item.lower() for item in component.detection_limitations or []]
     owned = int(summary.get("owned_copy") or 0)
@@ -80,20 +133,26 @@ def _cap_for_component(key: str, component: ComponentResult) -> tuple[int | None
 
     if key in _OWNED_EXPRESSION_CAPS:
         if _has_coverage_limitation(limitations, key, "verified_absent"):
-            return _OWNED_EXPRESSION_CAPS[key], f"source_policy:{key}_owned_expression_verified_absent"
+            template = "source_policy:{component}_owned_expression_verified_absent"
+            return _OWNED_EXPRESSION_CAPS[key], template.format(component=key), template
         if _has_coverage_limitation(limitations, key, "implied_not_explicit"):
-            return _IMPLIED_EXPRESSION_CAPS[key], f"source_policy:{key}_implied_not_explicit"
+            template = "source_policy:{component}_implied_not_explicit"
+            return _IMPLIED_EXPRESSION_CAPS[key], template.format(component=key), template
         if total and owned == 0 and visual == 0:
-            return _OWNED_EXPRESSION_CAPS[key], f"source_policy:{key}_requires_owned_expression"
+            template = "source_policy:{component}_requires_owned_expression"
+            return _OWNED_EXPRESSION_CAPS[key], template.format(component=key), template
         if external > owned + visual and key != "brand_idea":
-            return _IMPLIED_EXPRESSION_CAPS[key], f"source_policy:{key}_external_proof_dominates_owned_expression"
+            template = "source_policy:{component}_external_proof_dominates_owned_expression"
+            return _IMPLIED_EXPRESSION_CAPS[key], template.format(component=key), template
         if derived and owned == 0:
-            return _OWNED_EXPRESSION_CAPS[key], f"source_policy:{key}_derived_strategy_is_not_primary_evidence"
+            template = "source_policy:{component}_derived_strategy_is_not_primary_evidence"
+            return _OWNED_EXPRESSION_CAPS[key], template.format(component=key), template
 
     if key in _EXTERNAL_ONLY_PROOF_CAPS and total and owned == 0:
-        return _EXTERNAL_ONLY_PROOF_CAPS[key], f"source_policy:{key}_external_proof_without_owned_surface"
+        template = "source_policy:{component}_external_proof_without_owned_surface"
+        return _EXTERNAL_ONLY_PROOF_CAPS[key], template.format(component=key), template
 
-    return None, ""
+    return None, "", ""
 
 
 def _has_coverage_limitation(limitations: list[str], key: str, status: str) -> bool:
