@@ -134,27 +134,17 @@ requires its exact connected host, and then SELECTs the exact database,
 `current_user`, Neon project, and Neon branch identity. Missing or inactive client TLS and any identity mismatch
 perform no migration DDL. Neon terminates client TLS at its proxy, so the
 backend-facing `pg_stat_ssl.ssl` value is not evidence of the client connection's
-TLS state and is not part of this target attestation. Run migrations before deploy
-only from a clean operator environment where the approved secret manager has
-already injected `B3S_MIGRATION_DATABASE_URL`. Do not paste, assign, or export
-the DSN inline in a command that can enter shell history:
+TLS state and is not part of this target attestation.
+The approved secret manager must provision `B3S_MIGRATION_DATABASE_URL` only as a temporary secret
+in the protected `pr71-vault` GitHub environment after controller merge, CI,
+workflow-blob, zero-secret, and separate deployment-GO checks succeed. Never
+paste, assign, or export the DSN in a local command or shell history.
 
-```bash
-test -n "${B3S_MIGRATION_DATABASE_URL:-}" || {
-  echo "B3S_MIGRATION_DATABASE_URL is not loaded" >&2
-  exit 1
-}
-python scripts/migrate_b3s_history_postgres.py --target-profile pr71-vault
-python scripts/configure_b3s_runtime_role.py \
-  --target-profile pr71-vault \
-  --role b3s_pr71_app_runtime \
-  --database-name neondb
-fly config validate -a b3s-pr71-vault -c fly.pr71-vault.toml
-fly deploy --remote-only \
-  -a b3s-pr71-vault \
-  -c fly.pr71-vault.toml \
-  --build-arg B3S_BUILD_SHA="$(git rev-parse HEAD)"
-```
+Do not invoke the migrator, runtime-role configurator, `fly config validate`, or
+`fly deploy` from a local checkout. The only authorized path is the post-merge
+GitHub workflow dispatched from live `main`; its controller performs attestation
+before checkout and secret use, then runs those packaged operations against the
+fixed PR #97 payload.
 
 The role command repeats the same target assertion on its own grant connection
 before any `REVOKE`/`GRANT`, is idempotent, and only accepts the privileged URL
@@ -172,69 +162,81 @@ password, or prints a DSN/driver error.
 Do not use `fly.toml`, `fly.vault.toml`, `b3s`, `b3s-vault`, their volumes, or
 their database branches in this workflow. The manual GitHub workflow is a
 **post-merge-only** deployment mechanism for the isolated `b3s-pr71-vault`
-target. Its current reviewed application baseline is PR #86 at head
-`fecc2ede8a15f98fe6f8682c55be77bf2db964dd` and merge commit
-`4557ed34a681c90546253a37a3b53c688a0c19d4`. Neither merging the reviewed
+target. Its current reviewed application baseline is PR #97 at head
+`393a8894e86484456cce3144af111037ca5195c6` and merge commit
+`0f968e97bfeeff7052b9bcefcbd7c650ca28f4fa`. Neither merging the reviewed
 PR, the presence of `workflow_dispatch`, the confirmation input, nor a
 successful attestation authorizes a merge or deployment. Merge approval and
-the deployment GO remain separate operator decisions. The currently authorized
-Phase 2 deployment scope is migration `028` plus the exact reviewed application
-image with `B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED=false`; it does not activate
-the diagnostic surface, scoring, ranking, canonical selection, Scanner, or
-production authority. Workflow `Process isolated PR71 SV9 shadow work` is
-manually paused before deployment because its exact-head check would otherwise
-reject schema head `027`. Reactivating that scheduler remains a separate
-authorization after head `028` and ACLs are proven live.
+the deployment GO remain separate operator decisions. The authorized scope is
+the exact reviewed semantic-v3 application image on the already isolated
+head-`028` database, with `B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED=false`.
+It does not affect `b3s`, production authority, production data, or diagnostics.
+The existing isolated operational pipeline, worker, verified-raw shadow, and
+scheduler retain their independently authorized state; this reauthorization
+changes none of their flags or credentials.
 
 Dispatch only from exact `refs/heads/main` through the GitHub environment
-`pr71-vault`. The input SHA must equal both the immutable dispatch SHA and the
-live REST `main` ref. The environment has a custom deployment branch policy configured to allow only `main`.
+`pr71-vault`. The `deployment_sha` input must equal the reviewed PR #97 merge
+`0f968e97bfeeff7052b9bcefcbd7c650ca28f4fa`; that is the exact application
+payload checked out, built, and verified by `/health`.
+The immutable dispatch SHA must separately equal the live REST `main` ref and
+identifies only the three-file reauthorization controller. The environment has a
+custom deployment branch policy configured to allow only `main`.
 
 The `pr71-vault` environment currently contains zero deployment secrets.
 `B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN` were provisioned only for the
-previous authorized deployment and then removed. Deployment run `31767099481`
+previous authorized deployment and then removed. Deployment run `31851012413`
 completed every attestation, migration/ACL, deploy, and exact-commit liveness
-step successfully at `9151a381a56a2a58894bd8a5b377bbc608a86d39`. Both temporary deployment secrets were then removed.
+step successfully at `8e6bc79da525e854e1a96fb5cad9f3837445f125`.
+Both temporary deployment secrets were then removed.
 Any future deployment requires a new exact-SHA GO and fresh secret provisioning.
 The reviewed workflow source is trusted in this control-plane model.
 The self-blob comparison is defense in depth against a stale or mismatched
 dispatch; it does not
 make mutable repository source an immutable root of trust or defend against an
 actor able to merge a malicious workflow change. Before provisioning either
-temporary secret, the operator must independently fetch the workflow blob at live
-`main`, require it to equal both the reviewed expected blob and the protected
-environment baseline, and confirm that the environment still contains zero
+temporary secret, the operator must independently fetch the controller workflow
+blob at live `main`, require it to equal both the reviewed expected blob and the
+protected environment baseline, and confirm that the environment still contains zero
 secrets. Any mismatch is a hard NO-GO. A compromised-maintainer threat model
 would require an immutable external deployment controller and is not claimed here.
 
 Before checkout, dependency installation, or deployment-secret use, pre-check
-code embedded in the reviewed repository workflow fetches PR #86 and requires `state=closed`, `merged=true`, and `draft=false`, base `main`, head `feat/sv9-shadow-diagnostics`, repository ID
-`1288696741` and name `GsusFC/B3S`, exact reviewed head, and exact `merge_commit_sha`.
-It proves reviewed-head-to-merge and merge-to-current-main ancestry from complete
-GitHub Compare responses. For the deployment-attestation follow-up, the latter
-comparison must contain the exact three audited files listed above; those are these existing, modified, non-renamed paths:
+code embedded in the reviewed repository workflow fetches PR #97 and requires
+`state=closed`, `merged=true`, and `draft=false`, base `main`, head
+`refactor/vault-semantic-v3-selector-cutover`, repository ID `1288696741` and
+name `GsusFC/B3S`, exact reviewed head, and exact `merge_commit_sha`. It proves
+reviewed-head-to-target and target-to-current-controller ancestry from complete
+GitHub Compare responses. The target is fixed to the PR #97 merge. For the
+three-file reauthorization controller, the latter comparison must contain
+these exact existing, modified, non-renamed paths:
 
 - `.github/workflows/fly-deploy-pr71-vault.yml`
 - `docs/deployment/b3s_pr71_vault.md`
 - `tests/test_deploy_provenance.py`
 
 Under that trusted-source model, any runtime, database, CI-workflow, config, or
-other source change after PR #86 is outside the attestation allowlist and fails
+other source change after PR #97 is outside the attestation allowlist and fails
 closed. This three-file control-plane follow-up records the reviewed, merged,
-green protected SV9 shadow-diagnostics baseline consumed by the defense-in-depth
-attestation without changing runtime code or configuration. Deployment is still a
-separate operator decision and also requires the Google client and all temporary
-capabilities described below.
+green semantic-v3 baseline consumed by the defense-in-depth attestation without
+changing runtime code or configuration. Deployment remains a separate operator
+decision and requires temporary migration and Fly capabilities.
 
-The reauthorization baseline is PR #86: feature head `fecc2ede8a15f98fe6f8682c55be77bf2db964dd`, feature merge `4557ed34a681c90546253a37a3b53c688a0c19d4`, and CI runs `31835201991` and `31836021418`.
+The target tree cumulatively contains the already merged PRs #89, #91, #93,
+#95, and #97; this controller does not reinterpret or selectively omit them.
+The reauthorization trust anchor is PR #97: head
+`393a8894e86484456cce3144af111037ca5195c6`, merge
+`0f968e97bfeeff7052b9bcefcbd7c650ca28f4fa`, and CI runs `31933082104` and
+`31933234627`.
 
 The trusted CI identity is pinned to workflow ID `306885838`, path
 `.github/workflows/ci.yml`, and blob
 `c1082f6b5c53a364b8d38e43936b93722c0183d1`. The workflow must remain active;
-the reviewed head, merge, and deployment Contents responses must carry that
-exact blob. Exact successful CI runs `31835201991` (reviewed PR #86 head) and
-`31836021418` (PR #86 merge on `main`) are pinned. The current exact-main push run is fetched without filtering away non-successful runs; exactly one completed,
-successful, first-attempt run with the expected repository and SHA is accepted.
+the reviewed head, payload target, and current controller Contents responses
+must carry that exact blob. Exact successful CI runs `31933082104` (reviewed PR
+#97 head) and `31933234627` (PR #97 merge on `main`) are pinned. The current exact-main
+controller push run is fetched without filtering away non-successful runs;
+exactly one completed, successful, first-attempt run with the expected repository and SHA is accepted.
 The `pull_requests` array may be empty. Missing, pending, failed, foreign, stale,
 wrong-event, workflow-modified, truncated, or ambiguous objects fail closed.
 
@@ -321,18 +323,46 @@ canonical score, change public scoring or ranking, write the ledger, or grant
 runtime authority. Enabling the flag, applying migration 028, reconfiguring the
 runtime ACL, and deploying an image are separate authorization boundaries.
 
+## Post-deployment semantic-v3 validation
+
+The deployment workflow proves exact image identity and liveness; it does not by
+itself prove the forward-only report selector. Before declaring the rollout
+validated, use an already authorized isolated scanner client outside the
+`pr71-vault` deployment environment to generate exactly one new report for a
+preapproved Vault domain. Do not add scanner or reviewer credentials to the
+deployment environment.
+
+The new report must be `completed` and expose all of these exact bindings:
+
+- `metadata.pipeline_schema_version == b3s-vault-semantic-report-v2`
+- `metadata.pipeline_commit_sha == 0f968e97bfeeff7052b9bcefcbd7c650ca28f4fa`
+- `metadata.rubric_version == baldosas-v3-1`
+- `metadata.evaluator_model == evidence-vault-semantic-scoring-v3`
+- limitation `score_projected_from_evidence_vault_semantic_scoring_v3`
+
+Capture an exact digest of one historical Vault report before and after the smoke
+and require byte identity. Separately require the new semantic-v3 report to keep
+`raw.vault.legacy_operational_v2.score_evaluation` and
+`raw.vault.legacy_operational_v2.score_authority_witness` as its legacy witness.
+Confirm diagnostics remain `false` and no report, credential, or evidence appears
+in `b3s` or `b3s-vault`. Contradiction, tampering, a missing source, invalid
+bindings, selector fallback, or any metadata mismatch is a
+NO-GO: stop, preserve receipts, remove the two temporary deployment secrets,
+and do not backfill, promote evidence, or roll back automatically.
+
 ## Rollback and NO-GO
 
 This exact three-file reauthorization replaces the former deployment NO-GO only
-for the reviewed PR #86 baseline. It becomes effective after it is merged, its
-exact current-main CI succeeds, the independently reviewed deployment-workflow
-blob is pinned in the protected environment, that environment is reconfirmed to
-contain zero deployment secrets, and the operator records an exact-SHA deployment
-GO. The allowlist must not be weakened. The authorized deployment may then apply
-migration 028, configure the runtime's view-only `SELECT`, and deploy that exact
-image with the feature flag still `false`. The external migration-target assertion
-must pass before DDL and head `028` must verify exactly. Flag activation and
-scheduler reactivation remain separately unauthorized.
+for the reviewed PR #97 semantic-v3 baseline. It becomes effective after it is
+merged, its exact current-main CI succeeds, the independently reviewed
+deployment-workflow blob is pinned in the protected environment, that environment
+is reconfirmed to contain zero deployment secrets,
+and the operator records an exact-SHA deployment GO. The allowlist must not be weakened. The authorized
+workflow may idempotently verify/apply the packaged head 028, reassert the exact
+runtime ACL, and deploy the exact PR #97 merge image with diagnostics still
+`false`. The reauthorization controller itself is never checked out into the
+application payload. The external migration-target assertion must pass before any DDL and head `028` must
+verify exactly. No new flag activation or scheduler-state change is authorized.
 `b3s` and `b3s-vault` must remain on their SELECT-only release verifiers and may
 not be used as fallback migration targets.
 

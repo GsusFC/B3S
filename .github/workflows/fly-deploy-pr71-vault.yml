@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       deployment_sha:
-        description: "Exact current main commit SHA to deploy"
+        description: "Exact reviewed PR #97 merge SHA to deploy"
         required: true
         type: string
       confirm_app:
@@ -43,13 +43,13 @@ jobs:
           DISPATCH_SHA: ${{ github.sha }}
           GH_REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
-          TRUSTED_PR_HEAD_SHA: fecc2ede8a15f98fe6f8682c55be77bf2db964dd
-          TRUSTED_PR_MERGE_SHA: 4557ed34a681c90546253a37a3b53c688a0c19d4
+          TRUSTED_PR_HEAD_SHA: 393a8894e86484456cce3144af111037ca5195c6
+          TRUSTED_PR_MERGE_SHA: 0f968e97bfeeff7052b9bcefcbd7c650ca28f4fa
           TRUSTED_CI_BLOB_SHA: c1082f6b5c53a364b8d38e43936b93722c0183d1
           TRUSTED_REPOSITORY_ID: "1288696741"
           TRUSTED_CI_WORKFLOW_ID: "306885838"
-          TRUSTED_PR_CI_RUN_ID: "31835201991"
-          TRUSTED_MERGE_CI_RUN_ID: "31836021418"
+          TRUSTED_PR_CI_RUN_ID: "31933082104"
+          TRUSTED_MERGE_CI_RUN_ID: "31933234627"
           # Provisioned outside the repository in the protected pr71-vault environment.
           # This value is deliberately not self-pinned in the workflow source.
           EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA: ${{ vars.PR71_DEPLOY_WORKFLOW_BLOB_SHA }}
@@ -83,18 +83,18 @@ jobs:
           deployment_ci_runs_file="$attestation_dir/deployment-ci-runs.json"
           deploy_workflow_blob_file="$attestation_dir/deploy-workflow-blob.json"
 
-          api_get "$pr_file" "$API_URL/repos/$GH_REPOSITORY/pulls/86"
+          api_get "$pr_file" "$API_URL/repos/$GH_REPOSITORY/pulls/97"
           api_get "$main_ref_file" "$API_URL/repos/$GH_REPOSITORY/git/ref/heads/main"
           api_get "$workflow_file" "$API_URL/repos/$GH_REPOSITORY/actions/workflows/ci.yml"
           api_get "$head_ci_file" "$API_URL/repos/$GH_REPOSITORY/contents/.github/workflows/ci.yml?ref=$TRUSTED_PR_HEAD_SHA"
           api_get "$merge_ci_file" "$API_URL/repos/$GH_REPOSITORY/contents/.github/workflows/ci.yml?ref=$TRUSTED_PR_MERGE_SHA"
-          api_get "$deploy_ci_file" "$API_URL/repos/$GH_REPOSITORY/contents/.github/workflows/ci.yml?ref=$DEPLOY_SHA"
-          api_get "$deploy_workflow_blob_file" "$API_URL/repos/$GH_REPOSITORY/contents/.github/workflows/fly-deploy-pr71-vault.yml?ref=$DEPLOY_SHA"
+          api_get "$deploy_ci_file" "$API_URL/repos/$GH_REPOSITORY/contents/.github/workflows/ci.yml?ref=$DISPATCH_SHA"
+          api_get "$deploy_workflow_blob_file" "$API_URL/repos/$GH_REPOSITORY/contents/.github/workflows/fly-deploy-pr71-vault.yml?ref=$DISPATCH_SHA"
           api_get "$head_merge_compare_file" "$API_URL/repos/$GH_REPOSITORY/compare/$TRUSTED_PR_HEAD_SHA...$TRUSTED_PR_MERGE_SHA?per_page=100&page=1"
-          api_get "$merge_deploy_compare_file" "$API_URL/repos/$GH_REPOSITORY/compare/$TRUSTED_PR_MERGE_SHA...$DEPLOY_SHA?per_page=100&page=1"
+          api_get "$merge_deploy_compare_file" "$API_URL/repos/$GH_REPOSITORY/compare/$TRUSTED_PR_MERGE_SHA...$DISPATCH_SHA?per_page=100&page=1"
           api_get "$pr_ci_run_file" "$API_URL/repos/$GH_REPOSITORY/actions/runs/$TRUSTED_PR_CI_RUN_ID"
           api_get "$merge_ci_run_file" "$API_URL/repos/$GH_REPOSITORY/actions/runs/$TRUSTED_MERGE_CI_RUN_ID"
-          api_get "$deployment_ci_runs_file" "$API_URL/repos/$GH_REPOSITORY/actions/workflows/$TRUSTED_CI_WORKFLOW_ID/runs?event=push&branch=main&head_sha=$DEPLOY_SHA&per_page=100"
+          api_get "$deployment_ci_runs_file" "$API_URL/repos/$GH_REPOSITORY/actions/workflows/$TRUSTED_CI_WORKFLOW_ID/runs?event=push&branch=main&head_sha=$DISPATCH_SHA&per_page=100"
 
           PR_FILE="$pr_file" \
           MAIN_REF_FILE="$main_ref_file" \
@@ -160,10 +160,10 @@ jobs:
               os.environ["DISPATCH_REF"] == "refs/heads/main",
               "deployment workflow must be dispatched from refs/heads/main",
           )
-          require(deploy_sha == dispatch_sha, "deployment_sha is not the dispatched main SHA")
+          require(deploy_sha == trusted_merge, "deployment_sha is not the reviewed PR merge")
 
           pr = load_object("PR_FILE")
-          exact_int(pr.get("number"), 86, "unexpected pull request object")
+          exact_int(pr.get("number"), 97, "unexpected pull request object")
           require(pr.get("state") == "closed", "reviewed PR must be closed")
           require(pr.get("merged") is True, "reviewed PR must be merged")
           require(pr.get("draft") is False, "reviewed PR must not be a draft")
@@ -172,7 +172,7 @@ jobs:
           require(isinstance(base, dict), "reviewed PR base must be present")
           require(isinstance(head, dict), "reviewed PR head must be present")
           require(base.get("ref") == "main", "reviewed PR base ref must be main")
-          require(head.get("ref") == "feat/sv9-shadow-diagnostics", "reviewed PR head ref is not exact")
+          require(head.get("ref") == "refactor/vault-semantic-v3-selector-cutover", "reviewed PR head ref is not exact")
           require(head.get("sha") == trusted_head, "reviewed PR head SHA is not exact")
           require(pr.get("merge_commit_sha") == trusted_merge, "reviewed PR merge commit SHA is not exact")
           for label, side in (("base", base), ("head", head)):
@@ -186,7 +186,7 @@ jobs:
           main_object = main_ref.get("object")
           require(isinstance(main_object, dict), "main ref object is missing")
           require(main_object.get("type") == "commit", "main must resolve to a commit")
-          require(main_object.get("sha") == deploy_sha, "deployment_sha is not current main")
+          require(main_object.get("sha") == dispatch_sha, "dispatch SHA is not current main")
 
           workflow = load_object("WORKFLOW_FILE")
           exact_int(workflow.get("id"), trusted_workflow_id, "trusted CI workflow id is not exact")
@@ -195,8 +195,8 @@ jobs:
 
           for label, env_name in (
               ("reviewed head", "HEAD_CI_FILE"),
-              ("PR86 merge", "MERGE_CI_FILE"),
-              ("deployment", "DEPLOY_CI_FILE"),
+              ("PR97 merge", "MERGE_CI_FILE"),
+              ("deployment controller", "DEPLOY_CI_FILE"),
           ):
               blob = load_object(env_name)
               require(blob.get("type") == "file", f"{label} CI object must be a file")
@@ -244,7 +244,7 @@ jobs:
           head_merge_compare = load_object("HEAD_MERGE_COMPARE_FILE")
           attest_ancestry(head_merge_compare, trusted_head, trusted_merge, "reviewed-head-to-merge", None)
           merge_deploy_compare = load_object("MERGE_DEPLOY_COMPARE_FILE")
-          attest_ancestry(merge_deploy_compare, trusted_merge, deploy_sha, "merge-to-deployment", HOTFIX_FILES)
+          attest_ancestry(merge_deploy_compare, trusted_merge, dispatch_sha, "merge-to-controller", HOTFIX_FILES)
 
           def attest_run(run, expected):
               require(isinstance(run, dict), f"{expected['label']} run must be an object")
@@ -268,17 +268,17 @@ jobs:
           }
           attest_run(
               load_object("PR_CI_RUN_FILE"),
-              {"label": "reviewed PR86", "fields": {
+              {"label": "reviewed PR97", "fields": {
                   **common,
                   "id": trusted_pr_run_id,
                   "event": "pull_request",
-                  "head_branch": "feat/sv9-shadow-diagnostics",
+                  "head_branch": "refactor/vault-semantic-v3-selector-cutover",
                   "head_sha": trusted_head,
               }},
           )
           attest_run(
               load_object("MERGE_CI_RUN_FILE"),
-              {"label": "PR86 merge", "fields": {
+              {"label": "PR97 merge", "fields": {
                   **common,
                   "id": trusted_merge_run_id,
                   "event": "push",
@@ -297,12 +297,12 @@ jobs:
           require(isinstance(current_run_id, int) and not isinstance(current_run_id, bool) and current_run_id > 0, "current deployment CI run id is invalid")
           attest_run(
               current_run,
-              {"label": "current deployment", "fields": {
+              {"label": "current deployment controller", "fields": {
                   **common,
                   "id": current_run_id,
                   "event": "push",
                   "head_branch": "main",
-                  "head_sha": deploy_sha,
+                  "head_sha": dispatch_sha,
               }},
           )
           PY
