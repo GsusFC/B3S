@@ -304,9 +304,14 @@ El incremento inicial de este ADR introdujo kernel, adaptadores, paridad y tests
   `sv9-source-policy-axis-classification-v1` clasifica cada regla directa como
   `assessment_tile_reassessment_required` y el cap posterior de Coherencia como
   `legacy_compatibility_only`; no introduce transiciones de verification ni de
-  authority. El bloqueo sigue abierto hasta que evidencia ligada a cada baldosa
-  sustituya las demociones/caps legacy y el cutover de Scanner deje de llamar a
-  esta política.
+  authority. El shadow no público
+  `sv9-scanner-semantic-assessment-shadow-v2` conserva el vector original: lee
+  el plan directo y queda unavailable si una acción cambiaría su componente;
+  solo un plan sin cambios usa el adaptador estricto del kernel. El seguimiento
+  de Coherencia no es un trigger semántico. No hay integración con aggregate,
+  API, store, DB o web. El bloqueo sigue abierto hasta que evidencia ligada a
+  cada baldosa sustituya las demociones/caps legacy y el cutover de Scanner deje
+  de llamar a esta política.
 El bloqueo de aritmética del preview queda cerrado: sus vectores actual y
 recuperado consumen `build_sv9_assessment()` y fallan cerrados ante assessments
 inválidos o incompletos. El gate de reproducibilidad persistido se conserva.

@@ -8,7 +8,8 @@ source-authority transition semantics.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -16,6 +17,7 @@ from src.sv9.models import ComponentResult, ESTADO_OK, ESTADO_SIN_EVIDENCIA, STA
 from src.sv9.rubric import COMPONENTS
 
 SOURCE_POLICY_AXIS_CLASSIFICATION_VERSION = "sv9-source-policy-axis-classification-v1"
+LEGACY_SOURCE_POLICY_PROJECTION_VERSION = "sv9-legacy-source-policy-projection-v1"
 ASSESSMENT_TILE_REASSESSMENT_REQUIRED = "assessment_tile_reassessment_required"
 LEGACY_COMPATIBILITY_ONLY = "legacy_compatibility_only"
 
@@ -51,6 +53,15 @@ class SourcePolicyPlan:
     actions: tuple[SourcePolicyAction, ...]
 
 
+@dataclass(frozen=True)
+class LegacySourcePolicyProjection:
+    """Detached result of applying the frozen legacy policy."""
+
+    schema_version: str
+    components: dict[str, ComponentResult]
+    changed: bool
+
+
 _OWNED_EXPRESSION_CAPS = {
     "mission": 3,
     "vision": 3,
@@ -77,7 +88,7 @@ _EXTERNAL_ONLY_PROOF_CAPS = {
 
 
 def _iter_source_policy_actions(
-    components: dict[str, ComponentResult],
+    components: Mapping[str, ComponentResult],
 ) -> Iterator[SourcePolicyAction]:
     for key, component in components.items():
         if key == "coherencia":
@@ -92,7 +103,7 @@ def _iter_source_policy_actions(
             )
 
 
-def build_source_policy_plan(components: dict[str, ComponentResult]) -> SourcePolicyPlan:
+def build_source_policy_plan(components: Mapping[str, ComponentResult]) -> SourcePolicyPlan:
     """Build an immutable description of matching legacy caps without mutating inputs."""
 
     return SourcePolicyPlan(
@@ -102,7 +113,25 @@ def build_source_policy_plan(components: dict[str, ComponentResult]) -> SourcePo
     )
 
 
-def apply_source_policy(components: dict[str, ComponentResult]) -> bool:
+def project_legacy_source_policy(
+    components: Mapping[str, ComponentResult],
+) -> LegacySourcePolicyProjection:
+    """Apply the legacy policy to a detached component graph.
+
+    The legacy policy deliberately remains mutable for compatibility callers.
+    This projection is the typed pure boundary used by aggregation instead.
+    """
+
+    memo: dict[int, object] = {}
+    projected_components = {key: deepcopy(component, memo) for key, component in components.items()}
+    return LegacySourcePolicyProjection(
+        schema_version=LEGACY_SOURCE_POLICY_PROJECTION_VERSION,
+        components=projected_components,
+        changed=apply_source_policy(projected_components),
+    )
+
+
+def apply_source_policy(components: Mapping[str, ComponentResult]) -> bool:
     """Apply the frozen legacy plan in place and report whether it changed."""
 
     changed = False
