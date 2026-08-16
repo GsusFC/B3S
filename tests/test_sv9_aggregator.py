@@ -1,4 +1,6 @@
+from copy import deepcopy
 import unittest
+from types import MappingProxyType
 
 from src.sv9.aggregator import (
     aggregate,
@@ -185,16 +187,11 @@ class AggregateTests(unittest.TestCase):
             status=STATUS_SCORED,
             score=1,
             tile_profile=[
-                _tile(tile_id, ESTADO_OK if tile_id == "C7" else ESTADO_NO)
-                for tile_id in tile_ids("coherencia")
+                _tile(tile_id, ESTADO_OK if tile_id == "C7" else ESTADO_NO) for tile_id in tile_ids("coherencia")
             ],
         )
         components = full_components(
-            **{
-                key: scored(key, 0)
-                for key in COMPONENTS
-                if key != "coherencia"
-            },
+            **{key: scored(key, 0) for key in COMPONENTS if key != "coherencia"},
             coherencia=coherencia,
         )
 
@@ -224,9 +221,7 @@ class AggregateTests(unittest.TestCase):
     def test_not_evaluated_scores_zero_and_marks_partial(self):
         result = aggregate(
             full_components(
-                personality=ComponentResult(
-                    component="personality", status=STATUS_NOT_EVALUATED, error="llm_timeout"
-                )
+                personality=ComponentResult(component="personality", status=STATUS_NOT_EVALUATED, error="llm_timeout")
             ),
             brand_name="Acme",
             url="https://acme.test",
@@ -273,6 +268,41 @@ class AggregateTests(unittest.TestCase):
         components.pop("coherencia")
         with self.assertRaises(ValueError):
             aggregate(components, brand_name="Acme", url="https://acme.test")
+
+    def test_aggregate_preserves_legacy_output_without_mutating_input(self):
+        components = full_components(
+            mission=scored(
+                "mission",
+                5,
+                evidence_source_summary={"external_proof": 2, "total": 2},
+            )
+        )
+        before = deepcopy(components)
+
+        result = aggregate(components, brand_name="Acme", url="https://acme.test")
+
+        self.assertEqual(components, before)
+        self.assertEqual(result.brand3_score, 90)
+        self.assertEqual(result.components["mission"].score, 3)
+        self.assertEqual(result.components["coherencia"].score, 6)
+        self.assertEqual(
+            result.to_dict()["components"]["mission"]["source_policy_notes"],
+            ["source_policy:mission_requires_owned_expression"],
+        )
+
+    def test_aggregate_accepts_read_only_component_mapping(self):
+        components = full_components(
+            mission=scored(
+                "mission",
+                5,
+                evidence_source_summary={"external_proof": 2, "total": 2},
+            )
+        )
+
+        result = aggregate(MappingProxyType(components), brand_name="Acme", url="https://acme.test")
+
+        self.assertEqual(result.brand3_score, 90)
+        self.assertEqual(components["mission"].score, 5)
 
     def test_owned_expression_is_capped_when_only_external_proof_supports_it(self):
         result = aggregate(
@@ -332,7 +362,9 @@ class AggregateTests(unittest.TestCase):
         )
 
         self.assertEqual(result.components["mission"].score, 3)
-        self.assertIn("source_policy:mission_owned_expression_verified_absent", result.components["mission"].source_policy_notes)
+        self.assertIn(
+            "source_policy:mission_owned_expression_verified_absent", result.components["mission"].source_policy_notes
+        )
 
     def test_probable_absent_does_not_apply_verified_absent_cap(self):
         result = aggregate(
@@ -420,9 +452,7 @@ class MostPainfulGapTests(unittest.TestCase):
 
     def test_excludes_technical_failures(self):
         components = full_components(
-            personality=ComponentResult(
-                component="personality", status=STATUS_NOT_EVALUATED, error="x"
-            ),
+            personality=ComponentResult(component="personality", status=STATUS_NOT_EVALUATED, error="x"),
             mission=scored("mission", 4),
         )
         self.assertEqual(most_painful_gap(components), "mission")

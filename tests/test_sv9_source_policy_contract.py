@@ -14,12 +14,14 @@ from src.sv9.rubric import COMPONENTS, tile_ids
 from src.sv9.source_policy import (
     ASSESSMENT_TILE_REASSESSMENT_REQUIRED,
     LEGACY_COMPATIBILITY_ONLY,
+    LEGACY_SOURCE_POLICY_PROJECTION_VERSION,
     LEGACY_SOURCE_POLICY_VERSION,
     SOURCE_POLICY_AXIS_CLASSIFICATION_VERSION,
     SOURCE_POLICY_REASON_CLASSIFICATIONS,
     SOURCE_POLICY_VERSION,
     apply_source_policy,
     build_source_policy_plan,
+    project_legacy_source_policy,
 )
 
 
@@ -105,6 +107,21 @@ class SourcePolicyAxisClassificationContractTests(unittest.TestCase):
         )
         self.assertNotIn("verification", set(SOURCE_POLICY_REASON_CLASSIFICATIONS.values()))
         self.assertNotIn("authority_transition", set(SOURCE_POLICY_REASON_CLASSIFICATIONS.values()))
+
+    def test_projection_is_detached_and_matches_the_legacy_policy(self):
+        components = _rule_matrix()
+        before = copy.deepcopy(components)
+
+        projection = project_legacy_source_policy(components)
+        expected = copy.deepcopy(components)
+        expected_changed = apply_source_policy(expected)
+
+        self.assertEqual(projection.schema_version, LEGACY_SOURCE_POLICY_PROJECTION_VERSION)
+        self.assertEqual(projection.changed, expected_changed)
+        self.assertEqual(projection.components, expected)
+        self.assertEqual(components, before)
+        self.assertIsNot(projection.components, components)
+        self.assertIsNot(projection.components["mission"], components["mission"])
 
     def test_boundary_and_non_scored_component_do_not_change_legacy_output(self):
         components = _components(
