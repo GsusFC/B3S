@@ -21,6 +21,7 @@ from src.services.evidence_vault_candidate_resolver import (
     canonical_aggregation_policy_fingerprint,
 )
 from src.services.evidence_vault_canonical_core import (
+    build_candidate_packet,
     build_candidate_tile,
     build_tile_contract_registry,
     canonical_fingerprint,
@@ -30,8 +31,12 @@ from src.services.evidence_vault_operational_authority import (
     build_operational_adoption_event,
     project_adopted_operational_memory,
 )
-from src.services.evidence_vault_operational_memory import (
-    build_operational_memory_packet,
+from src.services.evidence_vault_operational_assessment_shadow import (
+    build_operational_semantic_shadow_assessment,
+)
+from src.services.evidence_vault_operational_memory import build_operational_memory_packet
+from src.services.evidence_vault_semantic_scoring_v3 import (
+    build_evidence_vault_semantic_assessment,
 )
 from src.services.evidence_vault_operational_scoring import (
     EVIDENCE_VAULT_OPERATIONAL_EVALUATION_IDENTITY_VERSION,
@@ -48,6 +53,7 @@ from web.report_view_model import build_report_view_model
 
 
 _PROMOTION_EVENTS: dict[str, dict] = {}
+_SEMANTIC_SELECTORS: dict[str, dict] = {}
 
 
 def _digest(value: str) -> str:
@@ -94,6 +100,18 @@ def _all_tile_ids() -> set[str]:
 
 def _packet(ok_tile_ids: set[str], accepted_ids: set[str]) -> dict:
     candidates = _candidates(ok_tile_ids)
+    tag = ",".join(sorted(ok_tile_ids)) or "empty"
+    source = build_candidate_packet(
+        brand_identity="example.com",
+        parent_canonical_memory_version=None,
+        candidate_memory_version=_digest(f"candidate-{tag}"),
+        accepted_memory_candidate_version=_digest(f"accepted-{tag}"),
+        reviewed_memory_candidate_version=_digest(f"reviewed-{tag}"),
+        review_packet_set_fingerprint=_digest(f"review-{tag}"),
+        aggregation_policy_fingerprint=canonical_aggregation_policy_fingerprint(),
+        candidate_tiles=candidates,
+        unresolved_items=[],
+    )
     by_id = {row["tile_id"]: row for row in candidates}
     dispositions = {
         tile_id: {
@@ -116,13 +134,26 @@ def _packet(ok_tile_ids: set[str], accepted_ids: set[str]) -> dict:
         }
         for tile_id in accepted_ids
     }
-    return build_operational_memory_packet(
+    packet = build_operational_memory_packet(
         brand_identity="example.com",
-        source_candidate_packet_fingerprint=_digest("source-packet"),
+        source_candidate_packet_fingerprint=source["candidate_packet_fingerprint"],
         aggregation_policy_fingerprint=canonical_aggregation_policy_fingerprint(),
         candidate_tiles=candidates,
         dispositions=dispositions,
     )
+    shadow = build_operational_semantic_shadow_assessment(
+        operational_packet=packet,
+        source_candidate_packet=source,
+        expected_parent_canonical_memory_version=None,
+    )
+    _SEMANTIC_SELECTORS[packet["candidate_packet_fingerprint"]] = {
+        "semantic_scoring_v3": build_evidence_vault_semantic_assessment(
+            source_candidate_packet=source
+        ),
+        "authority_coverage": shadow["authority_coverage"],
+        "verification_requirements": shadow["verification_requirements"],
+    }
+    return packet
 
 
 def _adopted_memory(ok_tile_ids: set[str], accepted_ids: set[str]) -> dict:
@@ -181,24 +212,26 @@ def _scanner_adoption(packet: dict) -> tuple[dict, dict, dict]:
 
 def _score_authority(memory: dict, score: dict) -> dict[str, dict]:
     promotion_event = _PROMOTION_EVENTS[memory["adoption_event_id"]]
+    selector = _SEMANTIC_SELECTORS[promotion_event["candidate_packet_fingerprint"]]
     return {
         "promotion_event": promotion_event,
-        "score_authority_witness": build_operational_score_authority_witness(
-            memory,
-            promotion_event=promotion_event,
-            evaluation=score,
-        ),
+        **selector,
+        "legacy_operational_v2": {
+            "score_evaluation": score,
+            "score_authority_witness": build_operational_score_authority_witness(
+                memory,
+                promotion_event=promotion_event,
+                evaluation=score,
+            ),
+        },
     }
 
 
 def _report_projection(memory: dict, score: dict) -> dict:
-    authority = _score_authority(memory, score)
     return {
-        "schema_version": "evidence-vault-operational-report-projection-v1",
+        "schema_version": "evidence-vault-semantic-report-projection-v2",
         "memory": memory,
-        "promotion_event": authority["promotion_event"],
-        "score_evaluation": score,
-        "score_authority_witness": authority["score_authority_witness"],
+        **_score_authority(memory, score),
     }
 
 
@@ -281,28 +314,30 @@ def test_compose_vault_memory_report_projects_durable_memory_model_free() -> Non
         brand_name="Example",
         capture_observation=_observation("scan-report"),
         memory=memory,
-        score=score,
         **_score_authority(memory, score),
     )
 
     assert report["raw"]["vault_memory_projection"] is True
-    assert report["raw"]["schema_version"] == "b3s-vault-memory-report-v1"
+    assert report["raw"]["schema_version"] == "b3s-vault-semantic-report-v2"
     assert (
         report["raw"]["flow"]["candidate"]["evidence_pack"]["schema_version"]
         == "brand-evidence-pack-v1"
     )
     assert report["raw"]["flow"]["interpretation_debug"]["mode"] == (
-        "persisted_vault_memory"
+        "evidence_vault_semantic_scoring_v3"
     )
     assert report["raw"]["source_run_id"] == "123"
     assert report["score"] == score["score"]
     assert report["base_average"] == score["base_average"]
     assert report["reliability_status"] == "reliable"
     assert report["vault_memory_version"] == memory["canonical_memory_version"]
-    assert report["vault_score_evaluation_identity"] == score["evaluation_identity"]
-    assert report["raw"]["vault"]["score_authority_witness"][
-        "evaluation_identity"
-    ] == score["evaluation_identity"]
+    assert report["vault_semantic_observation_identity"] == report["raw"]["vault"][
+        "semantic_scoring_v3"
+    ]["observation_identity"]
+    assert report["raw"]["vault"]["legacy_operational_v2"][
+        "score_authority_witness"
+    ]["evaluation_identity"] == score["evaluation_identity"]
+    assert "score_evaluation" not in report["raw"]["vault"]
     assert report["total_blind_spots"] == 0
     assert report["most_painful_gap"] is None
     assert report["most_painful_gap_label"] == ""
@@ -326,9 +361,9 @@ def test_compose_vault_memory_report_projects_durable_memory_model_free() -> Non
     }
     assert view_components["mission"]["card"]["brand_quote"] == {}
     assert report["raw"]["sv9"]["result"]["evaluator_model"] == (
-        "vault-deterministic-memory"
+        "evidence-vault-semantic-scoring-v3"
     )
-    assert "score_projected_from_persisted_vault_memory" in report["limitations"]
+    assert "score_projected_from_evidence_vault_semantic_scoring_v3" in report["limitations"]
     # The capture evidence pack stays bound to this scan's durable snapshot.
     assert len(report["raw"]["flow"]["candidate"]["evidence_pack"]["evidence"]) == 1
 
@@ -358,7 +393,6 @@ def test_vault_report_binds_exact_persisted_observation_without_snapshot_hint() 
         brand_name="Example",
         capture_observation=observation,
         memory=memory,
-        score=score,
         **_score_authority(memory, score),
     )
 
@@ -416,7 +450,6 @@ def test_trusted_vault_report_rebuilds_gate_from_persisted_attempts(
         brand_name="Example",
         capture_observation=observation,
         memory=memory,
-        score=score,
         **_score_authority(memory, score),
     )
 
@@ -432,7 +465,7 @@ def test_trusted_vault_report_rebuilds_gate_from_persisted_attempts(
         "2026-08-11T05:00:00+00:00"
     )
     assert {
-        "score_projected_from_persisted_vault_memory",
+        "score_projected_from_evidence_vault_semantic_scoring_v3",
         "verified_external_document_unavailable",
         "external_acquisition:provider_result_ineligible",
         "acquisition_gate:exa_failed",
@@ -473,7 +506,6 @@ def test_trusted_not_discovered_gate_does_not_invent_exa_failure(
         brand_name="Example",
         capture_observation=observation,
         memory=memory,
-        score=score,
         **_score_authority(memory, score),
     )
 
@@ -486,8 +518,8 @@ def test_trusted_not_discovered_gate_does_not_invent_exa_failure(
     ]
 
 
-def test_partial_vault_memory_report_stays_shadow_and_counts_unresolved_tiles() -> None:
-    memory, score = _memory_and_score({"M1", "M2"}, {"M1", "M2"})
+def test_semantic_v3_selector_scores_pending_tiles_without_authority_filter() -> None:
+    memory, score = _memory_and_score({"M1", "M2", "M3"}, {"M1", "M2"})
 
     report = scan_runner._compose_vault_memory_report(
         scan_id="scan-partial",
@@ -495,7 +527,6 @@ def test_partial_vault_memory_report_stays_shadow_and_counts_unresolved_tiles() 
         brand_name="Example",
         capture_observation=_observation("scan-partial"),
         memory=memory,
-        score=score,
         **_score_authority(memory, score),
     )
 
@@ -506,7 +537,9 @@ def test_partial_vault_memory_report_stays_shadow_and_counts_unresolved_tiles() 
         "reliability_reason_codes"
     ]
     assert "scan_not_complete" not in report["reliability_reason_codes"]
-    assert report["total_blind_spots"] == 78
+    assert report["score"] == score["score"] + 1
+    assert report["raw"]["sv9"]["brand3_score"] == report["score"]
+    assert report["total_blind_spots"] == 77
     assert report["most_painful_gap"] == "magnetism"
     assert report["most_painful_gap_label"] == "Magnetism"
     assert report["immediate_margin"] == 12
@@ -514,9 +547,10 @@ def test_partial_vault_memory_report_stays_shadow_and_counts_unresolved_tiles() 
     unresolved_m3 = next(
         row for row in mission["tile_profile"] if row["tile_id"] == "M3"
     )
+    assert unresolved_m3["estado"] == "ok"
     assert unresolved_m3["vault_authority_state"] == "unresolved"
     assert unresolved_m3["vault_basis"] == []
-    assert report["raw"]["sv9"]["result"]["total_blind_spots"] == 78
+    assert report["raw"]["sv9"]["result"]["total_blind_spots"] == 77
 
 
 def test_vault_markdown_preserves_shadow_confidence_and_magnetism_cap() -> None:
@@ -530,7 +564,6 @@ def test_vault_markdown_preserves_shadow_confidence_and_magnetism_cap() -> None:
         brand_name="Example",
         capture_observation=_observation("scan-markdown-partial"),
         memory=partial_memory,
-        score=partial_score,
         **_score_authority(partial_memory, partial_score),
     )
     partial_payload = _scan_payload_for_markdown(partial_report)
@@ -558,7 +591,6 @@ def test_vault_markdown_preserves_shadow_confidence_and_magnetism_cap() -> None:
         brand_name="Example",
         capture_observation=_observation("scan-markdown-capped"),
         memory=capped_memory,
-        score=capped_score,
         **_score_authority(capped_memory, capped_score),
     )
     capped_payload = _scan_payload_for_markdown(capped_report)
@@ -578,7 +610,6 @@ def test_compose_vault_memory_report_tracks_accepted_absences_as_shadow() -> Non
         brand_name="Example",
         capture_observation=_observation("scan-shadow"),
         memory=memory,
-        score=score,
         **_score_authority(memory, score),
     )
 
@@ -617,18 +648,17 @@ def test_vault_memory_report_passes_report_import_contract() -> None:
         brand_name="Example",
         capture_observation=_observation("scan-import"),
         memory=memory,
-        score=score,
         **_score_authority(memory, score),
     )
 
     parsed = parse_report(report)
     assert parsed.score == float(score["score"])
     assert parsed.base_average == float(score["base_average"])
-    assert parsed.evaluator_model == "vault-deterministic-memory"
-    assert parsed.pipeline_version == "b3s-vault-memory-report-v1"
-    assert parsed.evaluated_at.isoformat() == "2026-08-06T11:00:00+00:00"
+    assert parsed.evaluator_model == "evidence-vault-semantic-scoring-v3"
+    assert parsed.pipeline_version == "b3s-vault-semantic-report-v2"
+    assert parsed.evaluated_at.isoformat() == "2026-08-11T05:00:00+00:00"
     assert parsed.evaluated_at < parsed.recorded_at
-    assert "score_projected_from_persisted_vault_memory" in parsed.limitations
+    assert "score_projected_from_evidence_vault_semantic_scoring_v3" in parsed.limitations
     assert len(parsed.components) == 10
     parsed_components = {row["key"]: row for row in parsed.components}
     assert parsed_components["magnetism"]["score"] == 10
@@ -653,7 +683,6 @@ def test_vault_memory_report_records_all_tiles_in_sqlite_mirror(
         brand_name="Example",
         capture_observation=_observation("scan-sqlite-mirror"),
         memory=memory,
-        score=score,
         **_score_authority(memory, score),
     )
     database_path = tmp_path / "scoring.sqlite3"
@@ -670,8 +699,10 @@ def test_vault_memory_report_records_all_tiles_in_sqlite_mirror(
             "SELECT COUNT(*) FROM tiles WHERE run_id = ?",
             ("scan-sqlite-mirror",),
         ).fetchone()[0]
+        rubric_version = connection.execute("SELECT rubric_version FROM runs").fetchone()[0]
     assert component_count == 10
     assert tile_count == 80
+    assert rubric_version == "baldosas-v3-1"
 
 
 def test_vault_memory_report_preserves_current_acquisition_limitations() -> None:
@@ -688,12 +719,11 @@ def test_vault_memory_report_preserves_current_acquisition_limitations() -> None
         brand_name="Example",
         capture_observation=_observation("scan-warning", snapshot),
         memory=memory,
-        score=score,
         **_score_authority(memory, score),
     )
 
     assert report["limitations"] == [
-        "score_projected_from_persisted_vault_memory",
+        "score_projected_from_evidence_vault_semantic_scoring_v3",
         "acquisition_warning:exa_failed",
     ]
 
@@ -712,7 +742,6 @@ def test_vault_memory_report_rejects_cross_brand_memory() -> None:
             brand_name="Example",
             capture_observation=_observation("scan-cross-brand"),
             memory=memory,
-            score=score,
             **_score_authority(memory, score),
         )
 
@@ -723,6 +752,7 @@ def test_vault_memory_report_rejects_mismatched_memory_and_score_versions() -> N
     mismatched_score["canonical_memory_version"] = "f" * 64
 
     authority = _score_authority(memory, score)
+    authority["legacy_operational_v2"]["score_evaluation"] = mismatched_score
     with pytest.raises(
         EvidenceVaultOperationalScoringError,
         match="evaluation identity mismatch",
@@ -733,7 +763,6 @@ def test_vault_memory_report_rejects_mismatched_memory_and_score_versions() -> N
             brand_name="Example",
             capture_observation=_observation("scan-version-mismatch"),
             memory=memory,
-            score=mismatched_score,
             **authority,
         )
 
@@ -755,7 +784,7 @@ def test_vault_report_rejects_self_consistent_wrong_score_breakdown_row() -> Non
     )
     validate_operational_score_evaluation(wrong_score)
     authority = _score_authority(memory, score)
-
+    authority["legacy_operational_v2"]["score_evaluation"] = wrong_score
     with pytest.raises(
         EvidenceVaultOperationalScoringError,
         match="rederived from exact canonical memory",
@@ -766,7 +795,6 @@ def test_vault_report_rejects_self_consistent_wrong_score_breakdown_row() -> Non
             brand_name="Example",
             capture_observation=_observation("scan-wrong-score-row"),
             memory=memory,
-            score=wrong_score,
             **authority,
         )
 
@@ -777,7 +805,7 @@ def test_vault_report_rejects_self_consistent_wrong_promotion_event_row() -> Non
     wrong_event_score["adoption_event_id"] = str(uuid4())
     validate_operational_score_evaluation(wrong_event_score)
     authority = _score_authority(memory, score)
-
+    authority["legacy_operational_v2"]["score_evaluation"] = wrong_event_score
     with pytest.raises(
         EvidenceVaultOperationalScoringError,
         match="adoption event does not match",
@@ -788,7 +816,6 @@ def test_vault_report_rejects_self_consistent_wrong_promotion_event_row() -> Non
             brand_name="Example",
             capture_observation=_observation("scan-wrong-event-row"),
             memory=memory,
-            score=wrong_event_score,
             **authority,
         )
 
@@ -805,7 +832,6 @@ def test_vault_memory_report_fails_closed_when_capture_evidence_is_invalid() -> 
             brand_name="Example",
             capture_observation=observation,
             memory=memory,
-            score=score,
             **_score_authority(memory, score),
         )
 
@@ -913,7 +939,7 @@ def test_vault_resume_run_branches_to_memory_projection_without_interpreter(
     assert report["id"] == scan_id
     assert report["raw"]["vault_memory_projection"] is True
     assert report["raw"]["flow"]["interpretation_debug"]["mode"] == (
-        "persisted_vault_memory"
+        "evidence_vault_semantic_scoring_v3"
     )
     assert report["score"] == score["score"]
     assert report["acquisition_artifacts"][0]["screenshot_path"] == (
@@ -1755,7 +1781,7 @@ def test_llm_vault_operation_without_memory_score_fails_instead_of_reinterpretin
         scan_runner._run(scan_id, "https://example.com", "Example", False)
         assert status["state"] == "error"
         assert status["phase"] == "error"
-        assert "vault_interpretation_missing_memory_score" in status["error"]
+        assert "vault_semantic_v3_report_projection_unavailable" in status["error"]
     finally:
         scan_runner._SCANS.pop(scan_id, None)
 
@@ -1824,13 +1850,13 @@ def test_completed_llm_resume_reactivates_and_never_uses_legacy_interpreter(
     try:
         scan_runner._run(scan_id, "https://example.com", "Example", False)
         assert status["state"] == "error"
-        assert "vault_interpretation_missing_memory_score" in status["error"]
+        assert "vault_semantic_v3_report_projection_unavailable" in status["error"]
         assert observed == ["activation_retried"]
     finally:
         scan_runner._SCANS.pop(scan_id, None)
 
 
-def test_vault_run_without_canonical_memory_falls_back_to_interpreter(
+def test_vault_run_without_semantic_v3_projection_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from scripts import sv9_flow_sv9_shadow_eval as flow_eval
@@ -1900,4 +1926,6 @@ def test_vault_run_without_canonical_memory_falls_back_to_interpreter(
     finally:
         scan_runner._SCANS.pop(scan_id, None)
 
-    assert "interpreter_ran" in observed
+    assert observed == []
+    assert status["state"] == "error"
+    assert "vault_semantic_v3_report_projection_unavailable" in status["error"]

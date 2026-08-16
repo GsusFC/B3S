@@ -260,7 +260,7 @@ def _record_report(conn: sqlite3.Connection, report: dict[str, Any]) -> None:
             url,
             str(report.get("created_at") or ""),
             str(raw.get("schema_version") or "b3s-report-json"),
-            str(result.get("model") or raw_sv9.get("model") or "sv9"),
+            str(result.get("rubric_version") or result.get("model") or raw_sv9.get("model") or "sv9"),
             _num(report.get("score")),
             _int(report.get("detected_count")),
             _int(report.get("block_count")),

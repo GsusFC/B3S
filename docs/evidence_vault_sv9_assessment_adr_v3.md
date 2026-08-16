@@ -1,10 +1,10 @@
 # ADR v3 — Kernel puro de assessment SV9 y ortogonalidad de verification
 
-- **Estado:** Aceptado e implementado como contrato shadow
+- **Estado:** Aceptado; selector público Vault v3 autorizado para reportes nuevos
 - **Fecha:** 2026-08-13
 - **Ámbito:** aritmética SV9 compartida por Scanner y Evidence Vault
 - **Rúbrica fija de este incremento:** `baldosas-v3-1`
-- **No implica:** backfill, read path, API pública, worker, cambio de producto ni cutover. La migración 025 solo define un ledger append-only no autoritativo; la 027 añade un único writer interno y no cambia esa autoridad.
+- **No implica:** backfill, migración, mutación del ledger `operational_v2`, scheduler, deploy ni cambio de Scanner. La migración 025 solo define un ledger append-only no autoritativo; el cutover de la sección 15 solo gobierna reportes Vault nuevos.
 
 ## 1. Decisión
 
@@ -473,3 +473,9 @@ crea selector de score, compare mode, publicación, ranking, writer canónico,
 RPC, trigger ni función `SECURITY DEFINER`. Mergear el código tampoco autoriza
 migración, despliegue ni activación del flag: el attestation actual de PR71 no
 admite estos archivos y necesita una reautorización separada y exacta.
+
+## 15. Cutover forward-only del selector de reportes Vault
+
+Los reportes Vault nuevos seleccionan solo `evidence_vault_semantic_scoring_v3`: bajo el lock, el repository recupera el `operational_v2` adoptado y su source exacto, rederiva shadow/v3 y exige paridad; contradiction, source inválido o drift no publican.
+
+Coverage/verification no filtran semántica y `operational_v2` queda byte-for-byte, sin fallback, como `legacy_operational_v2`. Los envelopes son `evidence-vault-semantic-report-projection-v2` / `b3s-vault-semantic-report-v2`, evaluator v3; reportes previos, Scanner y mismatches quedan intactos.

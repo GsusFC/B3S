@@ -208,6 +208,12 @@ from src.services.evidence_vault_operational_scoring import (
     validate_operational_score_authority_witness,
     validate_operational_score_evaluation,
 )
+from src.services.evidence_vault_semantic_scoring_v3 import (
+    EvidenceVaultSemanticScoringV3Error,
+    _detached_json_object,
+    build_evidence_vault_semantic_assessment,
+    validate_evidence_vault_semantic_assessment,
+)
 from src.services.scanner_evidence_comparison import (
     CANONICAL_POLICY_VERSION,
     annotate_report_history,
@@ -229,6 +235,61 @@ EVIDENCE_VAULT_OPERATIONAL_SV9_SHADOW_DIAGNOSTIC_MAX_LIMIT = 20
 
 class SchemaHeadMismatchError(RuntimeError):
     """The database migration manifest does not exactly match this build."""
+
+
+def _build_vault_semantic_report_selector(
+    *,
+    operational_packet: Mapping[str, Any],
+    source_candidate_packet: Mapping[str, Any],
+    expected_parent_canonical_memory_version: str | None,
+) -> dict[str, Any]:
+    """Rederive the public semantic selector from its two immutable packets."""
+
+    try:
+        operational_packet = _detached_json_object(operational_packet, label="operational packet")
+        source_candidate_packet = _detached_json_object(source_candidate_packet, label="source candidate packet")
+        shadow = build_operational_semantic_shadow_assessment(
+            operational_packet=operational_packet,
+            source_candidate_packet=source_candidate_packet,
+            expected_parent_canonical_memory_version=expected_parent_canonical_memory_version,
+        )
+        validate_operational_semantic_shadow_assessment(
+            shadow,
+            operational_packet=operational_packet,
+            source_candidate_packet=source_candidate_packet,
+            expected_parent_canonical_memory_version=expected_parent_canonical_memory_version,
+        )
+        semantic = build_evidence_vault_semantic_assessment(
+            source_candidate_packet=source_candidate_packet
+        )
+        validate_evidence_vault_semantic_assessment(
+            semantic, source_candidate_packet=source_candidate_packet
+        )
+    except (
+        EvidenceVaultOperationalAssessmentShadowError,
+        EvidenceVaultSemanticScoringV3Error,
+    ) as exc:
+        raise EvidenceVaultOperationalScoringError(
+            "The activated packets cannot produce a safe semantic v3 score."
+        ) from exc
+    shadow_reasons = [] if shadow["assessment_status"] == "available" else [shadow["reason"]]
+    source_fingerprint = source_candidate_packet["candidate_packet_fingerprint"]
+    if (
+        semantic["source_candidate_packet_fingerprint"] != source_fingerprint
+        or shadow["source_candidate_packet_fingerprint"] != source_fingerprint
+        or operational_packet["source_candidate_packet_fingerprint"] != source_fingerprint
+        or semantic["availability"] != shadow["assessment_status"]
+        or semantic["reason_codes"] != shadow_reasons
+        or semantic["assessment_output"] != shadow["assessment_output"]
+    ):
+        raise EvidenceVaultOperationalScoringError(
+            "Operational shadow and semantic scoring v3 disagree."
+        )
+    return {
+        "semantic_scoring_v3": semantic,
+        "authority_coverage": shadow["authority_coverage"],
+        "verification_requirements": shadow["verification_requirements"],
+    }
 
 
 class PostgresHistoryRepository:
@@ -6935,33 +6996,74 @@ class PostgresHistoryRepository:
             ).fetchone()
             if row is None:
                 raise EvidenceVaultOperationalScoringError(
-                    "Activated operational memory has no persisted score evaluation."
+                    "Activated operational memory has no persisted legacy evaluation."
                 )
-            evaluation = _vault_operational_score_record(row)
+            legacy_evaluation = _vault_operational_score_record(row)
             if (
-                evaluation["evaluation_identity"] != expected_evaluation
-                or evaluation["adoption_event_id"] != expected_event
+                legacy_evaluation["evaluation_identity"] != expected_evaluation
+                or legacy_evaluation["adoption_event_id"] != expected_event
             ):
                 raise EvidenceVaultOperationalScoringError(
-                    "Activated score identity changed before report projection."
+                    "Activated legacy score identity changed before report projection."
                 )
-            witness = build_operational_score_authority_witness(
+            legacy_witness = build_operational_score_authority_witness(
                 memory,
                 promotion_event=promotion_event,
-                evaluation=evaluation,
+                evaluation=legacy_evaluation,
             )
             validate_operational_score_authority_witness(
-                witness,
+                legacy_witness,
                 canonical_memory=memory,
                 promotion_event=promotion_event,
-                evaluation=evaluation,
+                evaluation=legacy_evaluation,
+            )
+            operational_rows = conn.execute(
+                f"""
+                SELECT * FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s AND packet_fingerprint = %s
+                  AND packet_kind = 'operational_v2'
+                """,
+                (brand_id, promotion_event["candidate_packet_fingerprint"]),
+            ).fetchall()
+            if len(operational_rows) != 1:
+                raise EvidenceVaultOperationalScoringError(
+                    "The exact adopted operational packet is unavailable."
+                )
+            operational_packet = _vault_operational_packet_record(
+                operational_rows[0]
+            )["packet"]
+            source_rows = conn.execute(
+                f"""
+                SELECT * FROM {_SCHEMA}.evidence_vault_canonical_memory_packets
+                WHERE brand_id = %s AND packet_fingerprint = %s
+                  AND packet_kind IN ('canonical_v1', 'operational_source_v2', 'operational_reviewed_v2')
+                """,
+                (brand_id, operational_packet["source_candidate_packet_fingerprint"]),
+            ).fetchall()
+            if len(source_rows) != 1:
+                raise EvidenceVaultOperationalScoringError(
+                    "The exact adopted source packet is unavailable."
+                )
+            selector = _build_vault_semantic_report_selector(
+                operational_packet=operational_packet,
+                source_candidate_packet=(
+                    _vault_canonical_packet_record(source_rows[0])
+                    if str(source_rows[0]["packet_kind"]) == "canonical_v1"
+                    else _vault_operational_source_packet_record(source_rows[0])
+                )["packet"],
+                expected_parent_canonical_memory_version=promotion_event[
+                    "parent_canonical_memory_version"
+                ],
             )
             return {
-                "schema_version": "evidence-vault-operational-report-projection-v1",
+                "schema_version": "evidence-vault-semantic-report-projection-v2",
                 "memory": memory,
                 "promotion_event": promotion_event,
-                "score_evaluation": evaluation,
-                "score_authority_witness": witness,
+                **selector,
+                "legacy_operational_v2": {
+                    "score_evaluation": legacy_evaluation,
+                    "score_authority_witness": legacy_witness,
+                },
             }
 
     def append_evidence_claim_tile_review(

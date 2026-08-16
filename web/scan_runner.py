@@ -504,9 +504,7 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                         "memory_version": (
                             (vault_activation or {}).get("memory") or {}
                         ).get("canonical_memory_version"),
-                        "score": ((vault_activation or {}).get("score") or {}).get(
-                            "score"
-                        ),
+                        "legacy_operational_v2_score": ((vault_activation or {}).get("score") or {}).get("score"),
                     }
                     persisted_status = _status_copy_locked(status)
                 else:
@@ -549,17 +547,19 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                     raise RuntimeError("vault_report_projection_unavailable")
                 persisted_memory = projection.get("memory")
                 promotion_event = projection.get("promotion_event")
-                persisted_score = projection.get("score_evaluation")
-                score_authority_witness = projection.get(
-                    "score_authority_witness"
-                )
+                semantic_assessment = projection.get("semantic_scoring_v3")
+                authority_coverage = projection.get("authority_coverage")
+                verification_requirements = projection.get("verification_requirements")
+                legacy_operational_v2 = projection.get("legacy_operational_v2")
                 if not all(
                     isinstance(value, dict)
                     for value in (
                         persisted_memory,
                         promotion_event,
-                        persisted_score,
-                        score_authority_witness,
+                        semantic_assessment,
+                        authority_coverage,
+                        verification_requirements,
+                        legacy_operational_v2,
                     )
                 ):
                     raise RuntimeError("vault_report_projection_invalid")
@@ -573,8 +573,10 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                     capture_observation=report_observation,
                     memory=persisted_memory,
                     promotion_event=promotion_event,
-                    score=persisted_score,
-                    score_authority_witness=score_authority_witness,
+                    semantic_scoring_v3=semantic_assessment,
+                    authority_coverage=authority_coverage,
+                    verification_requirements=verification_requirements,
+                    legacy_operational_v2=legacy_operational_v2,
                 )
                 report = _attach_evidence_stability(report)
                 if _scan_cancelled(scan_id):
@@ -586,8 +588,8 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 _publish_completed_report(scan_id, report)
                 return
 
-        if vault_interpretation_completed:
-            raise RuntimeError("vault_interpretation_missing_memory_score")
+        if vault_enabled:
+            raise RuntimeError("vault_semantic_v3_report_projection_unavailable")
 
         _set_phase(scan_id, "interpret", "running")
         from scripts.sv9_flow_sv9_shadow_eval import build_flow_sv9_shadow_eval
@@ -629,25 +631,6 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
 
         _set_phase(scan_id, "report", "running")
         report = _compose_report(scan_id, url, brand_name, payload)
-        if vault_enabled and isinstance(vault_activation, dict):
-            vault_score = vault_activation.get("score")
-            vault_memory = vault_activation.get("memory")
-            if isinstance(vault_score, dict) and isinstance(vault_memory, dict):
-                # The public B3S report remains immutable evidence output, but
-                # its score is sourced from the Vault evaluation that was
-                # persisted above, never from the in-memory scan payload.
-                report["score"] = vault_score.get("score")
-                report["base_average"] = vault_score.get("base_average")
-                report["vault_memory_version"] = vault_memory.get(
-                    "canonical_memory_version"
-                )
-                report["vault_score_evaluation_identity"] = vault_score.get(
-                    "evaluation_identity"
-                )
-                report["raw"]["vault"] = {
-                    "memory_version": vault_memory.get("canonical_memory_version"),
-                    "score_evaluation": vault_score,
-                }
         report = _attach_evidence_stability(report)
         if not _publish_completed_report(scan_id, report):
             return
@@ -2137,8 +2120,10 @@ def _compose_vault_memory_report(
     capture_observation: dict[str, Any],
     memory: dict[str, Any],
     promotion_event: dict[str, Any],
-    score: dict[str, Any],
-    score_authority_witness: dict[str, Any],
+    semantic_scoring_v3: dict[str, Any],
+    authority_coverage: dict[str, Any],
+    verification_requirements: dict[str, Any],
+    legacy_operational_v2: dict[str, Any],
 ) -> dict[str, Any]:
     """Project the persisted Vault memory into the existing report shape.
 
@@ -2153,22 +2138,39 @@ def _compose_vault_memory_report(
     from src.services.evidence_vault_operational_scoring import (
         validate_operational_score_authority_witness,
     )
+    from src.sv9.assessment_kernel import (
+        Sv9AssessmentError,
+        validate_sv9_assessment_output,
+    )
     from src.sv9.rubric import (
         COMPONENTS as RUBRIC_COMPONENTS,
         PRESENTATION_ORDER,
         confidence_from_blind_spots,
     )
 
+    legacy_score = legacy_operational_v2.get("score_evaluation")
+    legacy_witness = legacy_operational_v2.get("score_authority_witness")
+    if not isinstance(legacy_score, dict) or not isinstance(legacy_witness, dict):
+        raise RuntimeError("vault_legacy_operational_v2_witness_invalid")
     validate_operational_score_authority_witness(
-        score_authority_witness,
+        legacy_witness,
         canonical_memory=memory,
         promotion_event=promotion_event,
-        evaluation=score,
+        evaluation=legacy_score,
     )
     memory_version = str(memory.get("canonical_memory_version") or "")
-    score_memory_version = str(score.get("canonical_memory_version") or "")
-    if not memory_version or score_memory_version != memory_version:
-        raise RuntimeError("vault_memory_score_version_mismatch")
+    if not memory_version:
+        raise RuntimeError("vault_memory_version_unavailable")
+    if semantic_scoring_v3.get("availability") != "available":
+        reasons = semantic_scoring_v3.get("reason_codes") or ["unknown"]
+        raise RuntimeError(f"vault_semantic_scoring_v3_unavailable:{','.join(reasons)}")
+    score = semantic_scoring_v3.get("assessment_output")
+    if not isinstance(score, dict):
+        raise RuntimeError("vault_semantic_scoring_v3_output_invalid")
+    try:
+        validate_sv9_assessment_output(score)
+    except Sv9AssessmentError as exc:
+        raise RuntimeError("vault_semantic_scoring_v3_output_invalid") from exc
     parsed_capture = parse_capture_observation(capture_observation)
     if parsed_capture.source_scan_id != scan_id:
         raise RuntimeError("vault_report_capture_scan_mismatch")
@@ -2201,7 +2203,12 @@ def _compose_vault_memory_report(
         for row in score.get("component_breakdown") or []
         if isinstance(row, dict)
     }
-    coverage = score.get("authority_coverage") or {}
+    semantic_tiles = {
+        str(row.get("tile_id") or ""): row
+        for row in score.get("tiles") or []
+        if isinstance(row, dict)
+    }
+    coverage = authority_coverage
     total_blind_spots = sum(
         int(row.get("sin_evidencia_count") or 0)
         for row in breakdown.values()
@@ -2227,9 +2234,9 @@ def _compose_vault_memory_report(
         tile_id = str(tile["tile_id"])
         component_key = str(tile["component_key"])
         accepted_row = accepted.get(tile_id) or {}
-        state = str(accepted_row.get("semantic_state") or "sin_evidencia")
+        state = str((semantic_tiles.get(tile_id) or {}).get("assessment_state") or "")
         if state not in {"ok", "no", "sin_evidencia"}:
-            state = "sin_evidencia"
+            raise RuntimeError("vault_semantic_scoring_v3_tile_invalid")
         basis_rows = [
             dict(row)
             for row in accepted_row.get("basis") or []
@@ -2350,7 +2357,7 @@ def _compose_vault_memory_report(
             else {}
         )
     evidence_pack["limitations"] = list(report_capture_limitations)
-    limitations = ["score_projected_from_persisted_vault_memory"]
+    limitations = ["score_projected_from_evidence_vault_semantic_scoring_v3"]
     for item in [
         *report_capture_limitations,
         *(acquisition_gate.get("limitations") or []),
@@ -2373,9 +2380,9 @@ def _compose_vault_memory_report(
     acquisition_artifacts = [dict(row) for row in parsed_capture.artifacts]
     created_at = datetime.now(timezone.utc).isoformat()
     observed_at = parsed_capture.observed_at.isoformat()
-    evaluated_at = str(score.get("created_at") or created_at)
+    evaluated_at = parsed_capture.observed_at.isoformat()
     raw = {
-        "schema_version": "b3s-vault-memory-report-v1",
+        "schema_version": "b3s-vault-semantic-report-v2",
         "source_run_id": parsed_capture.source_run_id,
         "vault_memory_projection": True,
         "source_capture": {
@@ -2385,19 +2392,19 @@ def _compose_vault_memory_report(
         },
         "flow": {
             "candidate": {"evidence_pack": evidence_pack, "interpretation": {}},
-            "interpretation_debug": {"mode": "persisted_vault_memory"},
+            "interpretation_debug": {"mode": "evidence_vault_semantic_scoring_v3"},
         },
         "sv9": {
-            "brand3_score": score.get("score"),
+            "brand3_score": score.get("sv9_score"),
             "base_average": score.get("base_average"),
             "reliability_status": reliability_status,
             "components": result_components,
             "result": {
                 "components": result_components,
-                "brand3_score": score.get("score"),
+                "brand3_score": score.get("sv9_score"),
                 "base_average": score.get("base_average"),
                 "rubric_version": score.get("rubric_version"),
-                "evaluator_model": "vault-deterministic-memory",
+                "evaluator_model": "evidence-vault-semantic-scoring-v3",
                 "magnetism_capped": score.get("magnetism_capped") is True,
                 "most_painful_gap": gap_key,
                 "immediate_margin": immediate_margin,
@@ -2408,8 +2415,10 @@ def _compose_vault_memory_report(
         },
         "vault": {
             "memory_version": memory_version,
-            "score_evaluation": score,
-            "score_authority_witness": score_authority_witness,
+            "semantic_scoring_v3": semantic_scoring_v3,
+            "authority_coverage": authority_coverage,
+            "verification_requirements": verification_requirements,
+            "legacy_operational_v2": legacy_operational_v2,
         },
     }
     return {
@@ -2421,7 +2430,7 @@ def _compose_vault_memory_report(
         "recorded_at": created_at,
         "evaluated_at": evaluated_at,
         "pipeline_commit_sha": current_build_sha(),
-        "score": score.get("score"),
+        "score": score.get("sv9_score"),
         "base_average": score.get("base_average"),
         "reliability_status": raw["sv9"]["reliability_status"],
         "reliability_reason_codes": reliability_reason_codes,
@@ -2431,7 +2440,7 @@ def _compose_vault_memory_report(
         "most_painful_gap_label": gap_label,
         "immediate_margin": immediate_margin,
         "total_blind_spots": total_blind_spots,
-        "executive_reading": "Memoria de marca reconstruida desde Vault.",
+        "executive_reading": "Assessment semántico reconstruido desde Vault.",
         "editorial": {},
         "detected_count": 0,
         "block_count": 0,
@@ -2444,7 +2453,7 @@ def _compose_vault_memory_report(
         "attempts": attempts,
         "limitations": limitations,
         "vault_memory_version": memory_version,
-        "vault_score_evaluation_identity": score.get("evaluation_identity"),
+        "vault_semantic_observation_identity": semantic_scoring_v3.get("observation_identity"),
         "raw": raw,
     }
 
