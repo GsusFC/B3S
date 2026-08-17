@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       deployment_sha:
-        description: "Exact reviewed PR #97 merge SHA to deploy"
+        description: "Exact reviewed PR #102 merge SHA to deploy"
         required: true
         type: string
       confirm_app:
@@ -43,13 +43,13 @@ jobs:
           DISPATCH_SHA: ${{ github.sha }}
           GH_REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
-          TRUSTED_PR_HEAD_SHA: 393a8894e86484456cce3144af111037ca5195c6
-          TRUSTED_PR_MERGE_SHA: 0f968e97bfeeff7052b9bcefcbd7c650ca28f4fa
+          TRUSTED_PR_HEAD_SHA: b476fff80cea9fb1f474bce24ebe511c06f30f7b
+          TRUSTED_PR_MERGE_SHA: 0ac13c6e95ce0f413094838f2448578d25e90b2c
           TRUSTED_CI_BLOB_SHA: c1082f6b5c53a364b8d38e43936b93722c0183d1
           TRUSTED_REPOSITORY_ID: "1288696741"
           TRUSTED_CI_WORKFLOW_ID: "306885838"
-          TRUSTED_PR_CI_RUN_ID: "31933082104"
-          TRUSTED_MERGE_CI_RUN_ID: "31933234627"
+          TRUSTED_PR_CI_RUN_ID: "32006974926"
+          TRUSTED_MERGE_CI_RUN_ID: "32007250803"
           # Provisioned outside the repository in the protected pr71-vault environment.
           # This value is deliberately not self-pinned in the workflow source.
           EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA: ${{ vars.PR71_DEPLOY_WORKFLOW_BLOB_SHA }}
@@ -83,7 +83,7 @@ jobs:
           deployment_ci_runs_file="$attestation_dir/deployment-ci-runs.json"
           deploy_workflow_blob_file="$attestation_dir/deploy-workflow-blob.json"
 
-          api_get "$pr_file" "$API_URL/repos/$GH_REPOSITORY/pulls/97"
+          api_get "$pr_file" "$API_URL/repos/$GH_REPOSITORY/pulls/102"
           api_get "$main_ref_file" "$API_URL/repos/$GH_REPOSITORY/git/ref/heads/main"
           api_get "$workflow_file" "$API_URL/repos/$GH_REPOSITORY/actions/workflows/ci.yml"
           api_get "$head_ci_file" "$API_URL/repos/$GH_REPOSITORY/contents/.github/workflows/ci.yml?ref=$TRUSTED_PR_HEAD_SHA"
@@ -163,7 +163,7 @@ jobs:
           require(deploy_sha == trusted_merge, "deployment_sha is not the reviewed PR merge")
 
           pr = load_object("PR_FILE")
-          exact_int(pr.get("number"), 97, "unexpected pull request object")
+          exact_int(pr.get("number"), 102, "unexpected pull request object")
           require(pr.get("state") == "closed", "reviewed PR must be closed")
           require(pr.get("merged") is True, "reviewed PR must be merged")
           require(pr.get("draft") is False, "reviewed PR must not be a draft")
@@ -172,7 +172,7 @@ jobs:
           require(isinstance(base, dict), "reviewed PR base must be present")
           require(isinstance(head, dict), "reviewed PR head must be present")
           require(base.get("ref") == "main", "reviewed PR base ref must be main")
-          require(head.get("ref") == "refactor/vault-semantic-v3-selector-cutover", "reviewed PR head ref is not exact")
+          require(head.get("ref") == "fix/vault-semantic-coverage", "reviewed PR head ref is not exact")
           require(head.get("sha") == trusted_head, "reviewed PR head SHA is not exact")
           require(pr.get("merge_commit_sha") == trusted_merge, "reviewed PR merge commit SHA is not exact")
           for label, side in (("base", base), ("head", head)):
@@ -195,7 +195,7 @@ jobs:
 
           for label, env_name in (
               ("reviewed head", "HEAD_CI_FILE"),
-              ("PR97 merge", "MERGE_CI_FILE"),
+              ("PR102 merge", "MERGE_CI_FILE"),
               ("deployment controller", "DEPLOY_CI_FILE"),
           ):
               blob = load_object(env_name)
@@ -268,17 +268,17 @@ jobs:
           }
           attest_run(
               load_object("PR_CI_RUN_FILE"),
-              {"label": "reviewed PR97", "fields": {
+              {"label": "reviewed PR102", "fields": {
                   **common,
                   "id": trusted_pr_run_id,
                   "event": "pull_request",
-                  "head_branch": "refactor/vault-semantic-v3-selector-cutover",
+                  "head_branch": "fix/vault-semantic-coverage",
                   "head_sha": trusted_head,
               }},
           )
           attest_run(
               load_object("MERGE_CI_RUN_FILE"),
-              {"label": "PR97 merge", "fields": {
+              {"label": "PR102 merge", "fields": {
                   **common,
                   "id": trusted_merge_run_id,
                   "event": "push",
