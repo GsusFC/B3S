@@ -11,6 +11,7 @@ from src.history.models import CaptureConflictError
 from src.services.evidence_vault_canonical_core import canonical_fingerprint
 from src.services.evidence_vault_incremental_executor import execute_vault_operation_plan
 from src.services.evidence_vault_incremental_refresh import build_vault_scan_plan
+from src.scanner_evidence_comparison import canonical_evidence_rows
 
 
 pytestmark = pytest.mark.skipif(
@@ -752,6 +753,10 @@ def test_no_delta_result_must_equal_frozen_delta_and_output_stays_null() -> None
         previous_capture_evidence_records=rows,
         known_evidence_records=rows,
         canonical_memory_version=memory["canonical_memory_version"],
+        semantic_analysis_claimed_fingerprints=(
+            row.fingerprint
+            for row in canonical_evidence_rows(rows, subject_url="https://example.com")
+        ),
     )
     observation = {
         "schema_version": "b3s-capture-observation-v1",

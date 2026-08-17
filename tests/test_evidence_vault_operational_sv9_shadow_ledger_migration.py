@@ -22,6 +22,9 @@ _WRITER_MIGRATION = Path(
 _DIAGNOSTIC_MIGRATION = Path(
     "src/history/migrations/028_evidence_vault_operational_sv9_shadow_diagnostics.sql"
 )
+_CLAIMS_MIGRATION = Path(
+    "src/history/migrations/029_evidence_vault_semantic_analysis_claims.sql"
+)
 
 
 def _sql() -> str:
@@ -40,6 +43,10 @@ def test_sv9_shadow_writer_precedes_the_diagnostic_only_head() -> None:
     writer_position = filenames.index(_WRITER_MIGRATION.name)
     diagnostic_position = filenames.index(_DIAGNOSTIC_MIGRATION.name)
     assert diagnostic_position == writer_position + 1
+    assert _CLAIMS_MIGRATION.name in filenames
+    claims_position = filenames.index(_CLAIMS_MIGRATION.name)
+    assert claims_position == diagnostic_position + 1
+    assert filenames[-1] == _CLAIMS_MIGRATION.name
     assert filenames.count(_MIGRATION.name) == 1
     assert filenames.count(_HARDENING_MIGRATION.name) == 1
     assert filenames.count(_WRITER_MIGRATION.name) == 1
@@ -195,7 +202,7 @@ def test_postgres_sv9_shadow_hardening_revokes_public_execute_and_rejects_bad_ou
     try:
         applied = PostgresHistoryRepository(dsn).migrate()
         assert _WRITER_MIGRATION.name in applied
-        assert applied[-1] == _DIAGNOSTIC_MIGRATION.name
+        assert applied[-1] == _CLAIMS_MIGRATION.name
         rows = [
             {
                 "component_key": component_key,
