@@ -11,7 +11,7 @@ from src.history.models import CaptureConflictError
 from src.services.evidence_vault_canonical_core import canonical_fingerprint
 from src.services.evidence_vault_incremental_executor import execute_vault_operation_plan
 from src.services.evidence_vault_incremental_refresh import build_vault_scan_plan
-from src.scanner_evidence_comparison import canonical_evidence_rows
+from src.services.scanner_evidence_comparison import canonical_evidence_rows
 
 
 pytestmark = pytest.mark.skipif(
