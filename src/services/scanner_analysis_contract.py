@@ -28,6 +28,11 @@ def analysis_contract_from_report(report: dict[str, Any]) -> dict[str, Any]:
         if isinstance(debug.get("evidence_labeling"), dict)
         else {}
     )
+    semantic_analysis_contract = (
+        debug.get("semantic_analysis_contract")
+        if isinstance(debug.get("semantic_analysis_contract"), dict)
+        else {}
+    )
     sv9 = raw.get("sv9") if isinstance(raw.get("sv9"), dict) else {}
     result = (
         sv9.get("result") if isinstance(sv9.get("result"), dict) else {}
@@ -60,6 +65,15 @@ def analysis_contract_from_report(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "gate_authority": _text(debug.get("gate_authority")),
     }
+    semantic_contract_fingerprint = _text(
+        semantic_analysis_contract.get(
+            "semantic_analysis_contract_fingerprint"
+        )
+    )
+    if semantic_contract_fingerprint:
+        values["vault_semantic_analysis_contract_fingerprint"] = (
+            semantic_contract_fingerprint
+        )
     fingerprint = hashlib.sha256(
         json.dumps(
             values,

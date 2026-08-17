@@ -8,7 +8,7 @@ Every successful write is read back and reverified before its transaction commit
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -38,6 +38,9 @@ from src.services.evidence_vault_canonical_core import canonical_fingerprint, ca
 from src.services.evidence_vault_incremental_refresh import (
     build_vault_scan_plan,
     validate_vault_scan_plan,
+)
+from src.services.evidence_vault_semantic_analysis_contract import (
+    current_semantic_analysis_contract,
 )
 from src.services.evidence_vault_raw_capture import (
     DETERMINISTIC_EXTRACTOR_VERSION,
@@ -77,10 +80,10 @@ _READ_SQL = (
 )
 _PLANNING_CONTEXT_SQL = (
     "SELECT b3s_history.read_evidence_vault_raw_planning_context("
-    "%s, %s, %s, %s, %s, %s) AS planning_context"
+    "%s, %s, %s, %s, %s, %s, %s) AS planning_context"
 )
 _READ_ONLY_SQL = "SET TRANSACTION READ ONLY"
-_PLANNING_CONTEXT_VERSION = "evidence-vault-raw-planning-context-v1"
+_PLANNING_CONTEXT_VERSION = "evidence-vault-raw-planning-context-v2"
 _ROLE_PREFLIGHT_SQL = """
 WITH role_row AS (
     SELECT * FROM pg_catalog.pg_roles WHERE rolname = current_user
@@ -90,7 +93,7 @@ WITH role_row AS (
     WHERE routines.oid = ANY(ARRAY[
         'b3s_history.append_evidence_vault_raw_acquisition(jsonb)'::regprocedure::oid,
         'b3s_history.read_evidence_vault_raw_acquisition(text,text)'::regprocedure::oid,
-        'b3s_history.read_evidence_vault_raw_planning_context(text,text,text,uuid,uuid,uuid)'::regprocedure::oid
+        'b3s_history.read_evidence_vault_raw_planning_context(text,text,text,uuid,uuid,uuid,text)'::regprocedure::oid
     ])
 ), allowed_function_acl_invalid AS (
     SELECT 1
@@ -242,7 +245,7 @@ SELECT
         'EXECUTE'
     ) AND pg_catalog.has_function_privilege(
         current_user,
-        'b3s_history.read_evidence_vault_raw_planning_context(text,text,text,uuid,uuid,uuid)'::regprocedure,
+        'b3s_history.read_evidence_vault_raw_planning_context(text,text,text,uuid,uuid,uuid,text)'::regprocedure,
         'EXECUTE'
     ) AND NOT EXISTS (SELECT 1 FROM allowed_function_acl_invalid)
         AS required_execute,
@@ -457,6 +460,12 @@ class EvidenceVaultRawPlanningContext:
     previous_capture_evidence_records: tuple[dict[str, Any], ...]
     known_evidence_records: tuple[dict[str, Any], ...]
     accepted_evidence_tile_relations: tuple[dict[str, Any], ...]
+    semantic_analysis_contract_fingerprint: str = field(
+        default_factory=lambda: current_semantic_analysis_contract()[
+            "semantic_analysis_contract_fingerprint"
+        ]
+    )
+    semantic_analysis_claimed_fingerprints: tuple[str, ...] = ()
     existing_operation_plan: dict[str, Any] | None = None
 
 
@@ -668,6 +677,9 @@ class EvidenceVaultRawRepository:
                 workspace_id,
                 brand_id,
                 scan_id,
+                current_semantic_analysis_contract()[
+                    "semantic_analysis_contract_fingerprint"
+                ],
             ),
         ).fetchone()
         if not isinstance(row, Mapping):
@@ -712,6 +724,12 @@ class EvidenceVaultRawRepository:
             canonical_memory_version=None,
             previous_capture_evidence_records=(),
             known_evidence_records=(),
+            semantic_analysis_contract_fingerprint=(
+                current_semantic_analysis_contract()[
+                    "semantic_analysis_contract_fingerprint"
+                ]
+            ),
+            semantic_analysis_claimed_fingerprints=(),
             accepted_evidence_tile_relations=(),
         )
         plan = (
@@ -1082,6 +1100,8 @@ def _validate_planning_context(
         "canonical_memory_version",
         "previous_capture_evidence_records",
         "known_evidence_records",
+        "semantic_analysis_contract_fingerprint",
+        "semantic_analysis_claimed_fingerprints",
         "accepted_evidence_tile_relations",
         "operational_authority_context",
         "existing_operation_plan",
@@ -1094,6 +1114,29 @@ def _validate_planning_context(
         or context["canonical_domain"] != _command_domain(command)
     ):
         raise ValueError("raw planning context identity diverged")
+    semantic_contract_fingerprint = context[
+        "semantic_analysis_contract_fingerprint"
+    ]
+    expected_semantic_contract_fingerprint = current_semantic_analysis_contract()[
+        "semantic_analysis_contract_fingerprint"
+    ]
+    if semantic_contract_fingerprint != expected_semantic_contract_fingerprint:
+        raise ValueError("raw planning semantic contract diverged")
+    raw_claims = context["semantic_analysis_claimed_fingerprints"]
+    if (
+        not isinstance(raw_claims, list)
+        or len(raw_claims) > 5000
+        or raw_claims != sorted(set(raw_claims))
+        or any(
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in raw_claims
+        )
+    ):
+        raise ValueError("raw planning semantic analysis claims are invalid")
+    semantic_claims = tuple(raw_claims)
+
     canonical_version = context["canonical_memory_version"]
     if canonical_version is not None and (
         not isinstance(canonical_version, str)
@@ -1209,6 +1252,10 @@ def _validate_planning_context(
         canonical_memory_version=canonical_version,
         previous_capture_evidence_records=previous,
         known_evidence_records=known,
+        semantic_analysis_contract_fingerprint=(
+            semantic_contract_fingerprint
+        ),
+        semantic_analysis_claimed_fingerprints=semantic_claims,
         accepted_evidence_tile_relations=tuple(relations),
         existing_operation_plan=(
             _canonical_detach(existing) if existing is not None else None
@@ -1231,6 +1278,12 @@ def _build_and_validate_plan(
         ),
         known_evidence_records=tuple(
             deepcopy(row) for row in planning_context.known_evidence_records
+        ),
+        semantic_analysis_contract_fingerprint=(
+            planning_context.semantic_analysis_contract_fingerprint
+        ),
+        semantic_analysis_claimed_fingerprints=tuple(
+            planning_context.semantic_analysis_claimed_fingerprints
         ),
         accepted_evidence_tile_relations=tuple(
             deepcopy(row)
@@ -1262,6 +1315,9 @@ def _build_and_validate_plan(
             planning_context.previous_capture_evidence_records
         ),
         known_evidence_records=planning_context.known_evidence_records,
+        semantic_analysis_claimed_fingerprints=(
+            planning_context.semantic_analysis_claimed_fingerprints
+        ),
         accepted_evidence_tile_relations=[
             deepcopy(row)
             for row in planning_context.accepted_evidence_tile_relations

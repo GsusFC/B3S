@@ -26,6 +26,8 @@ from src.services.evidence_vault_canonical_core import (
     validate_candidate_packet,
 )
 from src.services.evidence_vault_incremental_refresh import (
+    EvidenceVaultOperationPlanError,
+    require_current_semantic_analysis_contract,
     validate_vault_scan_plan,
 )
 from src.services.evidence_vault_operational_authority import (
@@ -62,6 +64,11 @@ _MAX_TILES_PER_EVIDENCE = 24
 _MAX_TOTAL_RELATION_PAIRS = 120
 _MAX_BASELINE_RELATION_PAIRS = 2400
 _MAX_BASELINE_SEMANTIC_EVIDENCE = 200
+_SUPPORTED_RELATION_PROPOSAL_VERSIONS = {
+    "evidence-tile-relation-proposal-v2",
+    "evidence-tile-relation-proposal-v3",
+    EVIDENCE_TILE_RELATION_PROPOSAL_VERSION,
+}
 
 
 class EvidenceVaultIncrementalExecutorError(RuntimeError):
@@ -242,6 +249,13 @@ def execute_vault_operation_plan(
             raise EvidenceVaultIncrementalExecutorError(
                 "diagnostic_full remains owned by the explicit full scanner"
             )
+        if plan["operations"]["llm_required"]:
+            try:
+                require_current_semantic_analysis_contract(plan)
+            except EvidenceVaultOperationPlanError as exc:
+                raise EvidenceVaultIncrementalExecutorError(
+                    "operation semantic analyzer is unavailable"
+                ) from exc
         if _is_no_delta_plan(plan):
             result = (
                 _material_delta_only_result(context)
@@ -531,10 +545,8 @@ def validate_vault_operation_result(result: Mapping[str, Any]) -> None:
     }
     if (
         not isinstance(proposal, Mapping)
-        or proposal.get("schema_version") not in {
-            EVIDENCE_TILE_RELATION_LEGACY_PROPOSAL_VERSION,
-            EVIDENCE_TILE_RELATION_PROPOSAL_VERSION,
-        }
+        or proposal.get("schema_version")
+        not in _SUPPORTED_RELATION_PROPOSAL_VERSIONS
         or not isinstance(proposal.get("relations"), list)
         or not isinstance(proposal.get("discarded_relations"), list)
         or len(proposal["relations"]) + len(proposal["discarded_relations"])

@@ -137,6 +137,7 @@ def test_worker_operation_plan_uses_frozen_history_including_c7() -> None:
         canonical_memory_version="a" * 64,
         previous_capture_evidence_records=tuple(previous),
         known_evidence_records=tuple(previous),
+        semantic_analysis_claimed_fingerprints=(previous_fingerprint,),
         accepted_evidence_tile_relations=(
             {
                 "tile_id": "C7",
@@ -166,6 +167,7 @@ def test_worker_operation_plan_uses_frozen_history_including_c7() -> None:
             canonical_memory_version="a" * 64,
             previous_capture_evidence_records=tuple(previous),
             known_evidence_records=tuple(previous),
+            semantic_analysis_claimed_fingerprints=(previous_fingerprint,),
             accepted_evidence_tile_relations=(),
         ),
     )
