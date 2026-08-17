@@ -27,15 +27,15 @@ from src.sv9_flow.evidence_source import (
     SOURCE_CLASS_OWNED_COPY,
     source_class_for_record,
 )
+from src.sv9_flow.semantic_passages import semantic_passages
 
-EVIDENCE_LABELING_VERSION = "sv9-flow-evidence-labeling-v3"
+EVIDENCE_LABELING_VERSION = "sv9-flow-evidence-labeling-v4"
 
 _BLOCKS = tuple(block_evidence_policy()["block_terms"].keys())
 _STANCES = {"supports", "contradicts", "neutral"}
 _IDENTITY_MATCHES = {"domain", "brand_name", "none", "unverified"}
 _SPECIFICITIES = {"explicit", "implied", "incidental"}
 _MAX_RECORDS = 80
-_CONTENT_CHARS = 900
 _IDENTITY_CONTEXT_RECORDS = 4
 _IDENTITY_CONTEXT_CHARS = 500
 
@@ -84,6 +84,9 @@ def label_evidence_pack(
         "artifact_cache_hits": 0,
         "artifact_cache_misses": 0,
         "provider_records": 0,
+        "provider_call_count": 0,
+        "semantic_passage_count": 0,
+        "semantic_batch_count": 0,
         "identity_divergences": [],
     }
     if not _llm_available(llm):
@@ -99,6 +102,10 @@ def label_evidence_pack(
         candidates = [record for record in candidates if record.ref in selected]
     records = canonical_evidence_records(candidates)[:max_records]
     debug["records_considered"] = len(records)
+    debug["semantic_passage_count"] = sum(
+        len(semantic_passages(record.content)) for record in records
+    )
+    debug["semantic_batch_count"] = evidence_labeling_call_count(records)
     if not records:
         debug["reason"] = "no_candidate_records"
         return debug
@@ -161,8 +168,13 @@ def _labels_with_artifact_cache(
         else:
             missing.append(record)
 
+    provider_call_count = 0
     if missing:
-        returned = _call_labeler(evidence_pack=evidence_pack, records=missing, llm=llm)
+        returned, provider_call_count = _call_labeler(
+            evidence_pack=evidence_pack,
+            records=missing,
+            llm=llm,
+        )
         failure_reason = str(getattr(llm, "last_failure_reason", None) or "").strip()
         if failure_reason:
             raise RuntimeError(f"evidence_labeling_provider_failed:{failure_reason}")
@@ -203,24 +215,80 @@ def _labels_with_artifact_cache(
         "artifact_cache_hits": hits,
         "artifact_cache_misses": len(missing),
         "provider_records": len(missing),
+        "provider_call_count": provider_call_count,
     }
 
 
-def _call_labeler(*, evidence_pack: BrandEvidencePack, records: list[EvidenceRecord], llm: Any) -> list[dict[str, Any]]:
-    raw = llm._call_json(
-        _system_prompt(),
-        _user_prompt(evidence_pack=evidence_pack, records=records),
-        max_tokens=8000,
-        json_schema=_LABEL_SCHEMA,
-        schema_name="sv9_flow_evidence_labeling",
-        temperature=0.0,  # deterministic evidence labeling
+def evidence_labeling_call_count(records: list[EvidenceRecord]) -> int:
+    return sum(len(semantic_passages(record.content)) for record in records)
+
+
+def _call_labeler(
+    *, evidence_pack: BrandEvidencePack, records: list[EvidenceRecord], llm: Any
+) -> tuple[list[dict[str, Any]], int]:
+    labels_by_parent: dict[str, list[dict[str, Any]]] = {}
+    call_count = 0
+    for record in canonical_evidence_records(records):
+        parent = canonical_evidence_ref(record)
+        metadata = record.metadata if isinstance(record.metadata, dict) else {}
+        for content in semantic_passages(record.content):
+            call_count += 1
+            row = {
+                "ref": parent,
+                "source_class": metadata.get("source_class") or source_class_for_record(record),
+                "evidence_type": record.evidence_type,
+                "url": normalize_evidence_url(record.url),
+                "content": content,
+                "deterministic_identity_match": metadata.get("identity_match") or "",
+            }
+            raw = llm._call_json(
+                _system_prompt(),
+                _user_prompt(evidence_pack=evidence_pack, rows=[row]),
+                max_tokens=8000,
+                json_schema=_LABEL_SCHEMA,
+                schema_name="sv9_flow_evidence_labeling",
+                temperature=0.0,
+            )
+            failure = str(getattr(llm, "last_failure_reason", None) or "").strip()
+            if failure:
+                raise RuntimeError(f"evidence_labeling_provider_failed:{failure}")
+            items = raw.get("labels", []) if isinstance(raw, dict) else []
+            normalized = [
+                _normalize_label(item) for item in items if isinstance(item, dict)
+            ]
+            match = next((label for label in normalized if label["ref"] in {parent, record.ref}), None)
+            if match is None:
+                raise RuntimeError(f"evidence_labeling_provider_incomplete:{parent}")
+            labels_by_parent.setdefault(parent, []).append(match)
+    return [
+        _aggregate_passage_labels(parent, labels_by_parent[parent])
+        for parent in sorted(labels_by_parent)
+    ], call_count
+
+
+def _aggregate_passage_labels(
+    parent_ref: str, labels: list[dict[str, Any]]
+) -> dict[str, Any]:
+    rank = {
+        "stance": ("neutral", "supports", "contradicts"),
+        "identity_match": ("unverified", "brand_name", "domain"),
+        "specificity": ("incidental", "implied", "explicit"),
+    }
+    highest = lambda field: max(
+        (str(row[field]) for row in labels), key=rank[field].index
     )
-    if not isinstance(raw, dict):
-        return []
-    labels = raw.get("labels")
-    if not isinstance(labels, list):
-        return []
-    return [_normalize_label(item) for item in labels if isinstance(item, dict)]
+    return {
+        "ref": parent_ref,
+        "relevant_blocks": sorted({
+            block for label in labels for block in label["relevant_blocks"]
+        }),
+        "stance": highest("stance"),
+        "identity_match": (
+            "none" if any(row["identity_match"] == "none" for row in labels)
+            else highest("identity_match")
+        ),
+        "specificity": highest("specificity"),
+    }
 
 
 def _system_prompt() -> str:
@@ -235,29 +303,20 @@ def _system_prompt() -> str:
     )
 
 
-def _user_prompt(*, evidence_pack: BrandEvidencePack, records: list[EvidenceRecord]) -> str:
-    rows = []
-    for record in canonical_evidence_records(records):
-        metadata = record.metadata if isinstance(record.metadata, dict) else {}
-        rows.append(
-            {
-                "ref": canonical_evidence_ref(record),
-                "source_class": metadata.get("source_class") or source_class_for_record(record),
-                "evidence_type": record.evidence_type,
-                "url": normalize_evidence_url(record.url),
-                "content": normalize_evidence_text(record.content)[:_CONTENT_CHARS],
-                "deterministic_identity_match": metadata.get("identity_match") or "",
-            }
-        )
+def _user_prompt(
+    *,
+    evidence_pack: BrandEvidencePack,
+    rows: list[dict[str, Any]],
+) -> str:
     return json.dumps(
         {
             "prompt_version": EVIDENCE_LABELING_VERSION,
-            "task": "Label evidence records for semantic relevance to canonical Brand3 blocks.",
+            "task": "Label evidence passages for semantic relevance to canonical Brand3 blocks.",
             "brand": {"name": evidence_pack.brand_name, "url": evidence_pack.url},
             "owned_identity_context": _identity_context(evidence_pack),
             "canonical_blocks": list(_BLOCKS),
             "labels_required": {
-                "relevant_blocks": "subset of canonical_blocks; empty if the record is not useful for any block",
+                "relevant_blocks": "subset of canonical_blocks; empty if the passage is not useful for any block",
                 "stance": "supports | contradicts | neutral",
                 "identity_match": "domain | brand_name | none | unverified",
                 "specificity": "explicit | implied | incidental",

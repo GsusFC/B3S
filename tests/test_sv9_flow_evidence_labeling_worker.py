@@ -13,7 +13,14 @@ class StubLabelingLLM:
 
     def _call_json(self, system, user, **kwargs):
         self.calls.append({"system": system, "user": user, "kwargs": kwargs})
-        return {"labels": self.labels}
+        rows = json.loads(user)["records"]
+        return {
+            "labels": [
+                {**label, "ref": rows[index]["ref"]}
+                for index, label in enumerate(self.labels)
+                if index < len(rows)
+            ]
+        }
 
 
 class ArtifactCachingLabelingLLM:
@@ -98,6 +105,22 @@ def test_label_evidence_pack_enriches_metadata_without_changing_pack_shape() -> 
             "content": "We turn every training ride into a reward loop.",
         }
     ]
+
+
+def test_long_single_line_record_exposes_tail_to_labeler() -> None:
+    tail = "Our mission is to help every team ship a reliable product."
+    record = EvidenceRecord(
+        "raw_inputs.0", "web", "raw_input",
+        "Early homepage copy. " + ("filler " * 8_000) + tail,
+        metadata={"source_class": "owned_copy", "identity_match": "domain"},
+    )
+    pack = BrandEvidencePack("Acme", "https://acme.example", [record])
+    llm = ArtifactCachingLabelingLLM()
+
+    label_evidence_pack(pack, llm=llm)
+
+    assert record.metadata["relevant_blocks"] == ["mission"]
+
 
 
 def test_label_evidence_pack_skips_when_llm_unavailable() -> None:
@@ -204,7 +227,7 @@ def test_label_cache_reuses_equivalent_records_across_ref_and_order_changes() ->
     assert first_debug["provider_records"] == 2
     assert second_debug["artifact_cache_hits"] == 2
     assert second_debug["provider_records"] == 0
-    assert len(llm.provider_calls) == 1
+    assert len(llm.provider_calls) == 2
     assert all(record.metadata["relevant_blocks"] == ["mission"] for record in second.evidence)
 
 
@@ -248,8 +271,8 @@ def test_label_cache_invalidates_records_when_owned_identity_context_changes() -
 
     assert debug["artifact_cache_hits"] == 0
     assert debug["provider_records"] == 2
-    assert len(llm.provider_calls) == 2
-    assert len(llm.provider_calls[-1]["records"]) == 2
+    assert len(llm.provider_calls) == 3
+    assert len(llm.provider_calls[-1]["records"]) == 1
 
 
 def test_label_cache_does_not_store_neutral_artifacts_after_provider_failure() -> None:
