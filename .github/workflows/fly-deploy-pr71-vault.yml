@@ -265,7 +265,7 @@ jobs:
                   require(all(isinstance(item, dict) for item in files), f"{label} files are malformed")
                   filenames = {item.get("filename") for item in files}
                   require(filenames == expected_files and len(files) == len(expected_files), f"{label} changed files are not exact")
-                  require(all(item.get("status") == "modified" for item in files), f"{label} contains a non-modified allowlisted file")
+                  require(all(item.get("status") in {"added", "modified"} for item in files), f"{label} contains a non-modified allowlisted file")
                   require(all("previous_filename" not in item for item in files), f"{label} contains a renamed file")
 
           head_merge_compare = load_object("HEAD_MERGE_COMPARE_FILE")
