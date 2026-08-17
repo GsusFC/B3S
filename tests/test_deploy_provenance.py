@@ -32,11 +32,38 @@ TRUSTED_PR_CI_RUN_ID = 32006974926
 TRUSTED_MERGE_CI_RUN_ID = 32007250803
 EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA = "d" * 40
 FIXTURE_DEPLOY_SHA = TRUSTED_PR_MERGE_SHA
-FIXTURE_CONTROLLER_SHA = "a" * 40
+FIXTURE_CONTROLLER_SHA = "3eaac76d0b5988b3041f7f8fbf5ff074a12372e1"
 HOTFIX_FILES = {
     ".github/workflows/fly-deploy-pr71-vault.yml",
     "docs/deployment/b3s_pr71_vault.md",
+    "scripts/configure_b3s_runtime_role.py",
+    "scripts/run_evidence_vault_acquisition_worker.py",
+    "src/history/evidence_vault_raw_repository.py",
+    "src/history/migrations/029_evidence_vault_semantic_analysis_claims.sql",
+    "src/history/repository.py",
+    "src/services/evidence_vault_field_replay.py",
+    "src/services/evidence_vault_incremental_executor.py",
+    "src/services/evidence_vault_incremental_refresh.py",
+    "src/services/evidence_vault_scan_orchestration.py",
+    "src/services/evidence_vault_semantic_analysis_contract.py",
+    "src/services/scanner_analysis_contract.py",
+    "src/sv9_flow/semantic_passages.py",
+    "tests/test_b3s_history.py",
+    "tests/test_configure_b3s_runtime_role.py",
     "tests/test_deploy_provenance.py",
+    "tests/test_evidence_vault_acquisition_worker_entrypoint.py",
+    "tests/test_evidence_vault_composite_group_lifecycle.py",
+    "tests/test_evidence_vault_cumulative_upgrade_postgres.py",
+    "tests/test_evidence_vault_field_replay.py",
+    "tests/test_evidence_vault_incremental_executor.py",
+    "tests/test_evidence_vault_incremental_refresh.py",
+    "tests/test_evidence_vault_operational_sv9_shadow_ledger_migration.py",
+    "tests/test_evidence_vault_raw_provenance_postgres.py",
+    "tests/test_evidence_vault_raw_repository.py",
+    "tests/test_evidence_vault_scan_orchestration.py",
+    "tests/test_evidence_vault_semantic_analysis_claims_migration.py",
+    "tests/test_evidence_vault_semantic_analysis_contract.py",
+    "web/scan_runner.py",
 }
 
 
@@ -115,12 +142,17 @@ def _attestation_fixture() -> dict[str, dict]:
         },
         "MERGE_DEPLOY_COMPARE_FILE": {
             "status": "ahead",
-            "ahead_by": 1,
+            "ahead_by": 4,
             "behind_by": 0,
-            "total_commits": 1,
+            "total_commits": 4,
             "base_commit": {"sha": TRUSTED_PR_MERGE_SHA},
             "merge_base_commit": {"sha": TRUSTED_PR_MERGE_SHA},
-            "commits": [{"sha": FIXTURE_CONTROLLER_SHA}],
+            "commits": [
+                {"sha": "d9c2ffcab806616bf6e5d58bc80a7d654294c82c"},
+                {"sha": "3795739abd64d8a0137b11c173acb822ccc33e25"},
+                {"sha": "4c1df3b3bf7b055ec912cf9cbc2a651d59b17221"},
+                {"sha": "3eaac76d0b5988b3041f7f8fbf5ff074a12372e1"},
+            ],
             "files": [
                 {"filename": filename, "status": "modified"}
                 for filename in sorted(HOTFIX_FILES)
@@ -427,7 +459,7 @@ def test_pr71_attestation_fixture_accepts_only_current_allowlisted_main(tmp_path
         ),
         (
             "MERGE_DEPLOY_COMPARE_FILE",
-            ("commits", 0, "sha"),
+            ("commits", -1, "sha"),
             "f" * 40,
             "head commit",
         ),
