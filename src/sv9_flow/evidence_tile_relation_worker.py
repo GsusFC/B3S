@@ -10,12 +10,19 @@ import hashlib
 import json
 from typing import Any, Mapping
 
+from src.sv9_flow.semantic_passages import SEMANTIC_PASSAGE_CHARS, semantic_passages
 
-EVIDENCE_TILE_RELATION_PROPOSAL_VERSION = (
+
+EVIDENCE_TILE_RELATION_LEGACY_PROPOSAL_VERSION = (
     "evidence-tile-relation-proposal-v2"
 )
+EVIDENCE_TILE_RELATION_PROPOSAL_VERSION = (
+    "evidence-tile-relation-proposal-v3"
+)
+EVIDENCE_TILE_RELATION_POLICY_VERSION = "evidence-tile-relation-policy-v3"
 _ALLOWED_POLARITIES = {"supports", "contradicts"}
 _MAX_RELATIONS_PER_CALL = 120
+_MAX_QUOTE_CHARS = 320
 
 
 class EvidenceTileRelationProposalError(ValueError):
@@ -28,41 +35,90 @@ def propose_evidence_tile_relations(
     tile_shortlists: Mapping[str, list[Mapping[str, Any]]],
     llm: Any,
 ) -> dict[str, Any]:
-    """Propose relations only inside the supplied evidence/tile pairs."""
+    """Propose relations across every deterministic evidence passage."""
 
     if llm is None or not getattr(llm, "api_key", None):
         raise EvidenceTileRelationProposalError("relation proposer requires an LLM")
-    evidence_by_fingerprint = _evidence_rows(evidence_rows)
-    shortlist = _tile_shortlists(
-        tile_shortlists,
-        evidence_by_fingerprint=evidence_by_fingerprint,
-    )
-    raw = llm._call_json(
-        _system_prompt(),
-        _user_prompt(evidence_by_fingerprint, shortlist),
-        max_tokens=6000,
-        json_schema=_schema(),
-        schema_name="evidence_tile_relation_proposals",
-        temperature=0.0,
-    )
-    if (
-        not isinstance(raw, Mapping)
-        or not isinstance(raw.get("relations"), list)
-        or len(raw["relations"]) > _MAX_RELATIONS_PER_CALL
-    ):
-        raise EvidenceTileRelationProposalError(
-            "relation proposer returned an invalid payload"
+    evidence = _evidence_rows(evidence_rows)
+    shortlist = _tile_shortlists(tile_shortlists, evidence_by_fingerprint=evidence)
+    relations: list[dict[str, str]] = []
+    discarded: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for batch_evidence, batch_shortlist in _proposal_batches(evidence, shortlist):
+        raw = llm._call_json(
+            _system_prompt(),
+            _user_prompt(batch_evidence, batch_shortlist),
+            max_tokens=6000,
+            json_schema=_schema(),
+            schema_name="evidence_tile_relation_proposals",
+            temperature=0.0,
         )
-    relations, discarded = _validate_relations(
-        raw["relations"],
-        evidence_by_fingerprint=evidence_by_fingerprint,
-        shortlist=shortlist,
-    )
+        if (
+            not isinstance(raw, Mapping)
+            or not isinstance(raw.get("relations"), list)
+            or len(raw["relations"]) > _MAX_RELATIONS_PER_CALL
+        ):
+            raise EvidenceTileRelationProposalError(
+                "relation proposer returned an invalid payload"
+            )
+        accepted, rejected = _validate_relations(
+            raw["relations"],
+            evidence_by_fingerprint=batch_evidence,
+            shortlist=batch_shortlist,
+        )
+        discarded.extend(rejected)
+        for relation in accepted:
+            submitted = relation.pop("_submitted_relation_fingerprint")
+            key = tuple(relation[field] for field in (
+                "evidence_fingerprint", "tile_id", "polarity"
+            ))
+            if key in seen:
+                discarded.append({
+                    "reason": "duplicate_relation",
+                    "submitted_relation_fingerprint": submitted,
+                })
+            else:
+                seen.add(key)
+                relations.append(relation)
     return {
         "schema_version": EVIDENCE_TILE_RELATION_PROPOSAL_VERSION,
-        "relations": relations,
-        "discarded_relations": discarded,
+        "relations": sorted(relations, key=lambda row: (
+            row["evidence_fingerprint"], row["tile_id"], row["polarity"]
+        )),
+        "discarded_relations": sorted(discarded, key=lambda row: (
+            row["submitted_relation_fingerprint"], row["reason"]
+        )),
     }
+
+
+def evidence_tile_relation_call_count(
+    *,
+    evidence_rows: list[Mapping[str, Any]],
+    tile_shortlists: Mapping[str, list[Mapping[str, Any]]],
+) -> int:
+    evidence = _evidence_rows(evidence_rows)
+    shortlist = _tile_shortlists(tile_shortlists, evidence_by_fingerprint=evidence)
+    return len(_proposal_batches(evidence, shortlist))
+
+
+def _proposal_batches(evidence, shortlist):
+    batches, rows, tiles, chars, pairs = [], {}, {}, 0, 0
+    for fingerprint, row in sorted(evidence.items()):
+        for passage in semantic_passages(str(row["content"])) if shortlist[fingerprint] else ():
+            if rows and (
+                fingerprint in rows
+                or chars + len(passage) > SEMANTIC_PASSAGE_CHARS
+                or pairs + len(shortlist[fingerprint]) > _MAX_RELATIONS_PER_CALL
+            ):
+                batches.append((rows, tiles))
+                rows, tiles, chars, pairs = {}, {}, 0, 0
+            rows[fingerprint] = {**row, "content": passage}
+            tiles[fingerprint] = shortlist[fingerprint]
+            chars += len(passage)
+            pairs += len(shortlist[fingerprint])
+    if rows:
+        batches.append((rows, tiles))
+    return batches
 
 
 def _evidence_rows(
@@ -156,6 +212,9 @@ def _validate_relations(
                 shortlist=shortlist,
                 seen=seen,
             )
+            relation["_submitted_relation_fingerprint"] = (
+                _submitted_fingerprint(raw)
+            )
         except _DiscardRelation as exc:
             discarded.append(
                 {
@@ -234,11 +293,10 @@ def _validated_relation(
     if polarity not in _ALLOWED_POLARITIES:
         raise _DiscardRelation("polarity_invalid")
     quote = str(raw.get("literal_quote") or "").strip()
-    quote_candidates = _literal_quote_candidates(str(evidence["content"]))
     if (
         len(quote) < 8
-        or len(quote) > 320
-        or not any(quote in candidate for candidate in quote_candidates)
+        or len(quote) > _MAX_QUOTE_CHARS
+        or quote not in str(evidence["content"])
     ):
         raise _DiscardRelation("quote_not_literal")
     rationale = str(raw.get("rationale") or "").strip()
@@ -275,7 +333,7 @@ def _system_prompt() -> str:
         "Use only the supplied evidence and only its shortlisted tiles. "
         "Return a relation only when a literal quote materially supports or "
         "contradicts the tile condition. literal_quote must be one continuous "
-        "verbatim substring copied exactly from one supplied quote_candidate, "
+        "verbatim substring copied exactly from one supplied evidence passage, "
         "including Markdown punctuation and capitalization; never join fragments, "
         "shorten with ellipses, strip formatting, or paraphrase. If no supplied "
         "continuous quote works, omit the relation. Omit "
@@ -288,37 +346,14 @@ def _user_prompt(
     shortlist: Mapping[str, list[Mapping[str, str]]],
 ) -> str:
     payload = [
-        {
-            **dict(row),
-            "quote_candidates": _literal_quote_candidates(
-                str(row["content"])
-            ),
-            "allowed_tiles": shortlist[fingerprint],
-        }
+        {**dict(row), "allowed_tiles": shortlist[fingerprint]}
         for fingerprint, row in sorted(evidence.items())
     ]
-    return "Scoped evidence and allowed tile contracts:\n" + json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
+    return (
+        "Scoped evidence passages and allowed tile contracts "
+        f"({EVIDENCE_TILE_RELATION_POLICY_VERSION}):\n"
+        + json.dumps(payload, ensure_ascii=False, sort_keys=True)
     )
-
-
-def _literal_quote_candidates(content: str) -> list[str]:
-    candidates: list[str] = []
-    for raw_line in content.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if 8 <= len(line) <= 320 and line not in candidates:
-            candidates.append(line)
-        if len(candidates) >= 24:
-            break
-    if not candidates:
-        text = content.strip()
-        if text:
-            candidates.append(text[:320])
-    return candidates
 
 
 def _schema() -> dict[str, Any]:
@@ -365,7 +400,10 @@ def _sha256(value: Any, *, field: str) -> str:
 
 
 __all__ = [
+    "EVIDENCE_TILE_RELATION_LEGACY_PROPOSAL_VERSION",
+    "EVIDENCE_TILE_RELATION_POLICY_VERSION",
     "EVIDENCE_TILE_RELATION_PROPOSAL_VERSION",
     "EvidenceTileRelationProposalError",
+    "evidence_tile_relation_call_count",
     "propose_evidence_tile_relations",
 ]

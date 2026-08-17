@@ -37,7 +37,9 @@ from src.services.scanner_evidence_comparison import (
     canonical_evidence_representatives,
 )
 from src.sv9_flow.evidence_tile_relation_worker import (
+    EVIDENCE_TILE_RELATION_LEGACY_PROPOSAL_VERSION,
     EVIDENCE_TILE_RELATION_PROPOSAL_VERSION,
+    evidence_tile_relation_call_count,
     propose_evidence_tile_relations,
 )
 
@@ -45,9 +47,8 @@ from src.sv9_flow.evidence_tile_relation_worker import (
 EVIDENCE_VAULT_COVERAGE_SUPPLEMENT_REQUEST_VERSION = (
     "evidence-vault-coverage-supplement-request-v1"
 )
-EVIDENCE_VAULT_COVERAGE_SUPPLEMENT_RESULT_VERSION = (
-    "evidence-vault-coverage-supplement-result-v1"
-)
+_LEGACY_COVERAGE_SUPPLEMENT_RESULT_VERSION = "evidence-vault-coverage-supplement-result-v1"
+EVIDENCE_VAULT_COVERAGE_SUPPLEMENT_RESULT_VERSION = "evidence-vault-coverage-supplement-result-v2"
 EVIDENCE_VAULT_COVERAGE_SUPPLEMENT_ARTIFACT_VERSION = (
     "evidence-vault-field-coverage-supplement-artifact-v1"
 )
@@ -241,13 +242,13 @@ def execute_coverage_supplement(
         str(row["tile_id"]): row
         for row in build_tile_contract_registry()["tiles"]
     }
+    proposal_rows = [evidence[value] for value in sorted(evidence)]
+    proposal_shortlists = {
+        fingerprint: [contracts[tile_id] for tile_id in tile_ids]
+        for fingerprint, tile_ids in sorted(workset.items())
+    }
     proposal = propose_evidence_tile_relations(
-        evidence_rows=[evidence[value] for value in sorted(evidence)],
-        tile_shortlists={
-            fingerprint: [contracts[tile_id] for tile_id in tile_ids]
-            for fingerprint, tile_ids in sorted(workset.items())
-        },
-        llm=llm,
+        evidence_rows=proposal_rows, tile_shortlists=proposal_shortlists, llm=llm
     )
     basis = _basis_from_proposal(
         proposal,
@@ -275,6 +276,9 @@ def execute_coverage_supplement(
             for fingerprint in sorted(evidence)
         ],
         "relation_proposal": proposal,
+        "relation_proposal_call_count": evidence_tile_relation_call_count(
+            evidence_rows=proposal_rows, tile_shortlists=proposal_shortlists
+        ),
         "basis_relations": basis,
         "authority": False,
         "runtime_effect": False,
@@ -886,11 +890,17 @@ def validate_coverage_supplement_result(
         "scanner_runtime_effect",
         "result_fingerprint",
     }
+    proposal_value = result.get("relation_proposal") if isinstance(result, Mapping) else None
+    proposal_version = proposal_value.get("schema_version") if isinstance(proposal_value, Mapping) else None
+    if result.get("schema_version") == EVIDENCE_VAULT_COVERAGE_SUPPLEMENT_RESULT_VERSION:
+        fields.add("relation_proposal_call_count")
     if (
         not isinstance(result, Mapping)
         or set(result) != fields
-        or result.get("schema_version")
-        != EVIDENCE_VAULT_COVERAGE_SUPPLEMENT_RESULT_VERSION
+        or result.get("schema_version") not in {
+            _LEGACY_COVERAGE_SUPPLEMENT_RESULT_VERSION,
+            EVIDENCE_VAULT_COVERAGE_SUPPLEMENT_RESULT_VERSION,
+        }
         or result.get("request_fingerprint")
         != request.get("request_fingerprint")
         or result.get("parent_canonical_memory_version")
@@ -912,7 +922,7 @@ def validate_coverage_supplement_result(
         if key != "result_fingerprint"
     }
     if result.get("result_fingerprint") != canonical_fingerprint(
-        EVIDENCE_VAULT_COVERAGE_SUPPLEMENT_RESULT_VERSION,
+        str(result["schema_version"]),
         unsigned,
     ):
         raise EvidenceVaultCoverageSupplementError(
@@ -954,14 +964,24 @@ def validate_coverage_supplement_result(
             "relations",
             "discarded_relations",
         }
-        or proposal.get("schema_version")
-        != EVIDENCE_TILE_RELATION_PROPOSAL_VERSION
+        or (result.get("schema_version"), proposal.get("schema_version")) not in {
+            (_LEGACY_COVERAGE_SUPPLEMENT_RESULT_VERSION, EVIDENCE_TILE_RELATION_LEGACY_PROPOSAL_VERSION),
+            (EVIDENCE_VAULT_COVERAGE_SUPPLEMENT_RESULT_VERSION, EVIDENCE_TILE_RELATION_PROPOSAL_VERSION),
+        }
         or not isinstance(proposal.get("relations"), list)
         or not isinstance(proposal.get("discarded_relations"), list)
     ):
         raise EvidenceVaultCoverageSupplementError(
             "coverage supplement relation proposal is invalid"
         )
+    if proposal_version == EVIDENCE_TILE_RELATION_PROPOSAL_VERSION:
+        contracts = {str(row["tile_id"]): row for row in build_tile_contract_registry()["tiles"]}
+        calls = evidence_tile_relation_call_count(
+            evidence_rows=list(result["evidence_snapshot"]),
+            tile_shortlists={key: [contracts[tile] for tile in value] for key, value in workset.items()},
+        )
+        if type(result.get("relation_proposal_call_count")) is not int or result.get("relation_proposal_call_count") != calls or len(proposal["relations"]) + len(proposal["discarded_relations"]) > calls * 120:
+            raise EvidenceVaultCoverageSupplementError("coverage supplement relation call count is invalid")
     discarded_fingerprints: set[str] = set()
     for discarded in proposal["discarded_relations"]:
         if (
@@ -1050,7 +1070,7 @@ def _basis_from_proposal(
             fingerprint not in evidence
             or tile_id not in tile_shortlists.get(fingerprint, [])
             or polarity not in {"supports", "contradicts"}
-            or not quote
+            or not 8 <= len(quote) <= 320
             or quote not in str(evidence[fingerprint]["content"])
             or not rationale
             or len(rationale) > 1000

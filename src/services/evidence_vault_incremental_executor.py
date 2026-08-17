@@ -40,10 +40,14 @@ from src.services.scanner_evidence_comparison import (
 )
 from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
 from src.sv9_flow.evidence_labeling_worker import (
+    EVIDENCE_LABELING_VERSION,
     is_evidence_record_labelable,
     label_evidence_pack,
 )
 from src.sv9_flow.evidence_tile_relation_worker import (
+    EVIDENCE_TILE_RELATION_LEGACY_PROPOSAL_VERSION,
+    EVIDENCE_TILE_RELATION_PROPOSAL_VERSION,
+    evidence_tile_relation_call_count,
     propose_evidence_tile_relations,
 )
 
@@ -496,15 +500,25 @@ def validate_vault_operation_result(result: Mapping[str, Any]) -> None:
             raise EvidenceVaultIncrementalExecutorError(
                 "shortlist truncation audit is inconsistent"
             )
-    expected_call_count = _relation_chunk_count(tile_shortlists)
+    minimum_call_count = _relation_chunk_count(tile_shortlists)
+    relation_call_count = result.get("relation_proposal_call_count")
+    proposal = result.get("relation_proposal")
+    legacy_proposal = (
+        isinstance(proposal, Mapping)
+        and proposal.get("schema_version")
+        == EVIDENCE_TILE_RELATION_LEGACY_PROPOSAL_VERSION
+    )
     if (
         pair_count > _MAX_BASELINE_RELATION_PAIRS
         or len(semantic_fingerprints) > _MAX_BASELINE_SEMANTIC_EVIDENCE
         or sorted(shortlist_union) != tile_ids
-        or result.get("relation_proposal_call_count") != expected_call_count
+        or not isinstance(relation_call_count, int)
+        or isinstance(relation_call_count, bool)
+        or relation_call_count < minimum_call_count
+        or (legacy_proposal and relation_call_count != minimum_call_count)
+        or relation_call_count > 1_000_000
     ):
         raise EvidenceVaultIncrementalExecutorError("tile shortlist union is invalid")
-    proposal = result.get("relation_proposal")
     discarded_reasons = {
         "fields_mismatch",
         "field_type_invalid",
@@ -517,16 +531,28 @@ def validate_vault_operation_result(result: Mapping[str, Any]) -> None:
     }
     if (
         not isinstance(proposal, Mapping)
-        or proposal.get("schema_version")
-        != "evidence-tile-relation-proposal-v2"
+        or proposal.get("schema_version") not in {
+            EVIDENCE_TILE_RELATION_LEGACY_PROPOSAL_VERSION,
+            EVIDENCE_TILE_RELATION_PROPOSAL_VERSION,
+        }
         or not isinstance(proposal.get("relations"), list)
         or not isinstance(proposal.get("discarded_relations"), list)
-        or len(proposal["discarded_relations"])
-        > expected_call_count * _MAX_TOTAL_RELATION_PAIRS
+        or len(proposal["relations"]) + len(proposal["discarded_relations"])
+        > relation_call_count * _MAX_TOTAL_RELATION_PAIRS
     ):
         raise EvidenceVaultIncrementalExecutorError(
             "relation proposal audit is invalid"
         )
+    for relation in proposal["relations"]:
+        quote = (
+            str(relation.get("literal_quote") or "").strip()
+            if isinstance(relation, Mapping)
+            else ""
+        )
+        if not 8 <= len(quote) <= 320:
+            raise EvidenceVaultIncrementalExecutorError(
+                "relation proposal crosses durable evidence bounds"
+            )
     for discarded in proposal["discarded_relations"]:
         if (
             not isinstance(discarded, Mapping)
@@ -610,7 +636,7 @@ def _build_candidate_result(
             )
     else:
         labeling_debug = {
-            "version": "sv9-flow-evidence-labeling-v3",
+            "version": EVIDENCE_LABELING_VERSION,
             "status": "not_required",
             "reason": "no_labelable_records",
             "records_considered": 0,
@@ -618,6 +644,10 @@ def _build_candidate_result(
             "artifact_cache_hits": 0,
             "artifact_cache_misses": 0,
             "provider_records": 0,
+            "provider_call_count": 0,
+            "provider_record_refs": [],
+            "semantic_passage_count": 0,
+            "semantic_batch_count": 0,
             "identity_divergences": [],
         }
     enriched: list[dict[str, Any]] = []
@@ -929,6 +959,7 @@ def _basis_relations(
     return sorted(rows, key=lambda row: (row["tile_id"], row["relation_id"]))
 
 
+
 def _propose_relations_bounded(
     *,
     evidence_rows: list[Mapping[str, Any]],
@@ -939,7 +970,7 @@ def _propose_relations_bounded(
     total_pairs = sum(len(rows) for rows in tile_shortlists.values())
     if total_pairs == 0:
         return {
-            "schema_version": "evidence-tile-relation-proposal-v2",
+            "schema_version": EVIDENCE_TILE_RELATION_PROPOSAL_VERSION,
             "relations": [],
             "discarded_relations": [],
         }, 0
@@ -951,52 +982,16 @@ def _propose_relations_bounded(
         raise EvidenceVaultIncrementalExecutorError(
             "baseline relation workset exceeds the safety ceiling"
         )
-    evidence_by_fingerprint = {
-        str(row["evidence_fingerprint"]): row for row in evidence_rows
-    }
-    relations: list[dict[str, str]] = []
-    discarded_relations: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
-    chunks = _relation_chunk_fingerprints(tile_shortlists)
-    for fingerprints in chunks:
-        proposal = propose_evidence_tile_relations(
-            evidence_rows=[evidence_by_fingerprint[value] for value in fingerprints],
-            tile_shortlists={
-                value: list(tile_shortlists[value]) for value in fingerprints
-            },
-            llm=llm,
+    proposal = propose_evidence_tile_relations(
+        evidence_rows=evidence_rows, tile_shortlists=tile_shortlists, llm=llm
+    )
+    if proposal.get("schema_version") != EVIDENCE_TILE_RELATION_PROPOSAL_VERSION:
+        raise EvidenceVaultIncrementalExecutorError(
+            "relation proposer returned a stale proposal contract"
         )
-        discarded_relations.extend(proposal["discarded_relations"])
-        for relation in proposal["relations"]:
-            key = (
-                relation["evidence_fingerprint"],
-                relation["tile_id"],
-                relation["polarity"],
-            )
-            if key in seen:
-                raise EvidenceVaultIncrementalExecutorError(
-                    "relation proposer repeated a cross-chunk relation"
-                )
-            seen.add(key)
-            relations.append(dict(relation))
-    return {
-        "schema_version": "evidence-tile-relation-proposal-v2",
-        "relations": sorted(
-            relations,
-            key=lambda row: (
-                row["evidence_fingerprint"],
-                row["tile_id"],
-                row["polarity"],
-            ),
-        ),
-        "discarded_relations": sorted(
-            discarded_relations,
-            key=lambda row: (
-                row["submitted_relation_fingerprint"],
-                row["reason"],
-            ),
-        ),
-    }, len(chunks)
+    return proposal, evidence_tile_relation_call_count(
+        evidence_rows=evidence_rows, tile_shortlists=tile_shortlists
+    )
 
 
 def _relation_chunk_fingerprints(
