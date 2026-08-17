@@ -32,7 +32,7 @@ TRUSTED_PR_CI_RUN_ID = 32006974926
 TRUSTED_MERGE_CI_RUN_ID = 32007250803
 EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA = "d" * 40
 FIXTURE_DEPLOY_SHA = TRUSTED_PR_MERGE_SHA
-FIXTURE_CONTROLLER_SHA = "3eaac76d0b5988b3041f7f8fbf5ff074a12372e1"
+FIXTURE_CONTROLLER_SHA = "7550c9969ea9b77dafbe016abe4c93e86e6a2535"
 HOTFIX_FILES = {
     ".github/workflows/fly-deploy-pr71-vault.yml",
     "docs/deployment/b3s_pr71_vault.md",
@@ -142,9 +142,9 @@ def _attestation_fixture() -> dict[str, dict]:
         },
         "MERGE_DEPLOY_COMPARE_FILE": {
             "status": "ahead",
-            "ahead_by": 4,
+            "ahead_by": 6,
             "behind_by": 0,
-            "total_commits": 4,
+            "total_commits": 6,
             "base_commit": {"sha": TRUSTED_PR_MERGE_SHA},
             "merge_base_commit": {"sha": TRUSTED_PR_MERGE_SHA},
             "commits": [
@@ -152,6 +152,8 @@ def _attestation_fixture() -> dict[str, dict]:
                 {"sha": "3795739abd64d8a0137b11c173acb822ccc33e25"},
                 {"sha": "4c1df3b3bf7b055ec912cf9cbc2a651d59b17221"},
                 {"sha": "3eaac76d0b5988b3041f7f8fbf5ff074a12372e1"},
+                {"sha": "725d26c1799bb832cb368a1d8ca07edd3366c322"},
+                {"sha": "7550c9969ea9b77dafbe016abe4c93e86e6a2535"},
             ],
             "files": [
                 {"filename": filename, "status": "modified"}
@@ -410,7 +412,7 @@ def test_isolated_deploy_pins_ci_blob_runs_and_hotfix_file_set():
     for filename in HOTFIX_FILES:
         assert f'"{filename}"' in workflow
     assert "filenames == expected_files" in workflow
-    assert 'item.get("status") == "modified"' in workflow
+    assert 'item.get("status") in {"added", "modified"}' in workflow
     assert '"previous_filename" not in item' in workflow
     assert (
         "actions/workflows/$TRUSTED_CI_WORKFLOW_ID/runs?event=push&"
@@ -530,7 +532,7 @@ def test_pr71_attestation_rejects_tampered_rest_objects(
             [
                 {
                     "filename": filename,
-                    "status": "added"
+                    "status": "removed"
                     if filename == "tests/test_deploy_provenance.py"
                     else "modified",
                 }
