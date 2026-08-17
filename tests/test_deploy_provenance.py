@@ -23,13 +23,13 @@ ISOLATED_RELEASE_COMMAND = (
     "python scripts/verify_b3s_history_postgres.py && "
     "python scripts/verify_pr71_vault_target.py'"
 )
-TRUSTED_PR_HEAD_SHA = "393a8894e86484456cce3144af111037ca5195c6"
-TRUSTED_PR_MERGE_SHA = "0f968e97bfeeff7052b9bcefcbd7c650ca28f4fa"
+TRUSTED_PR_HEAD_SHA = "b476fff80cea9fb1f474bce24ebe511c06f30f7b"
+TRUSTED_PR_MERGE_SHA = "0ac13c6e95ce0f413094838f2448578d25e90b2c"
 TRUSTED_CI_BLOB_SHA = "c1082f6b5c53a364b8d38e43936b93722c0183d1"
 TRUSTED_REPOSITORY_ID = 1288696741
 TRUSTED_CI_WORKFLOW_ID = 306885838
-TRUSTED_PR_CI_RUN_ID = 31933082104
-TRUSTED_MERGE_CI_RUN_ID = 31933234627
+TRUSTED_PR_CI_RUN_ID = 32006974926
+TRUSTED_MERGE_CI_RUN_ID = 32007250803
 EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA = "d" * 40
 FIXTURE_DEPLOY_SHA = TRUSTED_PR_MERGE_SHA
 FIXTURE_CONTROLLER_SHA = "a" * 40
@@ -70,7 +70,7 @@ def _attestation_fixture() -> dict[str, dict]:
     }
     fixture = {
         "PR_FILE": {
-            "number": 97,
+            "number": 102,
             "state": "closed",
             "merged": True,
             "draft": False,
@@ -81,7 +81,7 @@ def _attestation_fixture() -> dict[str, dict]:
                 "repo": repository,
             },
             "head": {
-                "ref": "refactor/vault-semantic-v3-selector-cutover",
+                "ref": "fix/vault-semantic-coverage",
                 "sha": TRUSTED_PR_HEAD_SHA,
                 "repo": repository,
             },
@@ -130,7 +130,7 @@ def _attestation_fixture() -> dict[str, dict]:
             **common_run,
             "id": TRUSTED_PR_CI_RUN_ID,
             "event": "pull_request",
-            "head_branch": "refactor/vault-semantic-v3-selector-cutover",
+            "head_branch": "fix/vault-semantic-coverage",
             "head_sha": TRUSTED_PR_HEAD_SHA,
         },
         "MERGE_CI_RUN_FILE": {
@@ -275,7 +275,7 @@ def test_isolated_pr71_vault_workflow_is_manual_post_merge_only():
     workflow = _read(".github/workflows/fly-deploy-pr71-vault.yml")
 
     assert "workflow_dispatch:" in workflow
-    assert 'description: "Exact reviewed PR #97 merge SHA to deploy"' in workflow
+    assert 'description: "Exact reviewed PR #102 merge SHA to deploy"' in workflow
     assert "Exact current main commit SHA to deploy" not in workflow
     assert "workflow_run:" not in workflow
     assert "Deploy isolated PR71 Vault" in workflow
@@ -308,7 +308,7 @@ def test_isolated_pr71_vault_workflow_is_manual_post_merge_only():
     assert 'r"[0-9a-f]{40}"' in workflow
     assert 'DISPATCH_REF: ${{ github.ref }}' in workflow
     assert 'os.environ["DISPATCH_REF"] == "refs/heads/main"' in workflow
-    assert '"$API_URL/repos/$GH_REPOSITORY/pulls/97"' in workflow
+    assert '"$API_URL/repos/$GH_REPOSITORY/pulls/102"' in workflow
     assert "persist-credentials: false" in workflow
     assert "EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA: ${{ vars.PR71_DEPLOY_WORKFLOW_BLOB_SHA }}" in workflow
     assert "deploy_workflow_blob_file" in workflow
@@ -323,12 +323,12 @@ def test_isolated_deploy_attests_exact_pr71_and_current_main_ancestry():
     required_contract = (
         'DISPATCH_SHA: ${{ github.sha }}',
         'deploy_sha == trusted_merge',
-        'pr.get("number"), 97',
+        'pr.get("number"), 102',
         'pr.get("state") == "closed"',
         'pr.get("merged") is True',
         'pr.get("draft") is False',
         'base.get("ref") == "main"',
-        'head.get("ref") == "refactor/vault-semantic-v3-selector-cutover"',
+        'head.get("ref") == "fix/vault-semantic-coverage"',
         'head.get("sha") == trusted_head',
         'pr.get("merge_commit_sha") == trusted_merge',
         'repo.get("id"), trusted_repository_id',
@@ -584,7 +584,9 @@ def test_pr71_runbook_marks_workflow_post_merge_and_separately_authorized():
     assert "`merge_commit_sha`" in runbook
     assert "`refs/heads/main`" in runbook
     assert "custom deployment branch policy configured to allow only `main`" in runbook
-    assert "`deployment_sha` input must equal the reviewed PR #97 merge" in runbook
+    assert "`deployment_sha` input must equal the reviewed PR #102 merge" in runbook
+    assert "reviewed PR\n#102 head" in runbook
+    assert "reviewed PR\n#97 head" not in runbook
     assert "immutable dispatch SHA must separately equal the live REST `main` ref" in runbook
     assert "controller itself is never checked out" in runbook
     assert "currently contains zero deployment secrets" in runbook
@@ -603,7 +605,7 @@ def test_pr71_runbook_marks_workflow_post_merge_and_separately_authorized():
     assert "records an exact-SHA deployment" in runbook
     assert "No new flag activation or scheduler-state change" in runbook
     assert "Post-deployment semantic-v3 validation" in runbook
-    assert "metadata.pipeline_commit_sha == 0f968e97bfeeff7052b9bcefcbd7c650ca28f4fa" in runbook
+    assert "metadata.pipeline_commit_sha == 0ac13c6e95ce0f413094838f2448578d25e90b2c" in runbook
     assert "score_projected_from_evidence_vault_semantic_scoring_v3" in runbook
     assert "historical Vault report before and after" in runbook
     assert "`raw.vault.legacy_operational_v2.score_evaluation`" in runbook

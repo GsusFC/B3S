@@ -144,7 +144,7 @@ Do not invoke the migrator, runtime-role configurator, `fly config validate`, or
 `fly deploy` from a local checkout. The only authorized path is the post-merge
 GitHub workflow dispatched from live `main`; its controller performs attestation
 before checkout and secret use, then runs those packaged operations against the
-fixed PR #97 payload.
+fixed PR #102 payload.
 
 The role command repeats the same target assertion on its own grant connection
 before any `REVOKE`/`GRANT`, is idempotent, and only accepts the privileged URL
@@ -162,9 +162,9 @@ password, or prints a DSN/driver error.
 Do not use `fly.toml`, `fly.vault.toml`, `b3s`, `b3s-vault`, their volumes, or
 their database branches in this workflow. The manual GitHub workflow is a
 **post-merge-only** deployment mechanism for the isolated `b3s-pr71-vault`
-target. Its current reviewed application baseline is PR #97 at head
-`393a8894e86484456cce3144af111037ca5195c6` and merge commit
-`0f968e97bfeeff7052b9bcefcbd7c650ca28f4fa`. Neither merging the reviewed
+target. Its current reviewed application baseline is PR #102 at head
+`b476fff80cea9fb1f474bce24ebe511c06f30f7b` and merge commit
+`0ac13c6e95ce0f413094838f2448578d25e90b2c`. Neither merging the reviewed
 PR, the presence of `workflow_dispatch`, the confirmation input, nor a
 successful attestation authorizes a merge or deployment. Merge approval and
 the deployment GO remain separate operator decisions. The authorized scope is
@@ -176,8 +176,8 @@ scheduler retain their independently authorized state; this reauthorization
 changes none of their flags or credentials.
 
 Dispatch only from exact `refs/heads/main` through the GitHub environment
-`pr71-vault`. The `deployment_sha` input must equal the reviewed PR #97 merge
-`0f968e97bfeeff7052b9bcefcbd7c650ca28f4fa`; that is the exact application
+`pr71-vault`. The `deployment_sha` input must equal the reviewed PR #102 merge
+`0ac13c6e95ce0f413094838f2448578d25e90b2c`; that is the exact application
 payload checked out, built, and verified by `/health`.
 The immutable dispatch SHA must separately equal the live REST `main` ref and
 identifies only the three-file reauthorization controller. The environment has a
@@ -202,12 +202,12 @@ secrets. Any mismatch is a hard NO-GO. A compromised-maintainer threat model
 would require an immutable external deployment controller and is not claimed here.
 
 Before checkout, dependency installation, or deployment-secret use, pre-check
-code embedded in the reviewed repository workflow fetches PR #97 and requires
+code embedded in the reviewed repository workflow fetches PR #102 and requires
 `state=closed`, `merged=true`, and `draft=false`, base `main`, head
-`refactor/vault-semantic-v3-selector-cutover`, repository ID `1288696741` and
+`fix/vault-semantic-coverage`, repository ID `1288696741` and
 name `GsusFC/B3S`, exact reviewed head, and exact `merge_commit_sha`. It proves
 reviewed-head-to-target and target-to-current-controller ancestry from complete
-GitHub Compare responses. The target is fixed to the PR #97 merge. For the
+GitHub Compare responses. The target is fixed to the PR #102 merge. For the
 three-file reauthorization controller, the latter comparison must contain
 these exact existing, modified, non-renamed paths:
 
@@ -216,7 +216,7 @@ these exact existing, modified, non-renamed paths:
 - `tests/test_deploy_provenance.py`
 
 Under that trusted-source model, any runtime, database, CI-workflow, config, or
-other source change after PR #97 is outside the attestation allowlist and fails
+other source change after PR #102 is outside the attestation allowlist and fails
 closed. This three-file control-plane follow-up records the reviewed, merged,
 green semantic-v3 baseline consumed by the defense-in-depth attestation without
 changing runtime code or configuration. Deployment remains a separate operator
@@ -224,17 +224,17 @@ decision and requires temporary migration and Fly capabilities.
 
 The target tree cumulatively contains the already merged PRs #89, #91, #93,
 #95, and #97; this controller does not reinterpret or selectively omit them.
-The reauthorization trust anchor is PR #97: head
-`393a8894e86484456cce3144af111037ca5195c6`, merge
-`0f968e97bfeeff7052b9bcefcbd7c650ca28f4fa`, and CI runs `31933082104` and
-`31933234627`.
+The reauthorization trust anchor is PR #102: head
+`b476fff80cea9fb1f474bce24ebe511c06f30f7b`, merge
+`0ac13c6e95ce0f413094838f2448578d25e90b2c`, and CI runs `32006974926` and
+`32007250803`.
 
 The trusted CI identity is pinned to workflow ID `306885838`, path
 `.github/workflows/ci.yml`, and blob
 `c1082f6b5c53a364b8d38e43936b93722c0183d1`. The workflow must remain active;
 the reviewed head, payload target, and current controller Contents responses
-must carry that exact blob. Exact successful CI runs `31933082104` (reviewed PR
-#97 head) and `31933234627` (PR #97 merge on `main`) are pinned. The current exact-main
+must carry that exact blob. Exact successful CI runs `32006974926` (reviewed PR
+#102 head) and `32007250803` (PR #102 merge on `main`) are pinned. The current exact-main
 controller push run is fetched without filtering away non-successful runs;
 exactly one completed, successful, first-attempt run with the expected repository and SHA is accepted.
 The `pull_requests` array may be empty. Missing, pending, failed, foreign, stale,
@@ -335,7 +335,7 @@ deployment environment.
 The new report must be `completed` and expose all of these exact bindings:
 
 - `metadata.pipeline_schema_version == b3s-vault-semantic-report-v2`
-- `metadata.pipeline_commit_sha == 0f968e97bfeeff7052b9bcefcbd7c650ca28f4fa`
+- `metadata.pipeline_commit_sha == 0ac13c6e95ce0f413094838f2448578d25e90b2c`
 - `metadata.rubric_version == baldosas-v3-1`
 - `metadata.evaluator_model == evidence-vault-semantic-scoring-v3`
 - limitation `score_projected_from_evidence_vault_semantic_scoring_v3`
@@ -353,13 +353,13 @@ and do not backfill, promote evidence, or roll back automatically.
 ## Rollback and NO-GO
 
 This exact three-file reauthorization replaces the former deployment NO-GO only
-for the reviewed PR #97 semantic-v3 baseline. It becomes effective after it is
+for the reviewed PR #102 semantic-v3 baseline. It becomes effective after it is
 merged, its exact current-main CI succeeds, the independently reviewed
 deployment-workflow blob is pinned in the protected environment, that environment
 is reconfirmed to contain zero deployment secrets,
 and the operator records an exact-SHA deployment GO. The allowlist must not be weakened. The authorized
 workflow may idempotently verify/apply the packaged head 028, reassert the exact
-runtime ACL, and deploy the exact PR #97 merge image with diagnostics still
+runtime ACL, and deploy the exact PR #102 merge image with diagnostics still
 `false`. The reauthorization controller itself is never checked out into the
 application payload. The external migration-target assertion must pass before any DDL and head `028` must
 verify exactly. No new flag activation or scheduler-state change is authorized.
