@@ -37,8 +37,9 @@ def test_sv9_shadow_writer_precedes_the_diagnostic_only_head() -> None:
 
     filenames = [filename for filename, _sql_text in _migration_files()]
 
-    assert filenames[-2] == _WRITER_MIGRATION.name
-    assert filenames[-1] == _DIAGNOSTIC_MIGRATION.name
+    writer_position = filenames.index(_WRITER_MIGRATION.name)
+    diagnostic_position = filenames.index(_DIAGNOSTIC_MIGRATION.name)
+    assert diagnostic_position == writer_position + 1
     assert filenames.count(_MIGRATION.name) == 1
     assert filenames.count(_HARDENING_MIGRATION.name) == 1
     assert filenames.count(_WRITER_MIGRATION.name) == 1

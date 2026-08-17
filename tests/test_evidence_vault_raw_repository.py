@@ -100,15 +100,25 @@ class _Connection:
                 }
             )
         if "read_evidence_vault_raw_planning_context" in sql:
-            workspace_slug, source_scan_id, canonical_domain, *_ids = params
+            (
+                workspace_slug,
+                source_scan_id,
+                canonical_domain,
+                *_ids,
+                semantic_contract_fingerprint,
+            ) = params
             value = self.planning_context or {
-                "schema_version": "evidence-vault-raw-planning-context-v1",
+                "schema_version": "evidence-vault-raw-planning-context-v2",
                 "workspace_slug": workspace_slug,
                 "source_scan_id": source_scan_id,
                 "canonical_domain": canonical_domain,
                 "canonical_memory_version": None,
                 "previous_capture_evidence_records": [],
                 "known_evidence_records": [],
+                "semantic_analysis_contract_fingerprint": (
+                    semantic_contract_fingerprint
+                ),
+                "semantic_analysis_claimed_fingerprints": [],
                 "accepted_evidence_tile_relations": [],
                 "operational_authority_context": {
                     "database_time": "2026-08-09T02:00:00+00:00",
@@ -263,13 +273,19 @@ def _plan(
 def test_planning_context_is_strict_and_never_accepts_operational_evidence_id_as_fingerprint() -> None:
     command, _signed, _registry = _fixture()
     base = {
-        "schema_version": "evidence-vault-raw-planning-context-v1",
+        "schema_version": "evidence-vault-raw-planning-context-v2",
         "workspace_slug": command.workspace_slug,
         "source_scan_id": command.source_scan_id,
         "canonical_domain": "example.com",
         "canonical_memory_version": None,
         "previous_capture_evidence_records": [],
         "known_evidence_records": [],
+        "semantic_analysis_contract_fingerprint": (
+            raw_repository.current_semantic_analysis_contract()[
+                "semantic_analysis_contract_fingerprint"
+            ]
+        ),
+        "semantic_analysis_claimed_fingerprints": [],
         "accepted_evidence_tile_relations": [],
         "operational_authority_context": {
             "database_time": "2026-08-09T02:00:00+00:00",
@@ -676,7 +692,7 @@ def test_scanner_preflight_allows_exactly_the_three_worker_functions() -> None:
     sql = raw_repository._ROLE_PREFLIGHT_SQL
     signature = (
         "b3s_history.read_evidence_vault_raw_planning_context("
-        "text,text,text,uuid,uuid,uuid)"
+        "text,text,text,uuid,uuid,uuid,text)"
     )
     assert signature in sql
     assert sql.count(signature) == 2

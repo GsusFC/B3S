@@ -165,6 +165,7 @@ from src.services.evidence_vault_exact_relation_supplement import (
 )
 from src.services.evidence_vault_incremental_refresh import (
     EvidenceVaultOperationPlanError,
+    semantic_analysis_contract_from_plan,
     validate_vault_scan_plan,
 )
 from src.services.evidence_vault_lineage_replay import (
@@ -1478,6 +1479,7 @@ class PostgresHistoryRepository:
                        scan_runs.acquisition_state, scan_runs.request_payload,
                        scan_runs.metadata,
                        operation_plans.status AS operation_status,
+                       operation_plans.plan_payload AS stored_plan_payload,
                        operation_plans.operation_plan_fingerprint AS stored_plan_fingerprint,
                        operation_plans.result_fingerprint AS stored_result_fingerprint,
                        operation_plans.candidate_packet_fingerprint AS stored_candidate_packet_fingerprint
@@ -1543,6 +1545,9 @@ class PostgresHistoryRepository:
                 if capture.get("operation_status") is not None:
                     metadata_payload["analysis_status"] = str(
                         capture["operation_status"]
+                    )
+                    metadata_payload["operation_plan"] = dict(
+                        capture["stored_plan_payload"] or {}
                     )
                     metadata_payload["operation_plan_fingerprint"] = str(
                         capture["stored_plan_fingerprint"]
@@ -11553,13 +11558,21 @@ def _validate_vault_operation_result_for_plan(
         raise CaptureConflictError(
             "incremental relation workset exceeds its single-call bound"
         )
+    semantic_contract = semantic_analysis_contract_from_plan(plan)
     proposal = result.get("relation_proposal")
+    supported_proposal_versions = {
+        "evidence-tile-relation-proposal-v2",
+        "evidence-tile-relation-proposal-v3",
+        EVIDENCE_TILE_RELATION_PROPOSAL_VERSION,
+    }
     if (
         not isinstance(proposal, Mapping)
-        or proposal.get("schema_version") not in {
-            EVIDENCE_TILE_RELATION_LEGACY_PROPOSAL_VERSION,
-            EVIDENCE_TILE_RELATION_PROPOSAL_VERSION,
-        }
+        or proposal.get("schema_version") not in supported_proposal_versions
+        or (
+            semantic_contract is not None
+            and proposal.get("schema_version")
+            != semantic_contract["relation_proposal_version"]
+        )
         or not isinstance(proposal.get("relations"), list)
     ):
         raise CaptureConflictError("executor relation proposal is invalid")
@@ -11572,7 +11585,12 @@ def _validate_vault_operation_result_for_plan(
         calls = debug.get("provider_call_count") if isinstance(debug, Mapping) else None
         if (
             not isinstance(debug, Mapping)
-            or debug.get("version") != EVIDENCE_LABELING_VERSION
+            or debug.get("version")
+            != (
+                semantic_contract["evidence_labeling_version"]
+                if semantic_contract is not None
+                else EVIDENCE_LABELING_VERSION
+            )
             or debug.get("status") != ("labeled" if records else "not_required")
             or debug.get("records_considered") != len(records)
             or debug.get("records_labeled") != len(records)

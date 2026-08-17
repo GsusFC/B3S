@@ -17,7 +17,7 @@ import os
 import threading
 import traceback
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlparse
 
 from src.build_info import current_build_sha
@@ -2112,6 +2112,31 @@ def _trusted_persisted_acquisition_gate(
     }
 
 
+def _vault_semantic_contract_from_observation(
+    observation: Mapping[str, Any],
+) -> dict[str, str]:
+    from src.services.evidence_vault_incremental_refresh import (
+        semantic_analysis_contract_from_plan,
+    )
+
+    metadata = (
+        dict(observation.get("metadata") or {})
+        if isinstance(observation.get("metadata"), Mapping)
+        else {}
+    )
+    nested = (
+        dict(metadata.get("observation") or {})
+        if isinstance(metadata.get("observation"), Mapping)
+        else {}
+    )
+    plan = metadata.get("operation_plan") or nested.get("operation_plan")
+    if not isinstance(plan, Mapping):
+        return {}
+    contract = semantic_analysis_contract_from_plan(plan)
+    return dict(contract or {})
+
+
+
 def _compose_vault_memory_report(
     *,
     scan_id: str,
@@ -2172,6 +2197,9 @@ def _compose_vault_memory_report(
     except Sv9AssessmentError as exc:
         raise RuntimeError("vault_semantic_scoring_v3_output_invalid") from exc
     parsed_capture = parse_capture_observation(capture_observation)
+    semantic_analysis_contract = _vault_semantic_contract_from_observation(
+        capture_observation
+    )
     if parsed_capture.source_scan_id != scan_id:
         raise RuntimeError("vault_report_capture_scan_mismatch")
     if (
@@ -2392,7 +2420,10 @@ def _compose_vault_memory_report(
         },
         "flow": {
             "candidate": {"evidence_pack": evidence_pack, "interpretation": {}},
-            "interpretation_debug": {"mode": "evidence_vault_semantic_scoring_v3"},
+            "interpretation_debug": {
+                "mode": "evidence_vault_semantic_scoring_v3",
+                "semantic_analysis_contract": semantic_analysis_contract,
+            },
         },
         "sv9": {
             "brand3_score": score.get("sv9_score"),

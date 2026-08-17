@@ -73,6 +73,7 @@ def test_identical_incremental_refresh_requires_zero_llm_and_no_report() -> None
         current_evidence_records=rows,
         previous_capture_evidence_records=rows,
         known_evidence_records=rows,
+        semantic_analysis_claimed_fingerprints=_fingerprints(rows),
         canonical_memory_version=MEMORY_VERSION,
     )
 
@@ -219,6 +220,7 @@ def test_modified_multi_chunk_locator_only_supersedes_missing_fingerprint() -> N
         current_evidence_records=current,
         previous_capture_evidence_records=previous,
         known_evidence_records=previous,
+        semantic_analysis_claimed_fingerprints=_fingerprints(previous),
     )
 
     assert fingerprint_a in delta["unchanged_evidence_fingerprints"]
@@ -265,6 +267,7 @@ def test_reacquired_historical_evidence_needs_no_llm() -> None:
         current_evidence_records=historical,
         previous_capture_evidence_records=[],
         known_evidence_records=historical,
+        semantic_analysis_claimed_fingerprints=_fingerprints(historical),
     )
 
     assert delta["summary"]["reacquired_count"] == 1
@@ -282,6 +285,7 @@ def test_new_evidence_is_classified_without_reopening_all_tiles() -> None:
         current_evidence_records=current,
         previous_capture_evidence_records=previous,
         known_evidence_records=previous,
+        semantic_analysis_claimed_fingerprints=_fingerprints(previous),
         canonical_memory_version=MEMORY_VERSION,
     )
 
@@ -372,6 +376,13 @@ def test_exact_duplicate_representative_is_order_insensitive() -> None:
 
     assert first == second
 
+
+
+def _fingerprints(rows: list[dict[str, object]]) -> list[str]:
+    return [
+        record.fingerprint
+        for record in canonical_evidence_rows(rows, subject_url=SUBJECT_URL)
+    ]
 
 
 def _row(slug: str, content: str) -> dict:

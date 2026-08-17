@@ -17,6 +17,7 @@ from src.services.evidence_vault_incremental_refresh import (
     build_vault_scan_plan,
     validate_vault_scan_plan,
 )
+from src.services.scanner_evidence_comparison import canonical_evidence_rows
 
 
 EVIDENCE_VAULT_FIELD_REPLAY_MANIFEST_VERSION = (
@@ -130,6 +131,12 @@ def validate_evidence_vault_field_replay(
                 current_evidence_records=observation["pack"]["evidence"],
                 previous_capture_evidence_records=observation["pack"]["evidence"],
                 known_evidence_records=observation["pack"]["evidence"],
+                semantic_analysis_claimed_fingerprints=(
+                    _evidence_fingerprints(
+                        observation["pack"]["evidence"],
+                        subject_url=case["subject_url"],
+                    )
+                ),
                 canonical_memory_version=parent,
             )
             _assert_plan_boundary(plan)
@@ -182,6 +189,12 @@ def validate_evidence_vault_field_replay(
                 current_evidence_records=current["pack"]["evidence"],
                 previous_capture_evidence_records=previous["pack"]["evidence"],
                 known_evidence_records=known,
+                semantic_analysis_claimed_fingerprints=(
+                    _evidence_fingerprints(
+                        known,
+                        subject_url=case["subject_url"],
+                    )
+                ),
                 canonical_memory_version=parent,
             )
             _assert_plan_boundary(plan)
@@ -511,6 +524,17 @@ def _load_observation(
         **dict(row),
         "pack": pack,
     }
+
+
+def _evidence_fingerprints(
+    rows: list[dict[str, Any]],
+    *,
+    subject_url: str,
+) -> list[str]:
+    return [
+        row.fingerprint
+        for row in canonical_evidence_rows(rows, subject_url=subject_url)
+    ]
 
 
 def _assert_plan_boundary(plan: Mapping[str, Any]) -> None:

@@ -20,6 +20,9 @@ from src.services.evidence_vault_incremental_refresh import (
     build_vault_scan_plan,
     resolve_vault_scan_mode,
 )
+from src.services.evidence_vault_semantic_analysis_contract import (
+    current_semantic_analysis_contract,
+)
 from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
 
 
@@ -251,6 +254,7 @@ def prepare_vault_scan_after_capture(
             for row in capture.get("evidence_records") or []
             if isinstance(row, dict)
         ]
+        semantic_claims = _semantic_analysis_claimed_fingerprints(history)
         plan = build_vault_scan_plan(
             brand_identity=(
                 str(current_memory["brand_identity"])
@@ -262,6 +266,7 @@ def prepare_vault_scan_after_capture(
             current_evidence_records=observation["evidence_records"],
             previous_capture_evidence_records=previous_rows,
             known_evidence_records=known_rows,
+            semantic_analysis_claimed_fingerprints=semantic_claims,
             accepted_evidence_tile_relations=relation_rows,
             canonical_memory_version=(
                 str(current_memory["canonical_memory_version"])
@@ -587,6 +592,61 @@ def _snapshot_observed_at(snapshot: Mapping[str, Any]) -> str | None:
             # not necessarily a Unix timestamp.
             return None
     return None
+
+
+def _semantic_analysis_claimed_fingerprints(
+    history: Iterable[Mapping[str, Any]],
+) -> list[str]:
+    current_fingerprint = current_semantic_analysis_contract()[
+        "semantic_analysis_contract_fingerprint"
+    ]
+    claims: set[str] = set()
+    for capture in history:
+        metadata = (
+            dict(capture.get("metadata") or {})
+            if isinstance(capture.get("metadata"), Mapping)
+            else {}
+        )
+        if metadata.get("analysis_status") == "superseded":
+            continue
+        observation_metadata = (
+            dict(metadata.get("observation") or {})
+            if isinstance(metadata.get("observation"), Mapping)
+            else {}
+        )
+        plan = metadata.get("operation_plan") or observation_metadata.get(
+            "operation_plan"
+        )
+        if not isinstance(plan, Mapping):
+            continue
+        context = plan.get("semantic_context")
+        contract = (
+            context.get("semantic_analysis_contract")
+            if isinstance(context, Mapping)
+            else None
+        )
+        if (
+            not isinstance(contract, Mapping)
+            or contract.get("semantic_analysis_contract_fingerprint")
+            != current_fingerprint
+        ):
+            continue
+        operations = plan.get("operations")
+        workset = (
+            operations.get("classify_evidence_fingerprints")
+            if isinstance(operations, Mapping)
+            else None
+        )
+        if not isinstance(workset, list):
+            continue
+        claims.update(
+            item
+            for item in workset
+            if isinstance(item, str)
+            and len(item) == 64
+            and all(character in "0123456789abcdef" for character in item)
+        )
+    return sorted(claims)
 
 
 def _capture_analysis_completed(capture: Mapping[str, Any]) -> bool:

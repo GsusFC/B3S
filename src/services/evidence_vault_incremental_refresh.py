@@ -22,6 +22,10 @@ from src.services.evidence_vault_canonical_core import (
     build_tile_contract_registry,
     canonical_fingerprint,
 )
+from src.services.evidence_vault_semantic_analysis_contract import (
+    current_semantic_analysis_contract,
+    validate_semantic_analysis_contract,
+)
 from src.services.scanner_evidence_comparison import (
     CanonicalEvidenceRecord,
     canonical_evidence_representatives,
@@ -32,7 +36,11 @@ from src.sv9_flow.evidence_labeling_worker import is_evidence_record_labelable
 
 
 EVIDENCE_VAULT_OPERATION_PLAN_VERSION = "evidence-vault-operation-plan-v1"
-EVIDENCE_VAULT_INCREMENTAL_DELTA_VERSION = "evidence-vault-incremental-delta-v1"
+EVIDENCE_VAULT_LEGACY_INCREMENTAL_DELTA_VERSION = (
+    "evidence-vault-incremental-delta-v1"
+)
+EVIDENCE_VAULT_INCREMENTAL_DELTA_VERSION = "evidence-vault-incremental-delta-v2"
+EVIDENCE_VAULT_SEMANTIC_CONTEXT_VERSION = "evidence-vault-semantic-context-v2"
 VAULT_INCREMENTAL_ENVIRONMENT = "vault"
 
 
@@ -112,6 +120,7 @@ def build_vault_scan_plan(
     current_evidence_records: Iterable[Mapping[str, Any]],
     previous_capture_evidence_records: Iterable[Mapping[str, Any]] = (),
     known_evidence_records: Iterable[Mapping[str, Any]] = (),
+    semantic_analysis_claimed_fingerprints: Iterable[str] = (),
     accepted_evidence_tile_relations: Iterable[Mapping[str, Any]] = (),
     canonical_memory_version: str | None = None,
 ) -> dict[str, Any]:
@@ -145,6 +154,10 @@ def build_vault_scan_plan(
         for row in accepted_evidence_tile_relations
         if isinstance(row, Mapping)
     ]
+    semantic_claims = _semantic_analysis_claims(
+        semantic_analysis_claimed_fingerprints
+    )
+    semantic_contract = current_semantic_analysis_contract()
     current = canonical_evidence_rows(
         current_rows,
         subject_url=url,
@@ -208,13 +221,12 @@ def build_vault_scan_plan(
             current_evidence_records=current_rows,
             previous_capture_evidence_records=previous_rows,
             known_evidence_records=known_rows,
+            semantic_analysis_claimed_fingerprints=semantic_claims,
             accepted_evidence_tile_relations=relation_rows,
         )
-        analysis_fingerprints = [
-            *delta["added_evidence_fingerprints"],
-            *delta["modified_evidence_fingerprints"],
-            *delta["unanalysed_unchanged_evidence_fingerprints"],
-        ]
+        analysis_fingerprints = list(
+            delta["semantic_analysis_required_fingerprints"]
+        )
         analysis_fingerprints = sorted(
             set(analysis_fingerprints).intersection(labelable_fingerprints)
         )
@@ -233,13 +245,15 @@ def build_vault_scan_plan(
         canonical_impact = "review_required" if has_analysis else "none"
 
     semantic_context_unsigned = {
+        "schema_version": EVIDENCE_VAULT_SEMANTIC_CONTEXT_VERSION,
         "scope": "exact_capture_owned_identity_context",
         "evidence_fingerprints": sorted(row.fingerprint for row in current),
+        "semantic_analysis_contract": semantic_contract,
     }
     semantic_context = {
         **semantic_context_unsigned,
         "context_fingerprint": canonical_fingerprint(
-            "evidence-vault-semantic-context-v1",
+            EVIDENCE_VAULT_SEMANTIC_CONTEXT_VERSION,
             semantic_context_unsigned,
         ),
     }
@@ -310,32 +324,7 @@ def validate_vault_scan_plan(plan: Mapping[str, Any]) -> None:
     if not str(plan.get("subject_url") or "").strip():
         raise EvidenceVaultOperationPlanError("operation plan URL is required")
     semantic_context = plan.get("semantic_context")
-    if (
-        not isinstance(semantic_context, Mapping)
-        or set(semantic_context) != {
-            "scope",
-            "evidence_fingerprints",
-            "context_fingerprint",
-        }
-        or semantic_context.get("scope")
-        != "exact_capture_owned_identity_context"
-        or not isinstance(semantic_context.get("evidence_fingerprints"), list)
-        or semantic_context["evidence_fingerprints"]
-        != sorted(set(semantic_context["evidence_fingerprints"]))
-        or semantic_context.get("context_fingerprint")
-        != canonical_fingerprint(
-            "evidence-vault-semantic-context-v1",
-            {
-                "scope": semantic_context.get("scope"),
-                "evidence_fingerprints": semantic_context.get(
-                    "evidence_fingerprints"
-                ),
-            },
-        )
-    ):
-        raise EvidenceVaultOperationPlanError(
-            "operation plan semantic context is invalid"
-        )
+    semantic_context_is_current = _validate_semantic_context(semantic_context)
     for fingerprint in semantic_context["evidence_fingerprints"]:
         _optional_fingerprint(fingerprint)
     canonical_version = plan.get("canonical_memory_version")
@@ -348,8 +337,16 @@ def validate_vault_scan_plan(plan: Mapping[str, Any]) -> None:
             "operation plan canonical version is invalid"
         )
     delta = plan.get("delta")
-    if not isinstance(delta, Mapping):
-        raise EvidenceVaultOperationPlanError("operation plan delta is required")
+    expected_delta_version = (
+        EVIDENCE_VAULT_INCREMENTAL_DELTA_VERSION
+        if semantic_context_is_current
+        else EVIDENCE_VAULT_LEGACY_INCREMENTAL_DELTA_VERSION
+    )
+    if (
+        not isinstance(delta, Mapping)
+        or delta.get("schema_version") != expected_delta_version
+    ):
+        raise EvidenceVaultOperationPlanError("operation plan delta is invalid")
     operations = plan.get("operations")
     operation_fields = {
         "persist_capture_only",
@@ -453,6 +450,7 @@ def build_incremental_evidence_delta(
     current_evidence_records: Iterable[Mapping[str, Any]],
     previous_capture_evidence_records: Iterable[Mapping[str, Any]],
     known_evidence_records: Iterable[Mapping[str, Any]] = (),
+    semantic_analysis_claimed_fingerprints: Iterable[str] = (),
     accepted_evidence_tile_relations: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Compare acquisition with the last capture and durable known evidence.
@@ -461,8 +459,13 @@ def build_incremental_evidence_delta(
     removal, refutation, or a reason to reopen accepted tiles automatically.
     """
 
+    current_source_rows = [
+        dict(row)
+        for row in current_evidence_records
+        if isinstance(row, Mapping)
+    ]
     current = canonical_evidence_rows(
-        [dict(row) for row in current_evidence_records if isinstance(row, Mapping)],
+        current_source_rows,
         subject_url=subject_url,
     )
     previous = canonical_evidence_rows(
@@ -480,6 +483,19 @@ def build_incremental_evidence_delta(
     current_by_fingerprint = _by_fingerprint(current)
     previous_by_fingerprint = _by_fingerprint(previous)
     known_by_fingerprint = _by_fingerprint(known)
+    claimed_fingerprints = _semantic_analysis_claims(
+        semantic_analysis_claimed_fingerprints
+    )
+    labelable_fingerprints = _labelable_fingerprints(
+        current_source_rows,
+        subject_url=subject_url,
+    )
+    current_claimed_fingerprints = (
+        labelable_fingerprints & claimed_fingerprints
+    )
+    semantic_analysis_required = sorted(
+        labelable_fingerprints - current_claimed_fingerprints
+    )
     previous_by_locator = _fingerprints_by_locator(previous)
     known_by_locator = _fingerprints_by_locator(
         tuple(known_by_fingerprint.values())
@@ -489,10 +505,11 @@ def build_incremental_evidence_delta(
         set(current_by_fingerprint) & set(previous_by_fingerprint)
     )
     unanalysed_unchanged = sorted(
-        unchanged_fingerprints - set(known_by_fingerprint)
+        (unchanged_fingerprints & labelable_fingerprints)
+        - current_claimed_fingerprints
     )
     unchanged = sorted(
-        unchanged_fingerprints & set(known_by_fingerprint)
+        unchanged_fingerprints - set(unanalysed_unchanged)
     )
     reacquired = sorted(
         (set(current_by_fingerprint) & set(known_by_fingerprint))
@@ -563,6 +580,10 @@ def build_incremental_evidence_delta(
             EVIDENCE_VAULT_INCREMENTAL_DELTA_VERSION,
             _record_payload(tuple(known_by_fingerprint.values())),
         ),
+        "semantic_analysis_claimed_fingerprints": sorted(
+            current_claimed_fingerprints
+        ),
+        "semantic_analysis_required_fingerprints": semantic_analysis_required,
         "unchanged_evidence_fingerprints": unchanged,
         "unanalysed_unchanged_evidence_fingerprints": unanalysed_unchanged,
         "reacquired_evidence_fingerprints": reacquired,
@@ -576,6 +597,12 @@ def build_incremental_evidence_delta(
             "current_count": len(current),
             "previous_capture_count": len(previous),
             "known_count": len(known_by_fingerprint),
+            "semantic_analysis_claimed_count": len(
+                current_claimed_fingerprints
+            ),
+            "semantic_analysis_required_count": len(
+                semantic_analysis_required
+            ),
             "unchanged_count": len(unchanged),
             "unanalysed_unchanged_count": len(unanalysed_unchanged),
             "reacquired_count": len(reacquired),
@@ -586,10 +613,10 @@ def build_incremental_evidence_delta(
             "affected_tile_count": len(affected_tiles),
         },
         "coverage_loss_only": bool(not_reacquired) and not (
-            added or modified or unanalysed_unchanged
+            added or modified or semantic_analysis_required
         ),
         "requires_incremental_analysis": bool(
-            added or modified or unanalysed_unchanged
+            added or modified or semantic_analysis_required
         ),
     }
     return {
@@ -713,6 +740,137 @@ def _all_tile_ids() -> list[str]:
     return [str(row["tile_id"]) for row in build_tile_contract_registry()["tiles"]]
 
 
+def semantic_analysis_contract_from_plan(
+    plan: Mapping[str, Any],
+) -> dict[str, str] | None:
+    """Return the frozen analyzer identity; legacy plans intentionally have none."""
+
+    validate_vault_scan_plan(plan)
+    context = plan.get("semantic_context")
+    if not isinstance(context, Mapping) or context.get("schema_version") != (
+        EVIDENCE_VAULT_SEMANTIC_CONTEXT_VERSION
+    ):
+        return None
+    contract = context.get("semantic_analysis_contract")
+    if not isinstance(contract, Mapping):
+        raise EvidenceVaultOperationPlanError(
+            "operation plan semantic analysis contract is invalid"
+        )
+    try:
+        return validate_semantic_analysis_contract(contract)
+    except ValueError as exc:
+        raise EvidenceVaultOperationPlanError(
+            "operation plan semantic analysis contract is invalid"
+        ) from exc
+
+
+def require_current_semantic_analysis_contract(
+    plan: Mapping[str, Any],
+) -> dict[str, str]:
+    """Fail closed before new semantic work under an unavailable analyzer."""
+
+    contract = semantic_analysis_contract_from_plan(plan)
+    if contract is None:
+        raise EvidenceVaultOperationPlanError(
+            "legacy operation plan cannot start new semantic work"
+        )
+    try:
+        return validate_semantic_analysis_contract(
+            contract,
+            require_current=True,
+        )
+    except ValueError as exc:
+        raise EvidenceVaultOperationPlanError(
+            "operation plan semantic analyzer is unavailable"
+        ) from exc
+
+
+def _validate_semantic_context(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        raise EvidenceVaultOperationPlanError(
+            "operation plan semantic context is invalid"
+        )
+    legacy_fields = {
+        "scope",
+        "evidence_fingerprints",
+        "context_fingerprint",
+    }
+    current_fields = {
+        "schema_version",
+        "scope",
+        "evidence_fingerprints",
+        "semantic_analysis_contract",
+        "context_fingerprint",
+    }
+    if set(value) == legacy_fields:
+        unsigned = {
+            "scope": value.get("scope"),
+            "evidence_fingerprints": value.get("evidence_fingerprints"),
+        }
+        context_version = "evidence-vault-semantic-context-v1"
+        is_current = False
+    elif set(value) == current_fields:
+        if value.get("schema_version") != EVIDENCE_VAULT_SEMANTIC_CONTEXT_VERSION:
+            raise EvidenceVaultOperationPlanError(
+                "operation plan semantic context version is invalid"
+            )
+        contract = value.get("semantic_analysis_contract")
+        if not isinstance(contract, Mapping):
+            raise EvidenceVaultOperationPlanError(
+                "operation plan semantic analysis contract is invalid"
+            )
+        try:
+            validate_semantic_analysis_contract(contract)
+        except ValueError as exc:
+            raise EvidenceVaultOperationPlanError(
+                "operation plan semantic analysis contract is invalid"
+            ) from exc
+        unsigned = {
+            "schema_version": value.get("schema_version"),
+            "scope": value.get("scope"),
+            "evidence_fingerprints": value.get("evidence_fingerprints"),
+            "semantic_analysis_contract": dict(contract),
+        }
+        context_version = EVIDENCE_VAULT_SEMANTIC_CONTEXT_VERSION
+        is_current = True
+    else:
+        raise EvidenceVaultOperationPlanError(
+            "operation plan semantic context fields mismatch"
+        )
+    fingerprints = value.get("evidence_fingerprints")
+    if (
+        value.get("scope") != "exact_capture_owned_identity_context"
+        or not isinstance(fingerprints, list)
+        or fingerprints != sorted(set(fingerprints))
+        or any(not _is_fingerprint(item) for item in fingerprints)
+        or value.get("context_fingerprint")
+        != canonical_fingerprint(context_version, unsigned)
+    ):
+        raise EvidenceVaultOperationPlanError(
+            "operation plan semantic context is invalid"
+        )
+    return is_current
+
+
+def _semantic_analysis_claims(values: Iterable[str]) -> set[str]:
+    claims: set[str] = set()
+    for value in values:
+        if not _is_fingerprint(value):
+            raise EvidenceVaultOperationPlanError(
+                "semantic analysis claim must be a lowercase sha256 fingerprint"
+            )
+        claims.add(value)
+    return claims
+
+
+def _is_fingerprint(value: Any) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _optional_fingerprint(value: str | None) -> str | None:
     if value is None:
         return None
@@ -726,11 +884,15 @@ def _optional_fingerprint(value: str | None) -> str | None:
 
 __all__ = [
     "EVIDENCE_VAULT_INCREMENTAL_DELTA_VERSION",
+    "EVIDENCE_VAULT_LEGACY_INCREMENTAL_DELTA_VERSION",
     "EVIDENCE_VAULT_OPERATION_PLAN_VERSION",
+    "EVIDENCE_VAULT_SEMANTIC_CONTEXT_VERSION",
     "EvidenceVaultOperationPlanError",
     "VaultScanMode",
     "build_incremental_evidence_delta",
     "build_vault_scan_plan",
+    "require_current_semantic_analysis_contract",
     "resolve_vault_scan_mode",
+    "semantic_analysis_contract_from_plan",
     "validate_vault_scan_plan",
 ]

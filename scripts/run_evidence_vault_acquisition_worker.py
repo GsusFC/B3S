@@ -157,6 +157,9 @@ def _operation_plan(
             planning_context.previous_capture_evidence_records
         ),
         known_evidence_records=planning_context.known_evidence_records,
+        semantic_analysis_claimed_fingerprints=(
+            planning_context.semantic_analysis_claimed_fingerprints
+        ),
         accepted_evidence_tile_relations=relations,
         canonical_memory_version=planning_context.canonical_memory_version,
     )

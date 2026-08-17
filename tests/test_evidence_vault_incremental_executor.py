@@ -145,6 +145,16 @@ class MemoryRepository:
         return dict(self.operation)
 
 
+def _claims(rows: list[dict[str, object]]) -> list[str]:
+    baseline = build_vault_scan_plan(
+        brand_identity="example.com",
+        subject_url="https://example.com",
+        mode="baseline",
+        current_evidence_records=rows,
+    )
+    return list(baseline["semantic_context"]["evidence_fingerprints"])
+
+
 def _row(content="We help teams ship better products."):
     return {
         "ref": "web.home",
@@ -211,6 +221,7 @@ def test_executor_processes_c7_plan_without_special_runtime_gate() -> None:
         current_evidence_records=rows,
         previous_capture_evidence_records=rows,
         known_evidence_records=rows,
+        semantic_analysis_claimed_fingerprints=_claims(rows),
         canonical_memory_version="a" * 64,
     )
     plan = deepcopy(plan)
@@ -249,6 +260,56 @@ def test_executor_processes_c7_plan_without_special_runtime_gate() -> None:
     assert repository.failures == []
 
 
+
+def test_executor_rejects_unavailable_frozen_semantic_contract() -> None:
+    rows = [_row("Future contract evidence")]
+    plan = deepcopy(build_vault_scan_plan(
+        brand_identity="example.com",
+        subject_url="https://example.com",
+        mode="baseline",
+        current_evidence_records=rows,
+    ))
+    contract = plan["semantic_context"]["semantic_analysis_contract"]
+    contract["relation_policy_version"] = "evidence-tile-relation-policy-v4"
+    contract_unsigned = {
+        key: value
+        for key, value in contract.items()
+        if key != "semantic_analysis_contract_fingerprint"
+    }
+    contract["semantic_analysis_contract_fingerprint"] = canonical_fingerprint(
+        contract["schema_version"], contract_unsigned
+    )
+    context_unsigned = {
+        key: value
+        for key, value in plan["semantic_context"].items()
+        if key != "context_fingerprint"
+    }
+    plan["semantic_context"]["context_fingerprint"] = canonical_fingerprint(
+        plan["semantic_context"]["schema_version"], context_unsigned
+    )
+    plan_unsigned = {
+        key: value
+        for key, value in plan.items()
+        if key != "operation_plan_fingerprint"
+    }
+    plan["operation_plan_fingerprint"] = canonical_fingerprint(
+        plan["schema_version"], plan_unsigned
+    )
+    repository = MemoryRepository(plan=plan, rows=rows)
+
+    with pytest.raises(
+        RuntimeError,
+        match="semantic analyzer is unavailable",
+    ):
+        execute_vault_operation_plan(
+            repository=repository,
+            source_scan_id="scan-future-contract",
+            worker_id="worker-a",
+            llm=ExecutorLLM(),
+        )
+
+    assert repository.failures
+
 def test_no_delta_executor_performs_zero_llm_and_creates_no_packet() -> None:
     rows = [_row("Stable evidence")]
     plan = build_vault_scan_plan(
@@ -258,6 +319,7 @@ def test_no_delta_executor_performs_zero_llm_and_creates_no_packet() -> None:
         current_evidence_records=rows,
         previous_capture_evidence_records=rows,
         known_evidence_records=rows,
+        semantic_analysis_claimed_fingerprints=_claims(rows),
         canonical_memory_version="a" * 64,
     )
     repository = MemoryRepository(plan=plan, rows=rows, status="not_required")

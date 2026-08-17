@@ -280,6 +280,10 @@ def test_not_reacquired_is_coverage_only_and_cannot_reopen_c7() -> None:
         current_evidence_records=[rows[1]],
         previous_capture_evidence_records=rows,
         known_evidence_records=rows,
+        semantic_analysis_claimed_fingerprints=[
+            relation["evidence_fingerprint"]
+            for relation in group["relations"]
+        ],
     )
     assert delta["not_reacquired_evidence_fingerprints"] == [
         group["relations"][0]["evidence_fingerprint"]

@@ -6,7 +6,10 @@ from dataclasses import dataclass
 import pytest
 
 from src.history.report_parser import canonical_json_hash
-from src.services.evidence_vault_incremental_refresh import canonical_evidence_rows
+from src.services.evidence_vault_incremental_refresh import (
+    build_vault_scan_plan,
+    canonical_evidence_rows,
+)
 from src.services.evidence_vault_scan_orchestration import (
     EvidenceVaultScanOrchestrationError,
     bind_vault_report_to_capture_observation,
@@ -119,6 +122,12 @@ def test_identical_vault_refresh_persists_capture_and_plans_zero_llm() -> None:
         str(row.get("evidence_type") or "").startswith("acquisition.attempt.")
         for row in previous_observation["evidence_records"]
     )
+    previous_observation["metadata"]["operation_plan"] = build_vault_scan_plan(
+        brand_identity="example.com",
+        subject_url="https://example.com",
+        mode="baseline",
+        current_evidence_records=previous_observation["evidence_records"],
+    )
     repository = _Repository(
         memory={
             "brand_identity": "example.com",
@@ -148,6 +157,42 @@ def test_identical_vault_refresh_persists_capture_and_plans_zero_llm() -> None:
     assert plan["canonical_impact"] == "none"
     assert plan["operations"]["llm_required"] is False
     assert plan["operations"]["create_canonical_report"] is False
+
+
+def test_legacy_completed_history_does_not_claim_current_semantic_analysis() -> None:
+    snapshot = _snapshot("Legacy semantic evidence")
+    previous = build_capture_observation_from_snapshot(
+        snapshot=snapshot,
+        scan_id="scan-legacy",
+        url="https://example.com",
+        brand_name="Example",
+        mode="incremental_refresh",
+        observed_at="2026-08-06T10:00:00Z",
+    )
+    repository = _Repository(
+        memory={
+            "brand_identity": "example.com",
+            "canonical_memory_version": "a" * 64,
+        },
+        history=[_history_capture(previous, analysis_status="completed")],
+    )
+
+    result = prepare_vault_scan_after_capture(
+        repository=repository,
+        snapshot=snapshot,
+        scan_id="scan-current-contract",
+        url="https://example.com",
+        brand_name="Example",
+        environment="vault",
+        incremental_enabled=True,
+        observed_at="2026-08-06T11:00:00Z",
+    )
+
+    plan = result["operation_plan"]
+    assert plan["delta"]["summary"]["known_count"] > 0
+    assert plan["delta"]["summary"]["semantic_analysis_claimed_count"] == 0
+    assert plan["operations"]["llm_required"] is True
+    assert repository.persisted[0]["metadata"]["analysis_status"] == "pending"
 
 
 def test_material_delta_is_scoped_and_never_falls_through_to_full_rerun() -> None:
@@ -478,8 +523,6 @@ def test_retry_rejects_a_superseded_canonical_parent() -> None:
         mode="incremental_refresh",
         observed_at="2026-08-06T10:00:00Z",
     )
-    from src.services.evidence_vault_incremental_refresh import build_vault_scan_plan
-
     plan = build_vault_scan_plan(
         brand_identity="example.com",
         subject_url="https://example.com",
@@ -559,6 +602,85 @@ def test_new_scan_does_not_treat_pending_capture_as_completed_analysis() -> None
     assert result["operation_plan"]["operations"]["llm_required"] is True
 
 
+
+
+def test_pending_current_contract_claim_suppresses_duplicate_semantic_work() -> None:
+    pending = build_capture_observation_from_snapshot(
+        snapshot=_snapshot("Claimed evidence"),
+        scan_id="scan-pending-current",
+        url="https://example.com",
+        brand_name="Example",
+        mode="incremental_refresh",
+        observed_at="2026-08-06T10:00:00Z",
+    )
+    pending["metadata"]["operation_plan"] = build_vault_scan_plan(
+        brand_identity="example.com",
+        subject_url="https://example.com",
+        mode="incremental_refresh",
+        current_evidence_records=pending["evidence_records"],
+        canonical_memory_version="a" * 64,
+    )
+    repository = _Repository(
+        memory={
+            "brand_identity": "example.com",
+            "canonical_memory_version": "a" * 64,
+        },
+        history=[_history_capture(pending, analysis_status="pending")],
+    )
+
+    result = prepare_vault_scan_after_capture(
+        repository=repository,
+        snapshot=_snapshot("Claimed evidence"),
+        scan_id="scan-after-claim",
+        url="https://example.com",
+        brand_name="Example",
+        environment="vault",
+        incremental_enabled=True,
+        observed_at="2026-08-06T11:00:00Z",
+    )
+
+    assert result["operation_plan"]["operations"]["llm_required"] is False
+    assert result["operation_plan"]["delta"]["summary"][
+        "semantic_analysis_claimed_count"
+    ] > 0
+
+
+def test_superseded_current_contract_claim_allows_replacement_work() -> None:
+    superseded = build_capture_observation_from_snapshot(
+        snapshot=_snapshot("Replacement evidence"),
+        scan_id="scan-superseded",
+        url="https://example.com",
+        brand_name="Example",
+        mode="incremental_refresh",
+        observed_at="2026-08-06T10:00:00Z",
+    )
+    superseded["metadata"]["operation_plan"] = build_vault_scan_plan(
+        brand_identity="example.com",
+        subject_url="https://example.com",
+        mode="incremental_refresh",
+        current_evidence_records=superseded["evidence_records"],
+        canonical_memory_version="a" * 64,
+    )
+    repository = _Repository(
+        memory={
+            "brand_identity": "example.com",
+            "canonical_memory_version": "a" * 64,
+        },
+        history=[_history_capture(superseded, analysis_status="superseded")],
+    )
+
+    result = prepare_vault_scan_after_capture(
+        repository=repository,
+        snapshot=_snapshot("Replacement evidence"),
+        scan_id="scan-replacement",
+        url="https://example.com",
+        brand_name="Example",
+        environment="vault",
+        incremental_enabled=True,
+        observed_at="2026-08-06T11:00:00Z",
+    )
+
+    assert result["operation_plan"]["operations"]["llm_required"] is True
 
 def test_missing_memory_selects_baseline_without_granting_authority() -> None:
     repository = _Repository(memory=None, history=[])

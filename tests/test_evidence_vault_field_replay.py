@@ -22,7 +22,7 @@ FIXTURE_MANIFEST_SHA256 = (
     "096b611cc6a6708bb17c462f18782a5a22d914857b2e45ec9c54783ddc98c60b"
 )
 EXPECTED_REPLAY_RESULT_FINGERPRINT = (
-    "b47681fe1493d5f7ac8986c5a91890c3219ceae3a36995eed404198d64543fc4"
+    "89ce4392b8364d1d4892e157ca473f0bc7730c57253dd0c642a0c57bfdde5c31"
 )
 
 
@@ -47,7 +47,7 @@ def test_real_brand_normalized_replay_freezes_expected_plan_behavior() -> None:
         "context_count": 137,
         "classify_count": 130,
         "operation_plan_fingerprint": (
-            "b8f0f3b187b0e5c6e67667d70977631a884b4cfce12cb936d9c45dcd8882fccd"
+            "13769f51cf52a960c458da2ebcdf4078799cce4c7e484626af781ba854b5a06f"
         ),
     }
     assert [
