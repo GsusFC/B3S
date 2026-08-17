@@ -1,5 +1,6 @@
 import pytest
 
+from src.sv9_flow.semantic_passages import semantic_passages
 from src.sv9_flow.evidence_tile_relation_worker import (
     EvidenceTileRelationProposalError,
     propose_evidence_tile_relations,
@@ -57,9 +58,7 @@ def test_relation_worker_returns_only_literal_scoped_proposals() -> None:
     assert "score" not in result["relations"][0]
     assert result["discarded_relations"] == []
     prompt = __import__("json").loads(llm.calls[0][1].split("\n", 1)[1])
-    assert prompt[0]["quote_candidates"] == [
-        "We help teams ship better products."
-    ]
+    assert prompt[0]["content"] == "We help teams ship better products."
 
 
 @pytest.mark.parametrize(
@@ -96,6 +95,30 @@ def test_relation_worker_discards_model_output_outside_contract(
     assert len(
         result["discarded_relations"][0]["submitted_relation_fingerprint"]
     ) == 64
+
+
+
+def test_relation_windows_cover_quote_crossing_a_passage_boundary() -> None:
+    quote = ("material claim " * 19) + "material claim"
+    content = ("x" * 47_950) + quote + ("z" * 100)
+    evidence = _evidence()
+    evidence[0]["content"] = content
+    llm = RelationLLM([{
+        "evidence_fingerprint": "a" * 64,
+        "tile_id": "M1",
+        "polarity": "supports",
+        "literal_quote": quote,
+        "rationale": "The complete claim crosses the first passage boundary.",
+    }])
+
+    assert [len(semantic_passages("x" * size)) for size in (47_681, 47_682, 48_000, 2_097_152)] == [1, 1, 1, 44]
+    result = propose_evidence_tile_relations(
+        evidence_rows=evidence,
+        tile_shortlists=_shortlist(),
+        llm=llm,
+    )
+
+    assert len(llm.calls) > 1 and result["relations"][0]["literal_quote"] == quote
 
 
 def test_relation_worker_rejects_oversized_model_payload() -> None:

@@ -479,3 +479,5 @@ admite estos archivos y necesita una reautorización separada y exacta.
 Los reportes Vault nuevos seleccionan solo `evidence_vault_semantic_scoring_v3`: bajo el lock, el repository recupera el `operational_v2` adoptado y su source exacto, rederiva shadow/v3 y exige paridad; contradiction, source inválido o drift no publican.
 
 Coverage/verification no filtran semántica y `operational_v2` queda byte-for-byte, sin fallback, como `legacy_operational_v2`. Los envelopes son `evidence-vault-semantic-report-projection-v2` / `b3s-vault-semantic-report-v2`, evaluator v3; reportes previos, Scanner y mismatches quedan intactos.
+
+## 16. Corrección de alcance — Baseline/incremental ya existían; el defecto era la frontera LLM. V4/v3 usa ventanas completas (48.000, solape 319, máximo 44) sin cambiar scoring, autoridad, memoria, históricos ni `8542a7b688bf`.

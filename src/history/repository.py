@@ -222,7 +222,9 @@ from src.services.scanner_evidence_comparison import (
 )
 from src.sv9.assessment_kernel import Sv9AssessmentError, validate_sv9_assessment_output
 from src.sv9_flow.contracts import EvidenceRecord
-from src.sv9_flow.evidence_labeling_worker import is_evidence_record_labelable
+from src.sv9_flow.evidence_labeling_worker import EVIDENCE_LABELING_VERSION, evidence_labeling_call_count, is_evidence_record_labelable
+from src.sv9_flow.evidence_tile_relation_worker import EVIDENCE_TILE_RELATION_LEGACY_PROPOSAL_VERSION, EVIDENCE_TILE_RELATION_PROPOSAL_VERSION, evidence_tile_relation_call_count
+from src.sv9_flow.semantic_passages import semantic_passages
 
 _ID_NAMESPACE = UUID("3ef1b80c-e7b7-4fb3-95ad-fb9e03c59d52")
 _SCHEMA = "b3s_history"
@@ -11467,6 +11469,7 @@ def _validate_vault_operation_result_for_plan(
         )
     identities: dict[str, dict[str, Any]] = {}
     expected_dispositions: dict[str, str] = {}
+    labelable_records: dict[str, EvidenceRecord] = {}
     for fingerprint in planned_fingerprints:
         representative = representatives[fingerprint]
         record = EvidenceRecord(
@@ -11483,6 +11486,7 @@ def _validate_vault_operation_result_for_plan(
         if not is_evidence_record_labelable(record):
             expected_dispositions[fingerprint] = "ineligible_label_type"
             continue
+        labelable_records[fingerprint] = record
         identity = project_evidence_memory_row_identity(
             representative,
             brand_domain=str(operation["canonical_domain"]),
@@ -11552,11 +11556,43 @@ def _validate_vault_operation_result_for_plan(
     proposal = result.get("relation_proposal")
     if (
         not isinstance(proposal, Mapping)
-        or proposal.get("schema_version")
-        != "evidence-tile-relation-proposal-v2"
+        or proposal.get("schema_version") not in {
+            EVIDENCE_TILE_RELATION_LEGACY_PROPOSAL_VERSION,
+            EVIDENCE_TILE_RELATION_PROPOSAL_VERSION,
+        }
         or not isinstance(proposal.get("relations"), list)
     ):
         raise CaptureConflictError("executor relation proposal is invalid")
+    if proposal.get("schema_version") == EVIDENCE_TILE_RELATION_PROPOSAL_VERSION:
+        debug = result.get("labeling_debug")
+        records = list(labelable_records.values())
+        passages = sum(len(semantic_passages(row.content)) for row in records)
+        hits = debug.get("artifact_cache_hits") if isinstance(debug, Mapping) else None
+        misses = debug.get("artifact_cache_misses") if isinstance(debug, Mapping) else None
+        calls = debug.get("provider_call_count") if isinstance(debug, Mapping) else None
+        if (
+            not isinstance(debug, Mapping)
+            or debug.get("version") != EVIDENCE_LABELING_VERSION
+            or debug.get("status") != ("labeled" if records else "not_required")
+            or debug.get("records_considered") != len(records)
+            or debug.get("records_labeled") != len(records)
+            or debug.get("semantic_passage_count") != passages
+            or debug.get("semantic_batch_count") != passages
+            or not all(type(value) is int and value >= 0 for value in (hits, misses, calls, debug.get("records_considered"), debug.get("records_labeled"), debug.get("provider_records"), debug.get("semantic_passage_count"), debug.get("semantic_batch_count")))
+            or hits + misses != len(records)
+            or debug.get("provider_records") != misses
+            or (calls != 0 if misses == 0 else not misses <= calls <= passages - hits)
+        ):
+            raise CaptureConflictError("executor semantic labeling audit is invalid")
+        relation_rows = [
+            dict(representatives[value], evidence_fingerprint=value, labels=result["semantic_labels"][value])
+            for value in sorted(semantic_fingerprints)
+        ]
+        expected_call_count = evidence_tile_relation_call_count(
+            evidence_rows=relation_rows, tile_shortlists=derived_shortlists
+        )
+        if result.get("relation_proposal_call_count") != expected_call_count:
+            raise CaptureConflictError("executor relation proposal call count is invalid")
     expected_basis: list[dict[str, Any]] = []
     seen_relations: set[tuple[str, str, str]] = set()
     for raw in proposal["relations"]:
@@ -11578,7 +11614,7 @@ def _validate_vault_operation_result_for_plan(
             identity is None
             or tile_id not in shortlists.get(fingerprint, [])
             or polarity not in {"supports", "contradicts"}
-            or not quote
+            or not 8 <= len(quote) <= 320
             or quote not in str(representatives[fingerprint].get("content") or "")
             or not rationale
             or len(rationale) > 1000

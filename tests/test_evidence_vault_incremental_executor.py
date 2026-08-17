@@ -51,6 +51,7 @@ class ExecutorLLM:
         }
 
 
+
 class NoCallLLM:
     api_key = "test"
 
@@ -168,6 +169,7 @@ def _baseline_plan(rows):
     )
 
 
+
 def test_executor_builds_pending_overlay_without_authority_or_score() -> None:
     rows = [_row()]
     repository = MemoryRepository(plan=_baseline_plan(rows), rows=rows)
@@ -191,10 +193,13 @@ def test_executor_builds_pending_overlay_without_authority_or_score() -> None:
     assert relation["tile_id"] == "M1"
     assert relation["review_status"] == "unreviewed"
     assert relation["decision_event_id"] is None
+    assert relation["evidence_id"] == result["selected_evidence_ids"][0]
+    assert relation["source_identity_id"] == result["selected_document_ids"][0]
     operational = result["operational_candidate_packet"]
     assert operational["has_accepted_change"] is False
     assert operational["accepted_memory"]["accepted_tiles"] == []
     assert repository.source_packets and repository.operational_packets
+
 
 
 def test_executor_processes_c7_plan_without_special_runtime_gate() -> None:
@@ -411,11 +416,8 @@ def test_baseline_relation_work_is_deterministically_chunked() -> None:
     assert execution["execution_status"] == "completed"
     result = repository.operation["result_payload"]
     assert result["relation_proposal_call_count"] == 2
-    assert llm.calls == [
-        "sv9_flow_evidence_labeling",
-        "evidence_tile_relation_proposals",
-        "evidence_tile_relation_proposals",
-    ]
+    assert llm.calls.count("sv9_flow_evidence_labeling") == 25
+    assert llm.calls[-2:] == ["evidence_tile_relation_proposals"] * 2
     assert sum(len(rows) for rows in result["tile_shortlists"].values()) == 125
 
 
