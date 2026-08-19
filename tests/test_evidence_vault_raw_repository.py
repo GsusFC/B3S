@@ -550,6 +550,45 @@ def test_trusted_acquisition_outcome_absence_has_explicit_legacy_behavior() -> N
         )
 
 
+def test_trusted_acquisition_records_independent_exa_search_without_c7() -> None:
+    limitations, attempts = raw_repository._trusted_acquisition_report_metadata(
+        {
+            "acquisition_outcome": {
+                "schema_version": "evidence-vault-acquisition-outcome-v1",
+                "external": "not_discovered",
+                "failure_reason": None,
+            },
+            "external_discovery": {
+                "schema_version": "evidence-vault-external-discovery-v1",
+                "provider": "exa",
+                "status": "searched",
+                "request_fingerprint": "a" * 64,
+                "candidate_urls": ["https://www.linkedin.com/company/example"],
+            },
+        },
+        external_captured=False,
+    )
+
+    assert limitations == [
+        "verified_external_document_unavailable",
+        "external_acquisition:not_discovered",
+    ]
+    assert attempts == [
+        {
+            "provider": "web",
+            "intent": "owned_web",
+            "status": "success",
+            "detail": "verified_raw_document_persisted",
+        },
+        {
+            "provider": "exa",
+            "intent": "external_social_profile",
+            "status": "not_discovered",
+            "detail": "independent_discovery_unassociated",
+        },
+    ]
+
+
 def test_trusted_acquisition_rejects_embedded_report_gate() -> None:
     with pytest.raises(ValueError, match="may not embed acquisition gate"):
         raw_repository._trusted_acquisition_report_metadata(

@@ -177,7 +177,8 @@ async function poll() {
   }
   renderGate(payload.acquisition_gate || null, payload.state);
   if (payload.state === "done") {
-    window.location.href = `/report/${scanId}`;
+    const reportId = payload.report_id || scanId;
+    window.location.href = `/report/${reportId}`;
     return;
   }
   if (payload.state === "blocked" || payload.state === "cancelled") {

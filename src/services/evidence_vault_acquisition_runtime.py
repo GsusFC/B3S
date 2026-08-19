@@ -110,6 +110,14 @@ class ExternalProviderObservation(_StrictRuntimeModel):
     raw_fragment: dict[str, JsonValue]
 
 
+class ExternalDiscovery(_StrictRuntimeModel):
+    schema_version: Literal["evidence-vault-external-discovery-v1"]
+    provider: Literal["exa"]
+    status: Literal["searched"]
+    request_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_urls: list[str] = Field(max_length=10)
+
+
 class CollectedAcquisition(_StrictRuntimeModel):
     owned: OwnedHttpObservation
     external: ExternalProviderObservation | None
@@ -123,6 +131,7 @@ class CollectedAcquisition(_StrictRuntimeModel):
         "provider_unavailable",
         "provider_result_ineligible",
     ] | None
+    external_discovery: ExternalDiscovery | None = None
 
 
 class OwnedFetcher(Protocol):
@@ -209,12 +218,12 @@ class TrustedAcquisitionRuntime:
         if owned is None:
             raise EvidenceVaultAcquisitionRuntimeError("owned_collection_failed")
         linkedin_url = _owned_linkedin_fact(owned.raw_fragment)
-        # An independently discovered LinkedIn URL proves only that the URL
-        # exists; it does not prove that the profile belongs to this brand.
-        # The current Exa adapter does not retain a structured canonical
-        # website fact, so v1 remains owned-link-only at this runtime boundary.
+        # An owned LinkedIn fact can be fetched and signed as C7. Independent
+        # Exa search may run without that fact, but those hits stay discovery
+        # only: they do not prove brand association and are not signed.
         external_attempted = linkedin_url is not None
         external: ExternalProviderObservation | None = None
+        discovery: ExternalDiscovery | None = None
         outcome: Literal[
             "not_discovered",
             "captured",
@@ -225,6 +234,27 @@ class TrustedAcquisitionRuntime:
             "provider_unavailable",
             "provider_result_ineligible",
         ] | None = None
+        discover = getattr(self.__external_fetch, "discover", None)
+        if not external_attempted and callable(discover):
+            try:
+                discovery = _model(discover(validated), ExternalDiscovery)
+                if discovery.provider != "exa" or discovery.status != "searched":
+                    raise ValueError("external discovery result is invalid")
+                for candidate_url in discovery.candidate_urls:
+                    _strict_linkedin_company_url(candidate_url)
+            except _ExternalProviderResultError:
+                failure_reason = "provider_result_ineligible"
+            except EvidenceVaultAcquisitionRuntimeError:
+                failure_reason = "provider_unavailable"
+            except (ValidationError, ValueError):
+                failure_reason = "provider_result_ineligible"
+            if failure_reason is not None:
+                discovery = None
+                if not self.__allow_owned_only_downgrade:
+                    raise EvidenceVaultAcquisitionRuntimeError(
+                        "external_collection_failed"
+                    )
+                outcome = "owned_only_downgrade"
         if external_attempted:
             if self.__external_fetch is None:
                 failure_reason = "provider_not_configured"
@@ -267,6 +297,7 @@ class TrustedAcquisitionRuntime:
             external=external,
             external_outcome=outcome,
             external_failure_reason=failure_reason,
+            external_discovery=discovery,
         ).model_dump(mode="json")
 
     def sign(
@@ -511,9 +542,9 @@ class HttpxOwnedFetcher:
 
 
 class HttpxExaExactUrlFetcher:
-    """Acquire only an exact LinkedIn profile proved by an owned raw link."""
+    """Fetch an owned-linked LinkedIn profile, and search when that fact is absent."""
 
-    supports_independent_discovery = False
+    supports_independent_discovery = True
     __slots__ = ("_api_key", "_client")
 
     def __init__(self, client: Any, *, api_key: str) -> None:
@@ -521,6 +552,43 @@ class HttpxExaExactUrlFetcher:
             raise EvidenceVaultAcquisitionRuntimeError("exa_api_key_missing")
         self._client = client
         self._api_key = api_key.strip()
+
+    def discover(self, command: TrustedAcquisitionCommand) -> ExternalDiscovery:
+        host = (urlsplit(command.brand_url).hostname or "").removeprefix("www.")
+        request_body = {
+            "query": f"{host} official LinkedIn company",
+            "type": "auto",
+            "numResults": 5,
+            "includeDomains": ["linkedin.com"],
+        }
+        request_fingerprint = canonical_fingerprint(
+            "evidence-vault-exa-independent-search-v1",
+            {"search_request": request_body},
+        )
+        payload, _status, _headers, _body_size = self._post_json(
+            "https://api.exa.ai/search",
+            request_body,
+        )
+        results = payload.get("results") if isinstance(payload, Mapping) else None
+        if not isinstance(results, list):
+            raise _ExternalProviderResultError("exa_discovery_results_invalid")
+        candidates: list[str] = []
+        for item in results:
+            if not isinstance(item, Mapping):
+                continue
+            url = _canonicalize_linkedin_company_url(item.get("url"))
+            if url is None or url in candidates:
+                continue
+            candidates.append(url)
+            if len(candidates) == 10:
+                break
+        return ExternalDiscovery(
+            schema_version="evidence-vault-external-discovery-v1",
+            provider="exa",
+            status="searched",
+            request_fingerprint=request_fingerprint,
+            candidate_urls=candidates,
+        )
 
     def __call__(self, source_url: str) -> ExternalProviderObservation:
         try:
@@ -640,6 +708,10 @@ def _sign_collected(
     }
     if collected.external is not None:
         raw_payload["sources"]["external"] = collected.external.raw_fragment
+    if collected.external_discovery is not None:
+        raw_payload["external_discovery"] = collected.external_discovery.model_dump(
+            mode="json"
+        )
     snapshot = PreReceiptSnapshot(
         schema_version=PRE_RECEIPT_SNAPSHOT_VERSION,
         workspace_slug=command.workspace_slug,
@@ -954,6 +1026,22 @@ def _extract_owned_html(
     return document, linkedin
 
 
+def _canonicalize_linkedin_company_url(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parsed = urlsplit(value.strip())
+    host = (parsed.hostname or "").lower()
+    if host not in {"linkedin.com", "www.linkedin.com"}:
+        return None
+    path = parsed.path.rstrip("/")
+    candidate = f"https://www.linkedin.com{path}"
+    try:
+        _strict_linkedin_company_url(candidate)
+    except ValueError:
+        return None
+    return candidate
+
+
 def _strict_linkedin_company_url(value: str) -> None:
     if not isinstance(value, str) or value != value.strip() or not value.isascii():
         raise ValueError("LinkedIn company URL is invalid")
@@ -1124,6 +1212,7 @@ def _utc_text(value: str) -> datetime:
 __all__ = [
     "CollectedAcquisition",
     "EvidenceVaultAcquisitionRuntimeError",
+    "ExternalDiscovery",
     "ExternalProviderObservation",
     "HttpxExaExactUrlFetcher",
     "HttpxOwnedFetcher",

@@ -143,10 +143,21 @@
         "buyer and supplier finally meet",
         "one network for your entire",
         "so money moves",
-        "ai agents negotiate directly"
+        "ai agents negotiate directly",
+        "how you hire",
+        "how you recruit",
+        "diff against",
+        "the way you",
+        "should work",
+        "world where",
+        "paradigm",
+        "status quo",
+        "cómo contratas",
+        "cómo se contrata",
+        "el mundo debería"
       ]
     },
-    "version": "sv9-flow-block-detection-policy-v7",
+    "version": "sv9-flow-block-detection-policy-v8",
     "weaken_terms": {
       "magnetism": [
         "lack of active engagement",
@@ -333,7 +344,12 @@
         "money moves",
         "on its own",
         "ai agents negotiate directly",
-        "autonomous agents"
+        "autonomous agents",
+        "how you hire",
+        "how you recruit",
+        "diff against",
+        "paradigm",
+        "status quo"
       ]
     },
     "feature_bonus_terms": [

@@ -67,6 +67,16 @@ def trusted_acquisition_report_metadata(
     if external_outcome == "not_discovered":
         if external_captured or failure_reason is not None:
             raise ValueError("trusted acquisition not-discovered outcome is invalid")
+        discovery = capture_payload.get("external_discovery")
+        if _independent_discovery_searched(discovery):
+            attempts.append(
+                {
+                    "provider": "exa",
+                    "intent": "external_social_profile",
+                    "status": "not_discovered",
+                    "detail": "independent_discovery_unassociated",
+                }
+            )
         return [
             "verified_external_document_unavailable",
             "external_acquisition:not_discovered",
@@ -114,6 +124,18 @@ def _external_captured_from_provenance(value: Any) -> bool:
     if external_captured != (len(roles) == 2):
         raise ValueError("trusted acquisition provenance is invalid")
     return external_captured
+
+
+def _independent_discovery_searched(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    candidates = value.get("candidate_urls")
+    return (
+        value.get("schema_version") == "evidence-vault-external-discovery-v1"
+        and value.get("provider") == "exa"
+        and value.get("status") == "searched"
+        and isinstance(candidates, list)
+    )
 
 
 def _external_success_attempt() -> dict[str, str]:

@@ -30,8 +30,8 @@
 </form>
 
 <div class="page-head page-head--section">
-  <h2>Reports</h2>
-  <span class="muted mono">{{ reports | length if reports else 0 }} runs</span>
+  <h2>Marcas</h2>
+  <span class="muted mono">{{ reports | length if reports else 0 }} análisis</span>
 </div>
 {% if reports %}
 <div class="overflow panel" style="padding:0">
@@ -41,7 +41,7 @@
   </thead>
   <tbody>
   {% for row in reports %}
-    <tr data-row-href="/report/{{ row.id }}" tabindex="0" aria-label="Abrir SV9 de {{ row.brand_name or row.id }}">
+    <tr data-row-href="/brand/{{ row.brand_domain }}?lang=es" tabindex="0" aria-label="Abrir análisis de {{ row.brand_name or row.brand_domain }}">
       <td>
         <div class="brand-cell">
           {% if row.brand_domain %}
@@ -67,6 +67,6 @@
 </table>
 </div>
 {% else %}
-<p class="muted">No reports yet — run the first scan above.</p>
+<p class="muted">Aún no hay análisis — lanza el primer scan arriba.</p>
 {% endif %}
 {% endblock %}

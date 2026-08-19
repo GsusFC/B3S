@@ -685,11 +685,15 @@ class EvaluateCoherenciaTests(unittest.TestCase):
         self.assertIn("C8 · Marca-producto", prompt)
         self.assertIn("Por defecto si el scanner no puede probar producto/uso real", prompt)
 
-    def test_coherencia_without_llm_is_not_evaluated(self):
+    def test_coherencia_without_llm_stays_scored(self):
         result = evaluate_coherencia(
             components={}, tldr=full_tldr(), signals=[], brand_name="Acme", url="u", llm=None
         )
-        self.assertEqual(result.status, STATUS_NOT_EVALUATED)
+        self.assertEqual(result.status, STATUS_SCORED)
+        self.assertEqual(result.score, 0)
+        self.assertEqual(result.error, "llm_unavailable")
+        self.assertTrue(result.tile_profile)
+        self.assertTrue(all(tile.estado == "sin_evidencia" for tile in result.tile_profile))
 
     def test_coherencia_captures_veredicto(self):
         llm = FakeLLM(ok_up_to=2)

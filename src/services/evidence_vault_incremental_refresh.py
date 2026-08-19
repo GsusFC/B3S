@@ -122,6 +122,7 @@ def build_vault_scan_plan(
     known_evidence_records: Iterable[Mapping[str, Any]] = (),
     semantic_analysis_claimed_fingerprints: Iterable[str] = (),
     accepted_evidence_tile_relations: Iterable[Mapping[str, Any]] = (),
+    accepted_tiles: Iterable[Mapping[str, Any]] = (),
     canonical_memory_version: str | None = None,
 ) -> dict[str, Any]:
     """Build a frozen, non-authoritative execution plan for one Vault scan."""
@@ -223,6 +224,7 @@ def build_vault_scan_plan(
             known_evidence_records=known_rows,
             semantic_analysis_claimed_fingerprints=semantic_claims,
             accepted_evidence_tile_relations=relation_rows,
+            accepted_tiles=accepted_tiles,
         )
         analysis_fingerprints = list(
             delta["semantic_analysis_required_fingerprints"]
@@ -452,6 +454,7 @@ def build_incremental_evidence_delta(
     known_evidence_records: Iterable[Mapping[str, Any]] = (),
     semantic_analysis_claimed_fingerprints: Iterable[str] = (),
     accepted_evidence_tile_relations: Iterable[Mapping[str, Any]] = (),
+    accepted_tiles: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Compare acquisition with the last capture and durable known evidence.
 
@@ -565,6 +568,12 @@ def build_incremental_evidence_delta(
             affected_tiles.update(
                 relation_tiles["by_fingerprint"].get(old_fingerprint, ())
             )
+    unlit_tile_ids = _unlit_accepted_tile_ids(accepted_tiles)
+    if unlit_tile_ids and labelable_fingerprints:
+        affected_tiles.update(unlit_tile_ids)
+        semantic_analysis_required = sorted(
+            set(semantic_analysis_required) | set(labelable_fingerprints)
+        )
 
     payload = {
         "schema_version": EVIDENCE_VAULT_INCREMENTAL_DELTA_VERSION,
@@ -734,6 +743,34 @@ def _fingerprints_by_locator(
     for record in records:
         result.setdefault(record.locator, set()).add(record.fingerprint)
     return result
+
+
+def _effective_basis_rows(tile: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    return [
+        row
+        for row in tile.get("basis") or []
+        if isinstance(row, Mapping)
+        and str(row.get("polarity") or "")
+        in {"supports", "contradicts", "demonstrates_absence"}
+    ]
+
+
+def _unlit_accepted_tile_ids(
+    accepted_tiles: Iterable[Mapping[str, Any]],
+) -> list[str]:
+    """Tiles already in memory that still have no accepted evidence basis."""
+
+    valid = set(_all_tile_ids())
+    unlit: list[str] = []
+    for raw in accepted_tiles:
+        if not isinstance(raw, Mapping):
+            continue
+        tile_id = str(raw.get("tile_id") or "").strip()
+        if tile_id not in valid or tile_id in unlit:
+            continue
+        if not _effective_basis_rows(raw):
+            unlit.append(tile_id)
+    return unlit
 
 
 def _all_tile_ids() -> list[str]:

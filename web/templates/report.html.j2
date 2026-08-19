@@ -198,8 +198,22 @@
 {% endmacro %}
 {% block main_class %}wide{% endblock %}
 {% block content %}
+{% set publication = report.brand_publication or {} %}
 <div class="report-actions">
-  <p><a href="/">← Todos los informes</a> · <a href="{{ report.export.brand_visual_url }}">Módulo visual</a> · <a href="{{ report.export.markdown_url }}">Markdown</a></p>
+  <p>
+    <a href="/">← Todos los informes</a>
+    · <a href="{{ report.export.brand_visual_url }}">Módulo visual</a>
+    · <a href="{{ report.export.markdown_url }}">Markdown</a>
+    {% if publication.is_sv9 %}
+    · <span class="chip ok">SV9</span>
+    {% if publication.latest_attempt_id and not publication.is_latest_attempt %}
+    · <a class="source-link" href="/report/{{ publication.latest_attempt_id }}">último intento</a>
+    {% endif %}
+    {% elif publication.is_latest_attempt and publication.sv9_report_id %}
+    · <span class="chip warn">último intento</span>
+    · <a class="source-link" href="/report/{{ publication.sv9_report_id }}">ver SV9</a>
+    {% endif %}
+  </p>
   <form method="post" action="/scan">
     <input type="hidden" name="url" value="{{ report.url }}">
     <input type="hidden" name="brand_name" value="{{ report.brand_name }}">

@@ -93,6 +93,42 @@ def test_identical_incremental_refresh_requires_zero_llm_and_no_report() -> None
     assert plan["exit_contract"]["canonical_memory_changes"] is False
 
 
+def test_unlit_accepted_tiles_reanalyze_current_evidence() -> None:
+    rows = [_row("home", "Stable evidence")]
+    accepted_tiles = [
+        {"tile_id": "M1", "basis": []},
+        {
+            "tile_id": "P1",
+            "basis": [
+                {
+                    "relation_id": "r1",
+                    "evidence_id": "e1",
+                    "source_identity_id": "s1",
+                    "polarity": "supports",
+                }
+            ],
+        },
+    ]
+
+    plan = build_vault_scan_plan(
+        brand_identity="Example",
+        subject_url=SUBJECT_URL,
+        mode="incremental_refresh",
+        current_evidence_records=rows,
+        previous_capture_evidence_records=rows,
+        known_evidence_records=rows,
+        semantic_analysis_claimed_fingerprints=_fingerprints(rows),
+        accepted_tiles=accepted_tiles,
+        canonical_memory_version=MEMORY_VERSION,
+    )
+
+    assert plan["operations"]["llm_required"] is True
+    assert plan["operations"]["create_candidate_packet"] is True
+    assert "M1" in plan["operations"]["reevaluate_tile_ids"]
+    assert "P1" not in plan["operations"]["reevaluate_tile_ids"]
+    assert plan["operations"]["classify_evidence_fingerprints"]
+
+
 def test_unchanged_but_unanalysed_capture_still_requires_analysis() -> None:
     rows = [_row("home", "Persisted before analysis completed")]
 

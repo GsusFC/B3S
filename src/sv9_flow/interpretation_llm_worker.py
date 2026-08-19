@@ -53,6 +53,17 @@ _VISION_ADJUDICATION_DIRECTION_TERMS = (
     "cuando logremos",
     "next generation",
     "próxima generación",
+    "how you hire",
+    "how you recruit",
+    "diff against",
+    "the way you",
+    "should work",
+    "world where",
+    "paradigm",
+    "status quo",
+    "cómo contratas",
+    "cómo se contrata",
+    "el mundo debería",
 )
 
 _BLOCK_KEYS = (

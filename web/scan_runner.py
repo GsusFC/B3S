@@ -28,6 +28,7 @@ from src.services.scanner_evidence_comparison import (
     EVIDENCE_COMPARISON_VERSION,
     annotate_candidate_report,
     canonical_enforcement_mode,
+    selected_report_for_display,
 )
 from src.url_validator import validate_url
 from web.report_store import list_reports_for_domain, new_scan_id, save_report
@@ -278,6 +279,37 @@ def _activate_vault_result_unless_cancelled(
     )
 
 
+def _vault_published_report_id(url: str, candidate: dict[str, Any]) -> str:
+    """Keep the selected brand analysis unless this candidate replaces it."""
+
+    candidate_id = str(candidate.get("id") or "")
+    selected, _classified, _state = selected_report_for_display(
+        [*list_reports_for_domain(url), candidate]
+    )
+    selected_id = str((selected or {}).get("id") or "")
+    return selected_id or candidate_id
+
+
+def _finish_scan_without_new_score(scan_id: str, report_id: str) -> bool:
+    """Close a recapture that did not replace the published brand score."""
+
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        if status is None or status.get("state") == "cancelled":
+            return False
+        _set_phase_locked(status, "report", "done")
+        status["state"] = "done"
+        status["phase"] = "done"
+        status["report_id"] = report_id
+        status["score_unchanged"] = True
+        status["completed_at"] = datetime.now(timezone.utc).isoformat()
+        _SCAN_EVENTS.pop(scan_id, None)
+        _VAULT_ACTIVATIONS.discard(scan_id)
+        persisted_status = _status_copy_locked(status)
+    _persist_scan_status(persisted_status)
+    return True
+
+
 def _publish_completed_report(scan_id: str, report: dict[str, Any]) -> bool:
     """Publish one immutable report with the same cancellation boundary."""
 
@@ -289,6 +321,7 @@ def _publish_completed_report(scan_id: str, report: dict[str, Any]) -> bool:
         _set_phase_locked(status, "report", "done")
         status["state"] = "done"
         status["phase"] = "done"
+        status["report_id"] = str(report.get("id") or scan_id)
         status["completed_at"] = datetime.now(timezone.utc).isoformat()
         _SCAN_EVENTS.pop(scan_id, None)
         _VAULT_ACTIVATIONS.discard(scan_id)
@@ -585,6 +618,10 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 _set_phase(scan_id, "interpret", "done")
                 _set_phase(scan_id, "score", "done")
                 _set_phase(scan_id, "report", "running")
+                published_id = _vault_published_report_id(url, report)
+                if published_id != str(report.get("id") or ""):
+                    _finish_scan_without_new_score(scan_id, published_id)
+                    return
                 _publish_completed_report(scan_id, report)
                 return
 
@@ -2039,6 +2076,26 @@ def _trusted_persisted_acquisition_gate(
                 for item in limitation_set
             ):
                 raise RuntimeError("vault_trusted_external_attempt_invalid")
+        elif status == "not_discovered":
+            if (
+                detail != "independent_discovery_unassociated"
+                or "external_acquisition:not_discovered" not in limitation_set
+            ):
+                raise RuntimeError("vault_trusted_external_attempt_invalid")
+            warning = {
+                "source": "exa",
+                "code": "external_identity_not_discovered",
+                "severity": "warning",
+                "message": (
+                    "Exa searched and found no associated external identity; "
+                    "continuing with owned-web analysis only. C7 remains "
+                    "sin_evidencia until a second channel is captured and reviewed."
+                ),
+                "status": "not_discovered",
+                "detail": "external_acquisition:not_discovered",
+                "can_fallback": False,
+            }
+            gate_limitation = "acquisition_gate:external_identity_not_discovered"
         elif status == "error":
             if detail not in {
                 "provider_not_configured",

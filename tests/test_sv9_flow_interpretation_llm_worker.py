@@ -1486,7 +1486,7 @@ def test_llm_worker_can_build_interpretation_per_block() -> None:
     assert debug["detected_count"] == 1
     assert debug["block_detection_decisions"] == [
         {
-            "version": "sv9-flow-block-detection-policy-v7",
+            "version": "sv9-flow-block-detection-policy-v8",
             "block": "magnetism",
             "outcome": "insufficient_evidence",
             "evidence_refs": [],
@@ -1495,7 +1495,7 @@ def test_llm_worker_can_build_interpretation_per_block() -> None:
             "limitation_code": "magnetism_insufficient_evidence_refs",
         },
         {
-            "version": "sv9-flow-block-detection-policy-v7",
+            "version": "sv9-flow-block-detection-policy-v8",
             "block": "mission",
             "outcome": "supports_detection",
             "evidence_refs": ["raw_inputs.0"],
@@ -1504,7 +1504,7 @@ def test_llm_worker_can_build_interpretation_per_block() -> None:
             "limitation_code": "",
         },
         {
-            "version": "sv9-flow-block-detection-policy-v7",
+            "version": "sv9-flow-block-detection-policy-v8",
             "block": "values",
             "outcome": "insufficient_evidence",
             "evidence_refs": [],
@@ -1513,7 +1513,7 @@ def test_llm_worker_can_build_interpretation_per_block() -> None:
             "limitation_code": "values_insufficient_evidence_refs",
         },
         {
-            "version": "sv9-flow-block-detection-policy-v7",
+            "version": "sv9-flow-block-detection-policy-v8",
             "block": "vision",
             "outcome": "insufficient_evidence",
             "evidence_refs": [],
@@ -1567,7 +1567,7 @@ def test_llm_worker_reports_block_detection_from_shortlists_not_llm_refs() -> No
     )
 
     assert debug["block_detection_decisions"][0] == {
-        "version": "sv9-flow-block-detection-policy-v7",
+        "version": "sv9-flow-block-detection-policy-v8",
         "block": "magnetism",
         "outcome": "supports_detection",
         "evidence_refs": ["raw_inputs.0"],

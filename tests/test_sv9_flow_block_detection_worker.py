@@ -313,6 +313,26 @@ def test_vision_detection_rejects_positioning_inference() -> None:
     assert decision.limitation_code == "vision_structural_gate_rejected"
 
 
+def test_vision_detection_accepts_category_direction_copy() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Nothiring",
+        url="https://nothiring.me",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content="The diff against how you hire today.",
+            )
+        ],
+    )
+
+    decision = resolve_block_detection("vision", pack, evidence_refs=["raw_inputs.0"])
+
+    assert decision.outcome == "supports_detection"
+    assert "how you hire" in decision.support_terms
+
+
 def test_magnetism_detection_rejects_visual_polish_only() -> None:
     pack = BrandEvidencePack(
         brand_name="Acme",
@@ -626,7 +646,7 @@ def test_block_detection_decision_serializes_for_debug_payloads() -> None:
     decision = resolve_block_detection("magnetism", pack, evidence_refs=["raw_inputs.0"])
 
     assert decision.to_dict() == {
-        "version": "sv9-flow-block-detection-policy-v7",
+        "version": "sv9-flow-block-detection-policy-v8",
         "block": "magnetism",
         "outcome": "supports_detection",
         "evidence_refs": ["raw_inputs.0"],

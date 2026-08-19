@@ -209,11 +209,14 @@ GitHub Compare responses. PR #102 remains the reviewed ancestry trust anchor.
 The deployed tree is current `main`. For the attested hotfix controller, the
 latter comparison must contain these exact existing, modified, non-renamed paths
 recorded in the controller workflow `HOTFIX_FILES` set, including
-`src/history/migrations/029_evidence_vault_semantic_analysis_claims.sql`.
+`src/history/migrations/029_evidence_vault_semantic_analysis_claims.sql`
+and the later recapture, first-lighting, unsigned Exa, and selected-analysis
+paths.
 
 Under that trusted-source model, any path after PR #102 that is outside the
 attestation allowlist fails closed. This controller records the reviewed,
-merged, green semantic-v3 baseline plus the attested 029 hotfix set.
+merged, green semantic-v3 baseline plus the attested 029 hotfix set and the
+later vault recapture files.
 Deployment remains a separate operator decision and requires temporary
 migration and Fly capabilities.
 
