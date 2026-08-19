@@ -284,6 +284,25 @@ def build_operational_memory_packet(
             if semantic_state is TileState.CONTRADICTION
             else multiplier if semantic_state is TileState.OK else 0
         )
+        # Scanner policy never re-accepts C7. An unchanged accepted row must
+        # keep its authority axis so a later owned-only scan does not project
+        # pending/required onto no-overlay accepted memory.
+        retain_accepted_authority = (
+            previous is not None
+            and authority_state is not AuthorityState.ACCEPTED
+            and not material_change
+            and not is_pending_reassessment
+        )
+        projected_authority = (
+            AuthorityState.ACCEPTED.value
+            if retain_accepted_authority
+            else authority_state.value
+        )
+        projected_review = (
+            ReviewState.RESOLVED.value
+            if retain_accepted_authority
+            else review_state.value
+        )
         projection.append(
             {
                 "component_key": candidate["component_key"],
@@ -300,8 +319,8 @@ def build_operational_memory_packet(
                 ),
                 "candidate_semantic_state": semantic_state.value,
                 "candidate_preview_points": preview_points,
-                "authority_state": authority_state.value,
-                "review_state": review_state.value,
+                "authority_state": projected_authority,
+                "review_state": projected_review,
                 "lifecycle_state": (
                     LifecycleState.SUPERSEDED.value
                     if is_pending_reassessment
