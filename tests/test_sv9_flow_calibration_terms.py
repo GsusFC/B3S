@@ -19,7 +19,7 @@ def test_policy_versions_match_worker_constants() -> None:
     assert (
         block_detection_policy()["version"]
         == BLOCK_DETECTION_POLICY_VERSION
-        == "sv9-flow-block-detection-policy-v7"
+        == "sv9-flow-block-detection-policy-v8"
     )
     assert (
         block_evidence_policy()["version"]

@@ -267,9 +267,8 @@ def evaluate_coherencia(
 ) -> ComponentResult:
     """Evaluate Coherencia over the whole: internal harmony + external consistency."""
     if llm is None or not getattr(llm, "api_key", None):
-        return ComponentResult(
-            component="coherencia",
-            status=STATUS_NOT_EVALUATED,
+        return _scored_incomplete_component(
+            "coherencia",
             error="llm_unavailable",
         )
 
@@ -405,6 +404,18 @@ def _run_tile_call(
             evidence=evidence or [],
         )
 
+    if key == "coherencia":
+        return _scored_incomplete_component(
+            key,
+            error=last_error,
+            evaluation_model=getattr(llm, "model", None),
+            detected_content=detected_content,
+            detection_mode=detection_mode,
+            detection_confidence=detection_confidence,
+            detection_limitations=list(detection_limitations or []),
+            evidence_source_summary=dict(evidence_source_summary or {}),
+            evidence=evidence or [],
+        )
     return ComponentResult(
         component=key,
         status=STATUS_NOT_EVALUATED,
@@ -567,6 +578,45 @@ def _override_motivo(prefix: str, rationale: str) -> str:
     if rationale:
         return f"{prefix} {rationale}"[:700]
     return prefix
+
+
+def _scored_incomplete_component(
+    key: str,
+    *,
+    error: str | None,
+    evaluation_model: str | None = None,
+    detected_content: str | None = None,
+    detection_mode: str | None = None,
+    detection_confidence: str | None = None,
+    detection_limitations: list[str] | None = None,
+    evidence_source_summary: dict[str, int] | None = None,
+    evidence: list[str] | None = None,
+) -> ComponentResult:
+    """Keep Coherencia scored so an LLM outage cannot invalidate the scan."""
+
+    verdicts = [
+        TileVerdict(
+            tile_id=tile_id,
+            estado=ESTADO_SIN_EVIDENCIA,
+            motivo="Evaluación de coherencia incompleta; se conserva el resto del SV9.",
+        )
+        for tile_id in tile_ids(key)
+    ]
+    return ComponentResult(
+        component=key,
+        status=STATUS_SCORED,
+        score=score_from_tile_profile(verdicts),
+        tile_profile=verdicts,
+        veredicto=_fallback_veredicto(key, verdicts),
+        evaluation_model=evaluation_model,
+        detected_content=detected_content,
+        detection_mode=detection_mode,
+        detection_confidence=detection_confidence,
+        detection_limitations=list(detection_limitations or []),
+        evidence_source_summary=dict(evidence_source_summary or {}),
+        evidence=evidence or [],
+        error=error,
+    )
 
 
 def _fallback_veredicto(key: str, verdicts: list[TileVerdict]) -> str:
