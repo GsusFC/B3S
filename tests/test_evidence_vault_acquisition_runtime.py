@@ -12,6 +12,7 @@ import pytest
 from src.services.evidence_vault_acquisition_contract import TrustedAcquisitionCommand
 from src.services.evidence_vault_acquisition_runtime import (
     EvidenceVaultAcquisitionRuntimeError,
+    ExternalDiscovery,
     ExternalProviderObservation,
     HttpxExaExactUrlFetcher,
     HttpxOwnedFetcher,
@@ -336,9 +337,9 @@ class _PostClient:
         self.response = response
         self.calls: list[dict[str, Any]] = []
 
-    def stream(self, method: str, _url: str, **kwargs: Any) -> _Response:
+    def stream(self, method: str, url: str, **kwargs: Any) -> _Response:
         assert method == "POST"
-        self.calls.append(kwargs)
+        self.calls.append({"url": url, **kwargs})
         return self.response
 
 
@@ -385,7 +386,7 @@ def test_exa_fetcher_rejects_brand_url_without_owned_linkedin_fact() -> None:
             raise AssertionError("unassociated discovery must not reach Exa")
 
     fetcher = HttpxExaExactUrlFetcher(NoPostClient(), api_key="worker-only")
-    assert fetcher.supports_independent_discovery is False
+    assert fetcher.supports_independent_discovery is True
     with pytest.raises(
         EvidenceVaultAcquisitionRuntimeError,
         match="external_source_url_ineligible",
@@ -424,17 +425,28 @@ def test_http_fetcher_rejects_private_connected_peer_even_after_public_dns() -> 
         )(_command())
 
 
-def test_independent_external_fetch_remains_owned_only_without_structured_fact() -> None:
+def test_independent_exa_search_does_not_sign_c7_without_owned_link() -> None:
     key, registry = _key_registry()
 
     class IndependentFetcher:
         supports_independent_discovery = True
 
         def __init__(self) -> None:
-            self.calls: list[str] = []
+            self.fetch_calls: list[str] = []
+            self.discover_calls: list[str] = []
+
+        def discover(self, command: Any) -> dict[str, Any]:
+            self.discover_calls.append(command.brand_url)
+            return {
+                "schema_version": "evidence-vault-external-discovery-v1",
+                "provider": "exa",
+                "status": "searched",
+                "request_fingerprint": "b" * 64,
+                "candidate_urls": ["https://www.linkedin.com/company/example"],
+            }
 
         def __call__(self, source_url: str):
-            self.calls.append(source_url)
+            self.fetch_calls.append(source_url)
             return _external()
 
     fetcher = IndependentFetcher()
@@ -449,12 +461,46 @@ def test_independent_external_fetch_remains_owned_only_without_structured_fact()
     collected = runtime.collect(_command())
     signed = runtime.sign(_command(), collected)
 
-    assert fetcher.calls == []
+    assert fetcher.discover_calls == ["https://example.com"]
+    assert fetcher.fetch_calls == []
     assert collected["external_outcome"] == "not_discovered"
+    assert collected["external"] is None
+    assert collected["external_discovery"]["candidate_urls"] == [
+        "https://www.linkedin.com/company/example"
+    ]
     assert signed.external_identity_provenance is None
+    assert signed.pre_receipt_snapshot.raw_payload["external_discovery"][
+        "status"
+    ] == "searched"
     assert [receipt.claims.channel_role for receipt in signed.receipts] == [
         "owned_web"
     ]
+
+
+def test_exa_discover_keeps_linkedin_company_candidates() -> None:
+    body = json.dumps(
+        {
+            "results": [
+                {"url": "https://linkedin.com/company/example/"},
+                {"url": "https://www.linkedin.com/company/example"},
+                {"url": "https://news.example/post"},
+            ]
+        }
+    ).encode()
+    client = _PostClient(
+        _Response(200, body, {"content-type": "application/json"})
+    )
+    discovery = HttpxExaExactUrlFetcher(client, api_key="worker-only").discover(
+        _command()
+    )
+    assert discovery == ExternalDiscovery(
+        schema_version="evidence-vault-external-discovery-v1",
+        provider="exa",
+        status="searched",
+        request_fingerprint=discovery.request_fingerprint,
+        candidate_urls=["https://www.linkedin.com/company/example"],
+    )
+    assert "https://api.exa.ai/search" in client.calls[0]["url"]
 
 
 def test_external_failure_is_terminal_by_default_and_not_discovered_is_explicit() -> None:

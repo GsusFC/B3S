@@ -2039,6 +2039,26 @@ def _trusted_persisted_acquisition_gate(
                 for item in limitation_set
             ):
                 raise RuntimeError("vault_trusted_external_attempt_invalid")
+        elif status == "not_discovered":
+            if (
+                detail != "independent_discovery_unassociated"
+                or "external_acquisition:not_discovered" not in limitation_set
+            ):
+                raise RuntimeError("vault_trusted_external_attempt_invalid")
+            warning = {
+                "source": "exa",
+                "code": "external_identity_not_discovered",
+                "severity": "warning",
+                "message": (
+                    "Exa searched and found no associated external identity; "
+                    "continuing with owned-web analysis only. C7 remains "
+                    "sin_evidencia until a second channel is captured and reviewed."
+                ),
+                "status": "not_discovered",
+                "detail": "external_acquisition:not_discovered",
+                "can_fallback": False,
+            }
+            gate_limitation = "acquisition_gate:external_identity_not_discovered"
         elif status == "error":
             if detail not in {
                 "provider_not_configured",

@@ -518,6 +518,55 @@ def test_trusted_not_discovered_gate_does_not_invent_exa_failure(
     ]
 
 
+def test_trusted_exa_search_without_association_is_not_exa_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory, score = _memory_and_score({"M1", "M2"}, {"M1", "M2"})
+    observation = _observation("scan-trusted-exa-search")
+    observation["pipeline_version"] = "evidence-vault-trusted-acquisition-v1"
+    observation["capture_payload"]["acquisition_gate"] = {"state": "pass"}
+    observation["limitations"] = [
+        "verified_external_document_unavailable",
+        "external_acquisition:not_discovered",
+    ]
+    observation["acquisition_attempts"] = [
+        {
+            "provider": "web",
+            "intent": "owned_web",
+            "status": "success",
+            "detail": "verified_raw_document_persisted",
+        },
+        {
+            "provider": "exa",
+            "intent": "external_social_profile",
+            "status": "not_discovered",
+            "detail": "independent_discovery_unassociated",
+        },
+    ]
+    monkeypatch.setattr(
+        scan_runner,
+        "trusted_acquisition_report_metadata",
+        lambda _payload: (
+            list(observation["limitations"]),
+            list(observation["acquisition_attempts"]),
+        ),
+    )
+
+    report = scan_runner._compose_vault_memory_report(
+        scan_id="scan-trusted-exa-search",
+        url="https://example.com",
+        brand_name="Example",
+        capture_observation=observation,
+        memory=memory,
+        **_score_authority(memory, score),
+    )
+
+    warning = report["acquisition_gate"]["warnings"][0]
+    assert warning["code"] == "external_identity_not_discovered"
+    assert warning["source"] == "exa"
+    assert "exa_failed" not in report["acquisition_gate"]["limitations"]
+
+
 def test_semantic_v3_selector_scores_pending_tiles_without_authority_filter() -> None:
     memory, score = _memory_and_score({"M1", "M2", "M3"}, {"M1", "M2"})
 
