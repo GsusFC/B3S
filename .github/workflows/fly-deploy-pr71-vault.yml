@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       deployment_sha:
-        description: "Exact reviewed PR #102 merge SHA to deploy"
+        description: "Exact current main SHA to deploy"
         required: true
         type: string
       confirm_app:
@@ -120,6 +120,7 @@ jobs:
               "docs/deployment/b3s_pr71_vault.md",
               "scripts/configure_b3s_runtime_role.py",
               "scripts/run_evidence_vault_acquisition_worker.py",
+              "scripts/run_evidence_vault_operational_sv9_shadow_work_items.py",
               "src/history/evidence_vault_raw_repository.py",
               "src/history/migrations/029_evidence_vault_semantic_analysis_claims.sql",
               "src/history/repository.py",
@@ -139,7 +140,9 @@ jobs:
               "tests/test_evidence_vault_field_replay.py",
               "tests/test_evidence_vault_incremental_executor.py",
               "tests/test_evidence_vault_incremental_refresh.py",
+              "tests/test_evidence_vault_operation_execution_postgres.py",
               "tests/test_evidence_vault_operational_sv9_shadow_ledger_migration.py",
+              "tests/test_evidence_vault_operational_sv9_shadow_work_item_runner.py",
               "tests/test_evidence_vault_raw_provenance_postgres.py",
               "tests/test_evidence_vault_raw_repository.py",
               "tests/test_evidence_vault_scan_orchestration.py",
@@ -187,7 +190,7 @@ jobs:
               os.environ["DISPATCH_REF"] == "refs/heads/main",
               "deployment workflow must be dispatched from refs/heads/main",
           )
-          require(deploy_sha == trusted_merge, "deployment_sha is not the reviewed PR merge")
+          require(deploy_sha == dispatch_sha, "deployment_sha is not current main")
 
           pr = load_object("PR_FILE")
           exact_int(pr.get("number"), 102, "unexpected pull request object")

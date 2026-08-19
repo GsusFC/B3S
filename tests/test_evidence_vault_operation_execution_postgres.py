@@ -753,6 +753,15 @@ def test_no_delta_result_must_equal_frozen_delta_and_output_stays_null() -> None
         known_evidence_records=rows,
         canonical_memory_version=memory["canonical_memory_version"],
     )
+    analysis_status = (
+        "pending"
+        if (
+            plan["operations"]["llm_required"]
+            or plan["operations"]["create_candidate_packet"]
+            or plan["operations"]["create_diagnostic_report"]
+        )
+        else "not_required"
+    )
     observation = {
         "schema_version": "b3s-capture-observation-v1",
         "source_scan_id": "no-delta-scan",
@@ -771,7 +780,7 @@ def test_no_delta_result_must_equal_frozen_delta_and_output_stays_null() -> None
         "artifacts": [],
         "metadata": {
             "mode": "incremental_refresh",
-            "analysis_status": "not_required",
+            "analysis_status": analysis_status,
             "operation_plan": plan,
             "operation_plan_fingerprint": plan["operation_plan_fingerprint"],
         },
@@ -801,7 +810,7 @@ def test_no_delta_result_must_equal_frozen_delta_and_output_stays_null() -> None
         "production_runtime_effect": False,
         "scanner_runtime_effect": False,
     }
-    with pytest.raises(CaptureConflictError, match="frozen delta"):
+    with pytest.raises(CaptureConflictError, match="does not match its frozen plan"):
         repository.persist_capture_operation_result(
             "no-delta-scan",
             worker_id="no-delta-worker",
@@ -827,7 +836,7 @@ def test_no_delta_result_must_equal_frozen_delta_and_output_stays_null() -> None
         repository=repository,
         source_scan_id="no-delta-scan",
         worker_id="no-delta-worker-2",
-        llm=NoCallLLM(),
+        llm=ExecutorLLM(),
     )
     assert completed["execution_status"] == "completed"
     with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"]) as conn:

@@ -151,6 +151,7 @@ def test_runner_append_passes_through_and_reports_discovery_append_replay(
 def test_runner_fails_safely_when_adoption_race_rejects_append(
     monkeypatch,
     tmp_path,
+    capsys,
 ) -> None:
     output = tmp_path / "race.json"
 
@@ -173,6 +174,9 @@ def test_runner_fails_safely_when_adoption_race_rejects_append(
         "error": "SV9 shadow work-item processing failed",
     }
     assert "secret" not in output.read_text()
+    captured = capsys.readouterr()
+    assert "SV9 shadow work-item processing failed" in captured.err
+    assert "secret" not in captured.err
 
 
 @pytest.mark.parametrize("limit", ["0", "101", "-1", "+1", "1.0", " 1"])
