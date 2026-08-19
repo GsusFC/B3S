@@ -876,7 +876,7 @@ def test_postgres_migration_sanitizes_poisoned_default_scanner_function_acls() -
             "b3s_history.append_evidence_vault_raw_acquisition(jsonb)",
             "b3s_history.read_evidence_vault_raw_acquisition(text,text)",
             "b3s_history.read_evidence_vault_raw_planning_context("
-            "text,text,text,uuid,uuid,uuid)",
+            "text,text,text,uuid,uuid,uuid,text)",
         )
         with psycopg.connect(admin_dsn) as connection:
             assert [
@@ -965,7 +965,7 @@ def test_postgres_scanner_execute_role_persists_looks_up_and_replays() -> None:
                 "b3s_history.append_evidence_vault_raw_acquisition(jsonb), "
                 "b3s_history.read_evidence_vault_raw_acquisition(text, text), "
                 "b3s_history.read_evidence_vault_raw_planning_context("
-                "text, text, text, uuid, uuid, uuid) TO {}"
+                "text, text, text, uuid, uuid, uuid, text) TO {}"
             ).format(sql.Identifier(role))
         )
     connection_values = conninfo_to_dict(admin_dsn)

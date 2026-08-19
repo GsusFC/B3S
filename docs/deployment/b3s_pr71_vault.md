@@ -17,7 +17,7 @@ not authorize either existing app, a production migration, or any later deployme
 - Public hostname: `b3s-pr71-vault.fly.dev`
 
 The release command runs `verify_release_build.py`, the SELECT-only exact schema
-head-028 verifier, and `verify_pr71_vault_target.py`. The final verifier checks
+head-029 verifier, and `verify_pr71_vault_target.py`. The final verifier checks
 the Fly app, base URL, authenticated TLS session, exact host/database/runtime
 role/project/branch identity, the operational-pipeline capability, and access
 gate. A mismatch aborts before an app Machine is updated. The
@@ -72,7 +72,7 @@ credential on the same branch is rejected before the Machine update.
 
 Migrations 025–028 add the non-authoritative SV9 shadow assessment ledger,
 structural hardening, the identity-only append writer, and one sanitized scalar-only
-diagnostic view; the packaged migration head is 028. The raw ledger remains denied
+diagnostic view; the packaged migration head is 029. The raw ledger remains denied
 to the web runtime. Only the exact PR71 runtime login receives `SELECT` on the view
 when the separately controlled runtime-role configurator runs. The writer is append-only, and the single-item administrative runner is
 dry-run by default (`--append` is the only persistent runner mode). Its expected
@@ -144,7 +144,7 @@ Do not invoke the migrator, runtime-role configurator, `fly config validate`, or
 `fly deploy` from a local checkout. The only authorized path is the post-merge
 GitHub workflow dispatched from live `main`; its controller performs attestation
 before checkout and secret use, then runs those packaged operations against the
-fixed PR #102 payload.
+attested current `main` payload, which is a hotfix descendant of PR #102.
 
 The role command repeats the same target assertion on its own grant connection
 before any `REVOKE`/`GRANT`, is idempotent, and only accepts the privileged URL
@@ -169,19 +169,17 @@ PR, the presence of `workflow_dispatch`, the confirmation input, nor a
 successful attestation authorizes a merge or deployment. Merge approval and
 the deployment GO remain separate operator decisions. The authorized scope is
 the exact reviewed semantic-v3 application image on the already isolated
-head-`028` database, with `B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED=false`.
+head-`029` database, with `B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED=false`.
 It does not affect `b3s`, production authority, production data, or diagnostics.
 The existing isolated operational pipeline, worker, verified-raw shadow, and
 scheduler retain their independently authorized state; this reauthorization
 changes none of their flags or credentials.
 
 Dispatch only from exact `refs/heads/main` through the GitHub environment
-`pr71-vault`. The `deployment_sha` input must equal the reviewed PR #102 merge
-`0ac13c6e95ce0f413094838f2448578d25e90b2c`; that is the exact application
-payload checked out, built, and verified by `/health`.
-The immutable dispatch SHA must separately equal the live REST `main` ref and
-identifies only the three-file reauthorization controller. The environment has a
-custom deployment branch policy configured to allow only `main`.
+`pr71-vault`. The `deployment_sha` input must equal the live `main` SHA; that
+is the exact application payload checked out, built, and verified by `/health`.
+The immutable dispatch SHA must separately equal the live REST `main` ref.
+The environment has a custom deployment branch policy configured to allow only `main`.
 
 The `pr71-vault` environment currently contains zero deployment secrets.
 `B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN` were provisioned only for the
@@ -207,20 +205,17 @@ code embedded in the reviewed repository workflow fetches PR #102 and requires
 `fix/vault-semantic-coverage`, repository ID `1288696741` and
 name `GsusFC/B3S`, exact reviewed head, and exact `merge_commit_sha`. It proves
 reviewed-head-to-target and target-to-current-controller ancestry from complete
-GitHub Compare responses. The target is fixed to the PR #102 merge. For the
-three-file reauthorization controller, the latter comparison must contain
-these exact existing, modified, non-renamed paths:
+GitHub Compare responses. PR #102 remains the reviewed ancestry trust anchor.
+The deployed tree is current `main`. For the attested hotfix controller, the
+latter comparison must contain these exact existing, modified, non-renamed paths
+recorded in the controller workflow `HOTFIX_FILES` set, including
+`src/history/migrations/029_evidence_vault_semantic_analysis_claims.sql`.
 
-- `.github/workflows/fly-deploy-pr71-vault.yml`
-- `docs/deployment/b3s_pr71_vault.md`
-- `tests/test_deploy_provenance.py`
-
-Under that trusted-source model, any runtime, database, CI-workflow, config, or
-other source change after PR #102 is outside the attestation allowlist and fails
-closed. This three-file control-plane follow-up records the reviewed, merged,
-green semantic-v3 baseline consumed by the defense-in-depth attestation without
-changing runtime code or configuration. Deployment remains a separate operator
-decision and requires temporary migration and Fly capabilities.
+Under that trusted-source model, any path after PR #102 that is outside the
+attestation allowlist fails closed. This controller records the reviewed,
+merged, green semantic-v3 baseline plus the attested 029 hotfix set.
+Deployment remains a separate operator decision and requires temporary
+migration and Fly capabilities.
 
 The target tree cumulatively contains the already merged PRs #89, #91, #93,
 #95, and #97; this controller does not reinterpret or selectively omit them.
@@ -335,7 +330,7 @@ deployment environment.
 The new report must be `completed` and expose all of these exact bindings:
 
 - `metadata.pipeline_schema_version == b3s-vault-semantic-report-v2`
-- `metadata.pipeline_commit_sha == 0ac13c6e95ce0f413094838f2448578d25e90b2c`
+- `metadata.pipeline_commit_sha` must equal the dispatched `deployment_sha`
 - `metadata.rubric_version == baldosas-v3-1`
 - `metadata.evaluator_model == evidence-vault-semantic-scoring-v3`
 - limitation `score_projected_from_evidence_vault_semantic_scoring_v3`
@@ -358,15 +353,15 @@ merged, its exact current-main CI succeeds, the independently reviewed
 deployment-workflow blob is pinned in the protected environment, that environment
 is reconfirmed to contain zero deployment secrets,
 and the operator records an exact-SHA deployment GO. The allowlist must not be weakened. The authorized
-workflow may idempotently verify/apply the packaged head 028, reassert the exact
-runtime ACL, and deploy the exact PR #102 merge image with diagnostics still
-`false`. The reauthorization controller itself is never checked out into the
-application payload. The external migration-target assertion must pass before any DDL and head `028` must
+workflow may idempotently verify/apply the packaged head 029, reassert the exact
+runtime ACL, and deploy the exact current `main` image with diagnostics still
+`false`. The controller is checked out only as part of attested current main.
+The external migration-target assertion must pass before any DDL and head `029` must
 verify exactly. No new flag activation or scheduler-state change is authorized.
 `b3s` and `b3s-vault` must remain on their SELECT-only release verifiers and may
 not be used as fallback migration targets.
 
-No older application image is assumed compatible with schema head `028`, and
+No older application image is assumed compatible with schema head `029`, and
 this runbook pre-authorizes no image rollback. Engage the access and scan holds first,
 stop new scans, and drain the single active scan. Prefer a reviewed forward fix;
 any coordinated image-plus-Neon-restore plan requires separate authorization and

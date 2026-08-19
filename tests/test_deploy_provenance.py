@@ -31,13 +31,14 @@ TRUSTED_CI_WORKFLOW_ID = 306885838
 TRUSTED_PR_CI_RUN_ID = 32006974926
 TRUSTED_MERGE_CI_RUN_ID = 32007250803
 EXPECTED_DEPLOY_WORKFLOW_BLOB_SHA = "d" * 40
-FIXTURE_DEPLOY_SHA = TRUSTED_PR_MERGE_SHA
 FIXTURE_CONTROLLER_SHA = "7550c9969ea9b77dafbe016abe4c93e86e6a2535"
+FIXTURE_DEPLOY_SHA = FIXTURE_CONTROLLER_SHA
 HOTFIX_FILES = {
     ".github/workflows/fly-deploy-pr71-vault.yml",
     "docs/deployment/b3s_pr71_vault.md",
     "scripts/configure_b3s_runtime_role.py",
     "scripts/run_evidence_vault_acquisition_worker.py",
+    "scripts/run_evidence_vault_operational_sv9_shadow_work_items.py",
     "src/history/evidence_vault_raw_repository.py",
     "src/history/migrations/029_evidence_vault_semantic_analysis_claims.sql",
     "src/history/repository.py",
@@ -57,7 +58,9 @@ HOTFIX_FILES = {
     "tests/test_evidence_vault_field_replay.py",
     "tests/test_evidence_vault_incremental_executor.py",
     "tests/test_evidence_vault_incremental_refresh.py",
+    "tests/test_evidence_vault_operation_execution_postgres.py",
     "tests/test_evidence_vault_operational_sv9_shadow_ledger_migration.py",
+    "tests/test_evidence_vault_operational_sv9_shadow_work_item_runner.py",
     "tests/test_evidence_vault_raw_provenance_postgres.py",
     "tests/test_evidence_vault_raw_repository.py",
     "tests/test_evidence_vault_scan_orchestration.py",
@@ -309,8 +312,8 @@ def test_isolated_pr71_vault_workflow_is_manual_post_merge_only():
     workflow = _read(".github/workflows/fly-deploy-pr71-vault.yml")
 
     assert "workflow_dispatch:" in workflow
-    assert 'description: "Exact reviewed PR #102 merge SHA to deploy"' in workflow
-    assert "Exact current main commit SHA to deploy" not in workflow
+    assert 'description: "Exact current main SHA to deploy"' in workflow
+    assert "Exact reviewed PR #102 merge SHA to deploy" not in workflow
     assert "workflow_run:" not in workflow
     assert "Deploy isolated PR71 Vault" in workflow
     assert "github.ref == 'refs/heads/main'" in workflow
@@ -356,7 +359,7 @@ def test_isolated_deploy_attests_exact_pr71_and_current_main_ancestry():
 
     required_contract = (
         'DISPATCH_SHA: ${{ github.sha }}',
-        'deploy_sha == trusted_merge',
+        'deploy_sha == dispatch_sha',
         'pr.get("number"), 102',
         'pr.get("state") == "closed"',
         'pr.get("merged") is True',
@@ -385,7 +388,7 @@ def test_isolated_deploy_attests_exact_pr71_and_current_main_ancestry():
         "compare/$TRUSTED_PR_MERGE_SHA...$DISPATCH_SHA?per_page=100&page=1"
         in workflow
     )
-    assert 'deploy_sha == dispatch_sha' not in workflow
+    assert 'deploy_sha == trusted_merge' not in workflow
 
 
 def test_isolated_deploy_pins_ci_blob_runs_and_hotfix_file_set():
@@ -575,14 +578,14 @@ def test_pr71_attestation_rejects_unreviewed_deployment_target(tmp_path):
     )
 
     assert result.returncode != 0
-    assert "deployment_sha is not the reviewed PR merge" in result.stderr
+    assert "deployment_sha is not current main" in result.stderr
 
 
 def test_pr71_attestation_rejects_controller_other_than_current_main(tmp_path):
     result = _run_attestation(
         tmp_path,
         _attestation_fixture(),
-        env_updates={"DISPATCH_SHA": "f" * 40},
+        env_updates={"DEPLOY_SHA": "f" * 40, "DISPATCH_SHA": "f" * 40},
     )
 
     assert result.returncode != 0
@@ -618,11 +621,11 @@ def test_pr71_runbook_marks_workflow_post_merge_and_separately_authorized():
     assert "`merge_commit_sha`" in runbook
     assert "`refs/heads/main`" in runbook
     assert "custom deployment branch policy configured to allow only `main`" in runbook
-    assert "`deployment_sha` input must equal the reviewed PR #102 merge" in runbook
+    assert "`deployment_sha` input must equal the live `main` SHA" in runbook
     assert "reviewed PR\n#102 head" in runbook
     assert "reviewed PR\n#97 head" not in runbook
     assert "immutable dispatch SHA must separately equal the live REST `main` ref" in runbook
-    assert "controller itself is never checked out" in runbook
+    assert "controller is checked out only as part of attested current main" in runbook
     assert "currently contains zero deployment secrets" in runbook
     assert "`B3S_MIGRATION_DATABASE_URL` and `FLY_API_TOKEN` were provisioned only" in runbook
     assert "Deployment run `31851012413`" in runbook
@@ -639,7 +642,7 @@ def test_pr71_runbook_marks_workflow_post_merge_and_separately_authorized():
     assert "records an exact-SHA deployment" in runbook
     assert "No new flag activation or scheduler-state change" in runbook
     assert "Post-deployment semantic-v3 validation" in runbook
-    assert "metadata.pipeline_commit_sha == 0ac13c6e95ce0f413094838f2448578d25e90b2c" in runbook
+    assert "metadata.pipeline_commit_sha` must equal the dispatched `deployment_sha`" in runbook
     assert "score_projected_from_evidence_vault_semantic_scoring_v3" in runbook
     assert "historical Vault report before and after" in runbook
     assert "`raw.vault.legacy_operational_v2.score_evaluation`" in runbook

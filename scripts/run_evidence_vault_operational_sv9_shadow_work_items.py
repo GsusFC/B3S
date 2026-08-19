@@ -218,13 +218,15 @@ def main(argv: list[str] | None = None) -> int:
                 )
         payload = _success_payload(limit=limit, dry_run=dry_run, results=results)
     except Exception:
+        payload = _error_payload("SV9 shadow work-item processing failed")
         if not _finish(
-            _error_payload("SV9 shadow work-item processing failed"),
+            payload,
             target=target_path,
             temporary=temporary_path,
             fallback_message="could not write output",
         ):
             return 1
+        print(json.dumps(payload, sort_keys=True), file=sys.stderr)
         return 1
 
     return 0 if _finish(
