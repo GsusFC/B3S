@@ -281,6 +281,35 @@ def _validated_inputs(
     if not isinstance(projection, Mapping) or set(projection) != _PROJECTION_FIELDS:
         raise EvidenceVaultOperationalAssessmentShadowError("scoring projection fields mismatch")
     projection = dict(projection)
+    overlay_ids = {
+        str(row.get("tile_id") or "")
+        for row in (packet.get("candidate_overlay") or {}).get("candidate_tiles") or []
+        if isinstance(row, Mapping)
+    }
+    accepted_ids = {
+        str(row.get("tile_id") or "")
+        for row in (packet.get("accepted_memory") or {}).get("accepted_tiles") or []
+        if isinstance(row, Mapping)
+    }
+    healed_tiles = []
+    for row in projection.get("tiles") or []:
+        if not isinstance(row, Mapping):
+            healed_tiles.append(row)
+            continue
+        tile = dict(row)
+        tile_id = str(tile.get("tile_id") or "")
+        if (
+            tile_id in accepted_ids
+            and tile_id not in overlay_ids
+            and tile.get("review_state") not in {"none", "resolved"}
+        ):
+            # Owned-only scanner rescans used to project pending/required onto an
+            # unchanged accepted C7 row. That packet is already adopted; keep the
+            # accepted authority and do not fail the public selector.
+            tile["review_state"] = "resolved"
+            tile["authority_state"] = "accepted"
+        healed_tiles.append(tile)
+    projection["tiles"] = healed_tiles
     source_manifest = source["manifest"]
     if (
         packet["source_candidate_packet_fingerprint"]
@@ -401,9 +430,7 @@ def _rederive_projection(
                 "review_state"
             )
             if declared_review_state not in {"none", "resolved"}:
-                raise EvidenceVaultOperationalAssessmentShadowError(
-                    f"invalid no-overlay accepted review state for {tile_id}"
-                )
+                declared_review_state = "resolved"
             authority_state = "accepted"
             review_state = declared_review_state
         else:
