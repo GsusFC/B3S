@@ -258,6 +258,86 @@ def test_scanner_rescan_does_not_fail_when_c7_was_already_accepted() -> None:
     assert c7["effective_scoring_state"] == "sin_evidencia"
 
 
+def test_stale_c7_required_projection_still_selects_semantic_v3() -> None:
+    from copy import deepcopy
+
+    from src.history.repository import _build_vault_semantic_report_selector
+    from src.services.evidence_vault_operational_memory import (
+        EVIDENCE_VAULT_OPERATIONAL_PACKET_VERSION,
+        build_operational_memory_packet,
+    )
+
+    candidates = _candidates()
+    source = _packet(candidates)
+    seeded = build_operational_memory_packet(
+        brand_identity="example.com",
+        source_candidate_packet_fingerprint=source["candidate_packet_fingerprint"],
+        aggregation_policy_fingerprint=source["manifest"][
+            "aggregation_policy_fingerprint"
+        ],
+        candidate_tiles=candidates,
+        dispositions={
+            "C7": {
+                "authority_state": "accepted",
+                "review_state": "resolved",
+                "authority_profile_id": "human-reviewed-test-v1",
+                "authority_source": "human",
+                "decision_event_id": "review-C7",
+            }
+        },
+    )
+    refreshed_source = _packet(
+        build_incremental_candidate_tiles(
+            previous_candidate_tiles=source["candidate_tiles"]
+        ),
+        parent=seeded["proposed_canonical_memory_version"],
+        seed="c7-stale",
+    )
+    refreshed = build_operational_packet_from_scanner_candidate(
+        refreshed_source,
+        current_operational_memory={
+            "canonical_memory_version": seeded["proposed_canonical_memory_version"],
+            "content": {
+                "accepted_tiles": seeded["accepted_memory"]["accepted_tiles"],
+                "pending_reassessments": [],
+            },
+        },
+    )
+    from src.services.evidence_vault_canonical_core import canonical_fingerprint
+
+    stale = deepcopy(refreshed)
+    stale["scoring_projection"] = {
+        **stale["scoring_projection"],
+        "tiles": [
+            {
+                **row,
+                "authority_state": "pending",
+                "review_state": "required",
+            }
+            if row["tile_id"] == "C7"
+            else row
+            for row in stale["scoring_projection"]["tiles"]
+        ],
+    }
+    stale["candidate_packet_fingerprint"] = canonical_fingerprint(
+        EVIDENCE_VAULT_OPERATIONAL_PACKET_VERSION,
+        {
+            key: value
+            for key, value in stale.items()
+            if key != "candidate_packet_fingerprint"
+        },
+    )
+
+    selector = _build_vault_semantic_report_selector(
+        operational_packet=stale,
+        source_candidate_packet=refreshed_source,
+        expected_parent_canonical_memory_version=stale[
+            "current_canonical_memory_version"
+        ],
+    )
+    assert selector["semantic_scoring_v3"]["availability"] == "available"
+
+
 def test_scanner_report_becomes_provisional_overlay_not_automatic_truth() -> None:
     report = {
         "id": "diagnostic-scan-1",

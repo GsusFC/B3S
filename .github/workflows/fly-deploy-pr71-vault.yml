@@ -127,6 +127,7 @@ jobs:
               "src/services/evidence_vault_field_replay.py",
               "src/services/evidence_vault_incremental_executor.py",
               "src/services/evidence_vault_incremental_refresh.py",
+              "src/services/evidence_vault_operational_assessment_shadow.py",
               "src/services/evidence_vault_operational_memory.py",
               "src/services/evidence_vault_scan_orchestration.py",
               "src/services/evidence_vault_semantic_analysis_contract.py",
