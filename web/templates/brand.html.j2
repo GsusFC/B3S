@@ -345,7 +345,11 @@
           <td class="muted mono">{{ row.canonical_status or "sin_clasificar" }}</td>
           <td class="muted mono">{{ (row.stability or {}).classification or "sin_datos" }}</td>
           <td class="muted mono">{{ row.id }}</td>
-          <td><a href="/report/{{ row.id }}">ver</a></td>
+          <td>
+            {% if brand.current and row.id == brand.current.id %}<span class="chip ok">SV9</span>{% endif %}
+            {% if brand.latest_attempt and row.id == brand.latest_attempt.id and (not brand.current or row.id != brand.current.id) %}<span class="chip warn">último intento</span>{% endif %}
+            <a href="/report/{{ row.id }}">ver</a>
+          </td>
         </tr>
         {% endfor %}
         </tbody>

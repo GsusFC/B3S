@@ -367,6 +367,32 @@ def _component_display_text(component: dict[str, Any], *, prefer_summary: bool =
     return summary
 
 
+def _brand_publication_for_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Label the selected SV9 baseline versus the newest attempt for one brand."""
+
+    report_id = str(report.get("id") or "")
+    domain = domain_key(str(report.get("url") or ""))
+    empty = {
+        "sv9_report_id": "",
+        "latest_attempt_id": "",
+        "is_sv9": False,
+        "is_latest_attempt": False,
+    }
+    if not report_id or not domain:
+        return empty
+    selected, classified, _state = selected_report_for_display(
+        list_reports_for_domain(domain)
+    )
+    selected_id = str((selected or {}).get("id") or "")
+    latest_id = str((classified[0].get("id") if classified else "") or "")
+    return {
+        "sv9_report_id": selected_id,
+        "latest_attempt_id": latest_id,
+        "is_sv9": bool(selected_id and report_id == selected_id),
+        "is_latest_attempt": bool(latest_id and report_id == latest_id),
+    }
+
+
 def _brand_profile(domain: str) -> dict:
     raw_reports = list_reports_for_domain(domain)
     selected, classified_reports, history_state = selected_report_for_display(raw_reports)
@@ -1026,10 +1052,37 @@ def _vault_review_error(error: ApiError) -> tuple[str, int]:
 
 
 def _report_rows_for_index() -> list[dict[str, Any]]:
-    rows = []
+    """One row per brand: the selected vault/SV9 analysis, not every scan."""
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    domain_order: list[str] = []
     for row in list_reports():
-        enriched = dict(row)
-        enriched["brand_domain"] = domain_key(str(row.get("url") or ""))
+        domain = domain_key(str(row.get("url") or ""))
+        if not domain:
+            continue
+        if domain not in grouped:
+            domain_order.append(domain)
+            grouped[domain] = []
+        grouped[domain].append(row)
+    rows: list[dict[str, Any]] = []
+    for domain in domain_order:
+        listed_ids = {
+            str(item.get("id") or "")
+            for item in grouped[domain]
+            if item.get("id")
+        }
+        loaded = [
+            item
+            for item in list_reports_for_domain(domain)
+            if str(item.get("id") or "") in listed_ids
+        ]
+        history = loaded or grouped[domain]
+        selected, classified, _state = selected_report_for_display(history)
+        source = selected or (classified[0] if classified else None)
+        if source is None:
+            continue
+        enriched = dict(source)
+        enriched["brand_domain"] = domain
         enriched["score_publication"] = score_publication_from_report(enriched)
         rows.append(enriched)
     return rows
@@ -2054,6 +2107,9 @@ def scan_view(request: Request, scan_id: str):
         if load_report(scan_id) is not None:
             return RedirectResponse(f"/report/{scan_id}", status_code=303)
         return RedirectResponse("/?error=Unknown scan", status_code=303)
+    published_id = str(status.get("report_id") or "")
+    if status.get("state") == "done" and published_id and published_id != scan_id:
+        return RedirectResponse(f"/report/{published_id}", status_code=303)
     return templates.TemplateResponse(request, "scan.html.j2", {"scan": status})
 
 
@@ -2062,7 +2118,7 @@ def scan_api(scan_id: str):
     status = scan_status(scan_id)
     if status is None:
         if load_report(scan_id) is not None:
-            return JSONResponse({"state": "done", "id": scan_id})
+            return JSONResponse({"state": "done", "id": scan_id, "report_id": scan_id})
         return JSONResponse({"state": "unknown", "id": scan_id}, status_code=404)
     status.pop("raw", None)
     return JSONResponse(status)
@@ -2103,4 +2159,5 @@ def report_view(request: Request, scan_id: str):
         return RedirectResponse("/?error=Report not found", status_code=303)
     report = _sanitize_report_language(report)
     report_vm = build_report_view_model(report)
+    report_vm["brand_publication"] = _brand_publication_for_report(report)
     return templates.TemplateResponse(request, "report.html.j2", {"report": report_vm})

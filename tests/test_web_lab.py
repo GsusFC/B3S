@@ -794,39 +794,141 @@ def test_home_renders_report_list(monkeypatch):
     assert "Scan a brand" in response.text
     assert 'aria-label="B3S home"' in response.text
     assert 'viewBox="0 0 193 63"' in response.text
-    assert 'href="/report/abc123"' in response.text
     assert 'href="/brand/vercel.com?lang=es"' in response.text
+    assert 'data-row-href="/brand/vercel.com?lang=es"' in response.text
+    assert 'href="/report/abc123"' not in response.text
     assert 'href="/report/abc123/moodboard?lang=es"' not in response.text
     assert "Vercel" in response.text
     assert "88" in response.text
     assert "status-tag status-tag--ok status-tag--filled" in response.text
 
 
-def test_home_shows_a_drifted_score_as_diagnostic(monkeypatch):
+def test_vault_recapture_keeps_selected_sv9_report_id(monkeypatch):
+    from web.scan_runner import _vault_published_report_id
+
+    older = {
+        "id": "sv9-baseline",
+        "brand_name": "Livellup",
+        "url": "https://livellup.com",
+        "score": 20,
+        "created_at": "2026-08-10T20:47:38+00:00",
+        "reliability_status": "shadow",
+        "canonical_status": "provisional",
+        "components": [],
+        "raw": {},
+    }
+    recapture = {
+        **older,
+        "id": "vault-recapture",
+        "score": 3,
+        "created_at": "2026-08-19T12:20:12+00:00",
+        "canonical_status": "non_canonical",
+        "stability": {
+            "classification": "contract_mismatch",
+            "canonical_status": "non_canonical",
+        },
+    }
+    monkeypatch.setenv("B3S_CANONICAL_ENFORCEMENT_MODE", "repeated")
+    monkeypatch.setattr(
+        "web.scan_runner.list_reports_for_domain",
+        lambda _url: [older],
+    )
+
+    assert _vault_published_report_id("https://livellup.com", recapture) == "sv9-baseline"
+    assert _vault_published_report_id("https://livellup.com", older) == "sv9-baseline"
+
+
+def test_home_lists_one_selected_analysis_per_brand(monkeypatch):
     from web.app import app
 
+    older = {
+        "id": "baseline",
+        "brand_name": "Livellup",
+        "url": "https://livellup.com",
+        "score": 20,
+        "detected_count": 4,
+        "block_count": 9,
+        "not_detected": ["vision"],
+        "created_at": "2026-08-10T20:47:38+00:00",
+        "reliability_status": "shadow",
+        "canonical_status": "provisional",
+        "components": [],
+        "raw": {},
+    }
+    newer = {
+        **older,
+        "id": "later",
+        "score": 3,
+        "detected_count": 0,
+        "block_count": 0,
+        "not_detected": [],
+        "created_at": "2026-08-19T12:20:12+00:00",
+        "canonical_status": "non_canonical",
+        "stability": {
+            "classification": "contract_mismatch",
+            "canonical_status": "non_canonical",
+        },
+    }
+
+    monkeypatch.setenv("B3S_CANONICAL_ENFORCEMENT_MODE", "repeated")
+    monkeypatch.setattr("web.app.list_reports", lambda: [newer, older])
     monkeypatch.setattr(
-        "web.app.list_reports",
-        lambda: [
-            {
-                "id": "drifted",
-                "brand_name": "SoccerSolver",
-                "url": "https://soccersolver.com",
-                "score": 64,
-                "detected_count": 8,
-                "block_count": 9,
-                "not_detected": [],
-                "created_at": "2026-08-03T12:00:00+00:00",
-                "stability": {"classification": "evaluation_drift"},
-            }
-        ],
+        "web.app.list_reports_for_domain",
+        lambda _domain: [newer, older],
     )
 
     response = TestClient(app).get("/")
 
     assert response.status_code == 200
-    assert "<strong>64</strong>" in response.text
-    assert "diagnóstico" in response.text
+    assert response.text.count("https://livellup.com") == 1
+    assert "<strong>20</strong>" in response.text
+    assert "diagnóstico" not in response.text
+    assert 'data-row-href="/brand/livellup.com?lang=es"' in response.text
+
+
+def test_home_hides_a_later_drifted_scan_behind_selected_score(monkeypatch):
+    from web.app import app
+
+    baseline = {
+        "id": "baseline",
+        "brand_name": "SoccerSolver",
+        "url": "https://soccersolver.com",
+        "score": 80,
+        "detected_count": 8,
+        "block_count": 9,
+        "not_detected": [],
+        "created_at": "2026-08-01T12:00:00+00:00",
+        "reliability_status": "shadow",
+        "canonical_status": "provisional",
+        "components": [],
+        "raw": {},
+    }
+    drifted = {
+        **baseline,
+        "id": "drifted",
+        "score": 64,
+        "created_at": "2026-08-03T12:00:00+00:00",
+        "canonical_status": "non_canonical",
+        "stability": {
+            "classification": "evaluation_drift",
+            "canonical_status": "non_canonical",
+        },
+    }
+
+    monkeypatch.setenv("B3S_CANONICAL_ENFORCEMENT_MODE", "repeated")
+    monkeypatch.setattr("web.app.list_reports", lambda: [drifted, baseline])
+    monkeypatch.setattr(
+        "web.app.list_reports_for_domain",
+        lambda _domain: [drifted, baseline],
+    )
+
+    response = TestClient(app).get("/")
+
+    assert response.status_code == 200
+    assert response.text.count("https://soccersolver.com") == 1
+    assert "<strong>80</strong>" in response.text
+    assert "<strong>64</strong>" not in response.text
+    assert "diagnóstico" not in response.text
 
 
 def test_visual_signature_logo_url_falls_back_to_real_logo_candidate():
@@ -2068,7 +2170,7 @@ def test_scan_and_api_fall_back_to_finished_report(monkeypatch):
     assert page.status_code == 303
     assert page.headers["location"] == "/report/done123"
     assert api.status_code == 200
-    assert api.json() == {"state": "done", "id": "done123"}
+    assert api.json() == {"state": "done", "id": "done123", "report_id": "done123"}
 
 
 def test_scan_view_uses_structured_layout(monkeypatch):
