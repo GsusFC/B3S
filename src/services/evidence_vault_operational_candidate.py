@@ -136,11 +136,21 @@ def build_operational_packet_from_scanner_candidate(
     packet = dict(candidate_packet)
     validate_candidate_packet(packet)
     manifest = packet["manifest"]
+    current = dict(current_operational_memory or {})
+    accepted_by_id = {
+        str(row.get("tile_id") or ""): row
+        for row in (current.get("content") or {}).get("accepted_tiles") or []
+        if isinstance(row, Mapping) and row.get("tile_id")
+    }
     dispositions: dict[str, dict[str, Any]] = {}
     for candidate in packet["candidate_tiles"]:
         tile_id = str(candidate["tile_id"])
         decision = evaluate_scanner_semantic_authority(candidate_tile=candidate)
-        if decision["eligible"] is True:
+        previous = accepted_by_id.get(tile_id)
+        if decision["eligible"] is True and not _lit_tile_requires_review(
+            previous,
+            candidate,
+        ):
             dispositions[tile_id] = {
                 "authority_state": "accepted",
                 "review_state": "none",
@@ -178,6 +188,34 @@ def build_operational_packet_from_scanner_candidate(
         current_pending_reassessments=(
             current.get("content", {}).get("pending_reassessments") or []
         ),
+    )
+
+
+def _effective_basis_rows(tile: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
+    if not isinstance(tile, Mapping):
+        return []
+    return [
+        row
+        for row in tile.get("basis") or []
+        if isinstance(row, Mapping)
+        and str(row.get("polarity") or "")
+        in {"supports", "contradicts", "demonstrates_absence"}
+    ]
+
+
+def _lit_tile_requires_review(
+    previous: Mapping[str, Any] | None,
+    candidate: Mapping[str, Any],
+) -> bool:
+    """Human review only when an already-lit tile would change."""
+
+    if previous is None or not _effective_basis_rows(previous):
+        return False
+    return not (
+        previous.get("semantic_state") == candidate.get("candidate_state")
+        and previous.get("basis") == candidate.get("basis")
+        and previous.get("coverage_refs", []) == candidate.get("coverage_refs")
+        and previous.get("unresolved_refs", []) == candidate.get("unresolved_refs")
     )
 
 

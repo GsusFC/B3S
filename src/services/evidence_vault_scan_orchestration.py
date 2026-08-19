@@ -268,6 +268,14 @@ def prepare_vault_scan_after_capture(
             known_evidence_records=known_rows,
             semantic_analysis_claimed_fingerprints=semantic_claims,
             accepted_evidence_tile_relations=relation_rows,
+            accepted_tiles=(
+                list(
+                    (current_memory.get("content") or {}).get("accepted_tiles")
+                    or []
+                )
+                if current_memory is not None
+                else []
+            ),
             canonical_memory_version=(
                 str(current_memory["canonical_memory_version"])
                 if current_memory is not None

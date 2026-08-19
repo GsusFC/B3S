@@ -338,6 +338,100 @@ def test_stale_c7_required_projection_still_selects_semantic_v3() -> None:
     assert selector["semantic_scoring_v3"]["availability"] == "available"
 
 
+def test_scanner_first_lighting_of_empty_tile_is_accepted() -> None:
+    empty_source = _packet(_candidates())
+    first = build_operational_packet_from_scanner_candidate(empty_source)
+    empty_m1 = next(
+        row
+        for row in first["accepted_memory"]["accepted_tiles"]
+        if row["tile_id"] == "M1"
+    )
+    assert empty_m1["semantic_state"] == "sin_evidencia"
+    assert empty_m1["basis"] == []
+
+    operational = build_operational_packet_from_scanner_candidate(
+        _packet(
+            build_incremental_candidate_tiles(
+                previous_candidate_tiles=empty_source["candidate_tiles"],
+                tile_updates=[
+                    {
+                        "tile_id": "M1",
+                        "delta_kind": "candidate_update",
+                        "basis": [_basis("first-light", "supports", reviewed=False)],
+                    }
+                ],
+            ),
+            parent=first["proposed_canonical_memory_version"],
+            seed="first-light",
+        ),
+        current_operational_memory={
+            "canonical_memory_version": first["proposed_canonical_memory_version"],
+            "content": {
+                "accepted_tiles": first["accepted_memory"]["accepted_tiles"],
+                "pending_reassessments": [],
+            },
+        },
+    )
+    m1 = next(
+        row
+        for row in operational["accepted_memory"]["accepted_tiles"]
+        if row["tile_id"] == "M1"
+    )
+    assert m1["semantic_state"] == "ok"
+    assert m1["authority_source"] == "policy"
+    assert operational["has_accepted_change"] is True
+
+
+def test_scanner_change_to_lit_tile_requires_review() -> None:
+    first_basis = [_basis("lit", "supports", reviewed=False)]
+    candidates = _candidates()
+    candidates[0] = build_candidate_tile(tile_id="M1", basis=first_basis)
+    first = build_operational_packet_from_scanner_candidate(_packet(candidates))
+    accepted_m1 = next(
+        row for row in first["accepted_memory"]["accepted_tiles"] if row["tile_id"] == "M1"
+    )
+    refreshed = build_operational_packet_from_scanner_candidate(
+        _packet(
+            build_incremental_candidate_tiles(
+                previous_candidate_tiles=candidates,
+                tile_updates=[
+                    {
+                        "tile_id": "M1",
+                        "delta_kind": "strengthened",
+                        "basis": [
+                            first_basis[0],
+                            _basis("changed", "supports", reviewed=False),
+                        ],
+                    }
+                ],
+            ),
+            parent=first["proposed_canonical_memory_version"],
+            seed="chg",
+        ),
+        current_operational_memory={
+            "canonical_memory_version": first["proposed_canonical_memory_version"],
+            "content": {
+                "accepted_tiles": first["accepted_memory"]["accepted_tiles"],
+                "pending_reassessments": [],
+            },
+        },
+    )
+    overlay_m1 = next(
+        row
+        for row in refreshed["candidate_overlay"]["candidate_tiles"]
+        if row["tile_id"] == "M1"
+    )
+    kept = next(
+        row
+        for row in refreshed["accepted_memory"]["accepted_tiles"]
+        if row["tile_id"] == "M1"
+    )
+    assert overlay_m1["review_state"] == "required"
+    assert overlay_m1["authority_state"] == "pending"
+    assert kept["basis"] == accepted_m1["basis"]
+    assert refreshed["has_accepted_change"] is False
+
+
 def test_scanner_report_becomes_provisional_overlay_not_automatic_truth() -> None:
     report = {
         "id": "diagnostic-scan-1",
