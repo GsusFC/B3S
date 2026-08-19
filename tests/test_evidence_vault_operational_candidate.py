@@ -8,6 +8,7 @@ from src.services.evidence_vault_candidate_resolver import (
 from src.services.evidence_vault_canonical_core import (
     build_candidate_packet,
     build_candidate_tile,
+    build_incremental_candidate_tiles,
     build_tile_contract_registry,
 )
 from src.services.evidence_vault_operational_candidate import (
@@ -128,6 +129,135 @@ def test_scanner_candidate_materializes_normal_vault_memory() -> None:
     assert operational["scoring_projection"]["coverage"]["accepted_tile_count"] == 79
 
 
+def test_scanner_owned_only_packets_produce_a_semantic_v3_selector() -> None:
+    from src.history.repository import _build_vault_semantic_report_selector
+    from src.services.evidence_vault_operational_assessment_shadow import (
+        build_operational_semantic_shadow_assessment,
+    )
+
+    candidates = _candidates()
+    candidates[0] = build_candidate_tile(
+        tile_id="M1",
+        basis=[_basis("scanner-m1", "supports", reviewed=False)],
+    )
+    source = _packet(candidates)
+    first = build_operational_packet_from_scanner_candidate(source)
+    first_shadow = build_operational_semantic_shadow_assessment(
+        operational_packet=first,
+        source_candidate_packet=source,
+        expected_parent_canonical_memory_version=first[
+            "current_canonical_memory_version"
+        ],
+    )
+    assert first_shadow["assessment_status"] == "available"
+    selector = _build_vault_semantic_report_selector(
+        operational_packet=first,
+        source_candidate_packet=source,
+        expected_parent_canonical_memory_version=first[
+            "current_canonical_memory_version"
+        ],
+    )
+    assert selector["semantic_scoring_v3"]["availability"] == "available"
+    c7 = next(
+        row
+        for row in first["scoring_projection"]["tiles"]
+        if row["tile_id"] == "C7"
+    )
+    assert c7["score_eligible"] is False
+    assert c7["effective_scoring_state"] == "sin_evidencia"
+
+    refreshed_source = _packet(
+        build_incremental_candidate_tiles(
+            previous_candidate_tiles=source["candidate_tiles"]
+        ),
+        parent=first["proposed_canonical_memory_version"],
+        seed="rescan",
+    )
+    refreshed = build_operational_packet_from_scanner_candidate(
+        refreshed_source,
+        current_operational_memory={
+            "canonical_memory_version": first["proposed_canonical_memory_version"],
+            "content": {
+                "accepted_tiles": first["accepted_memory"]["accepted_tiles"],
+                "pending_reassessments": first["accepted_memory"].get(
+                    "pending_reassessments"
+                )
+                or [],
+            },
+        },
+    )
+    refreshed_shadow = build_operational_semantic_shadow_assessment(
+        operational_packet=refreshed,
+        source_candidate_packet=refreshed_source,
+        expected_parent_canonical_memory_version=refreshed[
+            "current_canonical_memory_version"
+        ],
+    )
+    assert refreshed_shadow["assessment_status"] == "available"
+    assert "C7" not in {
+        row["tile_id"] for row in refreshed["accepted_memory"]["accepted_tiles"]
+    }
+
+
+def test_scanner_rescan_does_not_fail_when_c7_was_already_accepted() -> None:
+    from src.history.repository import _build_vault_semantic_report_selector
+    from src.services.evidence_vault_operational_memory import (
+        build_operational_memory_packet,
+    )
+
+    candidates = _candidates()
+    source = _packet(candidates)
+    seeded = build_operational_memory_packet(
+        brand_identity="example.com",
+        source_candidate_packet_fingerprint=source["candidate_packet_fingerprint"],
+        aggregation_policy_fingerprint=source["manifest"][
+            "aggregation_policy_fingerprint"
+        ],
+        candidate_tiles=candidates,
+        dispositions={
+            "C7": {
+                "authority_state": "accepted",
+                "review_state": "resolved",
+                "authority_profile_id": "human-reviewed-test-v1",
+                "authority_source": "human",
+                "decision_event_id": "review-C7",
+            }
+        },
+    )
+    refreshed_source = _packet(
+        build_incremental_candidate_tiles(
+            previous_candidate_tiles=source["candidate_tiles"]
+        ),
+        parent=seeded["proposed_canonical_memory_version"],
+        seed="c7-rescan",
+    )
+    refreshed = build_operational_packet_from_scanner_candidate(
+        refreshed_source,
+        current_operational_memory={
+            "canonical_memory_version": seeded["proposed_canonical_memory_version"],
+            "content": {
+                "accepted_tiles": seeded["accepted_memory"]["accepted_tiles"],
+                "pending_reassessments": [],
+            },
+        },
+    )
+    selector = _build_vault_semantic_report_selector(
+        operational_packet=refreshed,
+        source_candidate_packet=refreshed_source,
+        expected_parent_canonical_memory_version=refreshed[
+            "current_canonical_memory_version"
+        ],
+    )
+    assert selector["semantic_scoring_v3"]["availability"] == "available"
+    c7 = next(
+        row
+        for row in refreshed["scoring_projection"]["tiles"]
+        if row["tile_id"] == "C7"
+    )
+    assert c7["score_eligible"] is False
+    assert c7["effective_scoring_state"] == "sin_evidencia"
+
+
 def test_scanner_report_becomes_provisional_overlay_not_automatic_truth() -> None:
     report = {
         "id": "diagnostic-scan-1",
@@ -167,14 +297,21 @@ def _candidates() -> list[dict]:
     ]
 
 
-def _packet(candidates: list[dict], *, unresolved: list[str] | None = None) -> dict:
+def _packet(
+    candidates: list[dict],
+    *,
+    unresolved: list[str] | None = None,
+    parent: str | None = None,
+    seed: str = "",
+) -> dict:
+    prefix = f"{seed}-" if seed else ""
     return build_candidate_packet(
         brand_identity="example.com",
-        parent_canonical_memory_version=None,
-        candidate_memory_version=_digest("candidate-memory"),
-        accepted_memory_candidate_version=_digest("accepted-memory"),
-        reviewed_memory_candidate_version=_digest("reviewed-memory"),
-        review_packet_set_fingerprint=_digest("review-packets"),
+        parent_canonical_memory_version=parent,
+        candidate_memory_version=_digest(f"{prefix}candidate-memory"),
+        accepted_memory_candidate_version=_digest(f"{prefix}accepted-memory"),
+        reviewed_memory_candidate_version=_digest(f"{prefix}reviewed-memory"),
+        review_packet_set_fingerprint=_digest(f"{prefix}review-packets"),
         aggregation_policy_fingerprint=canonical_aggregation_policy_fingerprint(),
         candidate_tiles=candidates,
         unresolved_items=[
