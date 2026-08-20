@@ -838,6 +838,55 @@ def test_vault_recapture_keeps_selected_sv9_report_id(monkeypatch):
     assert _vault_published_report_id("https://livellup.com", older) == "sv9-baseline"
 
 
+def test_lock_prior_sv9_tiles_keeps_lit_and_fills_empty(monkeypatch) -> None:
+    from web.scan_runner import _lock_prior_sv9_tiles
+
+    prior = {
+        "id": "sv9-baseline",
+        "components": [
+            {
+                "key": "mission",
+                "status": "scored",
+                "score": 1,
+                "tile_profile": [
+                    {"id": "M1", "estado": "ok", "evidencia": "prior"},
+                    {"id": "M2", "estado": "sin_evidencia"},
+                ],
+            }
+        ],
+    }
+    fresh = {
+        "id": "sv9-recapture",
+        "score": 2,
+        "components": [
+            {
+                "key": "mission",
+                "status": "scored",
+                "score": 1,
+                "tile_profile": [
+                    {"id": "M1", "estado": "no", "motivo": "new pass"},
+                    {"id": "M2", "estado": "ok", "evidencia": "new"},
+                ],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "web.scan_runner.list_reports_for_domain",
+        lambda _url: [prior],
+    )
+    monkeypatch.setattr(
+        "web.scan_runner.selected_report_for_display",
+        lambda _rows: (prior, _rows, {}),
+    )
+    locked = _lock_prior_sv9_tiles("https://example.com", fresh)
+    tiles = locked["components"][0]["tile_profile"]
+    assert tiles[0]["estado"] == "ok"
+    assert tiles[0]["evidencia"] == "prior"
+    assert tiles[1]["estado"] == "ok"
+    assert locked["components"][0]["score"] == 2
+    assert locked["score"] == 2
+
+
 def test_home_lists_one_selected_analysis_per_brand(monkeypatch):
     from web.app import app
 
