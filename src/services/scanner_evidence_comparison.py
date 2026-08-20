@@ -402,6 +402,13 @@ def classify_report_history(reports: Iterable[dict[str, Any]]) -> dict[str, Any]
         classification = effective.classification
         reasons = list(effective.reason_codes)
         canonical_status = "non_canonical"
+        sv9_replaces_non_sv9 = bool(
+            not snapshot.invalid
+            and _gemini_sv9_evaluator(snapshot.analysis_contract)
+            and not _gemini_sv9_evaluator(
+                analysis_contract_from_report(selected_report)
+            )
+        )
         repeated_new_contract = bool(
             eligible
             and baseline_comparison.classification == "contract_mismatch"
@@ -409,7 +416,19 @@ def classify_report_history(reports: Iterable[dict[str, Any]]) -> dict[str, Any]
             and previous_comparison.classification == "stable"
         )
 
-        if repeated_new_contract:
+        if sv9_replaces_non_sv9:
+            selected_report = report
+            selected_kind = "canonical" if eligible else "provisional"
+            classification = selected_kind
+            canonical_status = selected_kind
+            reasons = ["sv9_replaces_non_sv9_baseline"]
+            for prior_entry in entries:
+                if prior_entry["canonical_status"] in {
+                    "canonical",
+                    "provisional",
+                }:
+                    prior_entry["canonical_status"] = "non_canonical"
+        elif repeated_new_contract:
             selected_report = report
             selected_kind = "canonical"
             classification = "canonical"
@@ -970,6 +989,10 @@ def _history_entry(
         "baseline_comparison": baseline_comparison.to_dict() if baseline_comparison else None,
         "previous_comparison": previous_comparison.to_dict() if previous_comparison else None,
     }
+
+
+def _gemini_sv9_evaluator(contract: Mapping[str, Any]) -> bool:
+    return str(contract.get("evaluator_model") or "").startswith("gemini-")
 
 
 def _eligible_for_canonical(report: dict[str, Any], snapshot: EvidenceSnapshot) -> bool:

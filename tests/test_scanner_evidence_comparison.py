@@ -176,6 +176,53 @@ def test_history_promotes_repeated_reliable_new_contract_without_locking_old_bas
     assert state["canonical_report_id"] == "repeated-new"
 
 
+def test_history_promotes_gemini_sv9_over_semantic_v3_baseline() -> None:
+    semantic = _report("semantic", "2026-08-20T07:00:00Z", score=3)
+    semantic["raw"]["sv9"] = {
+        "result": {"evaluator_model": "evidence-vault-semantic-scoring-v3"}
+    }
+    sv9 = _report("sv9", "2026-08-20T07:17:00Z", score=38)
+    sv9["raw"]["sv9"] = {
+        "result": {"evaluator_model": "gemini-3.1-flash-lite"}
+    }
+
+    state = classify_report_history([semantic, sv9])
+    entries = {entry["report_id"]: entry for entry in state["entries"]}
+    selected, _annotated, _state = selected_report_for_display(
+        [semantic, sv9],
+        mode="repeated",
+    )
+
+    assert state["selected_report_id"] == "sv9"
+    assert state["provisional_report_id"] == "sv9"
+    assert entries["sv9"]["canonical_status"] == "provisional"
+    assert entries["sv9"]["reason_codes"] == ["sv9_replaces_non_sv9_baseline"]
+    assert entries["semantic"]["canonical_status"] == "non_canonical"
+    assert selected["id"] == "sv9"
+    assert selected["score"] == 38
+
+
+def test_history_keeps_gemini_sv9_when_later_scan_is_semantic_v3() -> None:
+    sv9 = _report("sv9", "2026-08-10T00:00:00Z", score=20)
+    sv9["raw"]["sv9"] = {
+        "result": {"evaluator_model": "gemini-3.1-flash-lite"}
+    }
+    semantic = _report("semantic", "2026-08-19T00:00:00Z", score=3)
+    semantic["raw"]["sv9"] = {
+        "result": {"evaluator_model": "evidence-vault-semantic-scoring-v3"}
+    }
+
+    state = classify_report_history([sv9, semantic])
+    selected, _annotated, _state = selected_report_for_display(
+        [sv9, semantic],
+        mode="repeated",
+    )
+
+    assert state["selected_report_id"] == "sv9"
+    assert selected["id"] == "sv9"
+    assert selected["score"] == 20
+
+
 def test_comparator_tolerates_one_minor_content_change_in_same_source_set() -> None:
     baseline_rows = [
         _evidence("web", "web", "owned_copy", "https://example.com", "Owned copy."),
