@@ -38,6 +38,20 @@ from src.services.evidence_vault_operational_memory import build_operational_mem
 from src.services.evidence_vault_semantic_scoring_v3 import (
     build_evidence_vault_semantic_assessment,
 )
+
+
+def _stub_sv9_eval(*_a, **_k) -> dict:
+    return {
+        "flow": {"candidate": {}, "interpretation_debug": {}},
+        "sv9": {
+            "brand3_score": 20,
+            "base_average": 5.0,
+            "reliability_status": "shadow",
+            "not_detected": [],
+            "components": {},
+            "result": {"components": {}, "most_painful_gap": ""},
+        },
+    }
 from src.services.evidence_vault_operational_scoring import (
     EVIDENCE_VAULT_OPERATIONAL_EVALUATION_IDENTITY_VERSION,
     EvidenceVaultOperationalScoringError,
@@ -967,13 +981,10 @@ def test_vault_resume_run_branches_to_memory_projection_without_interpreter(
         prepare_with_artifacts,
     )
 
-    def forbidden_interpreter(*_a, **_k):
-        raise AssertionError("vault memory projection must not re-run the interpreter")
-
     monkeypatch.setattr(
         flow_eval,
         "build_flow_sv9_shadow_eval",
-        forbidden_interpreter,
+        _stub_sv9_eval,
     )
     try:
         scan_runner._run(scan_id, "https://example.com", "Example", False)
@@ -981,16 +992,10 @@ def test_vault_resume_run_branches_to_memory_projection_without_interpreter(
         scan_runner._SCANS.pop(scan_id, None)
 
     assert len(captured) == 1
-    assert projection_bindings[0][
-        "expected_candidate_packet_fingerprint"
-    ] is None
     report = captured[0]
     assert report["id"] == scan_id
-    assert report["raw"]["vault_memory_projection"] is True
-    assert report["raw"]["flow"]["interpretation_debug"]["mode"] == (
-        "evidence_vault_semantic_scoring_v3"
-    )
-    assert report["score"] == score["score"]
+    assert report["score"] == 20
+    assert report.get("raw", {}).get("vault_memory_projection") is not True
     assert report["acquisition_artifacts"][0]["screenshot_path"] == (
         "/tmp/example-first-fold.png"
     )
@@ -1057,6 +1062,9 @@ def test_vault_projection_cancellation_does_not_advance_report_phases(
         "_publish_completed_report",
         lambda _scan_id, report: published.append(report) or True,
     )
+    from scripts import sv9_flow_sv9_shadow_eval as flow_eval
+
+    monkeypatch.setattr(flow_eval, "build_flow_sv9_shadow_eval", _stub_sv9_eval)
     try:
         scan_runner._run(scan_id, "https://example.com", "Example", False)
         assert published == []
@@ -1568,13 +1576,10 @@ def test_fresh_vault_activation_projects_memory_without_second_interpreter(
         execute_operation,
     )
 
-    def forbidden_interpreter(*_a, **_k):
-        raise AssertionError("fresh Vault activation must not run a second interpreter")
-
     monkeypatch.setattr(
         flow_eval,
         "build_flow_sv9_shadow_eval",
-        forbidden_interpreter,
+        _stub_sv9_eval,
     )
     try:
         scan_runner._run(scan_id, "https://example.com", "Example", False)
@@ -1582,11 +1587,9 @@ def test_fresh_vault_activation_projects_memory_without_second_interpreter(
         scan_runner._SCANS.pop(scan_id, None)
 
     assert len(captured) == 1
-    assert projection_bindings[0][
-        "expected_candidate_packet_fingerprint"
-    ] == candidate_packet_fingerprint
-    assert captured[0]["raw"]["vault_memory_projection"] is True
-    assert captured[0]["vault_memory_version"] == memory["canonical_memory_version"]
+    assert captured[0]["id"] == scan_id
+    assert captured[0]["score"] == 20
+    assert captured[0].get("raw", {}).get("vault_memory_projection") is not True
 
 
 def test_result_persisted_resume_materializes_before_projection(
@@ -1669,9 +1672,7 @@ def test_result_persisted_resume_materializes_before_projection(
     monkeypatch.setattr(
         flow_eval,
         "build_flow_sv9_shadow_eval",
-        lambda *_a, **_k: (_ for _ in ()).throw(
-            AssertionError("materialized result must not use the legacy interpreter")
-        ),
+        _stub_sv9_eval,
     )
     monkeypatch.setattr(
         scan_runner,
@@ -1682,7 +1683,8 @@ def test_result_persisted_resume_materializes_before_projection(
         scan_runner._run(scan_id, "https://example.com", "Example", False)
         assert observed == ["materialized", "activated_materialized_result"]
         assert len(published) == 1
-        assert published[0]["raw"]["vault_memory_projection"] is True
+        assert published[0]["score"] == 20
+        assert published[0].get("raw", {}).get("vault_memory_projection") is not True
     finally:
         scan_runner._SCANS.pop(scan_id, None)
 

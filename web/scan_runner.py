@@ -279,6 +279,63 @@ def _activate_vault_result_unless_cancelled(
     )
 
 
+def _lock_prior_sv9_tiles(url: str, report: dict[str, Any]) -> dict[str, Any]:
+    """Keep already-lit SV9 tiles; let this pass fill only empty ones."""
+
+    selected, _classified, _state = selected_report_for_display(
+        list_reports_for_domain(url)
+    )
+    if not isinstance(selected, dict) or str(selected.get("id") or "") == str(
+        report.get("id") or ""
+    ):
+        return report
+    prior_by_component = {
+        str(row.get("key") or ""): row
+        for row in selected.get("components") or []
+        if isinstance(row, dict) and row.get("key")
+    }
+    locked_report = dict(report)
+    components = []
+    total_ok = 0
+    for component in report.get("components") or []:
+        if not isinstance(component, dict):
+            continue
+        updated = dict(component)
+        prior = prior_by_component.get(str(component.get("key") or ""))
+        prior_tiles = {
+            str(tile.get("id") or ""): dict(tile)
+            for tile in (prior or {}).get("tile_profile") or []
+            if isinstance(tile, dict)
+            and str(tile.get("estado") or "") in {"ok", "no"}
+            and tile.get("id")
+        }
+        merged: list[dict[str, Any]] = []
+        for tile in component.get("tile_profile") or []:
+            if not isinstance(tile, dict):
+                continue
+            tile_id = str(tile.get("id") or "")
+            locked = prior_tiles.get(tile_id)
+            merged.append(locked if locked is not None else dict(tile))
+        if merged:
+            updated["tile_profile"] = merged
+            lit_count, off_count, blind_count = _tile_counts_from_profile(merged)
+            updated["lit"] = lit_count
+            updated["off"] = off_count
+            updated["blind"] = blind_count
+            if str(updated.get("status") or "") == "scored":
+                updated["score"] = lit_count
+            total_ok += lit_count
+        else:
+            score = updated.get("score")
+            if isinstance(score, int):
+                total_ok += score
+        components.append(updated)
+    if components:
+        locked_report["components"] = components
+        locked_report["score"] = total_ok
+    return locked_report
+
+
 def _vault_published_report_id(url: str, candidate: dict[str, Any]) -> str:
     """Keep the selected brand analysis unless this candidate replaces it."""
 
@@ -545,88 +602,22 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
             if persisted_status is not None:
                 _persist_scan_status(persisted_status)
 
-        if vault_enabled and isinstance(vault_activation, dict):
-            activated_score = vault_activation.get("score")
-            activated_memory = vault_activation.get("memory")
-            expected_candidate_packet_fingerprint = None
-            if vault_activation.get("created") is True:
-                expected_candidate_packet_fingerprint = str(
-                    vault_activation.get("candidate_packet_fingerprint") or ""
-                )
-                if not expected_candidate_packet_fingerprint:
-                    raise RuntimeError(
-                        "vault_activation_missing_candidate_packet_fingerprint"
-                    )
-            if isinstance(activated_score, dict) and isinstance(activated_memory, dict):
-                projection = (
-                    vault_repository.get_evidence_vault_operational_report_projection(
-                        url,
-                        expected_canonical_memory_version=str(
-                            activated_memory.get("canonical_memory_version") or ""
-                        ),
-                        expected_evaluation_identity=str(
-                            activated_score.get("evaluation_identity") or ""
-                        ),
-                        expected_adoption_event_id=str(
-                            activated_memory.get("adoption_event_id") or ""
-                        ),
-                        expected_candidate_packet_fingerprint=(
-                            expected_candidate_packet_fingerprint
-                        ),
-                        workspace_slug="b3s",
-                    )
-                )
-                if not isinstance(projection, dict):
-                    raise RuntimeError("vault_report_projection_unavailable")
-                persisted_memory = projection.get("memory")
-                promotion_event = projection.get("promotion_event")
-                semantic_assessment = projection.get("semantic_scoring_v3")
-                authority_coverage = projection.get("authority_coverage")
-                verification_requirements = projection.get("verification_requirements")
-                legacy_operational_v2 = projection.get("legacy_operational_v2")
-                if not all(
-                    isinstance(value, dict)
-                    for value in (
-                        persisted_memory,
-                        promotion_event,
-                        semantic_assessment,
-                        authority_coverage,
-                        verification_requirements,
-                        legacy_operational_v2,
-                    )
-                ):
-                    raise RuntimeError("vault_report_projection_invalid")
-                report_observation = vault_preparation.get("report_observation")
-                if not isinstance(report_observation, dict):
-                    raise RuntimeError("vault_report_observation_unavailable")
-                report = _compose_vault_memory_report(
-                    scan_id=scan_id,
-                    url=url,
-                    brand_name=brand_name,
-                    capture_observation=report_observation,
-                    memory=persisted_memory,
-                    promotion_event=promotion_event,
-                    semantic_scoring_v3=semantic_assessment,
-                    authority_coverage=authority_coverage,
-                    verification_requirements=verification_requirements,
-                    legacy_operational_v2=legacy_operational_v2,
-                )
-                report = _attach_evidence_stability(report)
-                if _scan_cancelled(scan_id):
-                    return
-                _set_phase(scan_id, "capture", "done")
-                _set_phase(scan_id, "interpret", "done")
-                _set_phase(scan_id, "score", "done")
-                _set_phase(scan_id, "report", "running")
-                published_id = _vault_published_report_id(url, report)
-                if published_id != str(report.get("id") or ""):
-                    _finish_scan_without_new_score(scan_id, published_id)
-                    return
-                _publish_completed_report(scan_id, report)
-                return
-
         if vault_enabled:
-            raise RuntimeError("vault_semantic_v3_report_projection_unavailable")
+            activated_score = (
+                vault_activation.get("score")
+                if isinstance(vault_activation, dict)
+                else None
+            )
+            activated_memory = (
+                vault_activation.get("memory")
+                if isinstance(vault_activation, dict)
+                else None
+            )
+            if not (
+                isinstance(activated_score, dict)
+                and isinstance(activated_memory, dict)
+            ):
+                raise RuntimeError("vault_semantic_v3_report_projection_unavailable")
 
         _set_phase(scan_id, "interpret", "running")
         from scripts.sv9_flow_sv9_shadow_eval import build_flow_sv9_shadow_eval
@@ -665,10 +656,12 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
             return
         _set_phase(scan_id, "interpret", "done")
         _set_phase(scan_id, "score", "done")
-
-        _set_phase(scan_id, "report", "running")
         report = _compose_report(scan_id, url, brand_name, payload)
+        report = _lock_prior_sv9_tiles(url, report)
         report = _attach_evidence_stability(report)
+        if _scan_cancelled(scan_id):
+            return
+        _set_phase(scan_id, "report", "running")
         if not _publish_completed_report(scan_id, report):
             return
     except Exception as exc:  # surface the failure to the UI, never die silently
