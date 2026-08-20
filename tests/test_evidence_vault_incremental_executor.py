@@ -64,7 +64,7 @@ class NoCallLLM:
 
 
 class MemoryRepository:
-    def __init__(self, *, plan, rows, status="pending", result=None):
+    def __init__(self, *, plan, rows, status="pending", result=None, memory=None):
         self.context = {
             "source_scan_id": "scan-1",
             "brand_identity": "example.com",
@@ -88,6 +88,7 @@ class MemoryRepository:
         self.source_packets = []
         self.operational_packets = []
         self.failures = []
+        self.memory = memory
 
     def claim_capture_operation_plan(self, source_scan_id, **kwargs):
         if self.operation["status"] == "result_persisted":
@@ -112,7 +113,7 @@ class MemoryRepository:
         return {**self.context, **self.operation}
 
     def get_evidence_vault_operational_memory(self, *args, **kwargs):
-        return None
+        return self.memory
 
     def persist_capture_operation_result(self, source_scan_id, **kwargs):
         result = kwargs["result_payload"]
@@ -515,6 +516,60 @@ def test_baseline_relation_work_is_deterministically_chunked() -> None:
     assert llm.calls.count("sv9_flow_evidence_labeling") == 25
     assert llm.calls[-2:] == ["evidence_tile_relation_proposals"] * 2
     assert sum(len(rows) for rows in result["tile_shortlists"].values()) == 125
+
+
+def test_incremental_relation_work_is_chunked_instead_of_rejected() -> None:
+    previous = [_row("Old homepage copy that remains on the brand.")]
+    rows = [
+        {
+            **_row(f"We help teams ship better products. Evidence {index}."),
+            "ref": f"web.{index}",
+            "url": f"https://example.com/{index}",
+        }
+        for index in range(25)
+    ]
+    plan = build_vault_scan_plan(
+        brand_identity="example.com",
+        subject_url="https://example.com",
+        mode="incremental_refresh",
+        current_evidence_records=rows,
+        previous_capture_evidence_records=previous,
+        known_evidence_records=previous,
+        semantic_analysis_claimed_fingerprints=_claims(previous),
+        canonical_memory_version="a" * 64,
+    )
+    assert plan["operations"]["llm_required"] is True
+    repository = MemoryRepository(
+        plan=plan,
+        rows=rows,
+        memory={
+            "canonical_memory_version": "a" * 64,
+            "content": {
+                "accepted_tiles": [
+                    {
+                        "tile_id": "A1",
+                        "semantic_state": "ok",
+                        "basis": [],
+                        "source_candidate_packet_fingerprint": "b" * 64,
+                    }
+                ]
+            },
+        },
+    )
+    llm = ExecutorLLM()
+
+    execution = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="scan-1",
+        worker_id="worker-a",
+        llm=llm,
+    )
+
+    assert execution["execution_status"] == "completed"
+    result = repository.operation["result_payload"]
+    assert sum(len(rows) for rows in result["tile_shortlists"].values()) > 120
+    assert result["relation_proposal_call_count"] >= 2
+    assert llm.calls.count("evidence_tile_relation_proposals") >= 2
 
 
 class BroadLabelExecutorLLM(ExecutorLLM):
