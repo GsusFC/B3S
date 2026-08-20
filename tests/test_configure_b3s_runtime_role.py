@@ -93,8 +93,8 @@ class _Connection:
             return _Result(
                 rows=[
                     {
-                        "version": "029",
-                        "filename": "029_evidence_vault_semantic_analysis_claims.sql",
+                        "version": "030",
+                        "filename": "030_evidence_vault_receipt_evidence_cardinality.sql",
                         "checksum": "a" * 64,
                     }
                 ]
@@ -215,8 +215,8 @@ def _effective_relation_privileges(relations):
 def _install_contract(monkeypatch):
     manifest = [
         (
-            "029",
-            "029_evidence_vault_semantic_analysis_claims.sql",
+            "030",
+            "030_evidence_vault_receipt_evidence_cardinality.sql",
             "a" * 64,
             "SELECT 1",
         )
@@ -226,8 +226,8 @@ def _install_contract(monkeypatch):
         assert expected == manifest
         assert actual == [
             {
-                "version": "029",
-                "filename": "029_evidence_vault_semantic_analysis_claims.sql",
+                "version": "030",
+                "filename": "030_evidence_vault_receipt_evidence_cardinality.sql",
                 "checksum": "a" * 64,
             }
         ]
@@ -253,7 +253,7 @@ def test_configures_exact_runtime_contract_in_one_transaction(monkeypatch, capsy
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
         "status": "ok",
-        "head": "029_evidence_vault_semantic_analysis_claims.sql",
+        "head": "030_evidence_vault_receipt_evidence_cardinality.sql",
     }
     assert dsn not in json.dumps(payload)
     assert connected[0][0] == dsn
@@ -425,7 +425,7 @@ def test_requires_only_migration_database_url(monkeypatch, capsys) -> None:
 
 
 def test_raw_relation_and_journal_contract_is_pinned() -> None:
-    assert runtime_role.EXPECTED_HEAD_VERSION == "029"
+    assert runtime_role.EXPECTED_HEAD_VERSION == "030"
     assert runtime_role.MIGRATION_JOURNAL == "schema_migrations"
     assert runtime_role.WATERMARK_TABLE not in runtime_role.RAW_MIGRATION_019_RELATIONS
     assert runtime_role.PRIVATE_SHADOW_LEDGER_RELATIONS == {
