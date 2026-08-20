@@ -60,6 +60,10 @@ from src.services.evidence_vault_raw_provenance import (
     verify_raw_acquisition_receipt,
 )
 from src.services.scanner_evidence_comparison import canonical_evidence_rows
+from src.sv9_flow.evidence_worker import (
+    _split_web_subpages,
+    _strip_cross_page_boilerplate,
+)
 
 
 _SCHEMA = "b3s_history"
@@ -1045,26 +1049,48 @@ def _deterministic_evidence_records(verified: VerifiedRawCapture) -> list[dict[s
         role = receipt.claims.channel_role
         source_url = _receipt_source_url(receipt.claims.acquisition, role=role)
         source_class = "owned_copy" if role == "owned_web" else "external_proof"
-        records.append(
-            {
-                "ref": f"raw-acquisition:{role}:{receipt.receipt_fingerprint}",
-                "source": role,
-                "evidence_type": "text",
-                "url": source_url,
-                "content": extraction.document,
-                "confidence": "high",
-                "metadata": {
-                    "source_class": source_class,
-                    "provider": "verified_raw_acquisition",
-                    "role": role,
-                    "channel_role": role,
-                    "receipt_fingerprint": receipt.receipt_fingerprint,
-                    "extractor_version": receipt.claims.extractor_version,
-                    "extracted_document_sha256": extraction.sha256,
-                    "verified_raw": True,
-                },
-            }
-        )
+        pages: list[tuple[str, str, str]] = []
+        if role == "owned_web":
+            homepage, subpages, _missing = _split_web_subpages(extraction.document)
+            subpages = _strip_cross_page_boilerplate(homepage, subpages)
+            if homepage:
+                pages.append(("", source_url, homepage))
+            for subpage_index, (subpage_url, subpage_text) in enumerate(
+                subpages, start=1
+            ):
+                pages.append(
+                    (
+                        f":subpage.{subpage_index}",
+                        subpage_url or source_url,
+                        subpage_text,
+                    )
+                )
+        else:
+            pages.append(("", source_url, extraction.document))
+        for suffix, page_url, page_text in pages:
+            records.append(
+                {
+                    "ref": (
+                        f"raw-acquisition:{role}:"
+                        f"{receipt.receipt_fingerprint}{suffix}"
+                    ),
+                    "source": role,
+                    "evidence_type": "text",
+                    "url": page_url,
+                    "content": page_text,
+                    "confidence": "high",
+                    "metadata": {
+                        "source_class": source_class,
+                        "provider": "verified_raw_acquisition",
+                        "role": role,
+                        "channel_role": role,
+                        "receipt_fingerprint": receipt.receipt_fingerprint,
+                        "extractor_version": receipt.claims.extractor_version,
+                        "extracted_document_sha256": extraction.sha256,
+                        "verified_raw": True,
+                    },
+                }
+            )
     records.sort(key=lambda row: str(row["ref"]))
     return records
 

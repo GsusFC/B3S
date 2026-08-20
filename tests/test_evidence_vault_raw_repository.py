@@ -442,6 +442,35 @@ def test_contextual_plan_rejects_a_self_consistent_forged_delta() -> None:
             planning_context=context,
         )
 
+
+def test_deterministic_evidence_records_split_owned_subpages() -> None:
+    document = (
+        "Home copy for the brand.\n\n---\n"
+        "## Subpage: https://example.com/sofia\n"
+        "Owned product page copy."
+    )
+    _command, signed, registry = _fixture(document=document)
+    built = build_signed_raw_capture(
+        signed.pre_receipt_snapshot,
+        signed.receipts,
+        public_key_registry=registry,
+        external_identity_provenance=None,
+    )
+    verified = validate_signed_raw_capture(
+        built.durable_raw_capture_payload,
+        capture_content_hash=built.capture_content_hash,
+        public_key_registry=registry,
+    )
+    evidence = raw_repository._deterministic_evidence_records(verified)
+    urls = [row["url"] for row in evidence]
+    assert "https://example.com" in urls
+    assert "https://example.com/sofia" in urls
+    sofia = next(row for row in evidence if row["url"] == "https://example.com/sofia")
+    assert sofia["content"] == "Owned product page copy."
+    assert str(sofia["ref"]).endswith(":subpage.1")
+    assert sofia["metadata"]["verified_raw"] is True
+
+
 def test_repository_prepares_exact_atomic_pre_interpretation_envelope() -> None:
     command, signed, registry = _fixture()
     connection = _Connection()
