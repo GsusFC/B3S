@@ -460,6 +460,7 @@ class EvidenceVaultRawPlanningContext:
     previous_capture_evidence_records: tuple[dict[str, Any], ...]
     known_evidence_records: tuple[dict[str, Any], ...]
     accepted_evidence_tile_relations: tuple[dict[str, Any], ...]
+    accepted_tiles: tuple[dict[str, Any], ...] = ()
     semantic_analysis_contract_fingerprint: str = field(
         default_factory=lambda: current_semantic_analysis_contract()[
             "semantic_analysis_contract_fingerprint"
@@ -1087,6 +1088,22 @@ def _receipt_source_url(acquisition: Any, *, role: str) -> str:
     raise ValueError("receipt role has no safe exact source URL")
 
 
+def _accepted_tiles_from_memory(
+    memory: Mapping[str, Any],
+) -> tuple[dict[str, Any], ...]:
+    content = memory.get("content")
+    if not isinstance(content, Mapping):
+        return ()
+    raw_tiles = content.get("accepted_tiles") or []
+    if not isinstance(raw_tiles, list):
+        return ()
+    tiles: list[dict[str, Any]] = []
+    for raw in raw_tiles:
+        if isinstance(raw, Mapping) and raw.get("tile_id"):
+            tiles.append(_canonical_detach(dict(raw)))
+    return tuple(tiles)
+
+
 def _validate_planning_context(
     value: Any,
     *,
@@ -1188,6 +1205,7 @@ def _validate_planning_context(
         )
         if current_memory.get("canonical_memory_version") != canonical_version:
             raise ValueError("raw planning canonical authority diverged")
+        accepted_tiles = _accepted_tiles_from_memory(current_memory)
 
     def evidence_rows(field: str, *, maximum: int) -> tuple[dict[str, Any], ...]:
         raw_rows = context[field]
@@ -1248,6 +1266,8 @@ def _validate_planning_context(
     existing = context["existing_operation_plan"]
     if existing is not None and not isinstance(existing, Mapping):
         raise ValueError("raw planning existing operation is invalid")
+    if canonical_version is None:
+        accepted_tiles = ()
     return EvidenceVaultRawPlanningContext(
         canonical_memory_version=canonical_version,
         previous_capture_evidence_records=previous,
@@ -1257,6 +1277,7 @@ def _validate_planning_context(
         ),
         semantic_analysis_claimed_fingerprints=semantic_claims,
         accepted_evidence_tile_relations=tuple(relations),
+        accepted_tiles=accepted_tiles,
         existing_operation_plan=(
             _canonical_detach(existing) if existing is not None else None
         ),
@@ -1288,6 +1309,9 @@ def _build_and_validate_plan(
         accepted_evidence_tile_relations=tuple(
             deepcopy(row)
             for row in planning_context.accepted_evidence_tile_relations
+        ),
+        accepted_tiles=tuple(
+            deepcopy(row) for row in planning_context.accepted_tiles
         ),
         existing_operation_plan=(
             deepcopy(planning_context.existing_operation_plan)
@@ -1321,6 +1345,9 @@ def _build_and_validate_plan(
         accepted_evidence_tile_relations=[
             deepcopy(row)
             for row in planning_context.accepted_evidence_tile_relations
+        ],
+        accepted_tiles=[
+            deepcopy(row) for row in planning_context.accepted_tiles
         ],
         canonical_memory_version=planning_context.canonical_memory_version,
     )

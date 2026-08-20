@@ -172,3 +172,32 @@ def test_worker_operation_plan_uses_frozen_history_including_c7() -> None:
         ),
     )
     assert identical["operations"]["llm_required"] is False
+
+    first_light = module._operation_plan(
+        command,
+        previous,
+        module.EvidenceVaultRawPlanningContext(
+            canonical_memory_version="a" * 64,
+            previous_capture_evidence_records=tuple(previous),
+            known_evidence_records=tuple(previous),
+            semantic_analysis_claimed_fingerprints=(previous_fingerprint,),
+            accepted_evidence_tile_relations=(),
+            accepted_tiles=(
+                {"tile_id": "M1", "basis": []},
+                {
+                    "tile_id": "P1",
+                    "basis": [
+                        {
+                            "relation_id": "r1",
+                            "evidence_id": "e1",
+                            "source_identity_id": "s1",
+                            "polarity": "supports",
+                        }
+                    ],
+                },
+            ),
+        ),
+    )
+    assert first_light["operations"]["llm_required"] is True
+    assert "M1" in first_light["operations"]["reevaluate_tile_ids"]
+    assert "P1" not in first_light["operations"]["reevaluate_tile_ids"]
