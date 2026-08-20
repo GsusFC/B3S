@@ -845,9 +845,9 @@ class EvidenceVaultRawRepository:
         evidence_rows = _mapping_rows(projection["evidence_records"], fields=_EVIDENCE_FIELDS)
         receipt_rows = _mapping_rows(projection["receipts"], fields=_RECEIPT_FIELDS)
         binding_rows = _mapping_rows(projection["evidence_bindings"], fields=_BINDING_FIELDS)
-        if not (1 <= len(receipt_rows) <= 2) or len(evidence_rows) != len(receipt_rows):
+        if not (1 <= len(receipt_rows) <= 2) or len(evidence_rows) < len(receipt_rows):
             raise ValueError("raw acquisition row cardinality is invalid")
-        if len(binding_rows) != len(receipt_rows):
+        if len(binding_rows) != len(evidence_rows):
             raise ValueError("raw acquisition binding cardinality is invalid")
 
         expected_workspace_id = str(_stable_uuid("workspace", command.workspace_slug))
@@ -1104,6 +1104,115 @@ def _deterministic_passage_end(document: str) -> int:
     if end < 8 or len(passage) < 4:
         raise ValueError("deterministic passage is not meaningful")
     return end
+
+
+def _raw_evidence_binding_row(
+    *,
+    workspace_id: str,
+    brand_id: str,
+    scan_id: str,
+    capture_id: str,
+    receipt_id: str,
+    receipt_fingerprint: str,
+    role: str,
+    claims: Mapping[str, Any],
+    extracted_document: str,
+    evidence_row: Mapping[str, Any],
+    evidence_id: str,
+) -> dict[str, Any]:
+    extracted_document_sha256 = hashlib.sha256(
+        extracted_document.encode("utf-8")
+    ).hexdigest()
+    if extracted_document_sha256 != claims["extracted_document_sha256"]:
+        raise ValueError("receipt extracted document hash diverged")
+    evidence_content = str(evidence_row["content"])
+    locator = _binding_passage_locator(
+        extracted_document=extracted_document,
+        evidence_content=evidence_content,
+    )
+    passage = reproduce_passage_locator(
+        extracted_document=extracted_document,
+        passage_locator=locator,
+        durable_evidence_record_content=evidence_content,
+    )
+    source_url = str(evidence_row["url"])
+    binding_identity = {
+        "receipt_fingerprint": receipt_fingerprint,
+        "evidence_record_id": evidence_id,
+        "evidence_ref": evidence_row["evidence_ref"],
+        "source_url": source_url,
+        "channel_role": role,
+        "extractor_schema_version": DETERMINISTIC_EXTRACTOR_VERSION,
+        "extractor_version": claims["extractor_version"],
+        "extracted_document_sha256": extracted_document_sha256,
+        "passage_locator": locator,
+        "passage_sha256": passage.passage_sha256,
+        "evidence_record_content_hash": evidence_row["content_hash"],
+    }
+    binding_fingerprint = canonical_fingerprint(_RAW_BINDING_VERSION, binding_identity)
+    binding_id = str(_stable_uuid(capture_id, _RAW_BINDING_VERSION, binding_fingerprint))
+    return {
+        "id": binding_id,
+        "workspace_id": workspace_id,
+        "brand_id": brand_id,
+        "scan_run_id": scan_id,
+        "capture_id": capture_id,
+        "receipt_id": receipt_id,
+        "channel_role": role,
+        "evidence_record_id": evidence_id,
+        "evidence_ref": evidence_row["evidence_ref"],
+        "source_url": source_url,
+        "extractor_schema_version": DETERMINISTIC_EXTRACTOR_VERSION,
+        "extractor_version": claims["extractor_version"],
+        "extracted_document": extracted_document,
+        "extracted_document_sha256": extracted_document_sha256,
+        "passage_locator": locator,
+        "passage_text": passage.passage_text,
+        "passage_sha256": passage.passage_sha256,
+        "evidence_record_content_hash": evidence_row["content_hash"],
+        "binding_fingerprint": binding_fingerprint,
+    }
+
+
+def _binding_passage_locator(
+    *,
+    extracted_document: str,
+    evidence_content: str,
+) -> dict[str, Any]:
+    evidence_bytes = evidence_content.encode("utf-8")
+    extracted_bytes = extracted_document.encode("utf-8")
+    candidates: list[tuple[int, bytes]] = []
+    passage_end = _deterministic_passage_end(evidence_content)
+    candidates.append((0, evidence_bytes[:passage_end]))
+    byte_offset = 0
+    for line in evidence_content.splitlines(keepends=True):
+        line_content = line.rstrip("\r\n")
+        line_bytes = line_content.encode("utf-8")
+        if line_bytes:
+            line_end = min(len(line_bytes), 20_000)
+            while (
+                line_end > 0
+                and line_end < len(line_bytes)
+                and line_bytes[line_end] & 0b1100_0000 == 0b1000_0000
+            ):
+                line_end -= 1
+            candidates.append((byte_offset, line_bytes[:line_end]))
+        byte_offset += len(line.encode("utf-8"))
+    for evidence_start, candidate in candidates:
+        extracted_start = extracted_bytes.find(candidate)
+        try:
+            decoded = candidate.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if extracted_start >= 0 and len(candidate) >= 8 and len(decoded) >= 4:
+            return {
+                "kind": "utf8_byte_range",
+                "extracted_start": extracted_start,
+                "extracted_end": extracted_start + len(candidate),
+                "evidence_start": evidence_start,
+                "evidence_end": evidence_start + len(candidate),
+            }
+    raise ValueError("deterministic evidence has no bindable extracted passage")
 
 
 def _receipt_source_url(acquisition: Any, *, role: str) -> str:
@@ -1439,7 +1548,7 @@ def _build_sql_envelope(
             operation_plan["operation_plan_fingerprint"],
         )
     )
-    evidence_by_fingerprint: dict[str, tuple[dict[str, Any], str]] = {}
+    evidence_by_fingerprint: dict[str, list[tuple[dict[str, Any], str]]] = {}
     evidence_rows: list[dict[str, Any]] = []
     for record in observation.evidence_records:
         row = deepcopy(record)
@@ -1464,7 +1573,9 @@ def _build_sql_envelope(
             "metadata": metadata,
         }
         evidence_rows.append(evidence_row)
-        evidence_by_fingerprint[receipt_fingerprint] = (evidence_row, evidence_id)
+        evidence_by_fingerprint.setdefault(receipt_fingerprint, []).append(
+            (evidence_row, evidence_id)
+        )
 
     receipt_rows: list[dict[str, Any]] = []
     binding_rows: list[dict[str, Any]] = []
@@ -1474,11 +1585,13 @@ def _build_sql_envelope(
     association_dump = association.model_dump(mode="json") if association is not None else None
     for receipt in verified.receipts:
         fingerprint = receipt.receipt_fingerprint
-        evidence_row, evidence_id = evidence_by_fingerprint[fingerprint]
+        receipt_evidence = evidence_by_fingerprint.pop(fingerprint, None)
+        if not receipt_evidence:
+            raise ValueError("raw acquisition receipt lacks deterministic evidence")
         receipt_dump = receipt.model_dump(mode="json")
         claims = receipt_dump["claims"]
         role = str(claims["channel_role"])
-        source_url = str(evidence_row["url"])
+        source_url = _receipt_source_url(receipt.claims.acquisition, role=role)
         receipt_id = str(
             _stable_uuid(capture_id, "evidence-vault-raw-acquisition-receipt-v1", fingerprint)
         )
@@ -1530,61 +1643,29 @@ def _build_sql_envelope(
                 "signature": receipt_dump["signature"],
             }
         )
-        extracted_document = str(evidence_row["content"])
-        passage_end = _deterministic_passage_end(extracted_document)
-        locator = {
-            "kind": "utf8_byte_range",
-            "extracted_start": 0,
-            "extracted_end": passage_end,
-            "evidence_start": 0,
-            "evidence_end": passage_end,
-        }
-        passage = reproduce_passage_locator(
-            extracted_document=extracted_document,
-            passage_locator=locator,
-            durable_evidence_record_content=str(evidence_row["content"]),
+        extraction = extract_deterministic_document(
+            verified,
+            receipt_fingerprint=fingerprint,
         )
-        binding_identity = {
-            "receipt_fingerprint": fingerprint,
-            "evidence_record_id": evidence_id,
-            "evidence_ref": evidence_row["evidence_ref"],
-            "source_url": source_url,
-            "channel_role": role,
-            "extractor_schema_version": DETERMINISTIC_EXTRACTOR_VERSION,
-            "extractor_version": claims["extractor_version"],
-            "extracted_document_sha256": claims["extracted_document_sha256"],
-            "passage_locator": locator,
-            "passage_sha256": passage.passage_sha256,
-            "evidence_record_content_hash": evidence_row["content_hash"],
-        }
-        binding_fingerprint = canonical_fingerprint(_RAW_BINDING_VERSION, binding_identity)
-        binding_id = str(
-            _stable_uuid(capture_id, _RAW_BINDING_VERSION, binding_fingerprint)
-        )
-        binding_ids.append(binding_id)
-        binding_rows.append(
-            {
-                "id": binding_id,
-                "workspace_id": workspace_id,
-                "brand_id": brand_id,
-                "scan_run_id": scan_id,
-                "capture_id": capture_id,
-                "receipt_id": receipt_id,
-                "channel_role": role,
-                "evidence_record_id": evidence_id,
-                "evidence_ref": evidence_row["evidence_ref"],
-                "source_url": source_url,
-                "extractor_schema_version": DETERMINISTIC_EXTRACTOR_VERSION,
-                "extractor_version": claims["extractor_version"],
-                "extracted_document": extracted_document,
-                "extracted_document_sha256": claims["extracted_document_sha256"],
-                "passage_locator": locator,
-                "passage_text": passage.passage_text,
-                "passage_sha256": passage.passage_sha256,
-                "evidence_record_content_hash": evidence_row["content_hash"],
-                "binding_fingerprint": binding_fingerprint,
-            }
-        )
+        for evidence_row, evidence_id in receipt_evidence:
+            binding_row = _raw_evidence_binding_row(
+                workspace_id=workspace_id,
+                brand_id=brand_id,
+                scan_id=scan_id,
+                capture_id=capture_id,
+                receipt_id=receipt_id,
+                receipt_fingerprint=fingerprint,
+                role=role,
+                claims=claims,
+                extracted_document=extraction.document,
+                evidence_row=evidence_row,
+                evidence_id=evidence_id,
+            )
+            binding_ids.append(str(binding_row["id"]))
+            binding_rows.append(binding_row)
+
+    if evidence_by_fingerprint:
+        raise ValueError("deterministic evidence references an unknown receipt")
 
     plan_row = {
         "id": plan_id,
@@ -1911,11 +1992,10 @@ def _validate_receipt_and_binding_rows(
         str(row["channel_role"]): row for row in prepared.envelope["receipts"]
     }
     expected_bindings = {
-        str(row["channel_role"]): row
-        for row in prepared.envelope["evidence_bindings"]
+        _uuid_text(row["id"]): row for row in prepared.envelope["evidence_bindings"]
     }
     durable_receipts = {str(row["channel_role"]): row for row in receipt_rows}
-    durable_bindings = {str(row["channel_role"]): row for row in binding_rows}
+    durable_bindings = {_uuid_text(row["id"]): row for row in binding_rows}
     durable_evidence = {str(row["id"]): row for row in evidence_rows}
     if len(durable_evidence) != len(evidence_rows):
         raise ValueError("durable evidence identity set is not unique")
@@ -1926,6 +2006,18 @@ def _validate_receipt_and_binding_rows(
         or len(durable_bindings) != len(binding_rows)
     ):
         raise ValueError("durable role set diverged")
+    durable_evidence_binding_ids = [
+        _uuid_text(row["evidence_record_id"]) for row in binding_rows
+    ]
+    if (
+        len(durable_evidence_binding_ids) != len(set(durable_evidence_binding_ids))
+        or set(durable_evidence_binding_ids) != set(durable_evidence)
+    ):
+        raise ValueError("durable evidence binding coverage diverged")
+    durable_receipt_ids = {_uuid_text(row["id"]) for row in receipt_rows}
+    bound_receipt_ids = {_uuid_text(row["receipt_id"]) for row in binding_rows}
+    if bound_receipt_ids != durable_receipt_ids:
+        raise ValueError("durable receipt binding coverage diverged")
 
     arrivals: list[DurableReceiptReadback] = []
     verified_for_time: list[Any] = []
@@ -1981,8 +2073,8 @@ def _validate_receipt_and_binding_rows(
             )
         )
 
-        binding = durable_bindings[role]
-        expected_binding = expected_bindings[role]
+    for binding_id, expected_binding in expected_bindings.items():
+        binding = durable_bindings[binding_id]
         for field in set(expected_binding):
             if _json_comparable(binding[field]) != _json_comparable(expected_binding[field]):
                 raise ValueError("durable raw evidence binding diverged")

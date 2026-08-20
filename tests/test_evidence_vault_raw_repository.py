@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timezone
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 import hashlib
 import os
 import runpy
@@ -36,9 +37,13 @@ from src.services.evidence_vault_raw_provenance import (
     PUBLIC_KEY_REGISTRY_VERSION,
     RAW_ACQUISITION_RECEIPT_VERSION,
     DirectAcquisition,
+    ExternalIdentityProvenance,
+    ProviderApiAcquisition,
     PreReceiptSnapshot,
     PublicKeyRegistry,
     RawAcquisitionReceiptClaims,
+    evidence_memory_source_identity_id,
+    external_identity_provenance_fingerprint,
     pre_receipt_snapshot_sha256,
     receipt_set_fingerprint,
     sign_raw_acquisition_receipt,
@@ -256,6 +261,211 @@ def _fixture(
     return command, signed, registry
 
 
+def _fixture_with_external(
+    document: str,
+) -> tuple[
+    TrustedAcquisitionCommand,
+    SignedAcquisition,
+    PublicKeyRegistry,
+]:
+    command, owned_only, registry = _fixture(document=document)
+    private_key = Ed25519PrivateKey.generate()
+    public_key = base64.b64encode(
+        private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    ).decode("ascii")
+    registry = PublicKeyRegistry.model_validate(
+        {
+            "schema_version": PUBLIC_KEY_REGISTRY_VERSION,
+            "current_key_id": "repository-external-test-v1",
+            "keys": {
+                "repository-external-test-v1": {
+                    "version": 1,
+                    "status": "current",
+                    "signing_not_before": "2026-01-01T00:00:00Z",
+                    "signing_ended_at": None,
+                    "public_key_base64": public_key,
+                }
+            },
+        }
+    )
+    external_url = "https://www.linkedin.com/company/example"
+    raw_payload = deepcopy(owned_only.pre_receipt_snapshot.raw_payload)
+    raw_payload["sources"]["owned"]["linkedin"] = external_url
+    raw_payload["sources"]["external"] = {
+        "url": external_url,
+        "title": "Example Company",
+        "summary": "Independent external evidence.",
+        "text": "External profile proof.",
+        "highlights": ["Verified external highlight."],
+    }
+    raw_payload["acquisition_outcome"] = {
+        "schema_version": "evidence-vault-acquisition-outcome-v1",
+        "external": "captured",
+        "failure_reason": None,
+    }
+    snapshot = PreReceiptSnapshot(
+        schema_version=PRE_RECEIPT_SNAPSHOT_VERSION,
+        workspace_slug=command.workspace_slug,
+        source_scan_id=command.source_scan_id,
+        acquisition_session_id=str(uuid4()),
+        canonical_brand_domain="example.com",
+        canonical_brand_url=command.brand_url,
+        raw_payload=raw_payload,
+    )
+    snapshot_hash = pre_receipt_snapshot_sha256(snapshot)
+    fetched_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+    owned_fragment = raw_payload["sources"]["owned"]
+    owned_claims = RawAcquisitionReceiptClaims(
+        schema_version=RAW_ACQUISITION_RECEIPT_VERSION,
+        freshness_policy_version=C7_LIVE_FRESHNESS_POLICY_VERSION,
+        key_id="repository-external-test-v1",
+        receipt_nonce=str(uuid4()),
+        acquisition_session_id=snapshot.acquisition_session_id,
+        workspace_slug=command.workspace_slug,
+        source_scan_id=command.source_scan_id,
+        canonical_brand_domain="example.com",
+        channel_role="owned_web",
+        pre_receipt_snapshot_sha256=snapshot_hash,
+        provider="direct_http",
+        acquisition=DirectAcquisition(
+            acquisition_mode="direct_http",
+            requested_url=command.brand_url,
+            redirect_chain=[],
+            final_url=command.brand_url,
+        ),
+        fetched_at=fetched_at,
+        status_code=200,
+        selected_headers={"content-type": "text/html"},
+        media_type="text/html",
+        byte_count=128,
+        raw_fragment_json_pointer="/sources/owned",
+        raw_fragment_sha256=hashlib.sha256(
+            canonical_json(owned_fragment).encode()
+        ).hexdigest(),
+        extracted_document_sha256=hashlib.sha256(document.encode()).hexdigest(),
+        extractor_version=DETERMINISTIC_EXTRACTOR_VERSION,
+        external_identity_provenance_fingerprint=None,
+    )
+    owned_receipt = sign_raw_acquisition_receipt(
+        owned_claims,
+        private_key=private_key,
+        public_key_registry=registry,
+    )
+    association = ExternalIdentityProvenance(
+        schema_version="external-identity-provenance-v1",
+        policy_version="evidence-vault-external-identity-association-policy-v1",
+        association_method="owned_raw_links_external_profile",
+        canonical_brand_domain="example.com",
+        owned_source_url=command.brand_url,
+        external_source_url=external_url,
+        proof_receipt_fingerprint=owned_receipt.receipt_fingerprint,
+        raw_fact_role="owned_web",
+        raw_fact_json_pointer="/sources/owned/linkedin",
+        raw_fact_sha256=hashlib.sha256(canonical_json(external_url).encode()).hexdigest(),
+        source_identity_schema_version="evidence-memory-document-v2",
+        owned_source_identity_id=evidence_memory_source_identity_id(
+            source_url=command.brand_url,
+            raw_fact_role="owned_web",
+        ),
+        external_source_identity_id=evidence_memory_source_identity_id(
+            source_url=external_url,
+            raw_fact_role="external_social_profile",
+        ),
+    )
+    external_fragment = raw_payload["sources"]["external"]
+    external_document = (
+        "Example Company Independent external evidence. "
+        "Verified external highlight. External profile proof."
+    )
+    external_claims = RawAcquisitionReceiptClaims(
+        schema_version=RAW_ACQUISITION_RECEIPT_VERSION,
+        freshness_policy_version=C7_LIVE_FRESHNESS_POLICY_VERSION,
+        key_id="repository-external-test-v1",
+        receipt_nonce=str(uuid4()),
+        acquisition_session_id=snapshot.acquisition_session_id,
+        workspace_slug=command.workspace_slug,
+        source_scan_id=command.source_scan_id,
+        canonical_brand_domain="example.com",
+        channel_role="external_social_profile",
+        pre_receipt_snapshot_sha256=snapshot_hash,
+        provider="exa",
+        acquisition=ProviderApiAcquisition(
+            acquisition_mode="provider_api",
+            provider_request_fingerprint="a" * 64,
+            result_ordinal=0,
+            reported_source_url=external_url,
+            redirect_chain=[],
+        ),
+        fetched_at=fetched_at,
+        status_code=200,
+        selected_headers={"content-type": "application/json"},
+        media_type="application/json",
+        byte_count=128,
+        raw_fragment_json_pointer="/sources/external",
+        raw_fragment_sha256=hashlib.sha256(
+            canonical_json(external_fragment).encode()
+        ).hexdigest(),
+        extracted_document_sha256=hashlib.sha256(
+            external_document.encode()
+        ).hexdigest(),
+        extractor_version=DETERMINISTIC_EXTRACTOR_VERSION,
+        external_identity_provenance_fingerprint=(
+            external_identity_provenance_fingerprint(association)
+        ),
+    )
+    external_receipt = sign_raw_acquisition_receipt(
+        external_claims,
+        private_key=private_key,
+        public_key_registry=registry,
+    )
+    receipts = sorted(
+        [owned_receipt, external_receipt],
+        key=lambda receipt: receipt.receipt_fingerprint,
+    )
+    return (
+        command,
+        SignedAcquisition(
+            pre_receipt_snapshot=snapshot,
+            receipts=receipts,
+            receipt_set_fingerprint=receipt_set_fingerprint(receipts),
+            external_identity_provenance=association,
+        ),
+        registry,
+    )
+
+
+def _durable_provenance_rows(
+    prepared: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], datetime]:
+    watermark = {"id": str(uuid4()), "capture_sequence": 1}
+    receipts = deepcopy(prepared.envelope["receipts"])
+    latest_received_at = datetime.min.replace(tzinfo=timezone.utc)
+    for receipt in receipts:
+        fetched_at = datetime.fromisoformat(
+            str(receipt["fetched_at"]).replace("Z", "+00:00")
+        )
+        received_at = fetched_at + timedelta(seconds=1)
+        receipt.update(
+            {
+                "watermark_event_id": watermark["id"],
+                "capture_sequence": watermark["capture_sequence"],
+                "received_at": received_at,
+                "eligible_until": fetched_at + timedelta(hours=24),
+                "created_at": received_at,
+            }
+        )
+        latest_received_at = max(latest_received_at, received_at)
+    bindings = deepcopy(prepared.envelope["evidence_bindings"])
+    for binding in bindings:
+        binding["created_at"] = latest_received_at
+    return receipts, bindings, watermark, latest_received_at + timedelta(seconds=1)
+
+
 def _plan(
     command: TrustedAcquisitionCommand,
     evidence: Any,
@@ -469,6 +679,144 @@ def test_deterministic_evidence_records_split_owned_subpages() -> None:
     assert sofia["content"] == "Owned product page copy."
     assert str(sofia["ref"]).endswith(":subpage.1")
     assert sofia["metadata"]["verified_raw"] is True
+
+
+def test_repository_binds_every_owned_subpage_alongside_external_evidence() -> None:
+    document = (
+        "Home copy for the brand.\n\n---\n"
+        "## Subpage: https://example.com/sofia\n"
+        "Owned product page copy."
+    )
+    command, signed, registry = _fixture_with_external(document)
+    repository = EvidenceVaultRawRepository(
+        "postgresql://scanner-ingest",
+        public_key_registry=registry,
+        operation_plan_builder=_plan,
+        **_UNIT_TARGET,
+        connect=_Connector(_Connection()),
+    )
+    built = build_signed_raw_capture(
+        signed.pre_receipt_snapshot,
+        signed.receipts,
+        public_key_registry=registry,
+        external_identity_provenance=signed.external_identity_provenance,
+    )
+    verified = validate_signed_raw_capture(
+        built.durable_raw_capture_payload,
+        capture_content_hash=built.capture_content_hash,
+        public_key_registry=registry,
+    )
+
+    prepared = repository._EvidenceVaultRawRepository__prepare(command, verified)
+
+    assert len(prepared.envelope["receipts"]) == 2
+    assert len(prepared.envelope["evidence_records"]) == 3
+    assert len(prepared.envelope["evidence_bindings"]) == 3
+    assert {
+        binding["evidence_ref"]
+        for binding in prepared.envelope["evidence_bindings"]
+    } == {
+        evidence["evidence_ref"]
+        for evidence in prepared.envelope["evidence_records"]
+    }
+    owned_receipt = next(
+        receipt
+        for receipt in prepared.envelope["receipts"]
+        if receipt["channel_role"] == "owned_web"
+    )
+    owned_bindings = [
+        binding
+        for binding in prepared.envelope["evidence_bindings"]
+        if binding["receipt_id"] == owned_receipt["id"]
+    ]
+    assert len(owned_bindings) == 2
+    assert {binding["source_url"] for binding in owned_bindings} == {
+        "https://example.com",
+        "https://example.com/sofia",
+    }
+    assert all(binding["extracted_document"] == document for binding in owned_bindings)
+    assert all(
+        binding["extracted_document_sha256"]
+        == owned_receipt["extracted_document_sha256"]
+        for binding in owned_bindings
+    )
+    sofia_binding = next(
+        binding
+        for binding in owned_bindings
+        if binding["source_url"] == "https://example.com/sofia"
+    )
+    assert sofia_binding["passage_text"] == "Owned product page copy."
+    assert sofia_binding["passage_locator"]["extracted_start"] > 0
+    receipts, bindings, watermark, database_time = _durable_provenance_rows(
+        prepared
+    )
+    readback = raw_repository._validate_receipt_and_binding_rows(
+        receipts,
+        bindings,
+        evidence_rows=prepared.envelope["evidence_records"],
+        prepared=prepared,
+        watermark=watermark,
+        database_time=database_time,
+        registry=registry,
+    )
+    assert len(readback) == 2
+
+
+@pytest.mark.parametrize("malformation", ["missing", "duplicate", "wrong_receipt"])
+def test_repository_rejects_incomplete_or_malformed_subpage_bindings(
+    malformation: str,
+) -> None:
+    document = (
+        "Home copy for the brand.\n\n---\n"
+        "## Subpage: https://example.com/sofia\n"
+        "Owned product page copy."
+    )
+    command, signed, registry = _fixture_with_external(document)
+    repository = EvidenceVaultRawRepository(
+        "postgresql://scanner-ingest",
+        public_key_registry=registry,
+        operation_plan_builder=_plan,
+        **_UNIT_TARGET,
+        connect=_Connector(_Connection()),
+    )
+    built = build_signed_raw_capture(
+        signed.pre_receipt_snapshot,
+        signed.receipts,
+        public_key_registry=registry,
+        external_identity_provenance=signed.external_identity_provenance,
+    )
+    verified = validate_signed_raw_capture(
+        built.durable_raw_capture_payload,
+        capture_content_hash=built.capture_content_hash,
+        public_key_registry=registry,
+    )
+    prepared = repository._EvidenceVaultRawRepository__prepare(command, verified)
+    receipts, bindings, watermark, database_time = _durable_provenance_rows(
+        prepared
+    )
+    if malformation == "missing":
+        bindings.pop()
+    elif malformation == "duplicate":
+        bindings.append(deepcopy(bindings[0]))
+    else:
+        binding = next(
+            row for row in bindings if row["channel_role"] == "owned_web"
+        )
+        other_receipt = next(
+            row for row in receipts if row["channel_role"] != "owned_web"
+        )
+        binding["receipt_id"] = other_receipt["id"]
+
+    with pytest.raises(ValueError):
+        raw_repository._validate_receipt_and_binding_rows(
+            receipts,
+            bindings,
+            evidence_rows=prepared.envelope["evidence_records"],
+            prepared=prepared,
+            watermark=watermark,
+            database_time=database_time,
+            registry=registry,
+        )
 
 
 def test_repository_prepares_exact_atomic_pre_interpretation_envelope() -> None:
@@ -1046,7 +1394,11 @@ def test_postgres_scanner_execute_role_persists_looks_up_and_replays() -> None:
         "expected_neon_branch_id": None,
         "expected_role": role,
     }
-    command, signed, registry = _fixture()
+    command, signed, registry = _fixture_with_external(
+        "Home copy for the brand.\n\n---\n"
+        "## Subpage: https://example.com/sofia\n"
+        "Owned product page copy."
+    )
     planner_calls = 0
 
     def counted_plan(
@@ -1095,6 +1447,23 @@ def test_postgres_scanner_execute_role_persists_looks_up_and_replays() -> None:
         assert first.capture_content_hash == looked_up.capture_content_hash
         assert first.receipt_rows == looked_up.receipt_rows == replayed.receipt_rows
         assert first.durable_raw_capture_payload == looked_up.durable_raw_capture_payload
+        with psycopg.connect(admin_dsn) as admin:
+            counts = admin.execute(
+                """SELECT
+                    (SELECT count(*)
+                     FROM b3s_history.evidence_records AS evidence
+                     JOIN b3s_history.captures AS captures
+                       ON captures.id = evidence.capture_id
+                     WHERE captures.id = %s),
+                    (SELECT count(*)
+                     FROM b3s_history.evidence_vault_raw_acquisition_receipts
+                     WHERE capture_id = %s),
+                    (SELECT count(*)
+                     FROM b3s_history.evidence_vault_raw_evidence_bindings
+                     WHERE capture_id = %s)""",
+                (first.capture_id, first.capture_id, first.capture_id),
+            ).fetchone()
+        assert counts == (3, 2, 3)
 
         with psycopg.connect(scanner_dsn) as scanner:
             frozen_before = scanner.execute(
