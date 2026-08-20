@@ -316,6 +316,83 @@ def test_owned_http_fetcher_records_real_redirect_body_headers_and_owned_link() 
         "etag": '"exact"',
     }
     assert len(observation.redirect_chain) == 1
+    assert "## Subpage:" not in str(observation.raw_fragment["text"])
+
+
+def test_owned_http_fetcher_appends_same_brand_subpages_like_fly() -> None:
+    home = (
+        b'<html><a href="/sofia">SofIA</a>'
+        b"<p>Encuentra talento real en horas.</p></html>"
+    )
+    sofia = (
+        b"<html><h1>SofIA</h1>"
+        b"<p>Ecosistema propietario para que el reclutamiento vuelva a ser "
+        b"estrategico.</p></html>"
+    )
+    client = _GetClient(
+        [
+            _Response(200, home, {"content-type": "text/html; charset=utf-8"}),
+            _Response(200, sofia, {"content-type": "text/html; charset=utf-8"}),
+        ]
+    )
+    observation = HttpxOwnedFetcher(
+        client,
+        resolver=_global_resolver,
+    )(_command())
+    text = str(observation.raw_fragment["text"])
+    assert "talento real" in text
+    assert "## Subpage: https://example.com/sofia" in text
+    assert "reclutamiento vuelva a ser estrategico" in text
+    assert [url for url, _kwargs in client.calls] == [
+        "https://example.com",
+        "https://example.com/sofia",
+    ]
+
+
+def test_verified_raw_owned_subpages_become_separate_evidence_records() -> None:
+    from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
+
+    fingerprint = "b" * 64
+    pack = build_evidence_pack_from_snapshot(
+        {
+            "run": {
+                "id": 1,
+                "brand_name": "Leeters",
+                "url": "https://leeters.com",
+            },
+            "raw_inputs": [
+                {
+                    "source": "verified_raw_document",
+                    "payload": {
+                        "role": "owned_web",
+                        "url": "https://www.leeters.com/",
+                        "content": (
+                            "Encuentra talento real en horas.\n\n---\n"
+                            "## Subpage: https://www.leeters.com/sofia\n"
+                            "Ecosistema propietario para que el reclutamiento "
+                            "vuelva a ser estrategico."
+                        ),
+                        "extracted_document_sha256": "a" * 64,
+                        "extractor_version": (
+                            "evidence-vault-deterministic-extractor-v1"
+                        ),
+                        "receipt_fingerprint": fingerprint,
+                    },
+                }
+            ],
+        },
+        include_acquisition_steps=False,
+    )
+    urls = [record.url for record in pack.evidence]
+    assert "https://www.leeters.com/" in urls
+    assert "https://www.leeters.com/sofia" in urls
+    sofia = next(
+        record
+        for record in pack.evidence
+        if record.url == "https://www.leeters.com/sofia"
+    )
+    assert "estrategico" in sofia.content
+    assert sofia.metadata.get("verified_raw") is True
 
 
 def test_owned_http_fetcher_rejects_private_dns_and_cross_brand_redirect() -> None:
