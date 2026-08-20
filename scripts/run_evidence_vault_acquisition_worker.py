@@ -161,6 +161,7 @@ def _operation_plan(
             planning_context.semantic_analysis_claimed_fingerprints
         ),
         accepted_evidence_tile_relations=relations,
+        accepted_tiles=list(planning_context.accepted_tiles),
         canonical_memory_version=planning_context.canonical_memory_version,
     )
 
