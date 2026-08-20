@@ -935,6 +935,63 @@ def test_home_lists_one_selected_analysis_per_brand(monkeypatch):
     assert 'data-row-href="/brand/livellup.com?lang=es"' in response.text
 
 
+def test_home_publishes_gemini_sv9_over_semantic_v3_baseline(monkeypatch):
+    from web.app import app
+
+    semantic = {
+        "id": "semantic-v3",
+        "brand_name": "Leeters",
+        "url": "https://leeters.com",
+        "score": 3,
+        "detected_count": 3,
+        "block_count": 9,
+        "not_detected": [],
+        "created_at": "2026-08-20T07:00:00+00:00",
+        "reliability_status": "shadow",
+        "canonical_status": "provisional",
+        "components": [],
+        "raw": {
+            "sv9": {
+                "result": {
+                    "evaluator_model": "evidence-vault-semantic-scoring-v3",
+                }
+            }
+        },
+    }
+    sv9 = {
+        **semantic,
+        "id": "gemini-sv9",
+        "score": 38,
+        "detected_count": 7,
+        "created_at": "2026-08-20T07:17:22+00:00",
+        "canonical_status": "non_canonical",
+        "raw": {
+            "sv9": {
+                "result": {"evaluator_model": "gemini-3.1-flash-lite"}
+            }
+        },
+        "stability": {
+            "classification": "contract_mismatch",
+            "canonical_status": "non_canonical",
+        },
+    }
+
+    monkeypatch.setenv("B3S_CANONICAL_ENFORCEMENT_MODE", "repeated")
+    monkeypatch.setattr("web.app.list_reports", lambda: [sv9, semantic])
+    monkeypatch.setattr(
+        "web.app.list_reports_for_domain",
+        lambda _domain: [sv9, semantic],
+    )
+
+    response = TestClient(app).get("/")
+
+    assert response.status_code == 200
+    assert response.text.count("https://leeters.com") == 1
+    assert "<strong>38</strong>" in response.text
+    assert "<strong>3</strong>" not in response.text
+    assert "diagnóstico" not in response.text
+
+
 def test_home_hides_a_later_drifted_scan_behind_selected_score(monkeypatch):
     from web.app import app
 
