@@ -11550,14 +11550,6 @@ def _validate_vault_operation_result_for_plan(
         raise CaptureConflictError(
             "executor shortlists are not derived from its semantic labels"
         )
-    relation_pair_count = sum(len(rows) for rows in shortlists.values())
-    if (
-        plan.get("mode") != "baseline"
-        and relation_pair_count > 120
-    ):
-        raise CaptureConflictError(
-            "incremental relation workset exceeds its single-call bound"
-        )
     semantic_contract = semantic_analysis_contract_from_plan(plan)
     proposal = result.get("relation_proposal")
     supported_proposal_versions = {

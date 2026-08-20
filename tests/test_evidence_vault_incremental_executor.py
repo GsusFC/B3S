@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 import json
 
 import pytest
@@ -570,6 +571,8 @@ def test_incremental_relation_work_is_chunked_instead_of_rejected() -> None:
     assert sum(len(rows) for rows in result["tile_shortlists"].values()) > 120
     assert result["relation_proposal_call_count"] >= 2
     assert llm.calls.count("evidence_tile_relation_proposals") >= 2
+    persist_source = Path("src/history/repository.py").read_text(encoding="utf-8")
+    assert "incremental relation workset exceeds its single-call bound" not in persist_source
 
 
 class BroadLabelExecutorLLM(ExecutorLLM):
