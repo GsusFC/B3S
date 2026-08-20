@@ -31,6 +31,8 @@ def test_receipt_evidence_cardinality_migration_is_forward_only_and_fail_closed(
         in sql
     )
     assert "raw evidence binding replay diverges from immutable stored content" in sql
+    assert "scan replay diverges from stored immutable identity" in sql
+    assert "raw acquisition base observation identity is inconsistent" in sql
     assert "DROP TABLE" not in sql
     assert "DELETE FROM" not in sql
     assert "TRUNCATE" not in sql

@@ -210,6 +210,185 @@ BEGIN
             RAISE EXCEPTION
                 'pre-existing scan/capture cannot be upgraded with raw provenance';
         END IF;
+        -- Exact 1:N replay cannot call the 1:1 helper, but it must still fail
+        -- closed on inconsistent envelopes and tampered stored identity.
+        IF (payload #>> '{scan_run,workspace_id}')::uuid
+                IS DISTINCT FROM (payload #>> '{workspace,id}')::uuid
+           OR (payload #>> '{brand,workspace_id}')::uuid
+                IS DISTINCT FROM (payload #>> '{workspace,id}')::uuid
+           OR (payload #>> '{scan_run,brand_id}')::uuid
+                IS DISTINCT FROM (payload #>> '{brand,id}')::uuid
+           OR (payload #>> '{operation_plan,workspace_id}')::uuid
+                IS DISTINCT FROM (payload #>> '{workspace,id}')::uuid
+           OR (payload #>> '{operation_plan,brand_id}')::uuid
+                IS DISTINCT FROM (payload #>> '{brand,id}')::uuid
+           OR (payload #>> '{operation_plan,scan_run_id}')::uuid
+                IS DISTINCT FROM (payload #>> '{scan_run,id}')::uuid
+           OR (payload #>> '{capture,scan_run_id}')::uuid
+                IS DISTINCT FROM (payload #>> '{scan_run,id}')::uuid
+           OR (payload #>> '{capture,brand_id}')::uuid
+                IS DISTINCT FROM (payload #>> '{brand,id}')::uuid
+           OR (
+                SELECT first_receipt.workspace_id
+                           IS DISTINCT FROM (payload #>> '{workspace,id}')::uuid
+                    OR first_receipt.brand_id
+                           IS DISTINCT FROM (payload #>> '{brand,id}')::uuid
+                    OR first_receipt.scan_run_id
+                           IS DISTINCT FROM (payload #>> '{scan_run,id}')::uuid
+                    OR first_receipt.capture_id
+                           IS DISTINCT FROM (payload #>> '{capture,id}')::uuid
+                FROM jsonb_populate_recordset(
+                    NULL::b3s_history.evidence_vault_raw_acquisition_receipts,
+                    payload -> 'receipts'
+                ) AS first_receipt
+                LIMIT 1
+           ) THEN
+            RAISE EXCEPTION
+                'raw acquisition base observation identity is inconsistent';
+        END IF;
+        IF payload #>> '{capture,content_hash}' IS DISTINCT FROM encode(sha256(
+                convert_to(
+                    b3s_history.evidence_vault_canonical_json(
+                        payload -> 'capture' -> 'raw_payload'
+                    ),
+                    'UTF8'
+                )
+           ), 'hex')
+           OR payload #>> '{scan_run,metadata,observation_hash}'
+                IS DISTINCT FROM encode(sha256(convert_to(
+                    b3s_history.evidence_vault_canonical_json(
+                        COALESCE(
+                            payload -> 'scan_run' -> 'request_payload',
+                            '{}'::jsonb
+                        )
+                    ),
+                    'UTF8'
+                )), 'hex')
+           OR payload #>> '{scan_run,request_payload,schema_version}'
+                IS DISTINCT FROM 'b3s-capture-observation-v1'
+           OR payload #>> '{scan_run,request_payload,source_scan_id}'
+                IS DISTINCT FROM payload #>> '{scan_run,source_scan_id}'
+           OR payload #>> '{scan_run,request_payload,url}'
+                IS DISTINCT FROM payload #>> '{capture,source_url}'
+           OR (payload -> 'scan_run' -> 'request_payload' -> 'capture_payload')
+                IS DISTINCT FROM (payload -> 'capture' -> 'raw_payload')
+           OR (payload #>> '{scan_run,request_payload,observed_at}')::timestamptz
+                IS DISTINCT FROM (payload #>> '{capture,observed_at}')::timestamptz
+           OR (payload #>> '{scan_run,request_payload,recorded_at}')::timestamptz
+                IS DISTINCT FROM (payload #>> '{capture,recorded_at}')::timestamptz
+           OR (payload #>> '{scan_run,recorded_at}')::timestamptz
+                IS DISTINCT FROM (payload #>> '{capture,recorded_at}')::timestamptz
+           OR payload #>> '{scan_run,request_payload,pipeline_version}'
+                IS DISTINCT FROM payload #>> '{scan_run,pipeline_version}'
+           OR payload #>> '{scan_run,request_payload,acquisition_state}'
+                IS DISTINCT FROM payload #>> '{scan_run,acquisition_state}'
+           OR payload #>> '{watermark_event,capture_content_hash}'
+                IS DISTINCT FROM payload #>> '{capture,content_hash}'
+           OR payload #>> '{watermark_event,capture_observation_hash}'
+                IS DISTINCT FROM payload #>> '{scan_run,metadata,observation_hash}'
+           OR payload #>> '{watermark_event,append_origin}'
+                IS DISTINCT FROM 'capture_observation_commit'
+           OR payload #>> '{operation_plan,observation_hash}'
+                IS DISTINCT FROM payload #>> '{scan_run,metadata,observation_hash}'
+        THEN
+            RAISE EXCEPTION
+                'prepared capture/observation/operation-plan content is invalid';
+        END IF;
+        -- Exact 1:N replay cannot call the 1:1 helper, but it must still fail
+        -- closed when stored scan or receipt identity was tampered with.
+        IF NOT EXISTS (
+            SELECT 1
+            FROM b3s_history.scan_runs AS stored
+            JOIN jsonb_populate_record(
+                NULL::b3s_history.scan_runs, payload -> 'scan_run'
+            ) AS supplied ON stored.id = supplied.id
+            WHERE stored.workspace_id IS NOT DISTINCT FROM supplied.workspace_id
+              AND stored.brand_id IS NOT DISTINCT FROM supplied.brand_id
+              AND stored.source_scan_id IS NOT DISTINCT FROM supplied.source_scan_id
+              AND stored.source_run_id
+                    IS NOT DISTINCT FROM COALESCE(supplied.source_run_id, '')
+              AND stored.status IS NOT DISTINCT FROM supplied.status
+              AND stored.pipeline_version IS NOT DISTINCT FROM supplied.pipeline_version
+              AND stored.acquisition_state IS NOT DISTINCT FROM COALESCE(
+                    supplied.acquisition_state, 'unknown'
+              )
+              AND stored.requested_at IS NOT DISTINCT FROM supplied.requested_at
+              AND stored.started_at IS NOT DISTINCT FROM supplied.started_at
+              AND stored.completed_at IS NOT DISTINCT FROM supplied.completed_at
+              AND stored.recorded_at IS NOT DISTINCT FROM supplied.recorded_at
+              AND stored.error_summary
+                    IS NOT DISTINCT FROM COALESCE(supplied.error_summary, '')
+              AND stored.request_payload IS NOT DISTINCT FROM COALESCE(
+                    supplied.request_payload, '{}'::jsonb
+              )
+              AND stored.metadata IS NOT DISTINCT FROM COALESCE(
+                    supplied.metadata, '{}'::jsonb
+              )
+        ) THEN
+            RAISE EXCEPTION 'scan replay diverges from stored immutable identity';
+        END IF;
+        IF EXISTS (
+            SELECT 1
+            FROM jsonb_populate_recordset(
+                NULL::b3s_history.evidence_vault_raw_acquisition_receipts,
+                payload -> 'receipts'
+            ) AS supplied
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM b3s_history.evidence_vault_raw_acquisition_receipts AS stored
+                WHERE stored.receipt_fingerprint = supplied.receipt_fingerprint
+                  AND stored.id IS NOT DISTINCT FROM supplied.id
+                  AND stored.workspace_id IS NOT DISTINCT FROM supplied.workspace_id
+                  AND stored.brand_id IS NOT DISTINCT FROM supplied.brand_id
+                  AND stored.scan_run_id IS NOT DISTINCT FROM supplied.scan_run_id
+                  AND stored.source_scan_id IS NOT DISTINCT FROM supplied.source_scan_id
+                  AND stored.capture_id IS NOT DISTINCT FROM supplied.capture_id
+                  AND stored.watermark_event_id
+                        IS NOT DISTINCT FROM existing_watermark.id
+                  AND stored.capture_sequence
+                        IS NOT DISTINCT FROM existing_watermark.capture_sequence
+                  AND stored.key_id IS NOT DISTINCT FROM supplied.key_id
+                  AND stored.receipt_nonce IS NOT DISTINCT FROM supplied.receipt_nonce
+                  AND stored.acquisition_session_id
+                        IS NOT DISTINCT FROM supplied.acquisition_session_id
+                  AND stored.receipt_schema_version
+                        IS NOT DISTINCT FROM supplied.receipt_schema_version
+                  AND stored.freshness_policy_version
+                        IS NOT DISTINCT FROM supplied.freshness_policy_version
+                  AND stored.signature_schema_version
+                        IS NOT DISTINCT FROM supplied.signature_schema_version
+                  AND stored.workspace_slug IS NOT DISTINCT FROM supplied.workspace_slug
+                  AND stored.canonical_brand
+                        IS NOT DISTINCT FROM supplied.canonical_brand
+                  AND stored.channel_role IS NOT DISTINCT FROM supplied.channel_role
+                  AND stored.provider IS NOT DISTINCT FROM supplied.provider
+                  AND stored.acquisition_mode
+                        IS NOT DISTINCT FROM supplied.acquisition_mode
+                  AND stored.pre_receipt_snapshot_sha256
+                        IS NOT DISTINCT FROM supplied.pre_receipt_snapshot_sha256
+                  AND stored.source_url IS NOT DISTINCT FROM supplied.source_url
+                  AND stored.raw_fragment_pointer
+                        IS NOT DISTINCT FROM supplied.raw_fragment_pointer
+                  AND stored.raw_fragment_sha256
+                        IS NOT DISTINCT FROM supplied.raw_fragment_sha256
+                  AND stored.extracted_document_sha256
+                        IS NOT DISTINCT FROM supplied.extracted_document_sha256
+                  AND stored.extractor_version
+                        IS NOT DISTINCT FROM supplied.extractor_version
+                  AND stored.external_identity_provenance_fingerprint
+                        IS NOT DISTINCT FROM
+                            supplied.external_identity_provenance_fingerprint
+                  AND stored.fetched_at IS NOT DISTINCT FROM supplied.fetched_at
+                  AND stored.claims IS NOT DISTINCT FROM supplied.claims
+                  AND stored.signed_payload IS NOT DISTINCT FROM supplied.signed_payload
+                  AND stored.signature IS NOT DISTINCT FROM supplied.signature
+                  AND stored.external_identity_provenance IS NOT DISTINCT FROM
+                        supplied.external_identity_provenance
+            )
+        ) THEN
+            RAISE EXCEPTION
+                'raw receipt replay diverges from immutable stored content';
+        END IF;
         SELECT COALESCE(
             jsonb_agg(binding ->> 'id' ORDER BY ordinality),
             '[]'::jsonb

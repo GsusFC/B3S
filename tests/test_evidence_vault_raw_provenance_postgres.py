@@ -1046,7 +1046,10 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
                         conn.execute(
                             "SELECT b3s_history.bind_evidence_vault_verified_c7_lineage('{}'::jsonb)"
                         )
-            with pytest.raises(psycopg.Error, match="append envelope is invalid"):
+            with pytest.raises(
+                psycopg.Error,
+                match="raw acquisition append envelope cardinality is invalid",
+            ):
                 with conn.transaction():
                     conn.execute(
                         "SELECT b3s_history.append_evidence_vault_raw_acquisition(%s::jsonb)",
@@ -1452,7 +1455,10 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
                     (Jsonb(raw_envelope),),
                 )
             forged = {**raw_envelope, "receipts": [{**receipt_row, "id": str(uuid4())}]}
-            with pytest.raises(psycopg.Error, match="cannot be upgraded|replay diverges"):
+            with pytest.raises(
+                psycopg.Error,
+                match="cannot be upgraded|replay diverges|binding provenance is invalid",
+            ):
                 with conn.transaction():
                     conn.execute(
                         "SELECT b3s_history.append_evidence_vault_raw_acquisition(%s::jsonb)",
@@ -2409,7 +2415,10 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
             ]["evidence_start"] = 1
             with pytest.raises(
                 psycopg.Error,
-                match="locator does not reproduce a meaningful passage",
+                match=(
+                    "locator does not reproduce a meaningful passage|"
+                    "binding replay diverges"
+                ),
             ):
                 with conn.transaction():
                     conn.execute(
