@@ -717,7 +717,6 @@ def _build_candidate_result(
         evidence_rows=enriched,
         tile_shortlists=shortlists,
         llm=llm,
-        mode=str(plan["mode"]),
     )
     basis_relations = _basis_relations(
         proposal["relations"],
@@ -977,7 +976,6 @@ def _propose_relations_bounded(
     evidence_rows: list[Mapping[str, Any]],
     tile_shortlists: Mapping[str, list[Mapping[str, Any]]],
     llm: Any,
-    mode: str,
 ) -> tuple[dict[str, Any], int]:
     total_pairs = sum(len(rows) for rows in tile_shortlists.values())
     if total_pairs == 0:
@@ -986,10 +984,6 @@ def _propose_relations_bounded(
             "relations": [],
             "discarded_relations": [],
         }, 0
-    if mode != "baseline" and total_pairs > _MAX_TOTAL_RELATION_PAIRS:
-        raise EvidenceVaultIncrementalExecutorError(
-            "incremental relation workset exceeds the bounded contract"
-        )
     if total_pairs > _MAX_BASELINE_RELATION_PAIRS:
         raise EvidenceVaultIncrementalExecutorError(
             "baseline relation workset exceeds the safety ceiling"
