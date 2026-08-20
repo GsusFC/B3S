@@ -5,8 +5,12 @@ import json
 
 import pytest
 
-from src.services.evidence_vault_canonical_core import canonical_fingerprint
+from src.services.evidence_vault_canonical_core import (
+    build_tile_contract_registry,
+    canonical_fingerprint,
+)
 from src.services.evidence_vault_incremental_executor import (
+    derive_vault_tile_shortlists,
     execute_vault_operation_plan,
     validate_vault_operation_result,
 )
@@ -210,6 +214,36 @@ def test_executor_builds_pending_overlay_without_authority_or_score() -> None:
     assert operational["accepted_memory"]["accepted_tiles"] == []
     assert repository.source_packets and repository.operational_packets
 
+
+
+def test_unlit_first_lighting_does_not_force_every_empty_tile_onto_one_evidence() -> None:
+    unlit = [
+        str(row["tile_id"])
+        for row in build_tile_contract_registry()["tiles"]
+        if str(row["tile_id"]) not in {"A5", "P1", "P3"}
+    ]
+    assert len(unlit) > 24
+    shortlists, truncations = derive_vault_tile_shortlists(
+        [
+            {
+                "evidence_fingerprint": "a" * 64,
+                "labels": {
+                    "relevant_blocks": ["mission"],
+                    "identity_match_llm": "domain",
+                },
+            }
+        ],
+        forced_tile_ids=unlit,
+    )
+    selected = [row["tile_id"] for row in shortlists["a" * 64]]
+    assert selected
+    assert len(selected) <= 24
+    assert set(selected) <= {
+        str(row["tile_id"])
+        for row in build_tile_contract_registry()["tiles"]
+        if row["component_key"] == "mission"
+    }
+    assert truncations == {}
 
 
 def test_executor_processes_c7_plan_without_special_runtime_gate() -> None:

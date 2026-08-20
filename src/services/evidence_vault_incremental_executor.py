@@ -1051,16 +1051,13 @@ def derive_vault_tile_shortlists(
     for row in registry:
         by_component.setdefault(str(row["component_key"]), []).append(row)
     forced = {str(tile_id) for tile_id in forced_tile_ids}
-    if len(forced) == len(by_id):
-        # Baseline projects all canonical tiles, but semantic evidence pairing is
-        # still narrowed by the classifier's relevant component labels.
+    if len(forced) == len(by_id) or len(forced) > _MAX_TILES_PER_EVIDENCE:
+        # First-lighting of many unlit tiles, like baseline, cannot pair every
+        # canonical tile onto one evidence row. Classifier labels still choose
+        # the workset; policy later adopts never-lit matches.
         forced = set()
     if not forced.issubset(by_id):
         raise EvidenceVaultIncrementalExecutorError("plan has an unknown forced tile")
-    if len(forced) > _MAX_TILES_PER_EVIDENCE:
-        raise EvidenceVaultIncrementalExecutorError(
-            "forced incremental shortlist exceeds the per-evidence bound"
-        )
     result: dict[str, list[dict[str, Any]]] = {}
     truncations: dict[str, dict[str, Any]] = {}
     total_pairs = 0
