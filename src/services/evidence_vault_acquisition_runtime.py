@@ -14,13 +14,18 @@ from typing import Any, Callable, Literal, Mapping, Protocol
 
 import httpcore
 import httpx
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 from uuid import uuid4
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
+from src.collectors.web_collector_support_linking_runtime import (
+    VAULT_MAX_OWNED_SUBPAGES,
+    VAULT_MAX_STRATEGIC_ROLE_PAGES,
+    WebCollectorLinkingSupport,
+)
 from src.services.evidence_vault_acquisition_contract import TrustedAcquisitionCommand
 from src.services.evidence_vault_acquisition_worker import SignedAcquisition
 from src.services.evidence_vault_canonical_core import canonical_fingerprint, canonical_json
@@ -51,6 +56,7 @@ from src.services.evidence_vault_raw_provenance import (
 
 
 _MAX_CAPTURE_BYTES = 2_097_152
+_OWNED_SUBPAGE_MARKER = "\n\n---\n## Subpage: "
 _MAX_PROVIDER_BYTES = 4_194_304
 _MAX_REDIRECTS = 10
 _SAFE_HEADERS = {
@@ -420,6 +426,42 @@ class PublicOnlyHTTPTransport(httpx.HTTPTransport):
         )
 
 
+class _OwnedSubpageSelector(WebCollectorLinkingSupport):
+    @staticmethod
+    def _normalize_request_url(url: str) -> str:
+        raw = str(url or "").strip()
+        if not raw:
+            return raw
+        parts = urlsplit(raw)
+        if not parts.scheme or not parts.netloc:
+            return raw
+        path = quote(parts.path or "", safe="/:%@-._~!$&'()*+,;=")
+        query = quote(parts.query or "", safe="=&?/:@-._~!$&'()*+,;=%[]")
+        fragment = quote(parts.fragment or "", safe="=&?/:@-._~!$&'()*+,;=%[]")
+        return urlunsplit((parts.scheme, parts.netloc, path, query, fragment))
+
+
+def _owned_subpage_urls(html: str, base_url: str) -> list[str]:
+    selector = _OwnedSubpageSelector()
+    observed = selector._extract_internal_links("", base_url, html=html, links=[])
+    if not observed:
+        return []
+    selected = selector._select_internal_links_to_crawl(
+        observed,
+        base_url,
+        maximum_budget=VAULT_MAX_OWNED_SUBPAGES,
+        strategic_role_page_limit=VAULT_MAX_STRATEGIC_ROLE_PAGES,
+        sitemap_exploration_limit=0,
+        evidence_expansion=True,
+    )
+    for url in observed:
+        if len(selected) >= VAULT_MAX_OWNED_SUBPAGES:
+            break
+        if url not in selected:
+            selected.append(url)
+    return selected[:VAULT_MAX_OWNED_SUBPAGES]
+
+
 class HttpxOwnedFetcher:
     """Bounded direct-HTTPS fetcher with manual same-brand redirects."""
 
@@ -433,6 +475,96 @@ class HttpxOwnedFetcher:
     ) -> None:
         self._client = client
         self._resolver = resolver
+
+    def _text_with_owned_subpages(
+        self,
+        *,
+        homepage_url: str,
+        homepage_html: str,
+        homepage_text: str,
+        canonical_domain: str,
+    ) -> str:
+        extras: list[str] = []
+        for subpage_url in _owned_subpage_urls(homepage_html, homepage_url):
+            try:
+                subpage_text = self._owned_subpage_text(
+                    subpage_url,
+                    canonical_domain=canonical_domain,
+                )
+            except EvidenceVaultAcquisitionRuntimeError:
+                continue
+            if subpage_text:
+                extras.append(f"{_OWNED_SUBPAGE_MARKER}{subpage_url}\n{subpage_text}")
+        if not extras:
+            return homepage_text
+        return homepage_text + "".join(extras)
+
+    def _owned_subpage_text(self, url: str, *, canonical_domain: str) -> str:
+        current = url
+        for _ in range(_MAX_REDIRECTS + 1):
+            _require_public_same_brand_url(
+                current,
+                canonical_domain=canonical_domain,
+                resolver=self._resolver,
+            )
+            with self._client.stream(
+                "GET",
+                current,
+                headers={
+                    "accept": "text/html,application/xhtml+xml,text/plain;q=0.8",
+                    "accept-encoding": "identity",
+                    "user-agent": "B3S-Evidence-Vault-Acquisition/1",
+                },
+                follow_redirects=False,
+                timeout=20.0,
+            ) as response:
+                _require_public_peer(response)
+                _require_identity_encoding(response.headers)
+                status = int(response.status_code)
+                if status in {300, 301, 302, 303, 307, 308}:
+                    location = response.headers.get("location")
+                    if not isinstance(location, str) or not location:
+                        raise EvidenceVaultAcquisitionRuntimeError(
+                            "owned_redirect_invalid"
+                        )
+                    destination = urljoin(current, location)
+                    _require_public_same_brand_url(
+                        destination,
+                        canonical_domain=canonical_domain,
+                        resolver=self._resolver,
+                    )
+                    current = destination
+                    continue
+                if not 200 <= status <= 299:
+                    raise EvidenceVaultAcquisitionRuntimeError(
+                        "owned_http_status_ineligible"
+                    )
+                body = _read_bounded_body(response, maximum=_MAX_CAPTURE_BYTES)
+                media_type, charset = _media_type_and_charset(
+                    response.headers.get("content-type")
+                )
+                if media_type not in {
+                    "text/html",
+                    "application/xhtml+xml",
+                    "text/plain",
+                }:
+                    raise EvidenceVaultAcquisitionRuntimeError(
+                        "owned_media_type_ineligible"
+                    )
+                try:
+                    content = body.decode(charset, errors="strict")
+                except (LookupError, UnicodeDecodeError):
+                    raise EvidenceVaultAcquisitionRuntimeError(
+                        "owned_text_decode_failed"
+                    ) from None
+                if media_type in {"text/html", "application/xhtml+xml"}:
+                    document_text, _linkedin = _extract_owned_html(
+                        content,
+                        base_url=current,
+                    )
+                    return document_text
+                return content.strip()
+        raise EvidenceVaultAcquisitionRuntimeError("owned_redirect_limit_exceeded")
 
     def __call__(self, command: TrustedAcquisitionCommand) -> OwnedHttpObservation:
         canonical_domain = urlsplit(command.brand_url).hostname or ""
@@ -527,6 +659,13 @@ class HttpxOwnedFetcher:
                     linkedin = None
                 if linkedin is not None:
                     fragment["linkedin"] = linkedin
+                if media_type in {"text/html", "application/xhtml+xml"}:
+                    fragment["text"] = self._text_with_owned_subpages(
+                        homepage_url=current,
+                        homepage_html=content,
+                        homepage_text=str(fragment["text"]),
+                        canonical_domain=canonical_domain,
+                    )
                 return OwnedHttpObservation(
                     requested_url=command.brand_url,
                     redirect_chain=redirects,

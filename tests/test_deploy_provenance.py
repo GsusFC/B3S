@@ -54,6 +54,7 @@ HOTFIX_FILES = {
     "src/services/evidence_vault_semantic_analysis_contract.py",
     "src/services/scanner_analysis_contract.py",
     "src/sv9/evaluator.py",
+    "src/sv9_flow/evidence_worker.py",
     "src/sv9_flow/interpretation_llm_worker.py",
     "src/sv9_flow/policy_data/calibration_terms.json",
     "src/sv9_flow/semantic_passages.py",

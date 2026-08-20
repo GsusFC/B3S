@@ -166,13 +166,13 @@ def _evidence_from_raw_inputs(raw_inputs: list[Any], *, brand_name: str = "", sc
             continue
         payload = _payload_dict(entry)
         if source == "verified_raw_document":
-            record = _evidence_from_verified_raw_document(
-                index=index,
-                source=source,
-                payload=payload,
+            records.extend(
+                _evidence_from_verified_raw_document(
+                    index=index,
+                    source=source,
+                    payload=payload,
+                )
             )
-            if record is not None:
-                records.append(record)
             continue
         if source == "web":
             records.extend(_evidence_from_web_payload(index=index, source=source, payload=payload))
@@ -267,7 +267,8 @@ def _evidence_from_verified_raw_document(
     index: int,
     source: str,
     payload: dict[str, Any],
-) -> EvidenceRecord | None:
+) -> list[EvidenceRecord]:
+    del index, source
     role = str(payload.get("role") or "")
     content = payload.get("content")
     url = payload.get("url")
@@ -287,26 +288,40 @@ def _evidence_from_verified_raw_document(
         or not isinstance(receipt_fingerprint, str)
         or not re.fullmatch(r"[0-9a-f]{64}", receipt_fingerprint)
     ):
-        return None
+        return []
     external = role == "external_social_profile"
-    return EvidenceRecord(
-        ref=f"raw-acquisition:{role}:{receipt_fingerprint}",
-        source=role,
-        evidence_type="text",
-        content=content,
-        url=url,
-        confidence="high",
-        metadata={
-            "source_class": "external_proof" if external else "owned_copy",
-            "provider": "verified_raw_acquisition",
-            "role": role,
-            "channel_role": role,
-            "receipt_fingerprint": receipt_fingerprint,
-            "extractor_version": extractor_version,
-            "extracted_document_sha256": document_sha256,
-            "verified_raw": True,
-        },
-    )
+    metadata = {
+        "source_class": "external_proof" if external else "owned_copy",
+        "provider": "verified_raw_acquisition",
+        "role": role,
+        "channel_role": role,
+        "receipt_fingerprint": receipt_fingerprint,
+        "extractor_version": extractor_version,
+        "extracted_document_sha256": document_sha256,
+        "verified_raw": True,
+    }
+    pages: list[tuple[str, str, str]] = []
+    if external:
+        pages.append(("", url, content))
+    else:
+        homepage, subpages, _missing = _split_web_subpages(content)
+        subpages = _strip_cross_page_boilerplate(homepage, subpages)
+        if homepage:
+            pages.append(("", url, homepage))
+        for subpage_index, (subpage_url, subpage_text) in enumerate(subpages, start=1):
+            pages.append((f":subpage.{subpage_index}", subpage_url or url, subpage_text))
+    return [
+        EvidenceRecord(
+            ref=f"raw-acquisition:{role}:{receipt_fingerprint}{suffix}",
+            source=role,
+            evidence_type="text",
+            content=page_text,
+            url=page_url,
+            confidence="high",
+            metadata=dict(metadata),
+        )
+        for suffix, page_url, page_text in pages
+    ]
 
 
 def _evidence_from_exa_payload(
