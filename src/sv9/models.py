@@ -10,6 +10,7 @@ with three possible states — `ok` (lit), `no` (off: a brand failure) and
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -176,6 +177,10 @@ class Sv9ScanResult:
     url: str
     source_run_id: int | None
     components: dict[str, ComponentResult]
+    # The immutable scanner assessment output.  ``aggregate`` is the only
+    # constructor for normal scans and supplies either the full 80-tile kernel
+    # result or its explicit unavailable envelope for legacy incomplete scans.
+    assessment: dict[str, Any] = field(default_factory=dict)
     brand3_score: int = 0
     base_average: float | None = None
     magnetism_capped: bool = False
@@ -270,6 +275,7 @@ class Sv9ScanResult:
         return self.canonical_status == "canonical"
 
     def to_dict(self) -> dict[str, Any]:
+        assessment = copy.deepcopy(self.assessment)
         return {
             "brand_name": self.brand_name,
             "url": self.url,
@@ -280,6 +286,9 @@ class Sv9ScanResult:
             "brand3_score": self.brand3_score,
             "base_average": self.base_average,
             "magnetism_capped": self.magnetism_capped,
+            "assessment": assessment,
+            "assessment_fingerprint": assessment.get("assessment_fingerprint"),
+            "score_fingerprint": assessment.get("score_fingerprint"),
             "immediate_margin": self.immediate_margin,
             "most_painful_gap": self.most_painful_gap,
             "needs_review": self.needs_review,

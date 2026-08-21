@@ -300,6 +300,22 @@ def brand_scan_history(
     items = []
     for item in page:
         score_publication = score_publication_from_report(item)
+        assessment_availability = str(
+            score_publication.get("availability") or "legacy"
+        )
+        # Fingerprints are meaningful only for a validated, available SV9
+        # assessment.  Legacy and unavailable reports keep their historical
+        # diagnostic score, but never receive a fabricated identity.
+        assessment_fingerprint = (
+            score_publication.get("assessment_fingerprint")
+            if assessment_availability == "available"
+            else None
+        )
+        score_fingerprint = (
+            score_publication.get("score_fingerprint")
+            if assessment_availability == "available"
+            else None
+        )
         items.append({
             "id": str(item.get("id") or ""),
             "status": "completed",
@@ -317,6 +333,9 @@ def brand_scan_history(
             "stability_reason_codes": [
                 str(code) for code in (item.get("stability") or {}).get("reason_codes") or []
             ],
+            "assessment_availability": assessment_availability,
+            "assessment_fingerprint": assessment_fingerprint,
+            "score_fingerprint": score_fingerprint,
             "result_url": f"/api/v1/scans/{item.get('id')}/result",
             "report_url": f"/report/{item.get('id')}",
         })

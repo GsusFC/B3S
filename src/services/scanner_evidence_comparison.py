@@ -21,6 +21,10 @@ from src.services.scanner_analysis_contract import (
     analysis_contract_from_report,
     analysis_contracts_match,
 )
+from src.services.scanner_report_assessment import (
+    ScannerReportAssessmentError,
+    assessment_projection_from_report,
+)
 
 
 EVIDENCE_COMPARISON_VERSION = "evidence-comparison-v5"
@@ -90,6 +94,13 @@ class EvidenceSnapshot:
     interpretation_fingerprint: str
     analysis_contract: dict[str, Any]
     invalid: bool
+    assessment_availability: str = "legacy"
+    assessment_fingerprint: str | None = None
+    score_fingerprint: str | None = None
+    legacy_evaluation_fingerprint: str = ""
+    sv9_score: int | None = None
+    base_average: float | int | None = None
+    magnetism_capped: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -115,6 +126,13 @@ class EvidenceSnapshot:
             "interpretation_fingerprint": self.interpretation_fingerprint,
             "analysis_contract": dict(self.analysis_contract),
             "invalid": self.invalid,
+            "assessment_availability": self.assessment_availability,
+            "assessment_fingerprint": self.assessment_fingerprint,
+            "score_fingerprint": self.score_fingerprint,
+            "legacy_evaluation_fingerprint": self.legacy_evaluation_fingerprint,
+            "sv9_score": self.sv9_score,
+            "base_average": self.base_average,
+            "magnetism_capped": self.magnetism_capped,
         }
 
 
@@ -150,6 +168,13 @@ class EvidenceComparison:
 def build_evidence_snapshot(report: dict[str, Any]) -> EvidenceSnapshot:
     """Build an order- and ref-insensitive snapshot from one immutable report."""
 
+    try:
+        assessment = assessment_projection_from_report(report)
+    except ScannerReportAssessmentError:
+        # Invalid assessment-bearing reports cannot participate in history;
+        # callers must fail closed rather than compare a partially trusted
+        # projection.
+        raise
     records = canonical_evidence_records(report)
     material = tuple(record for record in records if record.source_class in MATERIAL_SOURCE_CLASSES)
     material_payload = [record.public_dict() for record in material]
@@ -165,7 +190,11 @@ def build_evidence_snapshot(report: dict[str, Any]) -> EvidenceSnapshot:
         if isinstance(item, dict) and str(item.get("code") or "").strip()
     ]
     reliability = str(report.get("reliability_status") or "unknown").strip().lower()
-    invalid = reliability in _INVALID_RELIABILITY or _has_not_evaluated_component(report)
+    invalid = (
+        reliability in _INVALID_RELIABILITY
+        or _has_not_evaluated_component(report)
+        or assessment.get("availability") == "unavailable"
+    )
     semantic_payload = [
         {
             "locator": locator,
@@ -187,10 +216,29 @@ def build_evidence_snapshot(report: dict[str, Any]) -> EvidenceSnapshot:
         acquisition_state=str(acquisition_gate.get("state") or "unknown").strip().lower(),
         acquisition_warning_codes=tuple(sorted(set(warnings))),
         reliability_status=reliability,
-        evaluation_fingerprint=_evaluation_fingerprint(report),
+        evaluation_fingerprint=_evaluation_fingerprint(report, assessment),
         interpretation_fingerprint=_interpretation_fingerprint(report),
         analysis_contract=analysis_contract_from_report(report),
         invalid=invalid,
+        assessment_availability=str(assessment.get("availability") or "legacy"),
+        assessment_fingerprint=assessment.get("assessment_fingerprint"),
+        score_fingerprint=assessment.get("score_fingerprint"),
+        legacy_evaluation_fingerprint=_legacy_evaluation_fingerprint(report),
+        sv9_score=(
+            assessment.get("sv9_score")
+            if assessment.get("availability") == "available"
+            else None
+        ),
+        base_average=(
+            assessment.get("base_average")
+            if assessment.get("availability") == "available"
+            else None
+        ),
+        magnetism_capped=(
+            assessment.get("magnetism_capped")
+            if assessment.get("availability") == "available"
+            else None
+        ),
     )
 
 
@@ -273,7 +321,10 @@ def compare_reports(
         lost_urls=lost_urls,
     )
     acquisition_comparable = not acquisition_regression_reasons
-    evaluation_changed = baseline.evaluation_fingerprint != candidate.evaluation_fingerprint
+    evaluation_changed = _evaluation_changed(
+        baseline,
+        candidate,
+    )
     interpretation_changed = baseline.interpretation_fingerprint != candidate.interpretation_fingerprint
     contract_comparable = analysis_contracts_match(
         baseline.analysis_contract,
@@ -577,6 +628,8 @@ def render_history_dry_run(histories: dict[str, Iterable[dict[str, Any]]]) -> di
             ),
             {},
         )
+        latest_score = _history_score(latest)
+        selected_score = _history_score(selected)
         selection_changes = bool(
             latest_report_id
             and selected_report_id
@@ -591,11 +644,11 @@ def render_history_dry_run(histories: dict[str, Iterable[dict[str, Any]]]) -> di
                 "domain": domain,
                 **state,
                 "latest_report_id": latest_report_id,
-                "latest_score": latest.get("score"),
-                "selected_score": selected.get("score"),
+                "latest_score": latest_score,
+                "selected_score": selected_score,
                 "score_delta_latest_minus_selected": _numeric_delta(
-                    latest.get("score"),
-                    selected.get("score"),
+                    latest_score,
+                    selected_score,
                 ),
                 "selection_changes_visible_report": selection_changes,
             }
@@ -613,6 +666,17 @@ def render_history_dry_run(histories: dict[str, Iterable[dict[str, Any]]]) -> di
         "classification_counts": dict(sorted(classifications.items())),
         "brands": brands,
     }
+
+
+def _history_score(report: Mapping[str, Any]) -> Any:
+    """Read one report's canonical score for history summaries."""
+
+    projection = assessment_projection_from_report(report)
+    if projection.get("availability") == "available":
+        return projection.get("sv9_score")
+    if projection.get("availability") == "legacy":
+        return projection.get("raw_score")
+    return None
 
 
 def canonical_evidence_records(
@@ -879,7 +943,39 @@ def _raw_evidence_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict)]
 
 
-def _evaluation_fingerprint(report: dict[str, Any]) -> str:
+def _evaluation_fingerprint(
+    report: dict[str, Any],
+    assessment: Mapping[str, Any] | None = None,
+) -> str:
+    """Return the immutable evaluation identity used by history.
+
+    New/new comparisons use the two kernel fingerprints directly.  Legacy and
+    mixed comparisons intentionally retain the pre-assessment component hash
+    on both sides so a fingerprint scheme change is not misclassified as
+    evaluation drift.
+    """
+
+    if assessment is None:
+        try:
+            assessment = assessment_projection_from_report(report)
+        except ScannerReportAssessmentError:
+            assessment = {"availability": "invalid"}
+    if (
+        assessment.get("availability") == "available"
+        and assessment.get("assessment_fingerprint")
+        and assessment.get("score_fingerprint")
+    ):
+        return _stable_hash(
+            {
+                "assessment_fingerprint": assessment["assessment_fingerprint"],
+                "score_fingerprint": assessment["score_fingerprint"],
+            }
+        )
+
+    return _legacy_evaluation_fingerprint(report)
+
+
+def _legacy_evaluation_fingerprint(report: dict[str, Any]) -> str:
     rows = []
     for component in report.get("components") or []:
         if not isinstance(component, dict):
@@ -903,6 +999,26 @@ def _evaluation_fingerprint(report: dict[str, Any]) -> str:
         )
     rows.sort(key=lambda item: item["key"])
     return _stable_hash(rows)
+
+
+def _evaluation_changed(
+    baseline: EvidenceSnapshot,
+    candidate: EvidenceSnapshot,
+) -> bool:
+    """Compare assessment identities without crossing legacy/new schemes."""
+
+    if (
+        baseline.assessment_availability == "available"
+        and candidate.assessment_availability == "available"
+    ):
+        return (
+            baseline.assessment_fingerprint != candidate.assessment_fingerprint
+            or baseline.score_fingerprint != candidate.score_fingerprint
+        )
+    return (
+        baseline.legacy_evaluation_fingerprint
+        != candidate.legacy_evaluation_fingerprint
+    )
 
 
 def _interpretation_fingerprint(report: dict[str, Any]) -> str:
@@ -975,12 +1091,27 @@ def _history_entry(
     baseline_comparison: EvidenceComparison | None,
     previous_comparison: EvidenceComparison | None,
 ) -> dict[str, Any]:
+    score = (
+        snapshot.sv9_score
+        if snapshot.assessment_availability == "available"
+        else (
+            report.get("score")
+            if snapshot.assessment_availability == "legacy"
+            else None
+        )
+    )
     return {
         "schema_version": EVIDENCE_COMPARISON_VERSION,
         "policy_version": CANONICAL_POLICY_VERSION,
         "report_id": str(report.get("id") or ""),
         "created_at": report.get("created_at"),
-        "score": report.get("score"),
+        "score": score,
+        "raw_score": report.get("score"),
+        "base_average": snapshot.base_average,
+        "magnetism_capped": snapshot.magnetism_capped,
+        "assessment_availability": snapshot.assessment_availability,
+        "assessment_fingerprint": snapshot.assessment_fingerprint,
+        "score_fingerprint": snapshot.score_fingerprint,
         "reliability_status": str(report.get("reliability_status") or "unknown"),
         "classification": classification,
         "canonical_status": canonical_status,

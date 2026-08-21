@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -230,10 +231,18 @@ def _compact_interpretation_debug(debug: dict[str, Any]) -> dict[str, Any]:
 
 def _result_summary(result: dict[str, Any]) -> dict[str, Any]:
     components = result.get("components") if isinstance(result.get("components"), dict) else {}
+    assessment = (
+        copy.deepcopy(result["assessment"])
+        if isinstance(result.get("assessment"), dict)
+        else None
+    )
     return {
         "brand3_score": result.get("brand3_score"),
         "base_average": result.get("base_average"),
         "magnetism_capped": result.get("magnetism_capped"),
+        "assessment": assessment,
+        "assessment_fingerprint": result.get("assessment_fingerprint"),
+        "score_fingerprint": result.get("score_fingerprint"),
         "reliability_status": result.get("reliability_status"),
         "not_detected": result.get("not_detected") or [],
         "not_evaluated": result.get("not_evaluated") or [],
@@ -241,9 +250,13 @@ def _result_summary(result: dict[str, Any]) -> dict[str, Any]:
             key: {
                 "status": value.get("status"),
                 "score": value.get("score"),
+                "points": value.get("points"),
+                "scale": value.get("scale"),
                 "lit_tiles": value.get("lit_tiles") or [],
                 "off_tiles": value.get("off_tiles") or [],
                 "blind_spot_tiles": value.get("blind_spot_tiles") or [],
+                "blind_spot_count": value.get("blind_spot_count"),
+                "tile_profile": copy.deepcopy(value.get("tile_profile") or []),
             }
             for key, value in sorted(components.items())
             if isinstance(value, dict)

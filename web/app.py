@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from contextlib import asynccontextmanager
 import json
 import logging
@@ -29,6 +30,7 @@ from src.services.scanner_evidence_comparison import (
     selected_report_for_display,
 )
 from src.services.scanner_content_sampling import content_sampling_from_report
+from src.services.scanner_report_assessment import assessment_projection_from_report
 from src.services.scanner_score_publication import score_publication_from_report
 from web.api_v1 import install_scanner_api
 from web.api_v1.errors import ApiError
@@ -1159,16 +1161,39 @@ def _failing_tiles(component_key: str, tile_profile: list[dict[str, Any]]) -> li
             continue
         tile_id = str(tile.get("id") or tile.get("tile_id") or "")
         rows.append(
-            {
-                "id": tile_id,
-                "name": names.get(tile_id) or "",
-                "estado": str(tile.get("estado") or ""),
-                "motivo": spanish_tile_motivo(tile.get("motivo"), estado=tile.get("estado")),
-                "contexto_requerido": spanish_tile_contexto(tile.get("contexto_requerido")),
-                "evidencia": str(tile.get("evidencia") or ""),
-            }
+            _localized_tile_copy(
+                {
+                    "id": tile_id,
+                    "name": names.get(tile_id) or "",
+                    "estado": str(tile.get("estado") or ""),
+                    "motivo": tile.get("motivo"),
+                    "contexto_requerido": tile.get("contexto_requerido"),
+                    "evidencia": str(tile.get("evidencia") or ""),
+                }
+            )
         )
     return rows
+
+
+def _localized_tile_copy(tile: dict[str, Any]) -> dict[str, Any]:
+    """Localize generated tile prose on a detached presentation copy."""
+
+    item = dict(tile)
+    estado = str(item.get("estado") or "")
+    if estado in {"no", "sin_evidencia"}:
+        item["motivo"] = spanish_tile_motivo(item.get("motivo"), estado=estado)
+        item["contexto_requerido"] = spanish_tile_contexto(
+            item.get("contexto_requerido")
+        )
+        return item
+
+    if str(item.get("motivo") or "").strip():
+        item["motivo"] = spanish_tile_motivo(item.get("motivo"), estado=estado)
+    if str(item.get("contexto_requerido") or "").strip():
+        item["contexto_requerido"] = spanish_tile_contexto(
+            item.get("contexto_requerido")
+        )
+    return item
 
 
 def _enrich_component_from_raw_sv9(item: dict[str, Any], raw_component: dict[str, Any]) -> dict[str, Any]:
@@ -1220,7 +1245,10 @@ def _enrich_component_from_raw_sv9(item: dict[str, Any], raw_component: dict[str
 def _sanitize_report_language(report: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(report, dict):
         return {}
-    sanitized = dict(report)
+    # Validate the persisted identity before localization can collapse two
+    # distinct raw strings into the same presentation fallback.
+    assessment_projection_from_report(report)
+    sanitized = copy.deepcopy(report)
     raw_result = _raw_sv9_result(report)
     if not sanitized.get("editorial") and isinstance(raw_result.get("editorial_v3_1"), dict):
         sanitized["editorial"] = raw_result.get("editorial_v3_1")
@@ -1242,6 +1270,13 @@ def _sanitize_report_language(report: dict[str, Any] | None) -> dict[str, Any]:
             item["editorial"] = raw_editorial_components.get(key)
         key = str(item.get("key") or item.get("component") or "")
         tile_profile = _resolve_component_tile_profile(item)
+        if isinstance(tile_profile, list):
+            tile_profile = [
+                _localized_tile_copy(tile)
+                for tile in tile_profile
+                if isinstance(tile, dict)
+            ]
+            item["tile_profile"] = tile_profile
         item["resumen"] = spanish_component_summary(
             key,
             item.get("resumen"),
@@ -1257,10 +1292,7 @@ def _sanitize_report_language(report: dict[str, Any] | None) -> dict[str, Any]:
         for tile in source_tiles:
             if not isinstance(tile, dict):
                 continue
-            tile_item = dict(tile)
-            tile_item["motivo"] = spanish_tile_motivo(tile_item.get("motivo"), estado=tile_item.get("estado"))
-            tile_item["contexto_requerido"] = spanish_tile_contexto(tile_item.get("contexto_requerido"))
-            tiles.append(tile_item)
+            tiles.append(_localized_tile_copy(tile))
         item["tiles"] = tiles
         components.append(item)
     sanitized["components"] = components
@@ -1273,6 +1305,7 @@ def _scan_payload_for_markdown(report: dict[str, Any]) -> dict[str, Any]:
     )
 
     result = dict(_raw_sv9_result(report))
+    assessment = assessment_projection_from_report(report)
     projected_components = {
         str(component.get("key") or component.get("component") or ""): component
         for component in report.get("components") or []
@@ -1302,6 +1335,9 @@ def _scan_payload_for_markdown(report: dict[str, Any]) -> dict[str, Any]:
                 merged["surface_hierarchy"] = dict(
                     projection["surface_hierarchy"]
                 )
+            for field in ("tile_profile", "tiles"):
+                if isinstance(projection.get(field), list):
+                    merged[field] = copy.deepcopy(projection[field])
             components[str(key)] = merged
         result["components"] = components
     result.setdefault("display_name", report.get("brand_name"))
@@ -1341,6 +1377,25 @@ def _scan_payload_for_markdown(report: dict[str, Any]) -> dict[str, Any]:
         "analysis_contract",
         analysis_contract_from_report(report),
     )
+    availability = str(assessment.get("availability") or "legacy")
+    if availability == "available":
+        result["brand3_score"] = assessment.get("sv9_score")
+        result["base_average"] = assessment.get("base_average")
+        result["magnetism_capped"] = assessment.get("magnetism_capped")
+    elif availability == "unavailable":
+        # Keep a retained legacy aggregate diagnostic-only when the explicit
+        # assessment envelope says it is unavailable.
+        result["brand3_score"] = None
+        result["base_average"] = None
+        result["magnetism_capped"] = None
+    else:
+        result["brand3_score"] = assessment.get("raw_score")
+        result["base_average"] = assessment.get("raw_base_average")
+        result["magnetism_capped"] = assessment.get("raw_magnetism_capped")
+    result["assessment"] = assessment.get("assessment")
+    result["assessment_availability"] = availability
+    result["assessment_fingerprint"] = assessment.get("assessment_fingerprint")
+    result["score_fingerprint"] = assessment.get("score_fingerprint")
     return result
 
 
@@ -1364,11 +1419,21 @@ def _moodboard_from_report(report: dict[str, Any]) -> dict[str, Any]:
         web_payload,
         brand_logo_url=str(report.get("brand_logo_url") or _visual_signature_logo_url(report) or ""),
     )
+    assessment = assessment_projection_from_report(report)
+    model_score = (
+        assessment.get("sv9_score")
+        if assessment.get("availability") == "available"
+        else (
+            assessment.get("raw_score")
+            if assessment.get("availability") == "legacy"
+            else None
+        )
+    )
     model.update(
         {
             "report_id": report.get("id") or "",
             "brand_name": report.get("brand_name") or "",
-            "score": report.get("score"),
+            "score": model_score,
             "url": report.get("url") or model.get("page_url") or "",
             "brand_domain": domain_key(str(report.get("url") or "")),
         }

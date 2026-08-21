@@ -25,7 +25,7 @@ def test_normalize_url_accepts_domains_and_rejects_bad_inputs():
         normalize_url("http://127.0.0.1")
 
 
-def test_report_store_saves_loads_lists_and_ignores_corrupt_json(tmp_path, monkeypatch):
+def test_report_store_saves_loads_and_fails_closed_on_corrupt_json(tmp_path, monkeypatch):
     from web import report_store
 
     monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
@@ -57,7 +57,8 @@ def test_report_store_saves_loads_lists_and_ignores_corrupt_json(tmp_path, monke
 
     assert report_store.load_report("older")["brand_name"] == "Older"
     assert report_store.load_report("missing") is None
-    assert [row["id"] for row in report_store.list_reports()] == ["newer", "older"]
+    with pytest.raises(ReportConflictError, match="already exists but is unreadable"):
+        report_store.list_reports()
 
 
 def test_report_store_mirrors_new_reports_and_falls_back_to_files(tmp_path, monkeypatch):
@@ -134,6 +135,272 @@ def test_report_store_merges_postgres_and_file_reports(tmp_path, monkeypatch):
         "file-only",
         "postgres-only",
     ]
+
+
+def test_report_store_raises_same_id_conflict_after_postgres_payload_load(
+    tmp_path,
+    monkeypatch,
+):
+    from web import report_store
+
+    postgres_report = {
+        "id": "same-id",
+        "brand_name": "Postgres",
+        "url": "https://same.test",
+        "created_at": "2026-07-10T10:00:00+00:00",
+        "score": 70,
+    }
+    file_report = {**postgres_report, "brand_name": "File", "score": 71}
+
+    repository = SimpleNamespace(
+        get_report_payload=lambda report_id: (
+            postgres_report if report_id == "same-id" else None
+        ),
+        list_report_summaries=lambda *, limit, offset: (
+            [report_store._summary_row(postgres_report)][offset : offset + limit]
+        ),
+    )
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    report_store.report_path("same-id").write_text(
+        json.dumps(file_report),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+
+    with pytest.raises(
+        ReportConflictError,
+        match="postgres and file stores with different content",
+    ):
+        report_store.list_reports()
+
+
+def test_report_store_accepts_identical_postgres_and_file_payloads(
+    tmp_path,
+    monkeypatch,
+):
+    from web import report_store
+
+    report = {
+        "id": "same-id",
+        "brand_name": "Same",
+        "url": "https://same.test",
+        "created_at": "2026-07-10T10:00:00+00:00",
+        "score": 70,
+    }
+    repository = SimpleNamespace(
+        get_report_payload=lambda report_id: report if report_id == "same-id" else None,
+        list_report_summaries=lambda *, limit, offset: (
+            [report_store._summary_row(report)][offset : offset + limit]
+        ),
+        list_report_payloads_for_domain=lambda domain, *, limit, offset: (
+            [report][offset : offset + limit] if domain == "same.test" else []
+        ),
+    )
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    report_store.report_path("same-id").write_text(
+        json.dumps(report),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+
+    assert report_store.load_report("same-id") == report
+    assert report_store.list_reports() == [report_store._summary_row(report)]
+    assert report_store.list_reports_for_domain("same.test") == [report]
+
+
+def test_report_store_load_fails_closed_for_malformed_same_id_file_after_postgres_load(
+    tmp_path,
+    monkeypatch,
+):
+    from web import report_store
+
+    postgres_report = {
+        "id": "malformed-file",
+        "brand_name": "Postgres",
+        "url": "https://same.test",
+        "created_at": "2026-07-10T10:00:00+00:00",
+        "score": 70,
+    }
+    repository = SimpleNamespace(
+        get_report_payload=lambda report_id: (
+            postgres_report if report_id == "malformed-file" else None
+        ),
+    )
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    report_store.report_path("malformed-file").write_text(
+        "{not json",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+
+    with pytest.raises(ReportConflictError, match="already exists but is unreadable"):
+        report_store.load_report("malformed-file")
+
+
+def test_report_store_lists_fail_closed_for_non_object_same_id_file_after_postgres_load(
+    tmp_path,
+    monkeypatch,
+):
+    from src.services.scanner_report_assessment import ScannerReportAssessmentError
+    from web import report_store
+
+    postgres_report = {
+        "id": "non-object-file",
+        "brand_name": "Postgres",
+        "url": "https://same.test",
+        "created_at": "2026-07-10T10:00:00+00:00",
+        "score": 70,
+    }
+    repository = SimpleNamespace(
+        get_report_payload=lambda report_id: (
+            postgres_report if report_id == "non-object-file" else None
+        ),
+        list_report_summaries=lambda *, limit, offset: (
+            [report_store._summary_row(postgres_report)][offset : offset + limit]
+        ),
+        list_report_payloads_for_domain=lambda domain, *, limit, offset: (
+            [postgres_report][offset : offset + limit]
+            if domain == "same.test"
+            else []
+        ),
+    )
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    report_store.report_path("non-object-file").write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+
+    with pytest.raises(ScannerReportAssessmentError, match="file_report_payload_invalid"):
+        report_store.list_reports()
+    with pytest.raises(ScannerReportAssessmentError, match="file_report_payload_invalid"):
+        report_store.list_reports_for_domain("same.test")
+
+
+def test_report_store_does_not_fallback_after_malformed_postgres_payload(
+    tmp_path,
+    monkeypatch,
+):
+    from src.services.scanner_report_assessment import ScannerReportAssessmentError
+    from web import report_store
+
+    file_report = {
+        "id": "malformed-postgres",
+        "brand_name": "File",
+        "url": "https://same.test",
+    }
+    malformed_postgres = {
+        "id": "malformed-postgres",
+        "brand_name": "Postgres",
+        "url": "https://same.test",
+        "sv9_assessment": {"availability": "available"},
+    }
+    repository = SimpleNamespace(
+        get_report_payload=lambda report_id: (
+            malformed_postgres if report_id == "malformed-postgres" else None
+        ),
+    )
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    report_store.report_path("malformed-postgres").write_text(
+        json.dumps(file_report),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+
+    with pytest.raises(ScannerReportAssessmentError, match="envelope_fields_mismatch"):
+        report_store.load_report("malformed-postgres")
+
+
+def test_report_store_rejects_stripped_assessment_at_file_and_postgres_boundaries(
+    tmp_path,
+    monkeypatch,
+):
+    from src.services.scanner_report_assessment import ScannerReportAssessmentError
+    from tests.test_vault_sv9_parity import _available_report
+    from web import report_store
+
+    report = _available_report("stripped-store-assessment")
+    report.pop("sv9_assessment")
+    report.pop("assessment_fingerprint")
+    report.pop("score_fingerprint")
+
+    class TrackingRepository:
+        def __init__(self):
+            self.imported = []
+
+        def import_report(self, payload):
+            self.imported.append(payload)
+
+        def get_report_payload(self, report_id):
+            return report if report_id == "stripped-store-assessment" else None
+
+    repository = TrackingRepository()
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+
+    with pytest.raises(
+        ScannerReportAssessmentError,
+        match="sv9_assessment_envelope_missing",
+    ):
+        report_store.save_report(report)
+    assert repository.imported == []
+    assert not report_store.report_path(report["id"]).exists()
+
+    path = report_store.report_path(report["id"])
+    path.write_text(json.dumps(report), encoding="utf-8")
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: None)
+    with pytest.raises(
+        ScannerReportAssessmentError,
+        match="sv9_assessment_envelope_missing",
+    ):
+        report_store.load_report(report["id"])
+
+    path.unlink()
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+    with pytest.raises(
+        ScannerReportAssessmentError,
+        match="sv9_assessment_envelope_missing",
+    ):
+        report_store.load_report(report["id"])
+
+
+def test_report_store_rejects_boolean_component_alias_before_write(
+    tmp_path,
+    monkeypatch,
+):
+    from src.services.scanner_report_assessment import ScannerReportAssessmentError
+    from tests.test_vault_sv9_parity import _available_report
+    from web import report_store
+
+    report = _available_report("boolean-store-assessment")
+    report["components"][0]["lit"] = False
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+
+    with pytest.raises(
+        ScannerReportAssessmentError,
+        match="sv9_assessment_component_lit_mismatch:report",
+    ):
+        report_store.save_report(report)
+    assert not report_store.report_path(report["id"]).exists()
+
+
+def test_report_store_rejects_type_drift_in_duplicate_assessment_before_write(
+    tmp_path,
+    monkeypatch,
+):
+    from src.services.scanner_report_assessment import ScannerReportAssessmentError
+    from tests.test_vault_sv9_parity import _available_report
+    from web import report_store
+
+    report = _available_report("duplicate-assessment-store")
+    report["raw"]["sv9"]["assessment"]["component_breakdown"][0][
+        "sin_evidencia_count"
+    ] = False
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+
+    with pytest.raises(
+        ScannerReportAssessmentError,
+        match="sv9_assessment_duplicate_mismatch",
+    ):
+        report_store.save_report(report)
+    assert not report_store.report_path(report["id"]).exists()
 
 
 def test_evidence_ledger_shadow_prefers_matching_persisted_projection(
@@ -689,6 +956,38 @@ def test_report_store_rejects_reused_file_id_with_different_content(tmp_path, mo
     assert json.loads(report_store.report_path("immutable").read_text(encoding="utf-8")) == original
 
 
+def test_report_store_validates_corrupt_existing_file_before_postgres_import(
+    tmp_path,
+    monkeypatch,
+):
+    from web import report_store
+
+    class TrackingRepository:
+        def __init__(self):
+            self.imported = []
+
+        def import_report(self, payload):
+            self.imported.append(payload)
+
+    repository = TrackingRepository()
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    path = report_store.report_path("corrupt-before-import")
+    path.write_bytes(b"{not json")
+    before = path.read_bytes()
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+
+    with pytest.raises(ReportConflictError, match="already exists but is unreadable"):
+        report_store.save_report(
+            {
+                "id": "corrupt-before-import",
+                "brand_name": "Changed",
+            }
+        )
+
+    assert repository.imported == []
+    assert path.read_bytes() == before
+
+
 def test_report_store_does_not_write_file_after_postgres_conflict(tmp_path, monkeypatch):
     from web import report_store
 
@@ -838,53 +1137,10 @@ def test_vault_recapture_keeps_selected_sv9_report_id(monkeypatch):
     assert _vault_published_report_id("https://livellup.com", older) == "sv9-baseline"
 
 
-def test_lock_prior_sv9_tiles_keeps_lit_and_fills_empty(monkeypatch) -> None:
-    from web.scan_runner import _lock_prior_sv9_tiles
+def test_scan_runner_has_no_prior_report_tile_lock() -> None:
+    import web.scan_runner as scan_runner
 
-    prior = {
-        "id": "sv9-baseline",
-        "components": [
-            {
-                "key": "mission",
-                "status": "scored",
-                "score": 1,
-                "tile_profile": [
-                    {"id": "M1", "estado": "ok", "evidencia": "prior"},
-                    {"id": "M2", "estado": "sin_evidencia"},
-                ],
-            }
-        ],
-    }
-    fresh = {
-        "id": "sv9-recapture",
-        "score": 2,
-        "components": [
-            {
-                "key": "mission",
-                "status": "scored",
-                "score": 1,
-                "tile_profile": [
-                    {"id": "M1", "estado": "no", "motivo": "new pass"},
-                    {"id": "M2", "estado": "ok", "evidencia": "new"},
-                ],
-            }
-        ],
-    }
-    monkeypatch.setattr(
-        "web.scan_runner.list_reports_for_domain",
-        lambda _url: [prior],
-    )
-    monkeypatch.setattr(
-        "web.scan_runner.selected_report_for_display",
-        lambda _rows: (prior, _rows, {}),
-    )
-    locked = _lock_prior_sv9_tiles("https://example.com", fresh)
-    tiles = locked["components"][0]["tile_profile"]
-    assert tiles[0]["estado"] == "ok"
-    assert tiles[0]["evidencia"] == "prior"
-    assert tiles[1]["estado"] == "ok"
-    assert locked["components"][0]["score"] == 2
-    assert locked["score"] == 2
+    assert not hasattr(scan_runner, "_lock_prior_sv9_tiles")
 
 
 def test_home_lists_one_selected_analysis_per_brand(monkeypatch):
@@ -2709,90 +2965,57 @@ def test_report_view_hides_automatic_verdict_from_card_without_tile_profile(monk
 
 
 def test_compose_report_preserves_canonical_sv9_tile_profile(monkeypatch):
+    from src.sv9.aggregator import aggregate
+    from src.sv9.models import ESTADO_NO, ESTADO_OK, ESTADO_SIN_EVIDENCIA
     from src.sv9.rubric import tile_ids
+    from tests.test_vault_sv9_parity import _component, _components, _flow_payload
     from web.scan_runner import _compose_report
 
     ids = tile_ids("magnetism")
-    tile_profile = [
-        {"id": ids[0], "estado": "ok", "evidencia": "promesa visible"},
-        {"id": ids[1], "estado": "ok", "evidencia": "dolor visible"},
-        {"id": ids[2], "estado": "ok", "evidencia": "deseo visible"},
-        {"id": ids[3], "estado": "no", "motivo": "No hay contraste narrativo."},
-        *[
-            {
-                "id": tile_id,
-                "estado": "sin_evidencia",
-                "motivo": "El snapshot no aporta prueba externa.",
-                "contexto_requerido": "Aporta entrevistas o métricas de adopción.",
-            }
-            for tile_id in ids[4:]
-        ],
-    ]
-    payload = {
-        "schema_version": "test",
-        "source_run_id": 1,
-        "flow": {
-            "candidate": {"interpretation": {"blocks": {}}, "evidence_pack": {"evidence": []}},
-            "interpretation_debug": {
-                "evidence_coverage": {
-                    "component_hierarchy": {
-                        "magnetism": {
-                            "schema_version": "component-surface-hierarchy-v1",
-                            "presence_status": "detected",
-                            "hierarchy_status": "sitemap_only",
-                            "owned_surface_count": 1,
-                            "counts": {
-                                "homepage": 0,
-                                "linked_from_home": 0,
-                                "sitemap_only": 1,
-                                "owned_unknown": 0,
-                                "external": 0,
-                            },
-                            "owned_surfaces": [
-                                {
-                                    "url": "https://optiak.com/thesis",
-                                    "navigation_status": "sitemap_only",
-                                    "captured": True,
-                                    "cited_refs": ["owned.thesis"],
-                                }
-                            ],
-                        }
-                    }
-                }
-            },
-        },
-        "sv9": {
-            "brand3_score": 61,
-            "base_average": 6.1,
-            "components": {
-                "magnetism": {
-                    "status": "scored",
-                    "score": 3,
-                    "lit_tiles": ids[:3],
-                    "off_tiles": [ids[3]],
-                    "blind_spot_tiles": ids[4:],
-                }
-            },
-            "result": {
-                "brand3_score": 61,
-                "components": {
-                    "magnetism": {
-                        "component": "magnetism",
-                        "status": "scored",
-                        "score": 3,
-                        "scale": 10,
-                        "points": 6,
-                        "confidence": "baja",
-                        "detected_content": "Promesa de soberanía tecnológica.",
-                        "veredicto": "La marca tiene utilidad técnica, pero necesita más tensión narrativa.",
-                        "tile_profile": tile_profile,
-                    }
+    components = _components()
+    states = [ESTADO_OK] * 3 + [ESTADO_NO] + [ESTADO_SIN_EVIDENCIA] * 6
+    magnetism = _component("magnetism", states)
+    magnetism.detected_content = "Promesa de soberanía tecnológica."
+    magnetism.veredicto = (
+        "La marca tiene utilidad técnica, pero necesita más tensión narrativa."
+    )
+    for tile in magnetism.tile_profile:
+        if tile.estado == ESTADO_NO:
+            tile.motivo = "No hay contraste narrativo."
+        elif tile.estado == ESTADO_SIN_EVIDENCIA:
+            tile.motivo = "El snapshot no aporta prueba externa."
+            tile.contexto_requerido = "Aporta entrevistas o métricas de adopción."
+    components["magnetism"] = magnetism
+    result = aggregate(
+        components,
+        brand_name="Optiak",
+        url="https://optiak.com",
+    ).to_dict()
+    payload = _flow_payload(result)
+    payload["flow"]["interpretation_debug"]["evidence_coverage"] = {
+        "component_hierarchy": {
+            "magnetism": {
+                "schema_version": "component-surface-hierarchy-v1",
+                "presence_status": "detected",
+                "hierarchy_status": "sitemap_only",
+                "owned_surface_count": 1,
+                "counts": {
+                    "homepage": 0,
+                    "linked_from_home": 0,
+                    "sitemap_only": 1,
+                    "owned_unknown": 0,
+                    "external": 0,
                 },
-                "most_painful_gap": "magnetism",
-                "immediate_margin": 8,
-                "total_blind_spots": 6,
-            },
-        },
+                "owned_surfaces": [
+                    {
+                        "url": "https://optiak.com/thesis",
+                        "navigation_status": "sitemap_only",
+                        "captured": True,
+                        "cited_refs": ["owned.thesis"],
+                    }
+                ],
+            }
+        }
     }
 
     monkeypatch.setenv("B3S_BUILD_SHA", "c" * 40)
@@ -2809,6 +3032,61 @@ def test_compose_report_preserves_canonical_sv9_tile_profile(monkeypatch):
     assert magnetism["tiles"][0]["id"] == ids[3]
     assert magnetism["tiles"][1]["contexto_requerido"] == "Aporta entrevistas o métricas de adopción."
     assert magnetism["surface_hierarchy"]["hierarchy_status"] == "sitemap_only"
+
+
+def test_english_tile_prose_localizes_profile_and_alias_for_html_and_markdown(
+    monkeypatch,
+):
+    from src.sv9.aggregator import aggregate
+    from tests.test_vault_sv9_parity import _components, _flow_payload
+    from web import scan_runner
+    from web.app import app
+
+    english_motivo = (
+        "The snapshot does not provide access to the full product interface "
+        "and customer evidence"
+    )
+    english_context = (
+        "The available evidence requires customer interviews and product usage documentation"
+    )
+    components = _components()
+    mission_m4 = components["mission"].tile_profile[3]
+    mission_m4.estado = "sin_evidencia"
+    mission_m4.motivo = english_motivo
+    mission_m4.contexto_requerido = english_context
+    result = aggregate(
+        components,
+        brand_name="Example",
+        url="https://example.com",
+    ).to_dict()
+    report = scan_runner._compose_report(
+        "english-tile-presentation",
+        "https://example.com",
+        "Example",
+        _flow_payload(result),
+    )
+    raw_mission = next(row for row in report["components"] if row["key"] == "mission")
+    raw_profile_m4 = next(row for row in raw_mission["tile_profile"] if row["id"] == "M4")
+    raw_alias_m4 = next(row for row in raw_mission["tiles"] if row["id"] == "M4")
+    assert raw_profile_m4["motivo"] == raw_alias_m4["motivo"] == english_motivo
+    assert raw_profile_m4["contexto_requerido"] == raw_alias_m4["contexto_requerido"] == english_context
+
+    monkeypatch.setattr("web.app.load_report", lambda _scan_id: report)
+    monkeypatch.setattr("web.app.list_reports_for_domain", lambda _domain: [])
+    client = TestClient(app)
+
+    html = client.get("/report/english-tile-presentation")
+    markdown = client.get("/report/english-tile-presentation.md")
+
+    assert html.status_code == 200
+    assert markdown.status_code == 200
+    spanish_motivo = "El snapshot no aporta evidencia suficiente para evaluar esta baldosa sin contexto adicional."
+    spanish_context = "Aporta contexto externo verificable: comparativa, experiencia de producto, canales activos o documentación operativa."
+    for response in (html, markdown):
+        assert english_motivo not in response.text
+        assert english_context not in response.text
+        assert spanish_motivo in response.text
+        assert spanish_context in response.text
 
 
 def test_attach_sv9_editorial_only_requests_components_with_unusable_prose():

@@ -21,6 +21,9 @@ from typing import Any, Mapping
 from urllib.parse import urlparse
 
 from src.build_info import current_build_sha
+from src.services.scanner_report_assessment import (
+    validate_report_sv9_assessment as _validate_report_sv9_assessment,
+)
 from src.services.evidence_vault_acquisition_outcome import (
     trusted_acquisition_report_metadata,
 )
@@ -279,63 +282,6 @@ def _activate_vault_result_unless_cancelled(
     )
 
 
-def _lock_prior_sv9_tiles(url: str, report: dict[str, Any]) -> dict[str, Any]:
-    """Keep already-lit SV9 tiles; let this pass fill only empty ones."""
-
-    selected, _classified, _state = selected_report_for_display(
-        list_reports_for_domain(url)
-    )
-    if not isinstance(selected, dict) or str(selected.get("id") or "") == str(
-        report.get("id") or ""
-    ):
-        return report
-    prior_by_component = {
-        str(row.get("key") or ""): row
-        for row in selected.get("components") or []
-        if isinstance(row, dict) and row.get("key")
-    }
-    locked_report = dict(report)
-    components = []
-    total_ok = 0
-    for component in report.get("components") or []:
-        if not isinstance(component, dict):
-            continue
-        updated = dict(component)
-        prior = prior_by_component.get(str(component.get("key") or ""))
-        prior_tiles = {
-            str(tile.get("id") or ""): dict(tile)
-            for tile in (prior or {}).get("tile_profile") or []
-            if isinstance(tile, dict)
-            and str(tile.get("estado") or "") in {"ok", "no"}
-            and tile.get("id")
-        }
-        merged: list[dict[str, Any]] = []
-        for tile in component.get("tile_profile") or []:
-            if not isinstance(tile, dict):
-                continue
-            tile_id = str(tile.get("id") or "")
-            locked = prior_tiles.get(tile_id)
-            merged.append(locked if locked is not None else dict(tile))
-        if merged:
-            updated["tile_profile"] = merged
-            lit_count, off_count, blind_count = _tile_counts_from_profile(merged)
-            updated["lit"] = lit_count
-            updated["off"] = off_count
-            updated["blind"] = blind_count
-            if str(updated.get("status") or "") == "scored":
-                updated["score"] = lit_count
-            total_ok += lit_count
-        else:
-            score = updated.get("score")
-            if isinstance(score, int):
-                total_ok += score
-        components.append(updated)
-    if components:
-        locked_report["components"] = components
-        locked_report["score"] = total_ok
-    return locked_report
-
-
 def _vault_published_report_id(url: str, candidate: dict[str, Any]) -> str:
     """Keep the selected brand analysis unless this candidate replaces it."""
 
@@ -415,14 +361,226 @@ def _vault_operational_pipeline_enabled() -> bool:
     )
 
 
+def _canonical_snapshot_from_persisted_vault_capture(
+    *,
+    scan_id: str,
+    url: str,
+    expected_snapshot: Mapping[str, Any],
+    report_observation: Any,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Read the canonical Flow input from the validated persisted capture.
+
+    The operational pipeline can derive memory or diagnostic scores from the
+    same capture, but neither is an input to Flow/SV9.  Parsing here performs
+    the JSON normalization and recomputes the content-addressed identities
+    used in the immutable report binding.
+    """
+
+    from src.history.capture_observation import parse_capture_observation
+    from src.history.report_parser import canonical_json_hash, normalize_domain
+
+    if not isinstance(report_observation, dict):
+        raise RuntimeError("vault_persisted_capture_unavailable")
+    try:
+        parsed = parse_capture_observation(report_observation)
+    except Exception as exc:
+        raise RuntimeError("vault_persisted_capture_invalid") from exc
+    if parsed.source_scan_id != str(scan_id):
+        raise RuntimeError("vault_persisted_capture_scan_mismatch")
+    if normalize_domain(parsed.canonical_url) != normalize_domain(url):
+        raise RuntimeError("vault_persisted_capture_domain_mismatch")
+    try:
+        expected_capture_hash = canonical_json_hash(dict(expected_snapshot))
+        persisted_capture_hash = canonical_json_hash(parsed.capture_payload)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("vault_persisted_capture_invalid") from exc
+    if persisted_capture_hash != expected_capture_hash:
+        raise RuntimeError("vault_persisted_capture_snapshot_mismatch")
+    return (
+        copy.deepcopy(parsed.capture_payload),
+        {
+            "source_scan_id": parsed.source_scan_id,
+            "observation_hash": parsed.observation_hash,
+            "capture_hash": parsed.capture_hash,
+        },
+    )
+
+
+def _read_back_persisted_vault_capture(
+    *,
+    repository: Any,
+    preparation: Mapping[str, Any],
+    scan_id: str,
+    url: str,
+) -> dict[str, Any]:
+    """Return the repository readback when the Vault repository exposes it."""
+
+    candidate = preparation.get("report_observation")
+    readback = getattr(repository, "list_capture_observations_for_domain", None)
+    if callable(readback):
+        try:
+            captures = readback(url, workspace_slug="b3s", limit=500)
+        except Exception as exc:
+            raise RuntimeError("vault_persisted_capture_readback_failed") from exc
+        candidate = next(
+            (
+                row.get("raw_observation")
+                for row in captures
+                if isinstance(row, Mapping)
+                and str(row.get("source_scan_id") or "") == str(scan_id)
+            ),
+            None,
+        )
+    if not isinstance(candidate, dict):
+        raise RuntimeError("vault_persisted_capture_unavailable")
+    return candidate
+
+
+def _record_vault_sidecar_status(scan_id: str, detail: dict[str, Any]) -> None:
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        if status is None:
+            return
+        status["vault"] = detail
+        persisted_status = _status_copy_locked(status)
+    try:
+        _persist_scan_status(persisted_status)
+    except Exception:
+        _LOG.exception(
+            "failed to persist Vault diagnostic sidecar status",
+            extra={"scan_id": scan_id},
+        )
+
+
+def _run_vault_operational_sidecar(
+    *,
+    scan_id: str,
+    url: str,
+    repository: Any,
+    preparation: Mapping[str, Any],
+) -> bool:
+    """Run Vault operational work as a non-authoritative diagnostic sidecar.
+
+    ``False`` only communicates user cancellation.  Operational planning,
+    execution, activation, memory, and score failures are retained in scan
+    diagnostics but must never replace or block the already-built canonical
+    Flow/SV9 result.
+    """
+
+    if _scan_cancelled(scan_id):
+        return False
+    operation_plan = preparation.get("operation_plan")
+    resume = (
+        dict(preparation.get("resume") or {})
+        if isinstance(preparation.get("resume"), Mapping)
+        else {}
+    )
+    detail: dict[str, Any] = {
+        "mode": str(preparation.get("mode") or "unknown"),
+        "role": "diagnostic_sidecar",
+        "state": "not_required",
+    }
+    try:
+        activation: dict[str, Any] | None = None
+        if isinstance(operation_plan, Mapping):
+            from src.services.evidence_vault_incremental_executor import (
+                execute_vault_operation_plan,
+            )
+
+            operation_requires_llm = bool(
+                (operation_plan.get("operations") or {}).get("llm_required")
+                and resume.get("materialization_required") is not True
+            )
+            operation_llm = None
+            if operation_requires_llm:
+                from src.config import SV9_FLOW_MODEL
+                from src.features.llm_analyzer import LLMAnalyzer
+
+                operation_llm = LLMAnalyzer(
+                    model=(
+                        os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL")
+                        or SV9_FLOW_MODEL
+                    )
+                )
+            execution = execute_vault_operation_plan(
+                repository=repository,
+                source_scan_id=scan_id,
+                worker_id=f"vault-scan-{scan_id}",
+                llm=operation_llm,
+                workspace_slug="b3s",
+            )
+            execution_status = str(execution.get("execution_status") or "unknown")
+            detail["execution_status"] = execution_status
+            if execution_status != "completed":
+                raise RuntimeError(
+                    "vault_operation_not_completed:" + execution_status
+                )
+            if _scan_cancelled(scan_id):
+                return False
+            activation = _activate_vault_result_unless_cancelled(
+                scan_id,
+                repository,
+                url,
+                operation_plan_fingerprint=str(
+                    operation_plan.get("operation_plan_fingerprint") or ""
+                ),
+            )
+            if activation is None:
+                return False
+            detail["state"] = "completed"
+        elif (
+            resume.get("analysis_status") == "completed"
+            and resume.get("semantic_work_completed") is True
+        ):
+            operation_plan_fingerprint = str(
+                resume.get("operation_plan_fingerprint") or ""
+            )
+            if not operation_plan_fingerprint:
+                raise RuntimeError(
+                    "vault_completed_operation_missing_plan_fingerprint"
+                )
+            if _scan_cancelled(scan_id):
+                return False
+            activation = _activate_vault_result_unless_cancelled(
+                scan_id,
+                repository,
+                url,
+                operation_plan_fingerprint=operation_plan_fingerprint,
+            )
+            if activation is None:
+                return False
+            detail["state"] = "completed"
+
+        if isinstance(activation, Mapping):
+            memory = activation.get("memory")
+            if isinstance(memory, Mapping):
+                detail["memory_version"] = str(
+                    memory.get("canonical_memory_version") or ""
+                )
+            detail["activation_created"] = activation.get("created") is True
+    except Exception as exc:
+        _LOG.exception(
+            "vault operational sidecar failed after canonical SV9 assessment",
+            extra={"scan_id": scan_id},
+        )
+        with _LOCK:
+            _VAULT_ACTIVATIONS.discard(scan_id)
+        detail.update(
+            {
+                "state": "failed",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+        )
+    _record_vault_sidecar_status(scan_id, detail)
+    return True
+
+
 def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool) -> None:
     try:
         vault_repository = None
         vault_preparation: dict[str, Any] | None = None
-        vault_execution: dict[str, Any] | None = None
-        vault_activation: dict[str, Any] | None = None
         vault_enabled = False
-        vault_interpretation_completed = False
         _set_phase(scan_id, "capture", "running")
         from src.config import (
             BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED,
@@ -467,6 +625,8 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
             return
 
         vault_enabled = _vault_operational_pipeline_enabled()
+        canonical_snapshot = snapshot
+        canonical_source_capture: dict[str, str] | None = None
         if vault_enabled:
             from src.services.evidence_vault_scan_orchestration import (
                 prepare_vault_scan_after_capture,
@@ -476,153 +636,83 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
             vault_repository = _postgres_repository()
             if vault_repository is None:
                 raise RuntimeError("vault_persistence_repository_unavailable")
-            vault_preparation = prepare_vault_scan_after_capture(
-                repository=vault_repository,
-                snapshot=snapshot,
-                scan_id=scan_id,
-                url=url,
-                brand_name=brand_name,
-                environment="vault",
-                incremental_enabled=True,
-                workspace_slug="b3s",
-                artifacts=_acquisition_artifacts_from_snapshot(snapshot),
-            )
-            vault_resume = (
-                dict(vault_preparation.get("resume") or {})
-                if isinstance(vault_preparation.get("resume"), dict)
-                else {}
-            )
-            vault_interpretation_completed = bool(
-                vault_resume.get("semantic_work_completed") is True
-            )
-            operation_plan = vault_preparation.get("operation_plan")
-            if operation_plan is not None:
-                from src.services.evidence_vault_incremental_executor import (
-                    execute_vault_operation_plan,
-                )
-
-                operation_requires_llm = bool(
-                    operation_plan.get("operations", {}).get("llm_required")
-                    and vault_resume.get("materialization_required") is not True
-                )
-                operation_llm = None
-                if operation_requires_llm:
-                    from src.config import SV9_FLOW_MODEL
-                    from src.features.llm_analyzer import LLMAnalyzer
-
-                    operation_llm = LLMAnalyzer(
-                        model=(
-                            os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL")
-                            or SV9_FLOW_MODEL
-                        )
-                    )
-                vault_execution = execute_vault_operation_plan(
+            try:
+                vault_preparation = prepare_vault_scan_after_capture(
                     repository=vault_repository,
-                    source_scan_id=scan_id,
-                    worker_id=f"vault-scan-{scan_id}",
-                    llm=operation_llm,
+                    snapshot=snapshot,
+                    scan_id=scan_id,
+                    url=url,
+                    brand_name=brand_name,
+                    environment="vault",
+                    incremental_enabled=True,
                     workspace_slug="b3s",
+                    artifacts=_acquisition_artifacts_from_snapshot(snapshot),
                 )
-                if vault_execution.get("execution_status") != "completed":
-                    raise RuntimeError(
-                        "vault_operation_not_completed:" + str(
-                            vault_execution.get("execution_status") or "unknown"
+                if vault_preparation.get("capture_persisted") is not True:
+                    raise RuntimeError("vault_persisted_capture_unavailable")
+                persisted_observation = _read_back_persisted_vault_capture(
+                    repository=vault_repository,
+                    preparation=vault_preparation,
+                    scan_id=scan_id,
+                    url=url,
+                )
+            except Exception as exc:
+                # The operation planner is a sidecar.  If its work failed only
+                # after the capture committed, an exact repository readback is
+                # still enough to publish the canonical Flow/SV9 report.
+                try:
+                    persisted_observation = _read_back_persisted_vault_capture(
+                        repository=vault_repository,
+                        preparation={},
+                        scan_id=scan_id,
+                        url=url,
+                    )
+                    canonical_snapshot, canonical_source_capture = (
+                        _canonical_snapshot_from_persisted_vault_capture(
+                            scan_id=scan_id,
+                            url=url,
+                            expected_snapshot=snapshot,
+                            report_observation=persisted_observation,
                         )
                     )
-                vault_interpretation_completed = bool(
-                    vault_interpretation_completed or operation_requires_llm
-                )
-                if _scan_cancelled(scan_id):
-                    return
-                vault_activation = _activate_vault_result_unless_cancelled(
-                    scan_id,
-                    vault_repository,
-                    url,
-                    operation_plan_fingerprint=str(
-                        operation_plan["operation_plan_fingerprint"]
-                    ),
-                )
-                if vault_activation is None:
-                    return
-            elif (
-                vault_interpretation_completed
-                and vault_resume.get("analysis_status") == "completed"
-            ):
-                if _scan_cancelled(scan_id):
-                    return
-                operation_plan_fingerprint = str(
-                    vault_resume.get("operation_plan_fingerprint") or ""
-                )
-                if not operation_plan_fingerprint:
+                except Exception as readback_exc:
                     raise RuntimeError(
-                        "vault_completed_operation_missing_plan_fingerprint"
-                    )
-                vault_activation = _activate_vault_result_unless_cancelled(
+                        "vault_persisted_capture_unavailable"
+                    ) from readback_exc
+                _record_vault_sidecar_status(
                     scan_id,
-                    vault_repository,
-                    url,
-                    operation_plan_fingerprint=operation_plan_fingerprint,
+                    {
+                        "role": "diagnostic_sidecar",
+                        "state": "failed",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
                 )
-                if vault_activation is None:
-                    return
-            elif vault_repository is not None:
-                memory = vault_repository.get_evidence_vault_operational_memory(
-                    url,
-                    workspace_slug="b3s",
-                )
-                score, score_replayed = (
-                    vault_repository.get_or_create_evidence_vault_operational_score_evaluation(
-                        url,
-                        workspace_slug="b3s",
+                vault_preparation = None
+            else:
+                canonical_snapshot, canonical_source_capture = (
+                    _canonical_snapshot_from_persisted_vault_capture(
+                        scan_id=scan_id,
+                        url=url,
+                        expected_snapshot=snapshot,
+                        report_observation=persisted_observation,
                     )
                 )
-                vault_activation = {
-                    "created": False,
-                    "reason": "persisted_operation_resume",
-                    "memory": memory,
-                    "score": score,
-                    "score_replayed": score_replayed,
-                }
-            with _LOCK:
-                status = _SCANS.get(scan_id)
-                if status is not None:
-                    status["vault"] = {
-                        "mode": vault_preparation.get("mode"),
-                        "execution_status": (
-                            vault_execution or {}
-                        ).get("execution_status"),
-                        "memory_version": (
-                            (vault_activation or {}).get("memory") or {}
-                        ).get("canonical_memory_version"),
-                        "legacy_operational_v2_score": ((vault_activation or {}).get("score") or {}).get("score"),
-                    }
-                    persisted_status = _status_copy_locked(status)
-                else:
-                    persisted_status = None
-            if persisted_status is not None:
-                _persist_scan_status(persisted_status)
-
-        if vault_enabled:
-            activated_score = (
-                vault_activation.get("score")
-                if isinstance(vault_activation, dict)
-                else None
-            )
-            activated_memory = (
-                vault_activation.get("memory")
-                if isinstance(vault_activation, dict)
-                else None
-            )
-            if not (
-                isinstance(activated_score, dict)
-                and isinstance(activated_memory, dict)
-            ):
-                raise RuntimeError("vault_semantic_v3_report_projection_unavailable")
 
         _set_phase(scan_id, "interpret", "running")
         from scripts.sv9_flow_sv9_shadow_eval import build_flow_sv9_shadow_eval
 
-        envelope = {"snapshot": snapshot, "source_run_id": snapshot["run"]["id"]}
+        canonical_run = (
+            canonical_snapshot.get("run")
+            if isinstance(canonical_snapshot, dict)
+            else None
+        )
+        if not isinstance(canonical_run, Mapping) or canonical_run.get("id") is None:
+            raise RuntimeError("canonical_capture_run_identity_unavailable")
+        envelope = {
+            "snapshot": canonical_snapshot,
+            "source_run_id": canonical_run["id"],
+        }
         payload = build_flow_sv9_shadow_eval(envelope, include_full=True)
         payload = _attach_sv9_editorial(payload)
         if BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED:
@@ -640,25 +730,45 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
 
                 candidate_payload["evidence_pack"] = (
                     build_evidence_pack_from_snapshot(
-                        snapshot,
+                        canonical_snapshot,
                         # Raw capture persistence owns the exact evidence set;
                         # acquisition warnings are report metadata, not extra
                         # evidence rows that could break the capture binding.
                         include_acquisition_steps=False,
                     ).to_dict()
                 )
-        source_capture = snapshot.get("source_capture")
-        if isinstance(source_capture, dict):
-            payload["source_capture"] = dict(source_capture)
-        payload["acquisition_gate"] = snapshot.get("acquisition_gate") or gate
-        payload["acquisition_artifacts"] = _acquisition_artifacts_from_snapshot(snapshot)
+        if canonical_source_capture is not None:
+            payload["source_capture"] = dict(canonical_source_capture)
+        else:
+            source_capture = snapshot.get("source_capture")
+            if isinstance(source_capture, dict):
+                payload["source_capture"] = dict(source_capture)
+        payload["acquisition_gate"] = canonical_snapshot.get("acquisition_gate") or gate
+        payload["acquisition_artifacts"] = _acquisition_artifacts_from_snapshot(
+            canonical_snapshot
+        )
         if _scan_cancelled(scan_id):
             return
         _set_phase(scan_id, "interpret", "done")
         _set_phase(scan_id, "score", "done")
         report = _compose_report(scan_id, url, brand_name, payload)
-        report = _lock_prior_sv9_tiles(url, report)
         report = _attach_evidence_stability(report)
+        _validate_report_sv9_assessment(
+            report,
+            required=vault_enabled,
+        )
+        if vault_enabled:
+            if vault_repository is None:
+                raise RuntimeError("vault_persisted_capture_unavailable")
+            if vault_preparation is not None:
+                if not _run_vault_operational_sidecar(
+                    scan_id=scan_id,
+                    url=url,
+                    repository=vault_repository,
+                    preparation=vault_preparation,
+                ):
+                    return
+            _validate_report_sv9_assessment(report, required=True)
         if _scan_cancelled(scan_id):
             return
         _set_phase(scan_id, "report", "running")
@@ -1903,8 +2013,6 @@ def _tile_counts_from_profile(tile_profile: list[dict[str, Any]]) -> tuple[int, 
 
 
 def _failing_tiles_from_profile(component_key: str, tile_profile: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    from src.sv9.language_guard import spanish_tile_contexto, spanish_tile_motivo
-
     tile_names = _tile_name_map(component_key)
     failing_tiles: list[dict[str, Any]] = []
     for tile in tile_profile:
@@ -1915,8 +2023,8 @@ def _failing_tiles_from_profile(component_key: str, tile_profile: list[dict[str,
                 "id": str(tile.get("id") or tile.get("tile_id") or ""),
                 "name": str(tile_names.get(str(tile.get("id") or tile.get("tile_id") or "")) or ""),
                 "estado": str(tile.get("estado") or ""),
-                "motivo": spanish_tile_motivo(tile.get("motivo"), estado=tile.get("estado")),
-                "contexto_requerido": spanish_tile_contexto(tile.get("contexto_requerido")),
+                "motivo": str(tile.get("motivo") or ""),
+                "contexto_requerido": str(tile.get("contexto_requerido") or ""),
                 "evidencia": str(tile.get("evidencia") or ""),
             }
         )
@@ -2200,11 +2308,11 @@ def _compose_vault_memory_report(
     verification_requirements: dict[str, Any],
     legacy_operational_v2: dict[str, Any],
 ) -> dict[str, Any]:
-    """Project the persisted Vault memory into the existing report shape.
+    """Build a legacy diagnostic projection from persisted Vault memory.
 
-    This is intentionally model-free.  Vault operation execution is the only
-    interpretation step; the report and score are reconstructed from durable
-    memory/score rows rather than the capture snapshot.
+    This remains available to historical diagnostics, but scanner publication
+    never calls it: the immutable scanner report is always composed from the
+    persisted capture's fresh Flow/SV9 assessment in ``_run``.
     """
 
     from src.history.capture_observation import parse_capture_observation
@@ -2612,6 +2720,21 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
 
     blocks_by_name = {block["name"]: block for block in blocks}
     result = sv9.get("result") if isinstance(sv9.get("result"), dict) else {}
+    summary_assessment = (
+        sv9.get("assessment") if isinstance(sv9.get("assessment"), dict) else None
+    )
+    result_assessment = (
+        result.get("assessment")
+        if isinstance(result.get("assessment"), dict)
+        else None
+    )
+    if (
+        summary_assessment is not None
+        and result_assessment is not None
+        and summary_assessment != result_assessment
+    ):
+        raise RuntimeError("sv9_assessment_duplicate_mismatch")
+    assessment = copy.deepcopy(summary_assessment or result_assessment)
     result_components = result.get("components") if isinstance(result.get("components"), dict) else {}
     structured_editorial = (
         result.get("editorial_v3_1") if isinstance(result.get("editorial_v3_1"), dict) else {}
@@ -2738,7 +2861,7 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
         if value and value not in limitations:
             limitations.append(value)
 
-    return {
+    report = {
         "id": scan_id,
         "brand_name": brand_name,
         "url": url,
@@ -2746,6 +2869,18 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
         "pipeline_commit_sha": current_build_sha(),
         "score": sv9.get("brand3_score"),
         "base_average": sv9.get("base_average"),
+        "magnetism_capped": sv9.get("magnetism_capped"),
+        "sv9_assessment": assessment,
+        "assessment_fingerprint": (
+            assessment.get("assessment_fingerprint")
+            if isinstance(assessment, dict)
+            else None
+        ),
+        "score_fingerprint": (
+            assessment.get("score_fingerprint")
+            if isinstance(assessment, dict)
+            else None
+        ),
         "reliability_status": str(sv9.get("reliability_status") or "shadow"),
         "not_detected": [str(item) for item in sv9.get("not_detected") or []],
         "most_painful_gap": gap_key,
@@ -2766,3 +2901,5 @@ def _compose_report(scan_id: str, url: str, brand_name: str, payload: dict[str, 
         "limitations": limitations,
         "raw": payload,
     }
+    _validate_report_sv9_assessment(report, required=False)
+    return report

@@ -18,6 +18,7 @@ from typing import Any, Mapping
 from urllib.parse import urlparse
 
 from src.history.models import ReportConflictError
+from src.history.report_parser import canonical_json_hash
 from src.services.evidence_claim_memory import build_evidence_claim_memory
 from src.services.evidence_claim_reconciliation import (
     EvidenceClaimReconciliationCommand,
@@ -61,6 +62,10 @@ from src.services.evidence_scoring_recovery_review import (
 from src.services.scanner_evidence_comparison import (
     annotate_report_history,
     selected_report_for_display,
+)
+from src.services.scanner_report_assessment import (
+    ScannerReportAssessmentError,
+    assessment_projection_from_report,
 )
 
 
@@ -182,15 +187,20 @@ def report_path(scan_id: str) -> Path:
 
 
 def save_report(report: dict[str, Any]) -> None:
+    # Validate the immutable SV9 identity before either persistence backend is
+    # touched.  Legacy reports remain compatible; assessment-bearing reports
+    # fail closed on any duplicate or projection drift.
+    assessment_projection_from_report(report)
     path = report_path(str(report["id"]))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_file():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            existing = None
+    if path.exists() or path.is_symlink():
+        existing = _read_report_file(
+            path,
+            expected_id=str(report["id"]),
+            require_id=True,
+        )
         if isinstance(existing, dict) and existing != report:
             raise ReportConflictError(f"report {report['id']} already exists with different content")
+    path.parent.mkdir(parents=True, exist_ok=True)
     repository = _postgres_repository()
     if repository is not None:
         try:
@@ -214,21 +224,33 @@ def save_report(report: dict[str, Any]) -> None:
 
 
 def load_report(scan_id: str) -> dict[str, Any] | None:
+    postgres_report: dict[str, Any] | None = None
     repository = _postgres_repository()
     if repository is not None:
         try:
             report = repository.get_report_payload(scan_id)
             if report is not None:
-                return report
+                if not isinstance(report, dict):
+                    raise ScannerReportAssessmentError(
+                        "postgres_report_payload_invalid"
+                    )
+                assessment_projection_from_report(report)
+                postgres_report = report
+        except (ReportConflictError, ScannerReportAssessmentError):
+            raise
         except Exception:
             _LOG.exception("failed to load report from postgres", extra={"scan_id": str(scan_id)})
     path = report_path(scan_id)
-    if not path.is_file():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    file_report: dict[str, Any] | None = None
+    if path.exists() or path.is_symlink():
+        file_report = _read_report_file(path, expected_id=str(scan_id))
+    if postgres_report is not None and file_report is not None:
+        _assert_duplicate_report_identity(
+            postgres_report,
+            file_report,
+            report_id=str(scan_id),
+        )
+    return postgres_report or file_report
 
 
 def list_reports() -> list[dict[str, Any]]:
@@ -241,19 +263,41 @@ def list_reports() -> list[dict[str, Any]]:
             for row in _all_postgres_pages(repository.list_report_summaries):
                 report_id = str(row.get("id") or "")
                 if report_id:
-                    rows_by_id[report_id] = row
+                    payload = _postgres_report_payload_for_identity(
+                        repository,
+                        report_id,
+                    )
+                    rows_by_id[report_id] = (
+                        _summary_row(payload, fallback_id=report_id)
+                        if payload is not None
+                        else row
+                    )
+        except (ReportConflictError, ScannerReportAssessmentError):
+            raise
         except Exception:
             _LOG.exception("failed to list reports from postgres")
 
     directory = reports_dir()
     if directory.is_dir():
         for path in directory.glob("*.json"):
-            try:
-                report = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
+            report = _read_report_file(path, expected_id=path.stem)
             row = _summary_row(report, fallback_id=path.stem)
             report_id = str(row.get("id") or path.stem)
+            if report_id in rows_by_id:
+                postgres_report = _postgres_report_payload_for_identity(
+                    repository,
+                    report_id,
+                )
+                if postgres_report is None:
+                    candidate = rows_by_id[report_id]
+                    if _looks_like_full_report(candidate):
+                        postgres_report = candidate
+                if postgres_report is not None:
+                    _assert_duplicate_report_identity(
+                        postgres_report,
+                        report,
+                        report_id=report_id,
+                    )
             rows_by_id.setdefault(report_id, row)
     rows = list(rows_by_id.values())
     rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
@@ -287,18 +331,24 @@ def list_reports_for_domain(domain: str) -> list[dict[str, Any]]:
                 report_id = str(report.get("id") or "")
                 if report_id:
                     matches_by_id[report_id] = report
+        except (ReportConflictError, ScannerReportAssessmentError):
+            raise
         except Exception:
             _LOG.exception("failed to list brand reports from postgres", extra={"domain": target})
 
     directory = reports_dir()
     if directory.is_dir():
         for path in directory.glob("*.json"):
-            try:
-                report = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
+            report = _read_report_file(path, expected_id=path.stem)
             if domain_key(str(report.get("url") or "")) == target:
                 report_id = str(report.get("id") or path.stem)
+                existing = matches_by_id.get(report_id)
+                if existing is not None:
+                    _assert_duplicate_report_identity(
+                        existing,
+                        report,
+                        report_id=report_id,
+                    )
                 matches_by_id.setdefault(report_id, report)
     matches = list(matches_by_id.values())
     matches.sort(key=lambda report: str(report.get("created_at") or ""), reverse=True)
@@ -948,12 +998,36 @@ def current_report_for_domain(
 
 
 def _summary_row(report: dict[str, Any], *, fallback_id: str = "") -> dict[str, Any]:
+    assessment = assessment_projection_from_report(report)
+    availability = str(assessment.get("availability") or "legacy")
+    score = (
+        assessment.get("sv9_score")
+        if availability == "available"
+        else (
+            assessment.get("raw_score")
+            if availability == "legacy"
+            else None
+        )
+    )
     return {
         "id": report.get("id") or fallback_id,
         "brand_name": report.get("brand_name") or "",
         "url": report.get("url") or "",
         "created_at": report.get("created_at") or "",
-        "score": report.get("score"),
+        "score": score,
+        "base_average": (
+            assessment.get("base_average")
+            if availability == "available"
+            else assessment.get("raw_base_average")
+        ),
+        "magnetism_capped": (
+            assessment.get("magnetism_capped")
+            if availability == "available"
+            else assessment.get("raw_magnetism_capped")
+        ),
+        "assessment_availability": availability,
+        "assessment_fingerprint": assessment.get("assessment_fingerprint"),
+        "score_fingerprint": assessment.get("score_fingerprint"),
         "detected_count": report.get("detected_count"),
         "block_count": report.get("block_count"),
         "not_detected": report.get("not_detected") or [],
@@ -988,12 +1062,50 @@ def _write_immutable_report_file(path: Path, report: dict[str, Any]) -> None:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
 
-    try:
-        existing = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ReportConflictError(f"report {report['id']} already exists but is unreadable") from exc
+    existing = _read_report_file(
+        path,
+        expected_id=str(report["id"]),
+        require_id=True,
+    )
     if existing != report:
         raise ReportConflictError(f"report {report['id']} already exists with different content")
+
+
+def _read_report_file(
+    path: Path,
+    *,
+    expected_id: str | None = None,
+    require_id: bool = False,
+) -> dict[str, Any]:
+    """Read and validate an existing report file without treating failures as absence."""
+
+    if not path.is_file():
+        report_id = expected_id or path.stem
+        raise ReportConflictError(
+            f"report {report_id} already exists but is unreadable"
+        )
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        report_id = expected_id or path.stem
+        raise ReportConflictError(
+            f"report {report_id} already exists but is unreadable"
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise ScannerReportAssessmentError("file_report_payload_invalid")
+
+    actual_id = str(loaded.get("id") or "")
+    if expected_id is not None:
+        if actual_id and actual_id != expected_id:
+            raise ReportConflictError(
+                f"report {expected_id} file store payload has unexpected identity"
+            )
+        if require_id and actual_id != expected_id:
+            raise ReportConflictError(
+                f"report {expected_id} file store payload has unexpected identity"
+            )
+    assessment_projection_from_report(loaded)
+    return loaded
 
 
 def _all_postgres_pages(fetch_page) -> list[dict[str, Any]]:
@@ -1001,7 +1113,69 @@ def _all_postgres_pages(fetch_page) -> list[dict[str, Any]]:
     offset = 0
     while True:
         page = fetch_page(limit=_POSTGRES_PAGE_SIZE, offset=offset)
-        rows.extend(item for item in page if isinstance(item, dict))
+        for item in page:
+            if not isinstance(item, dict):
+                raise ScannerReportAssessmentError("postgres_report_payload_invalid")
+            if not _is_report_summary(item):
+                assessment_projection_from_report(item)
+            rows.append(item)
         if len(page) < _POSTGRES_PAGE_SIZE:
             return rows
         offset += _POSTGRES_PAGE_SIZE
+
+
+def _is_report_summary(value: Mapping[str, Any]) -> bool:
+    """Recognize the flattened PostgreSQL summary projection, not a payload."""
+
+    return (
+        "assessment_availability" in value
+        and "sv9_assessment" not in value
+        and "raw" not in value
+        and not isinstance(value.get("components"), list)
+    )
+
+
+def _postgres_report_payload_for_identity(
+    repository: Any,
+    report_id: str,
+) -> dict[str, Any] | None:
+    """Load one full PostgreSQL payload for a same-ID file comparison."""
+
+    getter = getattr(repository, "get_report_payload", None)
+    if not callable(getter):
+        return None
+    try:
+        payload = getter(report_id)
+    except AttributeError:
+        # Small compatibility/test repositories may expose summaries only.
+        return None
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise ScannerReportAssessmentError("postgres_report_payload_invalid")
+    assessment_projection_from_report(payload)
+    return payload
+
+
+def _looks_like_full_report(value: Mapping[str, Any]) -> bool:
+    """Recognize a full payload returned by a test/compatibility repository."""
+
+    return isinstance(value.get("raw"), Mapping) or "sv9_assessment" in value
+
+
+def _assert_duplicate_report_identity(
+    postgres_report: Mapping[str, Any],
+    file_report: Mapping[str, Any],
+    *,
+    report_id: str,
+) -> None:
+    """Reject two stores claiming one id while carrying different JSON."""
+
+    assessment_projection_from_report(postgres_report)
+    assessment_projection_from_report(file_report)
+    if canonical_json_hash(dict(postgres_report)) != canonical_json_hash(
+        dict(file_report)
+    ):
+        raise ReportConflictError(
+            f"report {report_id} already exists in postgres and file stores with different content"
+        )

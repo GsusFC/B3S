@@ -138,6 +138,13 @@ class ResultMetadata(StrictModel):
     prompt_version: str
     evaluator_model: str
     analysis_contract_fingerprint: str = ""
+    assessment_availability: Literal["available", "unavailable", "legacy", "invalid"] = "legacy"
+    assessment_fingerprint: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    score_fingerprint: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     generated_at: str | None = None
 
 
@@ -197,6 +204,15 @@ class ScanHistoryItem(StrictModel):
     canonical_status: str = "unknown"
     stability_classification: str = "unknown"
     stability_reason_codes: list[str] = Field(default_factory=list)
+    assessment_availability: Literal[
+        "available", "unavailable", "legacy", "invalid"
+    ] = "legacy"
+    assessment_fingerprint: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    score_fingerprint: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     result_url: str
     report_url: str
 
