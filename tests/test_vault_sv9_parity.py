@@ -1148,7 +1148,7 @@ def test_vault_capture_provenance_mismatch_fails_closed(
     assert "vault_persisted_capture_snapshot_mismatch" in status["error"]
 
 
-def test_vault_trusted_capture_binding_uses_exact_worker_snapshot() -> None:
+def test_vault_trusted_capture_binding_authenticates_exact_worker_capture() -> None:
     scan_id = "vault-parity-trusted-capture"
     worker_snapshot = _snapshot(scan_id)
     worker_snapshot.pop("source_capture")
@@ -1171,7 +1171,8 @@ def test_vault_trusted_capture_binding_uses_exact_worker_snapshot() -> None:
     parsed = parse_capture_observation(raw_observation)
     wrapper_snapshot = _snapshot(scan_id)
     wrapper_snapshot["run"]["id"] = 2**63 - 1
-    wrapper_snapshot["raw_inputs"] = []
+    wrapper_snapshot["run"]["brand_name"] = "Untrusted wrapper brand"
+    wrapper_snapshot["raw_inputs"] = deepcopy(worker_snapshot["raw_inputs"])
     wrapper_snapshot["source_capture"] = {
         "source_scan_id": scan_id,
         "observation_hash": parsed.observation_hash,
@@ -1187,8 +1188,6 @@ def test_vault_trusted_capture_binding_uses_exact_worker_snapshot() -> None:
         )
     )
 
-    assert canonical_snapshot == parsed.capture_payload
-    assert canonical_snapshot != wrapper_snapshot
     assert source_capture == wrapper_snapshot["source_capture"]
 
     wrapper_snapshot["source_capture"]["capture_hash"] = "0" * 64
@@ -1200,5 +1199,140 @@ def test_vault_trusted_capture_binding_uses_exact_worker_snapshot() -> None:
             scan_id=scan_id,
             url="https://example.com",
             expected_snapshot=wrapper_snapshot,
+            report_observation=raw_observation,
+        )
+
+
+def test_vault_trusted_capture_projects_verified_documents_into_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from scripts import sv9_flow_sv9_shadow_eval as flow_eval
+    from src import config
+    from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
+    from tests.evidence_vault_c7_shadow_fixture import build_verified_raw_ready_fixture
+    from web import report_store
+
+    proof = build_verified_raw_ready_fixture().snapshot["proofs"][0]["acquisition"]
+    raw_observation = deepcopy(proof["scan_run"]["request_payload"])
+    scan_id = raw_observation["source_scan_id"]
+    evidence_by_source = {
+        row["source"]: row for row in raw_observation["evidence_records"]
+    }
+    documents = [
+            SimpleNamespace(
+                role=binding["channel_role"],
+                source_url=binding["source_url"],
+                extracted_document=binding["extracted_document"],
+                extracted_document_sha256=binding["extracted_document_sha256"],
+                extractor_version=binding["extractor_version"],
+                receipt_fingerprint=evidence_by_source[binding["channel_role"]][
+                    "metadata"
+                ]["receipt_fingerprint"],
+            )
+            for binding in proof["evidence_bindings"]
+        ]
+
+    scan_runner._SCANS[scan_id] = _status(scan_id)
+    monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda _value: None)
+    provisional = parse_capture_observation(raw_observation)
+    wrapper_snapshot = scan_runner._verified_raw_pre_analysis_snapshot(
+        scan_id=scan_id,
+        brand_name=provisional.brand_name,
+        canonical_url=provisional.canonical_url,
+        capture_content_hash=provisional.capture_hash,
+        capture_observation_hash=provisional.observation_hash,
+        documents=documents,
+    )
+    normalized_evidence = sorted(
+        build_evidence_pack_from_snapshot(
+            wrapper_snapshot,
+            include_acquisition_steps=False,
+        ).to_dict()["evidence"],
+        key=lambda row: row["ref"],
+    )
+    raw_observation["evidence_records"] = deepcopy(normalized_evidence)
+    parsed = parse_capture_observation(raw_observation)
+    wrapper_snapshot["source_capture"] = {
+        "source_scan_id": scan_id,
+        "observation_hash": parsed.observation_hash,
+        "capture_hash": parsed.capture_hash,
+    }
+    assert set(parsed.capture_payload) == {"evidence_vault_raw_provenance", "sources"}
+    result = aggregate(
+        _components(),
+        brand_name=parsed.brand_name,
+        url=parsed.canonical_url,
+    ).to_dict()
+    flow_calls: list[dict] = []
+    published: list[dict] = []
+
+    class Repository:
+        def list_capture_observations_for_domain(self, *_a, **_k):
+            return [
+                {
+                    "source_scan_id": scan_id,
+                    "raw_observation": deepcopy(raw_observation),
+                }
+            ]
+
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
+    monkeypatch.setattr(config, "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED", True)
+    monkeypatch.setattr(scan_runner, "_capture_verified_raw_shadow", lambda **_kwargs: deepcopy(wrapper_snapshot))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: Repository())
+    monkeypatch.setattr(
+        evidence_vault_scan_orchestration, "prepare_vault_scan_after_capture",
+        lambda **_kwargs: {
+            "capture_persisted": True,
+            "mode": "incremental",
+            "operation_plan": None,
+            "report_observation": deepcopy(raw_observation),
+        },
+    )
+
+    def canonical_flow(envelope: dict, **_kwargs) -> dict:
+        flow_calls.append(deepcopy(envelope))
+        payload = _flow_payload(deepcopy(result))
+        payload["source_run_id"] = envelope["source_run_id"]
+        return payload
+
+    monkeypatch.setattr(flow_eval, "build_flow_sv9_shadow_eval", canonical_flow)
+    monkeypatch.setattr(scan_runner, "_attach_evidence_stability", lambda report: report)
+    monkeypatch.setattr(scan_runner, "_publish_completed_report", lambda _scan_id, report: published.append(deepcopy(report)) or True)
+
+    try:
+        scan_runner._run(scan_id, parsed.canonical_url, parsed.brand_name, False)
+    finally:
+        scan_runner._SCANS.pop(scan_id, None)
+        scan_runner._SCAN_EVENTS.pop(scan_id, None)
+        scan_runner._VAULT_ACTIVATIONS.discard(scan_id)
+
+    assert len(flow_calls) == 1
+    envelope = flow_calls[0]
+    assert envelope["source_run_id"] == scan_runner._stable_verified_source_run_id(
+        scan_id
+    )
+    assert envelope["snapshot"]["run"]["brand_name"] == parsed.brand_name
+    assert envelope["snapshot"]["run"]["url"] == parsed.canonical_url
+    assert "acquisition_steps" not in envelope["snapshot"]
+    assert build_evidence_pack_from_snapshot(
+        envelope["snapshot"],
+        include_acquisition_steps=False,
+    ).to_dict()["evidence"] == list(parsed.evidence_records)
+    assert len(published) == 1
+    assert published[0]["raw"]["source_run_id"] == envelope["source_run_id"]
+    assert published[0]["raw"]["flow"]["candidate"]["evidence_pack"][
+        "evidence"
+    ] == list(parsed.evidence_records)
+
+    tampered_wrapper = deepcopy(wrapper_snapshot)
+    tampered_wrapper["raw_inputs"][0]["payload"]["content"] += " tampered"
+    with pytest.raises(RuntimeError, match="vault_persisted_capture_evidence_mismatch"):
+        scan_runner._canonical_snapshot_from_persisted_vault_capture(
+            scan_id=scan_id,
+            url=parsed.canonical_url,
+            expected_snapshot=tampered_wrapper,
             report_observation=raw_observation,
         )

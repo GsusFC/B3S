@@ -401,6 +401,39 @@ def _canonical_snapshot_from_persisted_vault_capture(
             == parsed.capture_hash
         ):
             raise RuntimeError("vault_persisted_capture_snapshot_mismatch")
+        raw_inputs = expected_snapshot.get("raw_inputs")
+        if not isinstance(raw_inputs, list) or not all(
+            isinstance(row, Mapping) and isinstance(row.get("payload"), Mapping)
+            for row in raw_inputs
+        ):
+            raise RuntimeError("vault_persisted_capture_evidence_mismatch")
+        projected_raw_inputs = copy.deepcopy(raw_inputs)
+        projected_raw_inputs.sort(
+            key=lambda row: (
+                str(row["payload"].get("role") or ""),
+                str(row["payload"].get("receipt_fingerprint") or ""),
+            )
+        )
+        canonical_snapshot = {
+            "run": {
+                "brand_name": parsed.brand_name,
+                "id": _stable_verified_source_run_id(scan_id),
+                "url": parsed.canonical_url,
+            },
+            "raw_inputs": projected_raw_inputs,
+            "features": [],
+        }
+        from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
+
+        rebuilt_evidence = build_evidence_pack_from_snapshot(
+            canonical_snapshot,
+            include_acquisition_steps=False,
+        ).to_dict()["evidence"]
+        persisted_evidence = [dict(row) for row in parsed.evidence_records]
+        if canonical_json_hash(rebuilt_evidence) != canonical_json_hash(
+            persisted_evidence
+        ):
+            raise RuntimeError("vault_persisted_capture_evidence_mismatch")
     else:
         try:
             expected_capture_hash = canonical_json_hash(dict(expected_snapshot))
@@ -409,7 +442,9 @@ def _canonical_snapshot_from_persisted_vault_capture(
         if parsed.capture_hash != expected_capture_hash:
             raise RuntimeError("vault_persisted_capture_snapshot_mismatch")
     return (
-        copy.deepcopy(parsed.capture_payload),
+        canonical_snapshot
+        if parsed.pipeline_version == "evidence-vault-trusted-acquisition-v1"
+        else copy.deepcopy(parsed.capture_payload),
         {
             "source_scan_id": parsed.source_scan_id,
             "observation_hash": parsed.observation_hash,
