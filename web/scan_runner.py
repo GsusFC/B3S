@@ -389,13 +389,25 @@ def _canonical_snapshot_from_persisted_vault_capture(
         raise RuntimeError("vault_persisted_capture_scan_mismatch")
     if normalize_domain(parsed.canonical_url) != normalize_domain(url):
         raise RuntimeError("vault_persisted_capture_domain_mismatch")
-    try:
-        expected_capture_hash = canonical_json_hash(dict(expected_snapshot))
-        persisted_capture_hash = canonical_json_hash(parsed.capture_payload)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError("vault_persisted_capture_invalid") from exc
-    if persisted_capture_hash != expected_capture_hash:
-        raise RuntimeError("vault_persisted_capture_snapshot_mismatch")
+    if parsed.pipeline_version == "evidence-vault-trusted-acquisition-v1":
+        source_capture = expected_snapshot.get("source_capture")
+        if not (
+            isinstance(source_capture, Mapping)
+            and str(source_capture.get("source_scan_id") or "")
+            == parsed.source_scan_id
+            and str(source_capture.get("observation_hash") or "")
+            == parsed.observation_hash
+            and str(source_capture.get("capture_hash") or "")
+            == parsed.capture_hash
+        ):
+            raise RuntimeError("vault_persisted_capture_snapshot_mismatch")
+    else:
+        try:
+            expected_capture_hash = canonical_json_hash(dict(expected_snapshot))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("vault_persisted_capture_invalid") from exc
+        if parsed.capture_hash != expected_capture_hash:
+            raise RuntimeError("vault_persisted_capture_snapshot_mismatch")
     return (
         copy.deepcopy(parsed.capture_payload),
         {

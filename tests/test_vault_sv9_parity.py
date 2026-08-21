@@ -1146,3 +1146,59 @@ def test_vault_capture_provenance_mismatch_fails_closed(
     assert flow_calls == []
     assert status["state"] == "error"
     assert "vault_persisted_capture_snapshot_mismatch" in status["error"]
+
+
+def test_vault_trusted_capture_binding_uses_exact_worker_snapshot() -> None:
+    scan_id = "vault-parity-trusted-capture"
+    worker_snapshot = _snapshot(scan_id)
+    worker_snapshot.pop("source_capture")
+    worker_snapshot["raw_inputs"][0]["payload"]["content"] = (
+        "Exact worker-persisted evidence."
+    )
+    raw_observation = (
+        evidence_vault_scan_orchestration.build_capture_observation_from_snapshot(
+            snapshot=worker_snapshot,
+            scan_id=scan_id,
+            url="https://example.com",
+            brand_name="Example",
+            mode="incremental",
+            observed_at="2026-08-21T00:00:00+00:00",
+        )
+    )
+    raw_observation["pipeline_version"] = (
+        "evidence-vault-trusted-acquisition-v1"
+    )
+    parsed = parse_capture_observation(raw_observation)
+    wrapper_snapshot = _snapshot(scan_id)
+    wrapper_snapshot["run"]["id"] = 2**63 - 1
+    wrapper_snapshot["raw_inputs"] = []
+    wrapper_snapshot["source_capture"] = {
+        "source_scan_id": scan_id,
+        "observation_hash": parsed.observation_hash,
+        "capture_hash": parsed.capture_hash,
+    }
+
+    canonical_snapshot, source_capture = (
+        scan_runner._canonical_snapshot_from_persisted_vault_capture(
+            scan_id=scan_id,
+            url="https://example.com",
+            expected_snapshot=wrapper_snapshot,
+            report_observation=raw_observation,
+        )
+    )
+
+    assert canonical_snapshot == parsed.capture_payload
+    assert canonical_snapshot != wrapper_snapshot
+    assert source_capture == wrapper_snapshot["source_capture"]
+
+    wrapper_snapshot["source_capture"]["capture_hash"] = "0" * 64
+    with pytest.raises(
+        RuntimeError,
+        match="vault_persisted_capture_snapshot_mismatch",
+    ):
+        scan_runner._canonical_snapshot_from_persisted_vault_capture(
+            scan_id=scan_id,
+            url="https://example.com",
+            expected_snapshot=wrapper_snapshot,
+            report_observation=raw_observation,
+        )
