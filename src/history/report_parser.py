@@ -9,6 +9,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from src.history.models import HistoricalReport, ReportImportError
+from src.services.scanner_report_assessment import (
+    ScannerReportAssessmentError,
+    assessment_projection_from_report,
+)
 
 
 def parse_report(report: dict[str, Any]) -> HistoricalReport:
@@ -24,6 +28,10 @@ def parse_report(report: dict[str, Any]) -> HistoricalReport:
     observed_at = _timestamp(report.get("observed_at") or report.get("created_at"), "created_at")
     recorded_at = _timestamp(report.get("recorded_at") or report.get("created_at"), "created_at")
     evaluated_at = _timestamp(report.get("evaluated_at") or report.get("created_at"), "created_at")
+    try:
+        assessment = assessment_projection_from_report(report)
+    except ScannerReportAssessmentError as exc:
+        raise ReportImportError(str(exc)) from exc
     raw = _mapping(report.get("raw"))
     flow = _mapping(raw.get("flow"))
     candidate = _mapping(flow.get("candidate"))
@@ -55,7 +63,22 @@ def parse_report(report: dict[str, Any]) -> HistoricalReport:
         "interpretation_debug": interpretation_debug,
         "llm_usage": _mapping(raw.get("llm_usage")),
         "visual_acquisition_present": raw.get("visual_acquisition_present"),
+        "assessment_availability": assessment["availability"],
+        "assessment_fingerprint": assessment.get("assessment_fingerprint"),
+        "score_fingerprint": assessment.get("score_fingerprint"),
     }
+
+    if assessment["availability"] == "available":
+        score = _number(assessment.get("sv9_score"))
+        base_average = _number(assessment.get("base_average"))
+    elif assessment["availability"] == "unavailable":
+        # An unavailable envelope may retain a legacy aggregate in the raw
+        # report, but it has no canonical historical score.
+        score = None
+        base_average = None
+    else:
+        score = _number(assessment.get("raw_score"))
+        base_average = _number(assessment.get("raw_base_average"))
 
     return HistoricalReport(
         source_report_id=source_report_id,
@@ -71,8 +94,8 @@ def parse_report(report: dict[str, Any]) -> HistoricalReport:
         prompt_version=str(interpretation_debug.get("prompt_version") or "unknown"),
         evaluator_model=str(evaluation_result.get("evaluator_model") or raw_sv9.get("evaluator_model") or "unknown"),
         gate_authority=str(interpretation_debug.get("gate_authority") or "unknown"),
-        score=_number(report.get("score", raw_sv9.get("brand3_score"))),
-        base_average=_number(report.get("base_average", raw_sv9.get("base_average"))),
+        score=score,
+        base_average=base_average,
         reliability_status=str(report.get("reliability_status") or raw_sv9.get("reliability_status") or "unknown"),
         acquisition_state=str(acquisition_gate.get("state") or "unknown"),
         report_hash=report_hash,

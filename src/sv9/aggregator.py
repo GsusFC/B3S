@@ -154,6 +154,7 @@ def aggregate(
         url=url,
         source_run_id=source_run_id,
         components=components,
+        assessment=assessment,
         brand3_score=brand3_score,
         base_average=round(avg, 2),
         magnetism_capped=capped,

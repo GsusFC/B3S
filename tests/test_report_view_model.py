@@ -1,3 +1,7 @@
+from copy import deepcopy
+
+import pytest
+
 from web.report_view_model import build_report_view_model
 
 
@@ -128,6 +132,142 @@ def test_drawer_separates_off_tiles_and_blind_spots():
     assert [tile["id"] for tile in drawer["off_tiles"]] == ["MG2"]
     assert [tile["id"] for tile in drawer["blind_spots"]] == ["MG3"]
     assert drawer["tile_summary"] == {"lit": 1, "off": 1, "blind": 1, "scale": 10}
+
+
+def test_available_view_uses_canonical_profile_when_tile_alias_is_absent():
+    from tests.test_vault_sv9_parity import _components, _flow_payload
+    from src.sv9.aggregator import aggregate
+    from web import scan_runner
+
+    result = aggregate(
+        _components(),
+        brand_name="Example",
+        url="https://example.com",
+    ).to_dict()
+    report = scan_runner._compose_report(
+        "view-tile-alias",
+        "https://example.com",
+        "Example",
+        _flow_payload(result),
+    )
+    without_alias = deepcopy(report)
+    for component in without_alias["components"]:
+        component.pop("tiles", None)
+
+    with_alias = build_report_view_model(report)
+    without_alias_vm = build_report_view_model(without_alias)
+    with_alias_mission = next(
+        component for component in with_alias["components"] if component["key"] == "mission"
+    )
+    without_alias_mission = next(
+        component
+        for component in without_alias_vm["components"]
+        if component["key"] == "mission"
+    )
+
+    assert with_alias_mission["drawer"]["off_tiles"] == without_alias_mission["drawer"]["off_tiles"]
+    assert with_alias_mission["drawer"]["blind_spots"] == without_alias_mission["drawer"]["blind_spots"]
+    assert [tile["id"] for tile in without_alias_mission["drawer"]["off_tiles"]] == [
+        "M4",
+        "M5",
+    ]
+    assert not without_alias_mission["drawer"]["blind_spots"]
+
+
+def test_available_view_fails_closed_on_tampered_tile_alias():
+    from src.services.scanner_report_assessment import ScannerReportAssessmentError
+    from tests.test_vault_sv9_parity import _components, _flow_payload
+    from src.sv9.aggregator import aggregate
+    from web import scan_runner
+
+    result = aggregate(
+        _components(),
+        brand_name="Example",
+        url="https://example.com",
+    ).to_dict()
+    report = scan_runner._compose_report(
+        "view-tile-alias-tampered",
+        "https://example.com",
+        "Example",
+        _flow_payload(result),
+    )
+    mission = next(component for component in report["components"] if component["key"] == "mission")
+    m4 = next(tile for tile in mission["tiles"] if tile["id"] == "M4")
+    m4["estado"] = "sin_evidencia"
+
+    with pytest.raises(
+        ScannerReportAssessmentError,
+        match="sv9_assessment_report_tiles_alias_state_mismatch:mission:M4",
+    ):
+        build_report_view_model(report)
+
+
+def test_available_view_accepts_localized_detached_profile_and_alias():
+    from src.sv9.aggregator import aggregate
+    from tests.test_vault_sv9_parity import _components, _flow_payload
+    from web import scan_runner
+    from web.app import _sanitize_report_language
+
+    english_motivo = (
+        "The snapshot does not provide access to the full product interface "
+        "and customer evidence"
+    )
+    components = _components()
+    components["mission"].tile_profile[3].motivo = english_motivo
+    result = aggregate(
+        components,
+        brand_name="Example",
+        url="https://example.com",
+    ).to_dict()
+    report = scan_runner._compose_report(
+        "view-localized-tile-alias",
+        "https://example.com",
+        "Example",
+        _flow_payload(result),
+    )
+    original = deepcopy(report)
+
+    presentation = _sanitize_report_language(report)
+    vm = build_report_view_model(presentation)
+    mission = next(component for component in vm["components"] if component["key"] == "mission")
+    spanish_motivo = "El snapshot no comunica evidencia suficiente para encender esta baldosa."
+
+    assert report == original
+    assert mission["drawer"]["off_tiles"][0]["motivo"] == spanish_motivo
+    assert english_motivo not in mission["drawer"]["off_tiles"][0]["motivo"]
+
+
+def test_localization_does_not_hide_raw_alias_text_mismatch():
+    from src.services.scanner_report_assessment import ScannerReportAssessmentError
+    from src.sv9.aggregator import aggregate
+    from tests.test_vault_sv9_parity import _components, _flow_payload
+    from web import scan_runner
+    from web.app import _sanitize_report_language
+
+    components = _components()
+    components["mission"].tile_profile[3].motivo = (
+        "The snapshot does not provide access to the full product interface and customer evidence"
+    )
+    result = aggregate(
+        components,
+        brand_name="Example",
+        url="https://example.com",
+    ).to_dict()
+    report = scan_runner._compose_report(
+        "raw-alias-mismatch",
+        "https://example.com",
+        "Example",
+        _flow_payload(result),
+    )
+    mission = next(component for component in report["components"] if component["key"] == "mission")
+    m4 = next(tile for tile in mission["tiles"] if tile["id"] == "M4")
+    m4["motivo"] = "The snapshot does not include customer evidence"
+
+    with pytest.raises(
+        ScannerReportAssessmentError,
+        match="sv9_assessment_report_tiles_alias_motivo_mismatch:mission:M4",
+    ):
+        _sanitize_report_language(report)
 
 
 def test_acquisition_artifact_uses_safe_visible_label_instead_of_raw_url():

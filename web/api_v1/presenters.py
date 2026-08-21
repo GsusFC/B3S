@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from src.services.scanner_analysis_contract import analysis_contract_from_report
+from src.services.scanner_report_assessment import assessment_projection_from_report
 from src.services.scanner_score_publication import score_publication_from_report
 
 
@@ -96,9 +97,17 @@ def completed_status_from_report(report: dict[str, Any]) -> dict[str, Any]:
 def result_payload(report: dict[str, Any]) -> dict[str, Any]:
     scan_id = str(report.get("id") or "")
     score_publication = score_publication_from_report(report)
+    assessment = assessment_projection_from_report(report)
+    canonical_components = assessment.get("component_projections") or {}
     score_publishable = bool(score_publication["publishable"])
     components = [
-        _component_payload(item, score_publishable=score_publishable)
+        _component_payload(
+            item,
+            canonical_component=canonical_components.get(
+                str(item.get("key") or item.get("component") or "")
+            ),
+            score_publishable=score_publishable,
+        )
         for item in report.get("components") or []
         if isinstance(item, dict)
     ]
@@ -146,7 +155,7 @@ def result_payload(report: dict[str, Any]) -> dict[str, Any]:
                 score_publication.get("retention_reason") or ""
             ),
             "scale": 100,
-            "base_average": _number(report.get("base_average")),
+            "base_average": _number(score_publication.get("base_average")),
             "reliability_status": str(report.get("reliability_status") or "unknown"),
         },
         "summary": executive_reading or _first_component_summary(components),
@@ -177,6 +186,13 @@ def result_payload(report: dict[str, Any]) -> dict[str, Any]:
             "evaluator_model": evaluator_model or "unknown",
             "analysis_contract_fingerprint": str(
                 analysis_contract.get("fingerprint") or ""
+            ),
+            "assessment_fingerprint": score_publication.get(
+                "assessment_fingerprint"
+            ),
+            "score_fingerprint": score_publication.get("score_fingerprint"),
+            "assessment_availability": str(
+                score_publication.get("availability") or "legacy"
             ),
             "generated_at": report.get("created_at"),
         },
@@ -221,20 +237,28 @@ def report_etag(report: dict[str, Any]) -> str:
 def _component_payload(
     component: dict[str, Any],
     *,
+    canonical_component: dict[str, Any] | None = None,
     score_publishable: bool = True,
 ) -> dict[str, Any]:
+    canonical = canonical_component if isinstance(canonical_component, dict) else {}
     block = component.get("block") if isinstance(component.get("block"), dict) else {}
     tile_profile = [dict(item) for item in component.get("tile_profile") or [] if isinstance(item, dict)]
     if not tile_profile:
         tile_profile = [dict(item) for item in component.get("tiles") or [] if isinstance(item, dict)]
-    passed = sum(1 for item in tile_profile if str(item.get("estado") or item.get("state") or "") in {"ok", "on"})
-    failed = sum(1 for item in tile_profile if str(item.get("estado") or item.get("state") or "") in {"no", "off"})
-    blind = sum(
+    passed_count = sum(1 for item in tile_profile if str(item.get("estado") or item.get("state") or "") in {"ok", "on"})
+    failed_count = sum(1 for item in tile_profile if str(item.get("estado") or item.get("state") or "") in {"no", "off"})
+    blind_count = sum(
         1
         for item in tile_profile
         if str(item.get("estado") or item.get("state") or "") in {"sin_evidencia", "blind"}
     )
     key = str(component.get("key") or component.get("component") or block.get("name") or "")
+    score = canonical.get("score", component.get("score"))
+    scale = canonical.get("scale", component.get("scale"))
+    lit = canonical.get("lit", component.get("lit"))
+    off = canonical.get("off", component.get("off"))
+    blind = canonical.get("blind", component.get("blind"))
+    total = canonical.get("tile_count", len(tile_profile))
     refs = []
     for item in block.get("refs") or []:
         if not isinstance(item, dict):
@@ -252,11 +276,11 @@ def _component_payload(
         "label": str(component.get("label") or key.replace("_", " ").title()),
         "status": str(component.get("status") or "unknown"),
         "score": (
-            _number(component.get("score")) if score_publishable else None
+            _number(score) if score_publishable else None
         ),
-        "raw_score": _number(component.get("score")),
+        "raw_score": _number(score),
         "score_publishable": score_publishable,
-        "max_score": _number(component.get("scale")),
+        "max_score": _number(scale),
         "confidence": str(component.get("confidence") or block.get("confidence") or "unknown"),
         "summary": str(component.get("resumen") or ""),
         "verdict": str(component.get("veredicto") or ""),
@@ -264,10 +288,10 @@ def _component_payload(
         "detected_content": str(component.get("detected_content") or block.get("content") or ""),
         "coverage_status": str(block.get("coverage_status") or "unknown"),
         "tile_summary": {
-            "passed": int(component.get("lit") if component.get("lit") is not None else passed),
-            "failed": int(component.get("off") if component.get("off") is not None else failed),
-            "insufficient_evidence": int(component.get("blind") if component.get("blind") is not None else blind),
-            "total": len(tile_profile),
+            "passed": int(lit if lit is not None else passed_count),
+            "failed": int(off if off is not None else failed_count),
+            "insufficient_evidence": int(blind if blind is not None else blind_count),
+            "total": int(total),
         },
         "tiles": tile_profile,
         "evidence_refs": refs,

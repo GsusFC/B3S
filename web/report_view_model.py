@@ -16,6 +16,7 @@ from web.report_store import domain_key
 
 from src.services.scanner_analysis_contract import analysis_contract_from_report
 from src.services.scanner_content_sampling import content_sampling_from_report
+from src.services.scanner_report_assessment import assessment_projection_from_report
 from src.services.scanner_score_publication import score_publication_from_report
 from src.sv9.rubric import COMPONENTS as SV9_COMPONENTS
 
@@ -88,8 +89,17 @@ _LANGUAGE_LABELS = {
 def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
     """Build the stable UI contract consumed by `report.html.j2`."""
 
+    assessment_projection = assessment_projection_from_report(report)
+    canonical_components = assessment_projection.get("component_projections")
+    if not isinstance(canonical_components, dict):
+        canonical_components = {}
     components = [
-        _component_view_model(component)
+        _component_view_model(
+            component,
+            canonical_component=canonical_components.get(
+                str(component.get("key") or component.get("component") or "")
+            ),
+        )
         for component in report.get("components") or []
         if isinstance(component, dict)
     ]
@@ -117,7 +127,18 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
     acquisition = _acquisition_view_model(report)
     stability = _stability_view_model(report)
     score_publication = _score_publication_view_model(report)
-    score = report.get("score")
+    assessment_availability = str(
+        score_publication.get("availability") or "legacy"
+    )
+    score = (
+        score_publication.get("sv9_score")
+        if assessment_availability == "available"
+        else (
+            score_publication.get("raw_value")
+            if assessment_availability == "legacy"
+            else None
+        )
+    )
     editorial = report.get("editorial") if isinstance(report.get("editorial"), dict) else {}
     insufficient_evidence = _coverage_limited_keys(report)
     pipeline_commit_sha = str(report.get("pipeline_commit_sha") or "unknown")
@@ -136,12 +157,18 @@ def build_report_view_model(report: dict[str, Any]) -> dict[str, Any]:
         },
         "analysis_contract": analysis_contract,
         "score": score,
+        "raw_score": score_publication.get("raw_value"),
         "score_scale": 100,
         # Non-canonical scores remain visible as diagnostics while authority
         # continues to be governed by score_publication.publishable.
         "score_width": score if score is not None else 0,
         "score_publication": score_publication,
-        "base_average": report.get("base_average"),
+        "base_average": score_publication.get("base_average"),
+        "assessment_availability": assessment_availability,
+        "assessment_fingerprint": score_publication.get(
+            "assessment_fingerprint"
+        ),
+        "score_fingerprint": score_publication.get("score_fingerprint"),
         "reliability": {
             "status": str(report.get("reliability_status") or "unknown"),
             "canonical_status": str(report.get("canonical_status") or "unknown"),
@@ -305,16 +332,40 @@ def _coverage_limited_keys(report: dict[str, Any]) -> list[str]:
     return keys
 
 
-def _component_view_model(component: dict[str, Any]) -> dict[str, Any]:
+def _component_view_model(
+    component: dict[str, Any],
+    *,
+    canonical_component: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     key = str(component.get("key") or component.get("component") or "")
     meta = SV9_COMPONENTS.get(key) or {}
     label = str(component.get("label") or meta.get("label") or key)
-    scale = int(component.get("scale") or meta.get("scale") or 0)
-    tile_profile = component.get("tile_profile") if isinstance(component.get("tile_profile"), list) else []
-    lit, off, blind = _tile_counts(component, tile_profile)
+    canonical = canonical_component if isinstance(canonical_component, dict) else {}
+    scale = int(
+        canonical.get("scale", component.get("scale") or meta.get("scale") or 0)
+    )
+    tile_profile = (
+        _canonical_tile_profile(component, canonical)
+        if canonical
+        else (
+            component.get("tile_profile")
+            if isinstance(component.get("tile_profile"), list)
+            else []
+        )
+    )
+    if canonical:
+        lit = int(canonical.get("lit") or 0)
+        off = int(canonical.get("off") or 0)
+        blind = int(canonical.get("blind") or 0)
+    else:
+        lit, off, blind = _tile_counts(component, tile_profile)
     primary = _primary_text(component)
     support = _support_text(component, primary_text=primary.get("text") or "")
-    off_tiles, blind_spots = _split_tiles(component, tile_profile)
+    off_tiles, blind_spots = _split_tiles(
+        component,
+        tile_profile,
+        prefer_alias=not bool(canonical),
+    )
     evidence = _evidence_items(component)
     brand_quote = _lit_evidence_quote(tile_profile, evidence)
     block = component.get("block") if isinstance(component.get("block"), dict) else {}
@@ -369,9 +420,9 @@ def _component_view_model(component: dict[str, Any]) -> dict[str, Any]:
         "component": key,
         "label": label,
         "question": str(component.get("question") or meta.get("question") or ""),
-        "score": component.get("score"),
+        "score": canonical.get("score", component.get("score")),
         "scale": scale,
-        "status": str(component.get("status") or ""),
+        "status": str(canonical.get("status", component.get("status") or "")),
         "confidence": str(component.get("confidence") or ""),
         "card": {
             "primary": primary,
@@ -621,8 +672,52 @@ def _compact_term_candidate(value: str) -> str:
     return text[0].upper() + text[1:] if text.islower() else text
 
 
-def _split_tiles(component: dict[str, Any], tile_profile: list[Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    source_tiles = component.get("tiles") if isinstance(component.get("tiles"), list) else []
+def _canonical_tile_profile(
+    component: dict[str, Any],
+    canonical_component: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Use kernel-bound IDs/states and retain only profile display metadata."""
+
+    canonical_profile = canonical_component.get("tile_profile")
+    if not isinstance(canonical_profile, list):
+        return []
+    persisted_profile = component.get("tile_profile")
+    persisted_by_id = {
+        str(row.get("id") or row.get("tile_id") or ""): row
+        for row in persisted_profile or []
+        if isinstance(row, dict)
+    }
+    profile: list[dict[str, Any]] = []
+    for canonical_row in canonical_profile:
+        if not isinstance(canonical_row, dict):
+            continue
+        tile_id = str(canonical_row.get("id") or canonical_row.get("tile_id") or "")
+        row = dict(canonical_row)
+        persisted_row = persisted_by_id.get(tile_id)
+        if persisted_row is not None:
+            for field in (
+                "evidencia",
+                "motivo",
+                "contexto_requerido",
+                "name",
+            ):
+                if field in persisted_row:
+                    row[field] = persisted_row[field]
+        profile.append(row)
+    return profile
+
+
+def _split_tiles(
+    component: dict[str, Any],
+    tile_profile: list[Any],
+    *,
+    prefer_alias: bool = True,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    source_tiles = (
+        component.get("tiles")
+        if prefer_alias and isinstance(component.get("tiles"), list)
+        else []
+    )
     if not source_tiles and tile_profile:
         source_tiles = tile_profile
     off_tiles: list[dict[str, Any]] = []

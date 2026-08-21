@@ -11,7 +11,10 @@ from src.history.capture_observation import parse_capture_observation
 from src.history.models import ReportImportError
 from src.history.report_parser import parse_report
 from src.history.repository import PostgresHistoryRepository
+from src.sv9.aggregator import aggregate
 from src.sv9.export_md import build_scan_markdown
+from src.sv9.models import ComponentResult, ESTADO_NO, ESTADO_OK, STATUS_SCORED, TileVerdict
+from src.sv9.rubric import COMPONENTS, PRESENTATION_ORDER
 from src.services import evidence_vault_scan_orchestration
 from src.services.evidence_vault_authority_profiles import (
     build_initial_authority_profile_matrix,
@@ -41,15 +44,54 @@ from src.services.evidence_vault_semantic_scoring_v3 import (
 
 
 def _stub_sv9_eval(*_a, **_k) -> dict:
+    components: dict[str, ComponentResult] = {}
+    for component_key in PRESENTATION_ORDER:
+        scale = int(COMPONENTS[component_key]["scale"])
+        ok_count = 2 if component_key == "mission" else (
+            9 if component_key == "coherencia" else 0
+        )
+        profile = [
+            TileVerdict(
+                tile_id=str(tile["id"]),
+                estado=ESTADO_OK if index < ok_count else ESTADO_NO,
+                evidencia="quoted" if index < ok_count else "",
+                motivo="not demonstrated" if index >= ok_count else "",
+            )
+            for index, tile in enumerate(COMPONENTS[component_key]["tiles"])
+        ]
+        assert len(profile) == scale
+        components[component_key] = ComponentResult(
+            component=component_key,
+            status=STATUS_SCORED,
+            score=ok_count,
+            tile_profile=profile,
+        )
+    result = aggregate(
+        components,
+        brand_name="Example",
+        url="https://example.com",
+    ).to_dict()
     return {
-        "flow": {"candidate": {}, "interpretation_debug": {}},
+        "flow": {
+            "candidate": {
+                "interpretation": {"blocks": {}, "evidence_refs": {}},
+                "evidence_pack": {"evidence": []},
+                "limitations": [],
+            },
+            "interpretation_debug": {"evidence_coverage": {}},
+        },
         "sv9": {
-            "brand3_score": 20,
-            "base_average": 5.0,
-            "reliability_status": "shadow",
-            "not_detected": [],
-            "components": {},
-            "result": {"components": {}, "most_painful_gap": ""},
+            "brand3_score": result["brand3_score"],
+            "base_average": result["base_average"],
+            "magnetism_capped": result["magnetism_capped"],
+            "reliability_status": result["reliability_status"],
+            "not_detected": result["not_detected"],
+            "not_evaluated": result["not_evaluated"],
+            "components": result["components"],
+            "assessment": result["assessment"],
+            "assessment_fingerprint": result["assessment_fingerprint"],
+            "score_fingerprint": result["score_fingerprint"],
+            "result": result,
         },
     }
 from src.services.evidence_vault_operational_scoring import (
@@ -967,6 +1009,7 @@ def test_vault_resume_run_branches_to_memory_projection_without_interpreter(
         artifacts = tuple(kwargs.get("artifacts") or ())
         return {
             "mode": "incremental",
+            "capture_persisted": True,
             "operation_plan": None,
             "report_observation": _observation(
                 scan_id,
@@ -1039,17 +1082,18 @@ def test_vault_projection_cancellation_does_not_advance_report_phases(
     monkeypatch.setattr(
         scan_runner,
         "_capture_snapshot",
-        lambda *_a, **_k: _snapshot(scan_id),
+        lambda *_a, **_k: snapshot,
     )
     monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda _value: None)
     monkeypatch.setattr(report_store, "_postgres_repository", lambda: FakeRepo())
     monkeypatch.setattr(
         evidence_vault_scan_orchestration,
         "prepare_vault_scan_after_capture",
-        lambda **_k: {
+        lambda **kwargs: {
             "mode": "incremental",
+            "capture_persisted": True,
             "operation_plan": None,
-            "report_observation": _observation(scan_id, snapshot),
+            "report_observation": _observation(scan_id, kwargs["snapshot"]),
         },
     )
     monkeypatch.setattr(
@@ -1372,9 +1416,10 @@ def test_vault_activation_error_keeps_cancel_guard_until_run_terminalizes(
         scan_runner._VAULT_ACTIVATIONS.discard(scan_id)
 
 
-def test_vault_activation_error_run_terminalizes_before_releasing_guard(
+def test_vault_activation_failure_is_diagnostic_after_canonical_report(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from scripts import sv9_flow_sv9_shadow_eval as flow_eval
     from src.services import evidence_vault_incremental_executor
 
     scan_id = "scan-vault-activation-run-error"
@@ -1407,13 +1452,13 @@ def test_vault_activation_error_run_terminalizes_before_releasing_guard(
         lambda *_a, **_k: snapshot,
     )
     monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda _value: None)
-    monkeypatch.setattr(scan_runner.traceback, "print_exc", lambda: None)
     monkeypatch.setattr(report_store, "_postgres_repository", FakeRepo)
     monkeypatch.setattr(
         evidence_vault_scan_orchestration,
         "prepare_vault_scan_after_capture",
         lambda **_k: {
             "mode": "incremental",
+            "capture_persisted": True,
             "operation_plan": operation_plan,
             "report_observation": _observation(scan_id, snapshot),
         },
@@ -1422,6 +1467,14 @@ def test_vault_activation_error_run_terminalizes_before_releasing_guard(
         evidence_vault_incremental_executor,
         "execute_vault_operation_plan",
         lambda **_k: {"execution_status": "completed"},
+    )
+    monkeypatch.setattr(flow_eval, "build_flow_sv9_shadow_eval", _stub_sv9_eval)
+    monkeypatch.setattr(scan_runner, "_attach_evidence_stability", lambda value: value)
+    published: list[dict] = []
+    monkeypatch.setattr(
+        scan_runner,
+        "_publish_completed_report",
+        lambda _scan_id, report: published.append(report) or True,
     )
 
     original_activate = scan_runner._activate_vault_result_unless_cancelled
@@ -1452,18 +1505,12 @@ def test_vault_activation_error_run_terminalizes_before_releasing_guard(
                 "acquisition_gate": status["acquisition_gate"],
             }
         ]
-        assert status["state"] == "error"
-        assert status["phase"] == "error"
-        assert status["error_code"] == "scan_execution_failed"
-        assert status["error"] == (
-            "RuntimeError: activation failed after partial commits"
-        )
+        assert len(published) == 1
+        assert published[0]["score"] == 20
+        assert status["vault"]["role"] == "diagnostic_sidecar"
+        assert status["vault"]["state"] == "failed"
+        assert status["vault"]["error_type"] == "RuntimeError"
         assert scan_id not in scan_runner._VAULT_ACTIVATIONS
-        assert scan_runner.cancel_scan(scan_id) == {
-            "state": "error",
-            "cancelled": False,
-            "acquisition_gate": status["acquisition_gate"],
-        }
     finally:
         scan_runner._SCANS.pop(scan_id, None)
         scan_runner._SCAN_EVENTS.pop(scan_id, None)
@@ -1555,6 +1602,7 @@ def test_fresh_vault_activation_projects_memory_without_second_interpreter(
         "prepare_vault_scan_after_capture",
         lambda **_k: {
             "mode": "incremental",
+            "capture_persisted": True,
             "operation_plan": operation_plan,
             "report_observation": _observation(scan_id, snapshot),
         },
@@ -1642,6 +1690,7 @@ def test_result_persisted_resume_materializes_before_projection(
         "prepare_vault_scan_after_capture",
         lambda **_k: {
             "mode": "incremental",
+            "capture_persisted": True,
             "operation_plan": operation_plan,
             "report_observation": _observation(scan_id, snapshot),
             "resume": {
@@ -1733,6 +1782,7 @@ def test_cancellation_after_vault_execution_skips_memory_activation(
         "prepare_vault_scan_after_capture",
         lambda **_k: {
             "mode": "incremental",
+            "capture_persisted": True,
             "operation_plan": operation_plan,
             "report_observation": _observation(scan_id, snapshot),
         },
@@ -1756,7 +1806,7 @@ def test_cancellation_after_vault_execution_skips_memory_activation(
         scan_runner._SCANS.pop(scan_id, None)
 
 
-def test_llm_vault_operation_without_memory_score_fails_instead_of_reinterpreting(
+def test_llm_vault_operation_without_memory_score_publishes_canonical_flow_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from scripts import sv9_flow_sv9_shadow_eval as flow_eval
@@ -1797,6 +1847,7 @@ def test_llm_vault_operation_without_memory_score_fails_instead_of_reinterpretin
         "prepare_vault_scan_after_capture",
         lambda **_k: {
             "mode": "incremental",
+            "capture_persisted": True,
             "operation_plan": operation_plan,
             "report_observation": _observation(scan_id, snapshot),
         },
@@ -1813,31 +1864,35 @@ def test_llm_vault_operation_without_memory_score_fails_instead_of_reinterpretin
         replay_operation,
     )
 
-    def forbidden_interpreter(*_a, **_k):
-        raise AssertionError("completed Vault interpretation must not run again")
+    interpreted: list[str] = []
+
+    def canonical_interpreter(*_a, **_k):
+        interpreted.append("canonical_flow")
+        return _stub_sv9_eval()
 
     monkeypatch.setattr(
         flow_eval,
         "build_flow_sv9_shadow_eval",
-        forbidden_interpreter,
+        canonical_interpreter,
     )
+    published: list[dict] = []
     monkeypatch.setattr(
         scan_runner,
         "_publish_completed_report",
-        lambda *_a, **_k: (_ for _ in ()).throw(
-            AssertionError("missing Vault memory cannot publish a report")
-        ),
+        lambda _scan_id, report: published.append(report) or True,
     )
+    monkeypatch.setattr(scan_runner, "_attach_evidence_stability", lambda value: value)
     try:
         scan_runner._run(scan_id, "https://example.com", "Example", False)
-        assert status["state"] == "error"
-        assert status["phase"] == "error"
-        assert "vault_semantic_v3_report_projection_unavailable" in status["error"]
+        assert interpreted == ["canonical_flow"]
+        assert len(published) == 1
+        assert published[0]["score"] == 20
+        assert status["vault"]["state"] == "completed"
     finally:
         scan_runner._SCANS.pop(scan_id, None)
 
 
-def test_completed_llm_resume_reactivates_and_never_uses_legacy_interpreter(
+def test_completed_llm_resume_keeps_canonical_flow_independent_of_sidecar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from scripts import sv9_flow_sv9_shadow_eval as flow_eval
@@ -1879,6 +1934,7 @@ def test_completed_llm_resume_reactivates_and_never_uses_legacy_interpreter(
         "prepare_vault_scan_after_capture",
         lambda **_k: {
             "mode": "incremental",
+            "capture_persisted": True,
             "operation_plan": None,
             "report_observation": _observation(scan_id, snapshot),
             "resume": {
@@ -1889,25 +1945,33 @@ def test_completed_llm_resume_reactivates_and_never_uses_legacy_interpreter(
         },
     )
 
-    def forbidden_interpreter(*_a, **_k):
-        observed.append("legacy_interpreter")
-        raise AssertionError("completed Vault semantic work must not be repeated")
+    def canonical_interpreter(*_a, **_k):
+        observed.append("canonical_flow")
+        return _stub_sv9_eval()
 
     monkeypatch.setattr(
         flow_eval,
         "build_flow_sv9_shadow_eval",
-        forbidden_interpreter,
+        canonical_interpreter,
     )
+    published: list[dict] = []
+    monkeypatch.setattr(
+        scan_runner,
+        "_publish_completed_report",
+        lambda _scan_id, report: published.append(report) or True,
+    )
+    monkeypatch.setattr(scan_runner, "_attach_evidence_stability", lambda value: value)
     try:
         scan_runner._run(scan_id, "https://example.com", "Example", False)
-        assert status["state"] == "error"
-        assert "vault_semantic_v3_report_projection_unavailable" in status["error"]
-        assert observed == ["activation_retried"]
+        assert observed == ["canonical_flow", "activation_retried"]
+        assert len(published) == 1
+        assert published[0]["score"] == 20
+        assert status["vault"]["state"] == "completed"
     finally:
         scan_runner._SCANS.pop(scan_id, None)
 
 
-def test_vault_run_without_semantic_v3_projection_fails_closed(
+def test_vault_run_fails_closed_without_persisted_capture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from scripts import sv9_flow_sv9_shadow_eval as flow_eval
@@ -1979,4 +2043,4 @@ def test_vault_run_without_semantic_v3_projection_fails_closed(
 
     assert observed == []
     assert status["state"] == "error"
-    assert "vault_semantic_v3_report_projection_unavailable" in status["error"]
+    assert "vault_persisted_capture_unavailable" in status["error"]

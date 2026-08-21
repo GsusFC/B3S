@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from src.storage.sqlite_store import SQLiteStore
@@ -127,6 +128,33 @@ def _report(scan_id: str = "scan123") -> dict:
             "sv9": {"result": {"rubric_version": "rubric-v1"}},
         },
     }
+
+
+def _assessment_report(scan_id: str, *, unavailable: bool = False) -> dict:
+    """Build a report through the production SV9 composition boundary."""
+
+    from src.sv9.aggregator import aggregate
+    from src.sv9.models import ComponentResult, STATUS_NOT_EVALUATED
+    from tests.test_vault_sv9_parity import _components, _flow_payload
+
+    components = _components()
+    if unavailable:
+        components["vision"] = ComponentResult(
+            component="vision",
+            status=STATUS_NOT_EVALUATED,
+            error="timeout",
+        )
+    result = aggregate(
+        components,
+        brand_name="Example",
+        url="https://example.com",
+    ).to_dict()
+    return scan_runner._compose_report(
+        scan_id,
+        "https://example.com",
+        "Example",
+        _flow_payload(result),
+    )
 
 
 def test_api_health_is_public(monkeypatch):
@@ -291,6 +319,62 @@ def test_completed_result_exposes_insufficient_evidence_separately():
     assert payload["insufficient_evidence"] == ["values"]
 
 
+def test_completed_result_rejects_tampered_canonical_component_summary():
+    from src.services.scanner_report_assessment import ScannerReportAssessmentError
+
+    report = _assessment_report("tampered-api-summary")
+    report["components"][0]["lit"] += 1
+
+    with pytest.raises(
+        ScannerReportAssessmentError,
+        match="sv9_assessment_component_lit_mismatch:report",
+    ):
+        result_payload(report)
+
+
+def test_completed_result_rejects_boolean_component_summary_alias():
+    from src.services.scanner_report_assessment import ScannerReportAssessmentError
+
+    report = _assessment_report("boolean-api-summary")
+    report["components"][0]["lit"] = False
+
+    with pytest.raises(
+        ScannerReportAssessmentError,
+        match="sv9_assessment_component_lit_mismatch:report",
+    ):
+        result_payload(report)
+
+
+def test_completed_result_rejects_type_drift_in_duplicate_assessment():
+    from src.services.scanner_report_assessment import ScannerReportAssessmentError
+
+    report = _assessment_report("duplicate-assessment-api")
+    report["raw"]["sv9"]["assessment"]["component_breakdown"][0][
+        "sin_evidencia_count"
+    ] = False
+
+    with pytest.raises(
+        ScannerReportAssessmentError,
+        match="sv9_assessment_duplicate_mismatch",
+    ):
+        result_payload(report)
+
+
+def test_completed_result_rejects_stripped_assessment_envelope():
+    from src.services.scanner_report_assessment import ScannerReportAssessmentError
+
+    report = _assessment_report("stripped-api-assessment")
+    report.pop("sv9_assessment")
+    report.pop("assessment_fingerprint")
+    report.pop("score_fingerprint")
+
+    with pytest.raises(
+        ScannerReportAssessmentError,
+        match="sv9_assessment_envelope_missing",
+    ):
+        result_payload(report)
+
+
 def test_completed_result_exposes_scan_time_stability_assessment():
     report = _report("scan-stability")
     report["canonical_status"] = "non_canonical"
@@ -383,6 +467,59 @@ def test_brand_history_is_paginated(monkeypatch):
     assert response.json()["canonical_report_id"] is None
     assert response.json()["items"][0]["canonical_status"] == "non_canonical"
     assert response.json()["items"][0]["stability_classification"] == "stable"
+
+
+def test_brand_history_identity_matches_available_result_projection(monkeypatch):
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    report = _assessment_report("available-history")
+    monkeypatch.setattr(
+        "web.api_v1.router.list_reports_for_domain",
+        lambda _domain: [report],
+    )
+
+    history_response = TestClient(app).get(
+        "/api/v1/brands/example.com/scans",
+        headers=AUTH,
+    )
+
+    assert history_response.status_code == 200
+    history_item = history_response.json()["items"][0]
+    result = result_payload(report)
+
+    assert history_item["assessment_availability"] == "available"
+    assert history_item["score"] == result["score"]["value"]
+    assert history_item["assessment_fingerprint"] == result["metadata"][
+        "assessment_fingerprint"
+    ]
+    assert history_item["score_fingerprint"] == result["metadata"]["score_fingerprint"]
+
+
+def test_brand_history_legacy_and_unavailable_have_no_assessment_identity(monkeypatch):
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+    legacy = _report("legacy-history")
+    unavailable = _assessment_report("unavailable-history", unavailable=True)
+    monkeypatch.setattr(
+        "web.api_v1.router.list_reports_for_domain",
+        lambda _domain: [legacy, unavailable],
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/brands/example.com/scans",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    items = {item["id"]: item for item in response.json()["items"]}
+
+    assert items["legacy-history"]["assessment_availability"] == "legacy"
+    assert items["legacy-history"]["assessment_fingerprint"] is None
+    assert items["legacy-history"]["score_fingerprint"] is None
+
+    assert items["unavailable-history"]["assessment_availability"] == "unavailable"
+    assert items["unavailable-history"]["score"] is None
+    assert items["unavailable-history"]["raw_score"] == unavailable["score"]
+    assert items["unavailable-history"]["assessment_fingerprint"] is None
+    assert items["unavailable-history"]["score_fingerprint"] is None
 
 
 def test_brand_history_retains_drifted_score_but_preserves_raw_audit_value(
