@@ -1,0 +1,43 @@
+{
+  "contract_version": "b3s-social-community-lab-v1",
+  "platform": "x",
+  "record_kind": "post",
+  "external_id": "post-1",
+  "canonical_url": "https://social.example/brandco/status/post-1",
+  "author_account_id": "brand-account-1",
+  "author_handle": "brandco",
+  "parent_external_id": null,
+  "thread_external_id": null,
+  "text": "A useful launch update.",
+  "media_kind": "text",
+  "published_at": "2026-08-21T12:00:00Z",
+  "actor_role": "official_brand_post",
+  "content_id": "sha256:5a8fed01ea4e8cd1d9eb2e8f251e9a798f1b5d2c629fa82012212d694800072a",
+  "semantic_fingerprint": "5a8fed01ea4e8cd1d9eb2e8f251e9a798f1b5d2c629fa82012212d694800072a",
+  "provenance": {
+    "provider": "scrapecreators",
+    "endpoint_key": "brand_posts",
+    "target_fingerprint": "target-fingerprint-1",
+    "manifest_fingerprint": "manifest-fingerprint-1",
+    "request_fingerprint": "request-fingerprint-1",
+    "response_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "fetched_at": "2026-08-22T08:00:00Z",
+    "page": 1,
+    "cursor": "cursor-1",
+    "result_ordinal": 0,
+    "target_identity": {
+      "account_id": "brand-account-1",
+      "handle": "brandco"
+    },
+    "normalization_version": "social-lab-normalization-v1",
+    "linkage_evidence": {}
+  },
+  "metric_context": {
+    "metrics": {
+      "likes": 4,
+      "followers": 100
+    },
+    "observed_at": "2026-08-22T08:01:00Z",
+    "fingerprint": "sha256:0a6e3d12fa29da2ea8c9dcd3d93d8e677e0a71b661ed3080ba3d62b1e13894e2"
+  }
+}
