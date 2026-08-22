@@ -20,6 +20,7 @@ from src.sv9.rubric import (
     ESTADO_OK,
     ESTADO_SIN_EVIDENCIA,
     MODEL_LABEL,
+    PRESENTATION_ORDER,
     RUBRIC_VERSION,
     STATUS_NOT_DETECTED,
     STATUS_NOT_EVALUATED,
@@ -198,7 +199,7 @@ class Sv9ScanResult:
 
     @property
     def not_detected(self) -> list[str]:
-        return [k for k, c in self.components.items() if c.status == STATUS_NOT_DETECTED]
+        return [key for key in PRESENTATION_ORDER if self.components[key].status == STATUS_NOT_DETECTED]
 
     @property
     def not_evaluated(self) -> list[str]:

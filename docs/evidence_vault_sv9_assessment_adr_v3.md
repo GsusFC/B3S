@@ -8,13 +8,11 @@
 
 ## 1. Decisión
 
-SV9 tiene una única frontera de aritmética pura:
-`src/sv9/assessment_kernel.py`. El kernel recibe un vector semántico completo,
-lo valida fail-closed y calcula el score sin leer Scanner, Vault, evidencias,
-verification, persistencia ni modelos.
+SV9 tiene una única frontera de aritmética pura: `src/sv9/assessment_kernel.py`. El kernel recibe cobertura semántica completa
+(perfiles evaluados y sentinels v2 `not_detected`), la valida fail-closed y calcula sin leer evidencias, persistencia ni modelos.
 
 ```text
-assessment semántico exacto (80 baldosas)
+assessment semántico exacto (baldosas reales + capacidades sentinel = 80)
         │
         ▼
 SV9 assessment kernel
@@ -30,8 +28,8 @@ completos.
 
 ## 2. Contrato de entrada
 
-La entrada contiene exactamente 80 filas, una por baldosa del registro
-`baldosas-v3-1`:
+V1 contiene 80 filas del registro `baldosas-v3-1`. V2 une perfiles completos y sentinels `not_detected`, sin `not_evaluated`
+ni baldosas sintéticas; `tile_count` puede ser 75 aunque la cobertura esperada siga siendo 80:
 
 ```json
 {
@@ -55,7 +53,7 @@ cualquier coerción implícita quedan fuera del kernel.
 El orden recibido no tiene significado: el kernel ordena por el registro
 canónico antes de calcular y hashear. Falla cerrado ante:
 
-- número distinto de 80;
+- en v1, número distinto de 80; en v2, baldosas reales más capacidades sentinel distintas de 80;
 - ID desconocido, duplicado o ausente;
 - `component_key` o `tile_key` que no correspondan al registro;
 - estado fuera de catálogo;
@@ -121,12 +119,11 @@ numérico.
 
 ## 5. Scanner: adaptador shadow fail-closed
 
-`build_scanner_sv9_assessment(components)` solo entrega `available` si existen
-los diez componentes en `STATUS_SCORED` y cada perfil contiene exactamente sus
-baldosas válidas. Entonces adapta los perfiles al kernel.
+`build_scanner_sv9_assessment(components)` entrega v1 `available` con diez perfiles completos y v2 con sentinels estrictos `not_detected`.
+Cada sentinel fija componente, estado, escala del registro, score/raw/effective/points en cero y `tile_profile=[]`.
 
-Si un componente está `not_detected`, `not_evaluated`, tiene perfil incompleto,
-duplicado o incompatible, devuelve:
+Si un componente está `not_evaluated`, o cualquier perfil/sentinel está incompleto, duplicado, solapado, desconocido o incompatible,
+devuelve el envelope v1 histórico:
 
 ```text
 availability = unavailable
@@ -140,14 +137,10 @@ score_fingerprint = null
 reason_codes = [...]
 ```
 
-No fabrica 80 `no`: distinguir `no` de `sin_evidencia` requiere evaluación por
-baldosa. Corregir esa producción en el evaluator es un incremento posterior.
+No fabrica baldosas: V2 hashea baldosas reales, sentinels, política, rúbrica, registro y el cálculo exacto de `_calculate`.
 
-Para scans completos, `aggregate()` usa el resultado del kernel para score,
-media y cap. Temporalmente conserva una ruta legacy explícita para scans
-incompletos porque el modelo/store público actual representa componentes
-`not_detected` o `not_evaluated` como cero. Esa compatibilidad no convierte el
-assessment shadow en disponible ni autoriza su reutilización canónica.
+Para scans completos, `aggregate()` usa el resultado del kernel para score, media y cap. Conserva una ruta legacy para `not_evaluated`.
+Un v2 disponible publica el score actual; `candidate`/`evaluation_drift` queda como diagnóstico y no suprime esa identidad canónica.
 
 ## 6. Vault: autoridad fuera, aritmética dentro
 

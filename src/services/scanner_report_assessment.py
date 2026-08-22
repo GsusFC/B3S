@@ -40,6 +40,7 @@ _SCANNER_ASSESSMENT_FIELDS = frozenset(
         "score_fingerprint",
     }
 )
+_SCANNER_ASSESSMENT_V2_FIELDS = _SCANNER_ASSESSMENT_FIELDS | {"component_sentinels"}
 _ASSESSMENT_MARKER_KEYS = frozenset(
     {
         "assessment",
@@ -247,16 +248,29 @@ def _validated_scanner_assessment_output(
 
     from src.sv9.assessment_kernel import (
         SV9_ASSESSMENT_OUTPUT_VERSION,
+        SV9_ASSESSMENT_OUTPUT_V2_VERSION,
         SV9_SCANNER_ASSESSMENT_VERSION,
+        SV9_SCANNER_ASSESSMENT_V2_VERSION,
         Sv9AssessmentError,
         validate_sv9_assessment_output,
     )
 
-    if set(assessment) != _SCANNER_ASSESSMENT_FIELDS:
+    schema_version = assessment.get("schema_version")
+    fields = (
+        _SCANNER_ASSESSMENT_V2_FIELDS
+        if schema_version == SV9_SCANNER_ASSESSMENT_V2_VERSION
+        else _SCANNER_ASSESSMENT_FIELDS
+    )
+    if set(assessment) != fields:
         raise ScannerReportAssessmentError("sv9_assessment_envelope_fields_mismatch")
-    if assessment.get("schema_version") != SV9_SCANNER_ASSESSMENT_VERSION:
+    expected_output_version = (
+        SV9_ASSESSMENT_OUTPUT_V2_VERSION
+        if schema_version == SV9_SCANNER_ASSESSMENT_V2_VERSION
+        else SV9_ASSESSMENT_OUTPUT_VERSION
+    )
+    if schema_version not in {SV9_SCANNER_ASSESSMENT_VERSION, SV9_SCANNER_ASSESSMENT_V2_VERSION}:
         raise ScannerReportAssessmentError("sv9_assessment_envelope_schema_invalid")
-    if assessment.get("assessment_schema_version") != SV9_ASSESSMENT_OUTPUT_VERSION:
+    if assessment.get("assessment_schema_version") != expected_output_version:
         raise ScannerReportAssessmentError("sv9_assessment_output_schema_invalid")
     if not _is_strict_int(assessment.get("expected_tile_count")) or assessment.get(
         "expected_tile_count"
@@ -268,6 +282,8 @@ def _validated_scanner_assessment_output(
     availability = assessment.get("availability")
     _validate_assessment_numeric_types(assessment, availability=availability)
     if availability == "unavailable":
+        if schema_version == SV9_SCANNER_ASSESSMENT_V2_VERSION:
+            raise ScannerReportAssessmentError("sv9_v2_unavailable_assessment_invalid")
         if (
             not _is_strict_int(assessment.get("tile_count"))
             or assessment.get("tile_count") != 0
@@ -312,6 +328,8 @@ def _validated_scanner_assessment_output(
         "assessment_fingerprint": assessment.get("assessment_fingerprint"),
         "score_fingerprint": assessment.get("score_fingerprint"),
     }
+    if schema_version == SV9_SCANNER_ASSESSMENT_V2_VERSION:
+        output["component_sentinels"] = assessment.get("component_sentinels")
     try:
         validate_sv9_assessment_output(output)
     except Sv9AssessmentError as exc:
@@ -489,6 +507,9 @@ def _canonical_component_projections(
                 "estado": str(tile["assessment_state"]),
             }
         )
+    sentinels = {
+        row["component_key"]: row for row in output.get("component_sentinels", [])
+    }
     projections: dict[str, dict[str, Any]] = {}
     for row in output["component_breakdown"]:
         component_key = str(row["component_key"])
@@ -496,11 +517,12 @@ def _canonical_component_projections(
             raise ScannerReportAssessmentError(
                 f"sv9_assessment_component_duplicate:assessment:{component_key}"
             )
+        sentinel = sentinels.get(component_key)
         projections[component_key] = {
-            "status": "scored",
+            "status": sentinel["status"] if sentinel else "scored",
             "score": row["effective_score"],
             "points": row["points"],
-            "scale": row["tile_count"],
+            "scale": sentinel["scale"] if sentinel else row["tile_count"],
             "lit": row["ok_count"],
             "off": row["no_count"],
             "blind": row["sin_evidencia_count"],
@@ -516,11 +538,11 @@ def _validate_component_counts(
     component_key: str,
     expected_profile: Mapping[str, str],
     breakdown: Mapping[str, Any],
+    expected_scale: int,
     location: str,
 ) -> None:
     """Validate all public count/scale aliases against kernel breakdown data."""
 
-    expected_scale = breakdown["tile_count"]
     expected_counts = {
         "lit": breakdown["ok_count"],
         "off": breakdown["no_count"],
@@ -663,6 +685,13 @@ def _validate_available_projection(
     result: Mapping[str, Any],
     output: Mapping[str, Any],
 ) -> None:
+    sentinels = {
+        row["component_key"]: row for row in output.get("component_sentinels", [])
+    }
+    expected_not_detected = list(sentinels)
+    for container in (report, sv9, result):
+        if container.get("not_detected") != expected_not_detected:
+            raise ScannerReportAssessmentError("sv9_assessment_not_detected_mismatch")
     for container in (report, sv9, result):
         projected_score = (
             container.get("score")
@@ -706,7 +735,9 @@ def _validate_available_projection(
                 f"sv9_assessment_component_duplicate:assessment:{component_key}"
             )
         breakdown[component_key] = row
-    expected_profiles: dict[str, dict[str, str]] = {}
+    expected_profiles: dict[str, dict[str, str]] = {
+        component_key: {} for component_key in breakdown
+    }
     for tile in output["tiles"]:
         component_key = str(tile["component_key"])
         tile_id = str(tile["tile_id"])
@@ -744,6 +775,8 @@ def _validate_available_projection(
         expected_score = component_score["effective_score"]
         expected_points = component_score["points"]
         expected_profile = expected_profiles[component_key]
+        sentinel = sentinels.get(component_key)
+        expected_status = sentinel["status"] if sentinel else "scored"
         for location, component in (
             ("report", report_components.get(component_key)),
             ("result", result_components.get(component_key)),
@@ -761,7 +794,7 @@ def _validate_available_projection(
                 raise ScannerReportAssessmentError(
                     f"sv9_assessment_component_points_mismatch:{location}:{component_key}"
                 )
-            if component.get("status") != "scored":
+            if component.get("status") != expected_status:
                 raise ScannerReportAssessmentError(
                     f"sv9_assessment_component_status_mismatch:{location}:{component_key}"
                 )
@@ -770,6 +803,7 @@ def _validate_available_projection(
                 component_key=component_key,
                 expected_profile=expected_profile,
                 breakdown=component_score,
+                expected_scale=sentinel["scale"] if sentinel else component_score["tile_count"],
                 location=location,
             )
         _validate_tile_profile_projection(

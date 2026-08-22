@@ -6,12 +6,17 @@ import pytest
 
 from src.history.capture_observation import parse_capture_observation
 from src.services import evidence_vault_scan_orchestration
+from src.services.scanner_report_assessment import (
+    ScannerReportAssessmentError,
+    assessment_projection_from_report,
+)
 from src.sv9.aggregator import aggregate
 from src.sv9.assessment_kernel import validate_sv9_assessment_output
 from src.sv9.models import (
     ComponentResult,
     ESTADO_NO,
     ESTADO_OK,
+    STATUS_NOT_DETECTED,
     STATUS_NOT_EVALUATED,
     STATUS_SCORED,
     TileVerdict,
@@ -50,6 +55,25 @@ def _components() -> dict[str, ComponentResult]:
             states[:4] = [ESTADO_OK] * 4
         rows[component_key] = _component(component_key, states)
     return rows
+
+
+def _vision_sentinel_result() -> dict:
+    components = _components()
+    components["vision"] = ComponentResult(component="vision", status=STATUS_NOT_DETECTED)
+    for key, score in {
+        "mission": 5, "values": 5, "attributes": 5, "value_proposition": 10,
+        "personality": 10, "brand_idea": 10, "core_purpose": 10,
+        "magnetism": 8, "coherencia": 1,
+    }.items():
+        states = [ESTADO_OK] * score + [ESTADO_NO] * (int(COMPONENTS[key]["scale"]) - score)
+        components[key] = _component(key, states)
+    return aggregate(components, brand_name="Example", url="https://example.com").to_dict()
+
+
+def _vision_sentinel_report(scan_id: str) -> dict:
+    return scan_runner._compose_report(
+        scan_id, "https://example.com", "Example", _flow_payload(_vision_sentinel_result())
+    )
 
 
 def _snapshot(scan_id: str) -> dict:
@@ -239,6 +263,92 @@ def test_flow_summary_adapter_publishes_real_available_assessment(
         assert summary["scale"] == component["scale"]
         assert summary["blind_spot_count"] == component["blind_spot_count"]
         assert summary["tile_profile"] == component["tile_profile"]
+
+
+@pytest.mark.parametrize(
+    ("classification", "publishable"),
+    [("candidate", True), ("evaluation_drift", True),
+     ("acquisition_regression", False), ("comparison_error", False),
+     ("contract_mismatch", False), ("invalid", False)],
+)
+def test_v2_sentinel_survives_report_store_api_view_and_history_diagnostics(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, classification: str, publishable: bool,
+) -> None:
+    from src.services.scanner_score_publication import score_publication_from_report
+    from web import report_store
+    from web.api_v1.presenters import result_payload
+    from web.report_view_model import build_report_view_model
+
+    result = _vision_sentinel_result()
+    report = _vision_sentinel_report("sentinel-73")
+    report["stability"] = {"classification": classification}
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    report_store.save_report(report)
+    loaded = report_store.load_report("sentinel-73")
+
+    assert loaded is not None
+    projection = assessment_projection_from_report(loaded)
+    publication = score_publication_from_report(loaded)
+    assert result["brand3_score"] == projection["sv9_score"] == 73
+    assert projection["component_projections"]["vision"]["status"] == "not_detected"
+    expected = 73 if publishable else None
+    assert publication["publishable"] is publishable
+    assert publication["classification"] == classification
+    assert publication["value"] == result_payload(loaded)["score"]["value"] == expected
+    assert build_report_view_model(loaded)["score_publication"]["value"] == expected
+    components = dict(reversed(_components().items()))
+    components.update({key: ComponentResult(component=key, status=STATUS_NOT_DETECTED) for key in ("mission", "vision")})
+    multi = aggregate(components, brand_name="Example", url="https://example.com").to_dict()
+    assert multi["not_detected"] == ["mission", "vision"]
+    assert assessment_projection_from_report(scan_runner._compose_report("multi", "https://example.com", "Example", _flow_payload(multi)))["availability"] == "available"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda a: a.pop("component_sentinels"),
+        lambda a: a["component_sentinels"].append(deepcopy(a["component_sentinels"][0])),
+        lambda a: a["component_sentinels"][0].update(component_key="unknown"),
+        lambda a: a["component_sentinels"].append({
+            **deepcopy(a["component_sentinels"][0]), "component_key": "mission",
+        }),
+        lambda a: a["component_sentinels"][0].update(status="scored"),
+        lambda a: a["component_sentinels"][0].update(scale=6),
+        lambda a: a["component_sentinels"][0].update(score=1),
+        lambda a: a["component_sentinels"][0]["tile_profile"].append({}),
+        lambda a: a["component_breakdown"][1].update(points=1),
+        lambda a: a.update(assessment_fingerprint="0" * 64),
+        lambda a: a["component_sentinels"][0].update(score=False),
+        lambda a: a.update(availability="unavailable"),
+    ],
+)
+def test_v2_sentinel_tampering_fails_closed(mutate) -> None:
+    report = _vision_sentinel_report("sentinel-tamper")
+    assessment = deepcopy(report["sv9_assessment"])
+    mutate(assessment)
+    report["sv9_assessment"] = deepcopy(assessment)
+    report["raw"]["sv9"]["assessment"] = deepcopy(assessment)
+    report["raw"]["sv9"]["result"]["assessment"] = deepcopy(assessment)
+    with pytest.raises(ScannerReportAssessmentError):
+        assessment_projection_from_report(report)
+
+
+def test_v2_sentinel_divergent_duplicate_fails_closed() -> None:
+    report = _vision_sentinel_report("sentinel-duplicate")
+    report["raw"]["sv9"]["assessment"]["component_sentinels"][0]["scale"] = 6
+    with pytest.raises(ScannerReportAssessmentError, match="duplicate_mismatch"):
+        assessment_projection_from_report(report)
+
+
+@pytest.mark.parametrize("tamper", ["component_status", "not_detected_alias"])
+def test_v2_report_alias_tampering_fails_closed(tamper: str) -> None:
+    report = _vision_sentinel_report("sentinel-alias")
+    if tamper == "component_status":
+        next(row for row in report["components"] if row["key"] == "vision")["status"] = "scored"
+    else:
+        report["raw"]["sv9"]["not_detected"] = []
+    with pytest.raises(ScannerReportAssessmentError):
+        assessment_projection_from_report(report)
 
 
 def test_incomplete_aggregate_exposes_unavailable_assessment_without_zero_tiles() -> None:

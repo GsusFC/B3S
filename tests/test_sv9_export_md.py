@@ -177,10 +177,10 @@ class ExportMarkdownTests(unittest.TestCase):
         self.assertIn("Baseline: `baseline`", md)
         self.assertIn("Propósito: **4 → 8** · baldosas PR3, PR4", md)
         self.assertIn(
-            "Brand3 Score: **retenido (evaluación no canónica)**",
+            "Brand3 Score: **35/100**",
             md,
         )
-        self.assertIn("Nota: **retenida**", md)
+        self.assertIn("Nota: **3/5**", md)
 
     def test_export_retains_score_after_acquisition_regression(self):
         scan = self._scan()
