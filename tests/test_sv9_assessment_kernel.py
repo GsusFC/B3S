@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
+import json
 import random
 
 import pytest
@@ -24,6 +26,7 @@ from src.sv9.assessment_kernel import (
 )
 from src.sv9.models import (
     ComponentResult,
+    STATUS_NOT_DETECTED,
     STATUS_NOT_EVALUATED,
     STATUS_SCORED,
     TileVerdict,
@@ -94,6 +97,10 @@ def test_kernel_golden_perfect_assessment() -> None:
     )
     assert result["score_fingerprint"] == (
         "a7542fd484fea47a00d4812b8844732b3c47098a49874771bd7b63a2f76cff80"
+    )
+    serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    assert hashlib.sha256(serialized.encode()).hexdigest() == (
+        "d8f67452c8703d04c9c90ea13f6ef41c4b10e96d934cec2b33a8ddeae76a226a"
     )
 
 
@@ -260,6 +267,47 @@ def test_scanner_adapter_is_available_only_for_exact_scored_profiles() -> None:
     assert unavailable["reason_codes"] == [
         "component_not_scored:vision:not_evaluated"
     ]
+
+
+def test_not_detected_component_uses_typed_v2_sentinel_without_tiles() -> None:
+    rows = _rows("ok")
+    for row in rows:
+        if (row["component_key"], row["tile_id"]) in {("magnetism", "MG1"), ("magnetism", "MG2")} or (
+            row["component_key"] == "coherencia" and row["tile_id"] != "C10"):
+            row["assessment_state"] = "no"
+    components = _components(rows)
+    components["vision"] = ComponentResult(component="vision", status=STATUS_NOT_DETECTED)
+    scan = aggregate(components, brand_name="Acme", url="https://acme.test")
+    assessment = scan.assessment
+    assert scan.brand3_score == assessment["sv9_score"] == 73
+    assert assessment["availability"] == "available"
+    assert assessment["schema_version"] == "sv9-scanner-assessment-v2"
+    assert assessment["assessment_schema_version"] == "sv9-assessment-output-v2"
+    assert assessment["tile_count"] == 75
+    assert not any(tile["component_key"] == "vision" for tile in assessment["tiles"])
+    assert assessment["component_sentinels"] == [
+        {"component_key": "vision", "status": "not_detected", "score": 0, "raw_score": 0,
+         "effective_score": 0, "points": 0, "tile_profile": [], "scale": 5}]
+    output = {key: value for key, value in assessment.items()
+              if key not in {"assessment_schema_version", "expected_tile_count", "availability", "reason_codes"}}
+    output["schema_version"] = assessment["assessment_schema_version"]
+    validate_sv9_assessment_output(output)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [*(("component_key", value) for value in ([], {}, True, 1, 1.0, "")),
+     *((field, 5.0 if field == "scale" else 0.0)
+       for field in ("score", "raw_score", "effective_score", "points", "scale"))],
+)
+def test_v2_sentinel_rejects_non_string_identity_and_non_integer_numbers(field, value) -> None:
+    rows = [row for row in _rows("ok") if row["component_key"] != "vision"]
+    sentinel = {"component_key": "vision", "status": "not_detected", "score": 0,
+                "raw_score": 0, "effective_score": 0, "points": 0,
+                "tile_profile": [], "scale": 5}
+    sentinel[field] = value
+    with pytest.raises(Sv9AssessmentError):
+        build_sv9_assessment(rows, [sentinel])
 
 
 def test_scanner_adapter_fails_closed_on_missing_or_duplicate_profile_tiles() -> None:

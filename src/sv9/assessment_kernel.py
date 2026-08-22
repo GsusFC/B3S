@@ -22,6 +22,7 @@ from src.sv9.rubric import (
     MAGNETISM_CAP_VALUE,
     PRESENTATION_ORDER,
     RUBRIC_VERSION,
+    STATUS_NOT_DETECTED,
     STATUS_SCORED,
 )
 
@@ -34,6 +35,11 @@ SV9_ASSESSMENT_FINGERPRINT_VERSION = "sv9-assessment-fingerprint-v1"
 SV9_SCORE_FINGERPRINT_VERSION = "sv9-score-fingerprint-v1"
 SV9_TILE_CONTRACT_REGISTRY_VERSION = "sv9-tile-contract-registry-v1"
 SV9_SCANNER_ASSESSMENT_VERSION = "sv9-scanner-assessment-v1"
+SV9_ASSESSMENT_OUTPUT_V2_VERSION = "sv9-assessment-output-v2"
+SV9_ASSESSMENT_VECTOR_V2_VERSION = "sv9-assessment-vector-v2"
+SV9_ASSESSMENT_FINGERPRINT_V2_VERSION = "sv9-assessment-fingerprint-v2"
+SV9_SCORE_FINGERPRINT_V2_VERSION = "sv9-score-fingerprint-v2"
+SV9_SCANNER_ASSESSMENT_V2_VERSION = "sv9-scanner-assessment-v2"
 
 _ASSESSMENT_FIELDS = frozenset(
     {"component_key", "tile_id", "tile_key", "assessment_state"}
@@ -55,6 +61,9 @@ _ASSESSMENT_OUTPUT_FIELDS = frozenset(
         "score_fingerprint",
     }
 )
+_ASSESSMENT_OUTPUT_V2_FIELDS = _ASSESSMENT_OUTPUT_FIELDS | {"component_sentinels"}
+_SENTINEL_FIELDS = frozenset(
+    {"component_key", "status", "score", "raw_score", "effective_score", "points", "tile_profile", "scale"})
 _BREAKDOWN_FIELDS = frozenset(
     {
         "component_key",
@@ -191,6 +200,7 @@ def build_sv9_tile_contract_registry() -> dict[str, Any]:
 
 def build_sv9_assessment(
     tile_assessments: list[Mapping[str, Any]],
+    component_sentinels: list[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Validate and score one complete 80-tile SV9 assessment vector.
 
@@ -200,8 +210,48 @@ def build_sv9_assessment(
     being coerced to a zero-valued brand judgment.
     """
 
-    normalized = _normalize_assessments(tile_assessments)
+    if component_sentinels is None:
+        normalized = _normalize_assessments(tile_assessments)
+        sentinels: list[dict[str, Any]] = []
+    else:
+        sentinels = _normalize_sentinels(component_sentinels)
+        normalized = _normalize_assessments(tile_assessments, sentinels=sentinels)
     calculation = _calculate(normalized)
+    if sentinels:
+        assessment_fingerprint = _fingerprint(
+            SV9_ASSESSMENT_FINGERPRINT_V2_VERSION,
+            {
+                "assessment_vector_version": SV9_ASSESSMENT_VECTOR_V2_VERSION,
+                "scoring_policy_version": SV9_SCORING_POLICY_VERSION,
+                "rubric_version": RUBRIC_VERSION,
+                "tile_contract_registry_fingerprint": SV9_TILE_CONTRACT_REGISTRY_FINGERPRINT,
+                "tiles": normalized,
+                "component_sentinels": sentinels,
+            },
+        )
+        score_fingerprint = _fingerprint(
+            SV9_SCORE_FINGERPRINT_V2_VERSION,
+            {
+                "assessment_fingerprint": assessment_fingerprint,
+                "scoring_policy_version": SV9_SCORING_POLICY_VERSION,
+                "rubric_version": RUBRIC_VERSION,
+                "tile_contract_registry_fingerprint": SV9_TILE_CONTRACT_REGISTRY_FINGERPRINT,
+                "calculation": calculation,
+            },
+        )
+        return {
+            "schema_version": SV9_ASSESSMENT_OUTPUT_V2_VERSION,
+            "rubric_version": RUBRIC_VERSION,
+            "assessment_vector_version": SV9_ASSESSMENT_VECTOR_V2_VERSION,
+            "scoring_policy_version": SV9_SCORING_POLICY_VERSION,
+            "tile_contract_registry_fingerprint": SV9_TILE_CONTRACT_REGISTRY_FINGERPRINT,
+            "tile_count": len(normalized),
+            "tiles": normalized,
+            "component_sentinels": sentinels,
+            **calculation,
+            "assessment_fingerprint": assessment_fingerprint,
+            "score_fingerprint": score_fingerprint,
+        }
     assessment_fingerprint = _fingerprint(
         SV9_ASSESSMENT_FINGERPRINT_VERSION,
         {
@@ -245,13 +295,22 @@ def build_sv9_assessment(
 def validate_sv9_assessment_output(output: Mapping[str, Any]) -> None:
     """Recompose and strictly verify one persisted kernel output snapshot."""
 
-    if not isinstance(output, Mapping) or set(output) != _ASSESSMENT_OUTPUT_FIELDS:
+    if not isinstance(output, Mapping):
         raise Sv9AssessmentError("SV9 assessment output fields mismatch")
-    if output.get("schema_version") != SV9_ASSESSMENT_OUTPUT_VERSION:
+    schema_version = output.get("schema_version")
+    fields = _ASSESSMENT_OUTPUT_V2_FIELDS if schema_version == SV9_ASSESSMENT_OUTPUT_V2_VERSION else _ASSESSMENT_OUTPUT_FIELDS
+    if set(output) != fields:
+        raise Sv9AssessmentError("SV9 assessment output fields mismatch")
+    if schema_version not in {SV9_ASSESSMENT_OUTPUT_VERSION, SV9_ASSESSMENT_OUTPUT_V2_VERSION}:
         raise Sv9AssessmentError("unsupported SV9 assessment output schema")
     if output.get("rubric_version") != RUBRIC_VERSION:
         raise Sv9AssessmentError("SV9 assessment output rubric mismatch")
-    if output.get("assessment_vector_version") != SV9_ASSESSMENT_VECTOR_VERSION:
+    expected_vector_version = (
+        SV9_ASSESSMENT_VECTOR_V2_VERSION
+        if schema_version == SV9_ASSESSMENT_OUTPUT_V2_VERSION
+        else SV9_ASSESSMENT_VECTOR_VERSION
+    )
+    if output.get("assessment_vector_version") != expected_vector_version:
         raise Sv9AssessmentError("SV9 assessment vector version mismatch")
     if output.get("scoring_policy_version") != SV9_SCORING_POLICY_VERSION:
         raise Sv9AssessmentError("SV9 scoring policy version mismatch")
@@ -263,14 +322,17 @@ def validate_sv9_assessment_output(output: Mapping[str, Any]) -> None:
     if (
         not isinstance(output.get("tile_count"), int)
         or isinstance(output.get("tile_count"), bool)
-        or output.get("tile_count") != 80
+        or not 0 <= output.get("tile_count") <= 80
     ):
         raise Sv9AssessmentError("SV9 assessment output tile count mismatch")
     tiles = output.get("tiles")
     if not isinstance(tiles, list):
         raise Sv9AssessmentError("SV9 assessment output tiles must be an array")
 
-    expected = build_sv9_assessment(tiles)
+    expected = build_sv9_assessment(
+        tiles,
+        output.get("component_sentinels") if schema_version == SV9_ASSESSMENT_OUTPUT_V2_VERSION else None,
+    )
     try:
         actual_json = json.dumps(
             dict(output),
@@ -323,12 +385,21 @@ def build_scanner_sv9_assessment(
         return _scanner_unavailable(reasons)
 
     rows: list[dict[str, str]] = []
+    sentinels: list[dict[str, Any]] = []
     for component_key in PRESENTATION_ORDER:
         component = components[component_key]
         if getattr(component, "component", None) != component_key:
             reasons.append(f"component_identity_mismatch:{component_key}")
             continue
         status = getattr(component, "status", None)
+        if status == STATUS_NOT_DETECTED:
+            tile_profile = getattr(component, "tile_profile", None)
+            score = getattr(component, "score", None)
+            if tile_profile != [] or not isinstance(score, int) or isinstance(score, bool) or score != 0:
+                reasons.append(f"invalid_not_detected_component:{component_key}")
+                continue
+            sentinels.append(_not_detected_sentinel(component_key))
+            continue
         if status != STATUS_SCORED:
             reasons.append(f"component_not_scored:{component_key}:{status or 'unknown'}")
             continue
@@ -354,7 +425,7 @@ def build_scanner_sv9_assessment(
         return _scanner_unavailable(reasons)
 
     try:
-        assessment = build_sv9_assessment(rows)
+        assessment = build_sv9_assessment(rows, sentinels or None)
     except Sv9AssessmentError as exc:
         return _scanner_unavailable([f"invalid_tile_profile:{exc}"])
 
@@ -364,6 +435,8 @@ def build_scanner_sv9_assessment(
     }
     for component_key in PRESENTATION_ORDER:
         score = getattr(components[component_key], "score", None)
+        if any(row["component_key"] == component_key for row in sentinels):
+            continue
         row = breakdown[component_key]
         allowed_scores = {row["raw_score"]}
         # ``aggregate`` historically mutates the capped Magnetism component to
@@ -383,7 +456,7 @@ def build_scanner_sv9_assessment(
         **assessment,
         # Preserve the adapter schema at the outer boundary while exposing the
         # kernel schema explicitly.
-        "schema_version": SV9_SCANNER_ASSESSMENT_VERSION,
+        "schema_version": SV9_SCANNER_ASSESSMENT_V2_VERSION if sentinels else SV9_SCANNER_ASSESSMENT_VERSION,
         "assessment_schema_version": assessment["schema_version"],
         "expected_tile_count": 80,
         "availability": "available",
@@ -495,12 +568,16 @@ def validate_sv9_calculation(
 
 def _normalize_assessments(
     tile_assessments: list[Mapping[str, Any]],
+    *,
+    sentinels: list[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
-    if not isinstance(tile_assessments, list) or len(tile_assessments) != len(
-        _REGISTRY
-    ):
+    sentinel_keys = {row["component_key"] for row in sentinels or []}
+    expected_count = sum(
+        1 for row in _REGISTRY if row["component_key"] not in sentinel_keys
+    )
+    if not isinstance(tile_assessments, list) or len(tile_assessments) != expected_count:
         raise Sv9AssessmentError(
-            "SV9 assessment requires exactly 80 tile assessments"
+            f"SV9 assessment requires exactly {expected_count} tile assessments"
         )
 
     normalized: list[dict[str, str]] = []
@@ -543,10 +620,50 @@ def _normalize_assessments(
             }
         )
 
-    if seen != set(_REGISTRY_BY_ID):
+    expected_ids = {
+        row["tile_id"] for row in _REGISTRY if row["component_key"] not in sentinel_keys
+    }
+    if seen != expected_ids:
         raise Sv9AssessmentError("SV9 assessment tile coverage is incomplete")
     normalized.sort(key=lambda row: _REGISTRY_ORDER[row["tile_id"]])
     return normalized
+
+
+def _not_detected_sentinel(component_key: str) -> dict[str, Any]:
+    return {
+        "component_key": component_key,
+        "status": STATUS_NOT_DETECTED,
+        "score": 0,
+        "raw_score": 0,
+        "effective_score": 0,
+        "points": 0,
+        "tile_profile": [],
+        "scale": int(COMPONENTS[component_key]["scale"]),
+    }
+
+
+def _normalize_sentinels(
+    component_sentinels: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if not isinstance(component_sentinels, list) or not component_sentinels:
+        raise Sv9AssessmentError("SV9 v2 assessment requires component sentinels")
+    indexed: dict[str, dict[str, Any]] = {}
+    for raw in component_sentinels:
+        if not isinstance(raw, Mapping) or set(raw) != _SENTINEL_FIELDS:
+            raise Sv9AssessmentError("SV9 component sentinel fields mismatch")
+        component_key = raw.get("component_key")
+        if not isinstance(component_key, str) or not component_key or (
+            component_key not in COMPONENTS or component_key in indexed
+        ):
+            raise Sv9AssessmentError("SV9 component sentinel identity invalid")
+        expected = _not_detected_sentinel(str(component_key))
+        if dict(raw) != expected or any(
+            not isinstance(raw[field], int) or isinstance(raw[field], bool)
+            for field in ("score", "raw_score", "effective_score", "points", "scale")
+        ):
+            raise Sv9AssessmentError("SV9 component sentinel contract mismatch")
+        indexed[str(component_key)] = expected
+    return [indexed[key] for key in PRESENTATION_ORDER if key in indexed]
 
 
 def _calculate(normalized: list[dict[str, str]]) -> dict[str, Any]:
@@ -636,8 +753,11 @@ __all__ = [
     "EXPECTED_RUBRIC_VERSION",
     "SV9_ASSESSMENT_FINGERPRINT_VERSION",
     "SV9_ASSESSMENT_OUTPUT_VERSION",
+    "SV9_ASSESSMENT_OUTPUT_V2_VERSION",
     "SV9_ASSESSMENT_VECTOR_VERSION",
+    "SV9_ASSESSMENT_VECTOR_V2_VERSION",
     "SV9_SCANNER_ASSESSMENT_VERSION",
+    "SV9_SCANNER_ASSESSMENT_V2_VERSION",
     "SV9_SCORE_FINGERPRINT_VERSION",
     "SV9_SCORING_POLICY_VERSION",
     "SV9_TILE_CONTRACT_REGISTRY_FINGERPRINT",

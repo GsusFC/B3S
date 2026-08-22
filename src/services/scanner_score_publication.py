@@ -68,7 +68,11 @@ def score_publication_from_report(report: dict[str, Any]) -> dict[str, Any]:
     classification = str(stability.get("classification") or "").strip()
     availability = str(assessment.get("availability") or "legacy")
     publishable = (
-        availability in {"available", "legacy"}
+        availability == "available"
+        and classification
+        not in RETAINED_SCORE_CLASSIFICATIONS - {"candidate", "evaluation_drift"}
+    ) or (
+        availability == "legacy"
         and classification not in RETAINED_SCORE_CLASSIFICATIONS
     )
     raw_value = (
