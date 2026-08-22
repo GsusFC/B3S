@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "targets": [
+    {
+      "target_id": "example-linkedin",
+      "platform": "linkedin",
+      "company_url": "https://www.linkedin.com/company/example"
+    },
+    {
+      "target_id": "example-twitter",
+      "platform": "twitter",
+      "handle": "example"
+    },
+    {
+      "target_id": "example-instagram",
+      "platform": "instagram",
+      "handle": "example"
+    }
+  ]
+}

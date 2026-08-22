@@ -1,0 +1,40 @@
+{
+  "contract_version": "b3s-social-community-lab-v1",
+  "platform": "x",
+  "record_kind": "response",
+  "external_id": "response-1",
+  "canonical_url": "https://social.example/community/status/response-1",
+  "author_account_id": "community-account-1",
+  "author_handle": "community",
+  "parent_external_id": "post-1",
+  "thread_external_id": "post-1",
+  "text": "This helped our team.",
+  "media_kind": "text",
+  "published_at": "2026-08-21T13:00:00Z",
+  "actor_role": "community_response",
+  "content_id": "sha256:92c329115a58faa06abf8eed1d0cca37828e49aeb2c10e5319e176f17866b74f",
+  "semantic_fingerprint": "92c329115a58faa06abf8eed1d0cca37828e49aeb2c10e5319e176f17866b74f",
+  "provenance": {
+    "provider": "scrapecreators",
+    "endpoint_key": "post_responses",
+    "target_fingerprint": "target-fingerprint-1",
+    "manifest_fingerprint": "manifest-fingerprint-1",
+    "request_fingerprint": "request-fingerprint-2",
+    "response_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "fetched_at": "2026-08-22T08:00:00Z",
+    "page": 1,
+    "cursor": null,
+    "result_ordinal": 0,
+    "target_identity": {
+      "account_id": "brand-account-1",
+      "handle": "brandco"
+    },
+    "normalization_version": "social-lab-normalization-v1",
+    "linkage_evidence": {
+      "parent_external_id": "post-1",
+      "thread_external_id": "post-1",
+      "resolved": true
+    }
+  },
+  "metric_context": null
+}
