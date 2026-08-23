@@ -11,6 +11,7 @@ from src.research.social_community_lab import (
     ANALYSIS_SECTIONS,
     SOCIAL_TILES_ANALYSIS_VERSION,
     SocialTilesAnalysis,
+    SocialTilesAnalyzer,
     SocialCommunityAnalyzer,
     SocialCommunityMalformedInputError,
     SocialCommunityValidationError,
@@ -26,6 +27,7 @@ from src.research.social_tiles import (
     TILE_IDS,
     TileState,
     TileVerdict,
+    build_component_prompt,
     evaluate_tile_eligibility,
     synthesize_not_acquired_verdict,
 )
@@ -620,3 +622,115 @@ def test_social_tiles_v2_replay_recomputes_capture_and_dispatches_exact_version(
     mixed = {**result.to_dict(), "analysis": {}}
     with pytest.raises(SocialCommunityValidationError):
         reconstruct_social_tiles_analysis(mixed, observations)
+
+
+def _component_response(component_id: str, observations: list[SocialObservation]) -> dict[str, str]:
+    eligibility = evaluate_tile_eligibility(observations)
+    packet = build_component_prompt(component_id, observations, eligibility)
+    return {
+        "analysis_json": json.dumps(
+            {"component_id": component_id, "tiles": [{"tile_id": tile["tile_id"], "state": "not_observed", "citations": []} for tile in packet["tiles"]]},
+            separators=(",", ":"),
+        )
+    }
+
+
+def test_social_tiles_analyzer_not_requested_and_zero_eligible_make_no_calls() -> None:
+    calls: list[object] = []
+    analyzer = SocialTilesAnalyzer(lambda *_: calls.append(True))
+    observations = _two_official_observations()
+    result = analyzer.analyze(observations, evaluation_requested=False)
+    assert result.status == "not_requested"
+    assert result.total_call_count == 0
+    assert calls == []
+
+    empty = SocialTilesAnalyzer(lambda *_: calls.append(True)).analyze(_observations(), evaluation_requested=True)
+    assert empty.status == "unavailable"
+    assert calls == []
+
+
+def test_social_tiles_analyzer_calls_each_eligible_component_once_in_catalog_order() -> None:
+    observations = _two_official_and_reply()
+    calls: list[str] = []
+
+    def invoke(_system: str, user: str, _schema: object) -> object:
+        packet = json.loads(user)
+        component_id = packet["component_id"]
+        calls.append(component_id)
+        return _component_response(component_id, observations)
+
+    result = SocialTilesAnalyzer(invoke).analyze(observations)
+    eligible = {item.tile_id: item for item in evaluate_tile_eligibility(observations)}
+    assert calls == [component for component in COMPONENT_IDS if any(eligible[tile].eligible for tile in TILE_IDS if tile.startswith({"voice_in_action": "ST-VI", "cross_channel_consistency": "ST-CC", "listening_themes": "ST-LT", "response_behavior": "ST-RB", "reciprocity_dialogue": "ST-RD", "tension_handling": "ST-TH"}[component]))]
+    assert result.total_call_count == len(calls) <= 6
+    assert tuple(item.tile_id for item in result.verdicts) == TILE_IDS
+
+
+@pytest.mark.parametrize("response", [RuntimeError("provider down"), {}])
+def test_social_tiles_analyzer_component_failure_does_not_retry_or_leak_raw_data(response: object) -> None:
+    observations = _two_official_observations()
+    calls = 0
+
+    def invoke(*_: object) -> object:
+        nonlocal calls
+        calls += 1
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    result = SocialTilesAnalyzer(invoke).analyze(observations)
+    assert calls == 1
+    assert result.total_call_count == 1
+    assert result.verdicts[0].reason_code == "provider_failure"
+    assert result.verdicts[0].failure_stage == "component_invocation"
+    assert "provider down" not in json.dumps(result.to_dict())
+
+
+def test_social_tiles_analyzer_malformed_nonempty_response_is_one_attempt() -> None:
+    calls = 0
+
+    def invoke(*_: object) -> object:
+        nonlocal calls
+        calls += 1
+        return {"analysis_json": "not-json"}
+
+    result = SocialTilesAnalyzer(invoke).analyze(_two_official_observations())
+    assert calls == result.total_call_count == 1
+    assert result.verdicts[0].reason_code == "malformed_inner_json"
+    assert result.verdicts[0].failure_stage == "component_decode"
+
+
+def test_social_tiles_analyzer_invalid_sibling_survives_and_valid_output_completes() -> None:
+    observations = _two_official_and_reply()
+    invocation = 0
+
+    def invoke(_system: str, user: str, _schema: object) -> object:
+        nonlocal invocation
+        invocation += 1
+        component_id = json.loads(user)["component_id"]
+        if invocation == 1:
+            return _component_response(component_id, observations)
+        raise RuntimeError("second component failure")
+
+    result = SocialTilesAnalyzer(invoke).analyze(observations)
+    assert result.status == "partial"
+    assert result.total_call_count == invocation
+    assert any(verdict.state is TileState.NOT_OBSERVED for verdict in result.verdicts)
+    assert "second component failure" not in json.dumps(result.to_dict())
+
+
+def test_social_tiles_analyzer_prompt_is_canonical_and_private() -> None:
+    observations = _two_official_observations()
+    seen: list[tuple[str, str]] = []
+
+    def invoke(system: str, user: str, _schema: object) -> object:
+        seen.append((system, user))
+        return _component_response("voice_in_action", observations)
+
+    SocialTilesAnalyzer(invoke).analyze(observations)
+    assert seen
+    system, user = seen[0]
+    assert "exactly one" in system.casefold()
+    assert "demonstrated" in system and "contradicted" in system and "not_observed" in system
+    assert "metric_context" not in user and "provenance" not in user and "https://" not in user and "brandco" not in user
+    assert "analysis_json" not in user

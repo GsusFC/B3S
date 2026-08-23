@@ -30,8 +30,11 @@ from src.research.social_tiles import (
     CaptureSet,
     TileState,
     TileVerdict,
+    build_component_prompt,
+    component_response_schema,
     evaluate_tile_eligibility,
     synthesize_not_acquired_verdict,
+    validate_component_result,
 )
 
 
@@ -1337,6 +1340,115 @@ def reconstruct_social_tiles_analysis(
 reconstruct_social_community_analysis_v2 = reconstruct_social_tiles_analysis
 
 
+def _social_tiles_component_system_prompt(component_id: str, packet: Mapping[str, Any]) -> str:
+    return (
+        "Evaluate exactly one isolated Social Tiles component. "
+        f"Component ID: {component_id}. Eligible tile definitions JSON: {_canonical_json(packet['tiles'])}. "
+        "Return exactly one outer object with exactly analysis_json, whose value is a JSON string. "
+        "The inner object has exactly component_id and tiles; each tile has exactly tile_id, state, citations. "
+        "States are demonstrated, contradicted, or not_observed. Demonstrated and contradicted require supplied "
+        "content_id citations; not_observed requires an empty citations array and means absence only within the "
+        "supplied capture set. Use only supplied evidence. Do not infer scores, confidence, activation, identity, "
+        "metrics, provenance, URLs, or handles, and emit no extra keys."
+    )
+
+
+def _social_tiles_component_failure(tile_ids: Iterable[str], reason_code: str, failure_stage: str) -> tuple[TileVerdict, ...]:
+    return tuple(
+        TileVerdict(tile_id, TileState.NOT_ACQUIRED, reason_code=reason_code, failure_stage=failure_stage)
+        for tile_id in tile_ids
+    )
+
+
+def _social_tiles_response_is_empty(raw: object) -> bool:
+    return raw is None or (isinstance(raw, str) and not raw.strip()) or (isinstance(raw, Mapping) and not raw)
+
+
+class SocialTilesAnalyzer:
+    """Run one no-retry, component-local Social Tiles v2 evaluation."""
+
+    def __init__(self, invoke_structured_json: Callable[..., object] | None = None, *, invoker: Callable[..., object] | None = None) -> None:
+        if invoke_structured_json is not None and invoker is not None and invoke_structured_json is not invoker:
+            raise _invalid("provide only one of invoke_structured_json or invoker")
+        callback = invoke_structured_json if invoke_structured_json is not None else invoker
+        if callback is None or not callable(callback):
+            raise _malformed("an injected structured-JSON invoker callable is required")
+        self.invoke_structured_json = callback
+
+    def analyze(
+        self,
+        observations: Iterable[SocialObservation | Mapping[str, Any]],
+        evaluation_requested: bool = True,
+    ) -> SocialTilesAnalysis:
+        if not isinstance(evaluation_requested, bool):
+            raise _malformed("analysis_v2.evaluation_requested must be a boolean")
+        normalized = _social_tiles_observations(observations)
+        eligibility = evaluate_tile_eligibility(normalized)
+        eligibility_by_id = {record.tile_id: record for record in eligibility}
+        verdicts: dict[str, TileVerdict] = {}
+        call_counts: list[int] = []
+        schema = component_response_schema()
+
+        for component_id in COMPONENT_IDS:
+            tile_ids = _SOCIAL_TILES_COMPONENT_TILES[component_id]
+            eligible_ids = tuple(tile_id for tile_id in tile_ids if eligibility_by_id[tile_id].eligible)
+            if not eligible_ids:
+                call_counts.append(0)
+                continue
+            if not evaluation_requested:
+                call_counts.append(0)
+                continue
+
+            call_counts.append(1)
+            packet = build_component_prompt(component_id, normalized, eligibility)
+            system_prompt = _social_tiles_component_system_prompt(component_id, packet)
+            user_prompt = _canonical_json(packet)
+            try:
+                raw = self.invoke_structured_json(system_prompt, user_prompt, schema)
+            except Exception:
+                result_verdicts = _social_tiles_component_failure(
+                    eligible_ids, "provider_failure", "component_invocation"
+                )
+            else:
+                if _social_tiles_response_is_empty(raw):
+                    result_verdicts = _social_tiles_component_failure(
+                        eligible_ids, "provider_failure", "component_invocation"
+                    )
+                else:
+                    try:
+                        result = validate_component_result(component_id, raw, normalized, eligibility)
+                        result_verdicts = result.verdicts
+                    except Exception:
+                        result_verdicts = _social_tiles_component_failure(
+                            eligible_ids, "component_validation", "component_validation"
+                        )
+            verdicts.update({verdict.tile_id: verdict for verdict in result_verdicts})
+
+        for tile_id in TILE_IDS:
+            record = eligibility_by_id[tile_id]
+            if not record.eligible:
+                verdicts[tile_id] = synthesize_not_acquired_verdict(record)
+            elif not evaluation_requested:
+                verdicts[tile_id] = TileVerdict(
+                    tile_id, TileState.NOT_ACQUIRED, reason_code="not_requested", failure_stage="evaluation"
+                )
+            elif tile_id not in verdicts:
+                verdicts[tile_id] = TileVerdict(
+                    tile_id, TileState.NOT_ACQUIRED, reason_code="component_validation", failure_stage="component_validation"
+                )
+        return SocialTilesAnalysis(normalized, evaluation_requested, tuple(verdicts[tile_id] for tile_id in TILE_IDS), call_counts)
+
+
+def analyze_social_tiles(
+    observations: Iterable[SocialObservation | Mapping[str, Any]],
+    invoke_structured_json: Callable[..., object] | None = None,
+    *,
+    invoker: Callable[..., object] | None = None,
+    evaluation_requested: bool = True,
+) -> SocialTilesAnalysis:
+    return SocialTilesAnalyzer(invoke_structured_json, invoker=invoker).analyze(observations, evaluation_requested)
+
+
 __all__ = [
     "ANALYSIS_SCHEMA_NAME",
     "SOCIAL_COMMUNITY_ANALYSIS_SCHEMA_NAME",
@@ -1363,12 +1475,14 @@ __all__ = [
     "SocialCommunityMalformedInputError",
     "SocialCommunityValidationError",
     "SocialTilesAnalysis",
+    "SocialTilesAnalyzer",
     "InvokeStructuredJSON",
     "StructuredJSONCallable",
     "TILE_SIGNALS",
     "analysis_response_schema",
     "analyze_social_community",
     "analyze_social_lab",
+    "analyze_social_tiles",
     "build_analysis_prompt",
     "build_prompt_packet",
     "build_social_tiles_analysis",
