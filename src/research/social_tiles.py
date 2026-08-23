@@ -30,6 +30,18 @@ class CaptureSetIntegrityError(SocialTilesContractError):
     """Raised when a capture-set payload does not match validated observations."""
 
 
+class ComponentDecodeError(SocialTilesContractError):
+    """Raised internally for a malformed component response envelope."""
+
+    def __init__(self, reason_code: str) -> None:
+        self.reason_code = reason_code
+        super().__init__(reason_code)
+
+
+class ComponentValidationError(SocialTilesContractError):
+    """Raised for malformed local component inputs, never for model output."""
+
+
 class TileState(str, Enum):
     DEMONSTRATED = "demonstrated"
     CONTRADICTED = "contradicted"
@@ -39,6 +51,10 @@ class TileState(str, Enum):
 
 VerdictState = TileState
 VERDICT_STATES = tuple(state.value for state in TileState)
+COMPONENT_MODEL_STATES = (TileState.DEMONSTRATED.value, TileState.CONTRADICTED.value, TileState.NOT_OBSERVED.value)
+COMPONENT_RESPONSE_KEYS = frozenset({"analysis_json"})
+COMPONENT_INNER_KEYS = frozenset({"component_id", "tiles"})
+COMPONENT_TILE_KEYS = frozenset({"tile_id", "state", "citations"})
 
 COMPONENT_IDS = (
     "voice_in_action",
@@ -525,6 +541,255 @@ def evaluate_tile_eligibility(observations: Iterable[SocialObservation]) -> tupl
     return tuple(records[tile_id] for tile_id in TILE_IDS)
 
 
+def _component_definition(component_id: str) -> ComponentDefinition:
+    if component_id not in COMPONENT_IDS:
+        raise ValueError(f"unknown component_id: {component_id!r}")
+    return next(component for component in CATALOG.components if component.component_id == component_id)
+
+
+def _component_eligibility(
+    component_id: str,
+    eligibility: Iterable[TileEligibility],
+) -> dict[str, TileEligibility]:
+    component = _component_definition(component_id)
+    records = tuple(eligibility)
+    if any(not isinstance(record, TileEligibility) for record in records):
+        raise ValueError("eligibility must contain TileEligibility records")
+    by_id: dict[str, TileEligibility] = {}
+    for record in records:
+        if record.tile_id in by_id:
+            raise ValueError(f"duplicate eligibility for {record.tile_id!r}")
+        by_id[record.tile_id] = record
+    missing = [tile.tile_id for tile in component.tiles if tile.tile_id not in by_id]
+    if missing:
+        raise ValueError(f"eligibility is missing component tiles: {missing}")
+    return {tile.tile_id: by_id[tile.tile_id] for tile in component.tiles}
+
+
+def build_component_prompt(
+    component_id: str,
+    observations: Iterable[SocialObservation],
+    eligibility: Iterable[TileEligibility],
+) -> dict[str, object]:
+    """Build the provider packet for one component without acquisition metadata."""
+    component = _component_definition(component_id)
+    values = _eligibility_observations(observations)
+    by_content_id = {observation.content_id: observation for observation in values}
+    if len(by_content_id) != len(values):
+        raise ValueError("duplicate content_id makes component prompt ambiguous")
+    records = _component_eligibility(component_id, eligibility)
+    eligible_tiles = [tile for tile in component.tiles if records[tile.tile_id].eligible]
+    relevant_ids = {
+        content_id
+        for tile in eligible_tiles
+        for content_id in records[tile.tile_id].relevant_content_ids
+    }
+    if not relevant_ids.issubset(by_content_id):
+        raise ValueError("eligibility cites content absent from supplied observations")
+    return {
+        "component_id": component.component_id,
+        "tiles": [
+            {
+                "tile_id": tile.tile_id,
+                "description": tile.description,
+                "evidence_requirement": tile.evidence_requirement,
+            }
+            for tile in eligible_tiles
+        ],
+        "observations": [
+            {
+                "content_id": observation.content_id,
+                "text": observation.text,
+                "actor_role": observation.actor_role,
+                "platform": observation.platform,
+                "parent_external_id": observation.parent_external_id,
+            }
+            for observation in sorted((by_content_id[content_id] for content_id in relevant_ids), key=lambda item: item.content_id)
+        ],
+    }
+
+
+def component_response_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "required": ["analysis_json"],
+        "properties": {"analysis_json": {"type": "string"}},
+        "additionalProperties": False,
+    }
+
+
+def _component_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ComponentDecodeError("duplicate_json_keys")
+        result[key] = value
+    return result
+
+
+def _reject_component_constant(_: str) -> None:
+    raise ComponentDecodeError("non_json_constant")
+
+
+def decode_component_response(raw: object) -> Mapping[str, object]:
+    """Decode the exact transport envelope and strict inner JSON object."""
+    if isinstance(raw, str):
+        try:
+            envelope = json.loads(
+                raw,
+                object_pairs_hook=_component_json_pairs,
+                parse_constant=_reject_component_constant,
+            )
+        except ComponentDecodeError:
+            raise
+        except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
+            raise ComponentDecodeError("malformed_envelope") from None
+    elif isinstance(raw, Mapping):
+        envelope = dict(raw)
+    else:
+        raise ComponentDecodeError("malformed_envelope")
+    if not isinstance(envelope, Mapping) or set(envelope) != COMPONENT_RESPONSE_KEYS:
+        raise ComponentDecodeError("malformed_envelope")
+    encoded = envelope.get("analysis_json")
+    if not isinstance(encoded, str) or not encoded.strip():
+        raise ComponentDecodeError("malformed_envelope")
+    try:
+        decoded = json.loads(
+            encoded,
+            object_pairs_hook=_component_json_pairs,
+            parse_constant=_reject_component_constant,
+        )
+    except ComponentDecodeError:
+        raise
+    except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
+        raise ComponentDecodeError("malformed_inner_json") from None
+    if not isinstance(decoded, Mapping):
+        raise ComponentDecodeError("inner_not_object")
+    return decoded
+
+
+@dataclass(frozen=True, slots=True)
+class ComponentValidationResult:
+    component_id: str
+    verdicts: tuple[TileVerdict, ...]
+
+    def __post_init__(self) -> None:
+        _component_definition(self.component_id)
+        verdicts = tuple(self.verdicts)
+        if any(not isinstance(verdict, TileVerdict) for verdict in verdicts):
+            raise ValueError("verdicts must contain TileVerdict records")
+        object.__setattr__(self, "verdicts", verdicts)
+
+    def to_dict(self) -> dict[str, object]:
+        return {"component_id": self.component_id, "verdicts": [verdict.to_dict() for verdict in self.verdicts]}
+
+    def to_json(self) -> str:
+        return _canonical_json(self.to_dict())
+
+
+def _component_failure_result(
+    component_id: str,
+    eligible_tiles: Iterable[TileDefinition],
+    reason_code: str,
+    failure_stage: str,
+) -> ComponentValidationResult:
+    return ComponentValidationResult(
+        component_id,
+        tuple(
+            TileVerdict(tile.tile_id, TileState.NOT_ACQUIRED, reason_code=reason_code, failure_stage=failure_stage)
+            for tile in eligible_tiles
+        ),
+    )
+
+
+def _validated_model_tile(
+    tile: Mapping[str, object],
+    eligibility: TileEligibility,
+) -> TileVerdict:
+    if set(tile) != COMPONENT_TILE_KEYS:
+        raise ComponentValidationError("invalid_tile_shape")
+    state = tile.get("state")
+    if state == TileState.NOT_ACQUIRED.value:
+        raise ComponentValidationError("not_acquired_forbidden")
+    if state not in COMPONENT_MODEL_STATES:
+        raise ComponentValidationError("invalid_state")
+    citations = tile.get("citations")
+    if not isinstance(citations, list) or any(not isinstance(citation, str) for citation in citations):
+        raise ComponentValidationError("invalid_citations")
+    if len(citations) != len(set(citations)):
+        raise ComponentValidationError("duplicate_citations")
+    if state == TileState.NOT_OBSERVED.value and citations:
+        raise ComponentValidationError("not_observed_requires_empty_citations")
+    if state in {TileState.DEMONSTRATED.value, TileState.CONTRADICTED.value} and not citations:
+        raise ComponentValidationError("demonstrated_or_contradicted_requires_citations")
+    if not set(citations).issubset(set(eligibility.relevant_content_ids)):
+        raise ComponentValidationError("citation_outside_relevant_content")
+    return TileVerdict(
+        tile_id=str(tile["tile_id"]),
+        state=TileState(state),
+        citations=tuple(sorted(citations)),
+    )
+
+
+def validate_component_result(
+    component_id: str,
+    raw_response: object,
+    observations: Iterable[SocialObservation],
+    eligibility: Iterable[TileEligibility],
+) -> ComponentValidationResult:
+    """Validate one component while isolating each eligible tile's failure."""
+    component = _component_definition(component_id)
+    values = _eligibility_observations(observations)
+    records = _component_eligibility(component_id, eligibility)
+    expected = _component_eligibility(component_id, evaluate_tile_eligibility(values))
+    if records != expected:
+        raise ValueError("eligibility does not match validated observations")
+    eligible_tiles = [tile for tile in component.tiles if records[tile.tile_id].eligible]
+    try:
+        decoded = decode_component_response(raw_response)
+    except ComponentDecodeError as error:
+        return _component_failure_result(component_id, eligible_tiles, error.reason_code, "component_decode")
+    if set(decoded) != COMPONENT_INNER_KEYS:
+        return _component_failure_result(component_id, eligible_tiles, "invalid_component_shape", "component_validation")
+    if decoded.get("component_id") != component_id:
+        return _component_failure_result(component_id, eligible_tiles, "wrong_component_id", "component_validation")
+    raw_tiles = decoded.get("tiles")
+    if not isinstance(raw_tiles, list):
+        return _component_failure_result(component_id, eligible_tiles, "invalid_component_shape", "component_validation")
+    by_tile_id: dict[str, Mapping[str, object]] = {}
+    duplicates: set[str] = set()
+    eligible_ids = {tile.tile_id for tile in eligible_tiles}
+    for raw_tile in raw_tiles:
+        if not isinstance(raw_tile, Mapping) or not isinstance(raw_tile.get("tile_id"), str):
+            continue
+        tile_id = raw_tile["tile_id"]
+        if tile_id not in eligible_ids:
+            continue
+        if tile_id in by_tile_id:
+            duplicates.add(tile_id)
+        else:
+            by_tile_id[tile_id] = raw_tile
+    verdicts: list[TileVerdict] = []
+    for tile in eligible_tiles:
+        record = records[tile.tile_id]
+        try:
+            if tile.tile_id in duplicates:
+                raise ComponentValidationError("duplicate_tile_id")
+            if tile.tile_id not in by_tile_id:
+                raise ComponentValidationError("missing_tile")
+            verdicts.append(_validated_model_tile(by_tile_id[tile.tile_id], record))
+        except ComponentValidationError as error:
+            verdicts.append(
+                TileVerdict(
+                    tile.tile_id,
+                    TileState.NOT_ACQUIRED,
+                    reason_code=error.args[0],
+                    failure_stage="component_validation",
+                )
+            )
+    return ComponentValidationResult(component_id, tuple(verdicts))
+
+
 def synthesize_not_acquired_verdict(eligibility: TileEligibility) -> TileVerdict:
     if not isinstance(eligibility, TileEligibility):
         raise TypeError("eligibility must be a TileEligibility")
@@ -623,3 +888,4 @@ __all__ = [
     "synthesize_not_acquired_verdict",
     "validate_capture_set",
 ]
+__all__ += ["ComponentDecodeError", "ComponentValidationError", "ComponentValidationResult", "build_component_prompt", "component_response_schema", "decode_component_response", "validate_component_result"]

@@ -10,6 +10,8 @@ from src.research.social_tiles import (
     CATALOG_VERSION,
     COMPONENT_IDS,
     CaptureSet,
+    ComponentDecodeError,
+    ComponentValidationResult,
     TILE_IDS,
     CatalogIntegrityError,
     ComponentDefinition,
@@ -20,7 +22,10 @@ from src.research.social_tiles import (
     assert_catalog_integrity,
     build_capture_set,
     evaluate_tile_eligibility,
+    build_component_prompt,
+    decode_component_response,
     synthesize_not_acquired_verdict,
+    validate_component_result,
 )
 from src.research.social_lab_contracts import MetricContext, Provenance, SocialObservation, build_social_observation
 
@@ -382,3 +387,126 @@ def test_not_acquired_synthesis_is_limited_to_ineligible_records() -> None:
     eligible = evaluate_tile_eligibility(_eligibility_fixture())[0]
     with pytest.raises(ValueError):
         synthesize_not_acquired_verdict(eligible)
+
+
+def _component_response(component_id: str, tiles: list[dict[str, object]]) -> dict[str, str]:
+    return {"analysis_json": json.dumps({"component_id": component_id, "tiles": tiles})}
+
+
+def test_component_prompt_is_minimal_component_scoped_and_deterministic() -> None:
+    observations = _eligibility_fixture()
+    eligibility = evaluate_tile_eligibility(observations)
+    packet = build_component_prompt("response_behavior", observations, eligibility)
+    assert packet == build_component_prompt("response_behavior", reversed(observations), reversed(eligibility))
+    assert [tile["tile_id"] for tile in packet["tiles"]] == ["ST-RB-01", "ST-RB-02"]
+    assert {key for observation in packet["observations"] for key in observation} == {
+        "content_id", "text", "actor_role", "platform", "parent_external_id"
+    }
+    assert all("response_sha256" not in observation for observation in packet["observations"])
+    assert all("canonical_url" not in observation for observation in packet["observations"])
+    assert all(observation["actor_role"] != "official_brand_post" for observation in packet["observations"])
+
+
+def test_component_decoder_rejects_outer_inner_malformed_and_duplicate_json() -> None:
+    with pytest.raises(ComponentDecodeError):
+        decode_component_response({"wrong": "x"})
+    with pytest.raises(ComponentDecodeError):
+        decode_component_response({"analysis_json": "[]"})
+    with pytest.raises(ComponentDecodeError):
+        decode_component_response({"analysis_json": '{"component_id":"voice_in_action","component_id":"x","tiles":[]}'})
+    with pytest.raises(ComponentDecodeError):
+        decode_component_response({"analysis_json": '{"component_id":"voice_in_action","tiles":[NaN]}'})
+
+
+def test_component_validator_accepts_each_model_state_without_not_acquired() -> None:
+    observations = _eligibility_fixture()
+    eligibility = evaluate_tile_eligibility(observations)
+    for state, citations in (("demonstrated", [observations[0].content_id]), ("contradicted", [observations[0].content_id]), ("not_observed", [])):
+        result = validate_component_result(
+            "voice_in_action",
+            _component_response("voice_in_action", [{"tile_id": "ST-VI-01", "state": state, "citations": citations}]),
+            observations,
+            eligibility,
+        )
+        verdict = result.verdicts[0]
+        assert verdict.state.value == state
+        assert verdict.state is not TileState.NOT_ACQUIRED
+
+
+def test_component_validator_enforces_citation_subset_and_rejects_model_not_acquired() -> None:
+    observations = _eligibility_fixture()
+    eligibility = evaluate_tile_eligibility(observations)
+    invalid_citation = validate_component_result(
+        "voice_in_action",
+        _component_response("voice_in_action", [{"tile_id": "ST-VI-01", "state": "demonstrated", "citations": ["unknown"]}]),
+        observations,
+        eligibility,
+    )
+    assert invalid_citation.verdicts[0].state is TileState.NOT_ACQUIRED
+    assert invalid_citation.verdicts[0].failure_stage == "component_validation"
+    forbidden_state = validate_component_result(
+        "voice_in_action",
+        _component_response("voice_in_action", [{"tile_id": "ST-VI-01", "state": "not_acquired", "citations": []}]),
+        observations,
+        eligibility,
+    )
+    assert forbidden_state.verdicts[0].state is TileState.NOT_ACQUIRED
+    assert forbidden_state.verdicts[0].reason_code == "not_acquired_forbidden"
+
+
+def test_invalid_siblings_do_not_destroy_valid_known_eligible_tiles() -> None:
+    observations = _eligibility_fixture()
+    eligibility = evaluate_tile_eligibility(observations)
+    response = _component_response(
+        "voice_in_action",
+        [
+            {"tile_id": "ST-VI-01", "state": "demonstrated", "citations": [observations[0].content_id]},
+            {"tile_id": "ST-XX-99", "state": "demonstrated", "citations": [observations[0].content_id]},
+        ],
+    )
+    result = validate_component_result("voice_in_action", response, observations, eligibility)
+    assert result.verdicts[0].state is TileState.DEMONSTRATED
+    assert result.verdicts[1].state is TileState.NOT_ACQUIRED
+    assert result.verdicts[1].reason_code == "missing_tile"
+    duplicate = _component_response(
+        "voice_in_action",
+        [
+            {"tile_id": "ST-VI-01", "state": "demonstrated", "citations": [observations[0].content_id]},
+            {"tile_id": "ST-VI-01", "state": "contradicted", "citations": [observations[0].content_id]},
+            {"tile_id": "ST-VI-02", "state": "not_observed", "citations": []},
+        ],
+    )
+    duplicate_result = validate_component_result("voice_in_action", duplicate, observations, eligibility)
+    assert duplicate_result.verdicts[0].reason_code == "duplicate_tile_id"
+    assert duplicate_result.verdicts[1].state is TileState.NOT_OBSERVED
+
+
+def test_wrong_component_and_ineligible_siblings_fail_closed_without_raw_output() -> None:
+    observations = tuple(item for item in _eligibility_fixture() if item.actor_role == "official_brand_post")
+    baseline = evaluate_tile_eligibility(observations)
+    result = validate_component_result(
+        "voice_in_action",
+        _component_response(
+            "provider-leaked-secret",
+            [
+                {"tile_id": "ST-VI-01", "state": "demonstrated", "citations": [observations[0].content_id]},
+                {"tile_id": "ST-VI-02", "state": "demonstrated", "citations": [observations[0].content_id]},
+            ],
+        ),
+        observations,
+        baseline,
+    )
+    assert isinstance(result, ComponentValidationResult)
+    assert len(result.verdicts) == 1
+    assert result.verdicts[0].reason_code == "wrong_component_id"
+    assert "provider-leaked-secret" not in result.to_json()
+
+
+def test_component_validator_rejects_forged_eligibility() -> None:
+    observations = _eligibility_fixture()
+    eligibility = list(evaluate_tile_eligibility(observations))
+    eligibility[0] = TileEligibility("ST-VI-01", True, ("forged",))
+    with pytest.raises(ValueError, match="eligibility"):
+        validate_component_result(
+            "voice_in_action", _component_response("voice_in_action", []), observations, eligibility
+        )
