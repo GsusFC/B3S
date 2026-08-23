@@ -148,7 +148,13 @@ before invoking anything, calls that native method exactly once, and keeps the
 C analyzer at one attempt. It never falls back to `_call_json`, another
 provider, or a hidden retry. If that path cannot be proven, the command fails
 closed with a concise unavailable error; it does not weaken the file-only
-boundary.
+boundary. The accepted acquisition is atomically checkpointed before the
+Gemini call. If the call raises or its response fails domain validation, the
+command exits non-zero **after** replacing that checkpoint with a final
+fail-closed artifact: admitted observations, provenance, response metadata, and
+credit accounting remain available, `community_analysis` is unavailable, and
+an `analysis_failure` object records the safe failure status/reason. No analyst
+claims or promotion readiness are fabricated.
 
 The provider-facing Gemini schema is deliberately tiny: one required string
 field named `analysis_json`. The system prompt describes the exact inner JSON
@@ -176,6 +182,7 @@ before any parent is created. Accepted files use an atomic replace and mode
 | `advisory_tile_candidates` | validated candidates constrained only by the caller allowlist |
 | `metric_context` | engagement/follower context keyed by content ID, separate from semantic analysis |
 | `promotion_evidence` | starts at `insufficient`; the runner cannot promote itself |
+| `analysis_failure` | present only after a live analysis failure; fixed safe status/reason, attempt count, and `claims_available = false` |
 | `limitations` | explicit partial/not-acquired and laboratory-boundary limitations |
 | `canonical_invariance` | starts at `not_checked` for the independent E gate |
 

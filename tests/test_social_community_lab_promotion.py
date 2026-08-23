@@ -179,6 +179,29 @@ def test_promotion_checklist_is_exactly_ordered_and_remains_insufficient() -> No
     }
 
 
+def test_failed_analysis_state_keeps_promotion_unchecked() -> None:
+    cli = _load_cli()
+    observations = _observations()
+    artifact = cli.compose_lab_artifact(
+        _manifest(),
+        _acquisition(observations),
+        mode="live_analysis",
+        analysis_artifact=cli._analysis_attempts_exhausted(observations),
+        analysis_options={"mode": "live_analysis", "attempt_policy": "one_shot"},
+    )
+    artifact["analysis_failure"] = cli._analysis_failure_metadata("gemini_domain_validation_failed", attempt_count=1)
+
+    assert artifact["community_analysis"]["status"] == "unavailable"
+    assert artifact["community_analysis"]["reason"] == "analyst_attempts_exhausted"
+    assert artifact["analysis_failure"]["status"] == "failed"
+    assert artifact["analysis_failure"]["claims_available"] is False
+    assert artifact["promotion_evidence"]["status"] == "insufficient"
+    assert all(
+        gate["status"] == "not_checked" and gate["evidence"] == [] for gate in artifact["promotion_evidence"]["gates"]
+    )
+    assert artifact["canonical_invariance"]["status"] == "not_checked"
+
+
 def test_acquisition_and_caller_payloads_cannot_self_certify_promotion() -> None:
     cli = _load_cli()
     acquisition = _acquisition()
