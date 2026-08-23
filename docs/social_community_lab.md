@@ -2,14 +2,85 @@
 
 `run_social_community_lab.py` is a private laboratory composition edge. It
 joins the accepted target manifest and ScrapeCreators acquisition contract to
-the citation-bound social analysis contract, then writes one atomic
-`b3s-social-community-lab-v1` artifact.
+the citation-bound social analysis contract, then writes one atomic artifact.
+The legacy `b3s-social-community-lab-v1` path remains the default. Social
+Tiles v2 is an explicit opt-in laboratory contract; it never changes the v1
+artifact or canonical production behavior.
 
 The lab is deliberately **not** a Scanner, Evidence Vault, or SV9 path. It
 does not calculate a score, activate a tile, write a canonical state, write
 SQLite/PostgreSQL, or promote evidence. Promotion starts as `insufficient` and
 canonical invariance starts as `not_checked` for an independent E gate to
 replace or prove.
+
+## Social Tiles v2 (opt-in)
+
+Use the v2 contract only when the command names it explicitly:
+
+```bash
+.venv/bin/python scripts/run_social_community_lab.py \
+  --manifest examples/social_community_lab_targets.example.json \
+  --acquisition-result path/to/acquisition.json \
+  --analysis-contract social-tiles-v2 \
+  --output out/social-community-lab/social-tiles-v2.json
+```
+
+This acquisition-result example is offline and contains no credentials or
+secrets. Add `--live-analysis` only when a separately approved provider run is
+intended. Without it, v2 records acquisition and marks evaluation
+`not_requested`; the runner does not construct an LLM client.
+
+### Catalog and verdict states
+
+The catalog is fixed at six components and twelve tiles. Each component is
+evaluated independently, and tile order is stable:
+
+| Component | Tiles |
+| --- | --- |
+| `voice_in_action` | `ST-VI-01`, `ST-VI-02` |
+| `cross_channel_consistency` | `ST-CC-01`, `ST-CC-02` |
+| `listening_themes` | `ST-LT-01`, `ST-LT-02` |
+| `response_behavior` | `ST-RB-01`, `ST-RB-02` |
+| `reciprocity_dialogue` | `ST-RD-01`, `ST-RD-02` |
+| `tension_handling` | `ST-TH-01`, `ST-TH-02` |
+
+Every tile has exactly one scoreless state:
+
+| State | Meaning |
+| --- | --- |
+| `demonstrated` | The supplied eligible evidence supports the tile, with citations. |
+| `contradicted` | The supplied eligible evidence contradicts the tile, with citations. |
+| `not_observed` | No qualifying semantic signal was observed in a **non-empty, validated capture set**; citations are empty. |
+| `not_acquired` | Code-owned acquisition or evaluation evidence is unavailable, unsupported, or failed; citations are empty and a reason/stage are required. |
+
+`not_observed` is never a disguise for an empty or failed acquisition. Missing,
+unsupported, or failed interaction acquisition is `not_acquired`. Parent and
+thread relationships use explicit validated IDs (`parent_external_id` and
+`thread_external_id`); do not claim community interaction when the corresponding
+roles were not acquired.
+
+The capture set is the bounded set of admitted observations. Its observed and
+fetched timestamps describe that set, not a complete historical window. A
+historical window is an acquisition request bound and must not be inferred from
+the capture-set ranges. Metrics are context only; semantic tile IDs and
+citations remain metric-free. Provenance is receipt-bound capture context, not
+tile meaning.
+
+### Bounded analysis behavior
+
+V2 makes at most six component calls: one one-shot call for each component with
+at least one eligible tile, never a retry. A component decode/provider/validation
+failure becomes local `not_acquired` verdicts for that component while valid
+sibling components remain intact. Ineligible tiles are synthesized by code and
+cannot be assigned a model state. The v2 artifact carries its authoritative
+verdicts under `social_tiles.verdicts`; no other `state` field is admitted.
+
+The v2 artifact is scoreless and laboratory-only. No tile affects an SV9 or
+Vault score, activation, canonical assessment, persistence, or Scanner output.
+Its 11 promotion gates remain `not_checked` and promotion remains
+`insufficient` until an independent gate proves the evidence. Existing v1
+commands, defaults, advisory candidates, and compatibility projections are
+unchanged.
 
 ## Target manifest
 
@@ -179,6 +250,7 @@ before any parent is created. Accepted files use an atomic replace and mode
 | `role_coverage` | counts and acquisition status for official posts, community responses, brand replies, and unclassified observations |
 | `observations_by_role` | semantic observations grouped by role, retaining provenance/citation fields but not metrics |
 | `community_analysis` | strict C result, including status, sections, citations, and limitations |
+| `social_tiles` | v2-only capture-bound analysis, ordered verdicts, and component call counts |
 | `advisory_tile_candidates` | validated candidates constrained only by the caller allowlist |
 | `metric_context` | engagement/follower context keyed by content ID, separate from semantic analysis |
 | `promotion_evidence` | starts at `insufficient`; the runner cannot promote itself |
