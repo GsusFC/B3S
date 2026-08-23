@@ -407,14 +407,14 @@ def test_social_tiles_v2_artifact_has_recomputed_identity_and_empty_legacy_proje
         _manifest(),
         _acquisition(),
         analysis,
-        mode="offline_social_tiles",
+        mode="live_analysis",
         output_path="/tmp/one.json",
     )
     second = cli.compose_social_tiles_lab_artifact(
         _manifest(),
         _acquisition(),
         analysis.to_dict(),
-        mode="offline_social_tiles",
+        mode="live_analysis",
         output_path="/tmp/two.json",
     )
 
@@ -507,6 +507,29 @@ def test_social_tiles_v2_replay_rejects_unknown_or_tampered_owned_root_fields() 
     payload = json.loads(json.dumps(artifact))
     payload["analysis_failure"]["attempt_count"] = 6
     invalid_payloads.append(payload)
+    payload = json.loads(json.dumps(artifact))
+    payload["mode"] = "acquisition_only"
+    payload["run_identity"]["mode"] = "acquisition_only"
+    payload["run_identity"]["run_id"] = cli._sha256_json(
+        {key: value for key, value in payload["run_identity"].items() if key != "run_id"}
+    )
+    payload.pop("analysis_failure")
+    invalid_payloads.append(payload)
+    payload = json.loads(json.dumps(artifact))
+    payload.pop("analysis_failure")
+    payload["run_identity"]["run_id"] = cli._sha256_json(
+        {key: value for key, value in payload["run_identity"].items() if key != "run_id"}
+    )
+    invalid_payloads.append(payload)
+    payload = json.loads(json.dumps(artifact))
+    payload["acquisition_matrix"]["brand-x"]["official_brand_post"]["reason"] = "forged"
+    invalid_payloads.append(payload)
+    payload = json.loads(json.dumps(artifact))
+    payload["role_coverage"]["official_brand_post"]["count"] = 99
+    invalid_payloads.append(payload)
+    payload = json.loads(json.dumps(artifact))
+    payload["limitations"].append("forged")
+    invalid_payloads.append(payload)
 
     for payload in invalid_payloads:
         with pytest.raises(cli.SocialCommunityLabCLIError):
@@ -532,6 +555,8 @@ def test_social_tiles_v2_options_are_fixed_and_not_requested_limitations_are_exp
     ):
         with pytest.raises(cli.SocialCommunityLabCLIError):
             cli.compose_social_tiles_lab_artifact(_manifest(), _acquisition(), analysis, analysis_options=options)
+    with pytest.raises(cli.SocialCommunityLabCLIError):
+        cli.compose_social_tiles_lab_artifact(_manifest(), _acquisition(), analysis, mode="offline_social_tiles")
 
 
 def test_cli_analysis_contract_defaults_to_legacy_and_rejects_legacy_v2_inputs(
