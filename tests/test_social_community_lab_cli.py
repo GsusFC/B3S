@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from src.research.scrapecreators_spike import parse_target_manifest
+from src.research.social_community_lab import SocialTilesAnalyzer
 from src.features import llm_analyzer as llm_analyzer_module
 
 
@@ -123,6 +124,14 @@ def _analysis_envelope(payload: object | None = None) -> dict[str, str]:
             separators=(",", ":"),
         )
     }
+
+
+def _social_tiles_analysis(cli: object, *, evaluation_requested: bool) -> object:
+    observations = [cli.SocialObservation.from_dict(row) for row in _acquisition()["observations"]]
+    return SocialTilesAnalyzer(lambda *_args: pytest.fail("zero-eligible fixture must not invoke a provider")).analyze(
+        observations,
+        evaluation_requested=evaluation_requested,
+    )
 
 
 def test_compose_artifact_keeps_roles_metrics_and_analysis_separate() -> None:
@@ -293,6 +302,104 @@ def test_compose_artifact_revalidates_prebuilt_analysis_against_observations_and
                 allowed_tile_ids=["tile-community"],
                 analysis_artifact=forged,
             )
+
+
+def test_social_tiles_v2_artifact_has_recomputed_identity_and_empty_legacy_projection() -> None:
+    cli = _load_cli()
+    analysis = _social_tiles_analysis(cli, evaluation_requested=True)
+    first = cli.compose_social_tiles_lab_artifact(
+        _manifest(),
+        _acquisition(),
+        analysis,
+        mode="offline_social_tiles",
+        output_path="/tmp/one.json",
+    )
+    second = cli.compose_social_tiles_lab_artifact(
+        _manifest(),
+        _acquisition(),
+        analysis.to_dict(),
+        mode="offline_social_tiles",
+        output_path="/tmp/two.json",
+    )
+
+    assert first["schema_version"] == first["version"] == first["artifact_type"] == "b3s-social-community-lab-v2"
+    assert first["social_tiles"] == analysis.to_dict()
+    assert first["advisory_tile_candidates"] == []
+    assert first["community_analysis"] == {
+        "version": "b3s-social-community-analysis-v2",
+        "status": analysis.status,
+        "cross_channel_voice": [],
+        "recurring_community_themes": [],
+        "response_behavior": [],
+        "corroborations": [],
+        "tensions": [],
+        "tile_candidates": [],
+        "limitations": ["deprecated_empty_projection_social_tiles_authoritative"],
+    }
+    identity = first["run_identity"]
+    assert identity == second["run_identity"]
+    assert identity["contract_versions"] == {
+        "artifact": "b3s-social-community-lab-v2",
+        "observation": "b3s-social-community-lab-v1",
+        "observation_normalization": "social-lab-normalization-v1",
+        "analysis": "b3s-social-community-analysis-v2",
+        "social_tiles_catalog": "b3s-social-tiles-v1",
+        "acquisition": "b3s-social-community-lab-v1",
+    }
+    assert identity["social_tiles_capture_set_id"] == analysis.capture_set.capture_set_id
+    assert identity["social_tiles_receipt_integrity_sha256"] == analysis.capture_set.receipt_integrity_sha256
+    assert identity["run_id"] == cli._sha256_json({key: value for key, value in identity.items() if key != "run_id"})
+    assert "analysis_not_requested" not in first["limitations"]
+    assert "social_tiles_unavailable" in first["limitations"]
+    assert "bounded_non_exhaustive_capture" in first["limitations"]
+    assert "score" not in json.dumps(first["social_tiles"]).casefold()
+
+
+def test_social_tiles_v2_composer_recomputes_analysis_and_rejects_mixed_or_tampered_payloads() -> None:
+    cli = _load_cli()
+    analysis = _social_tiles_analysis(cli, evaluation_requested=True)
+    artifact = cli.compose_social_tiles_lab_artifact(_manifest(), _acquisition(), analysis)
+
+    reconstructed = cli.reconstruct_social_tiles_lab_artifact(artifact)
+    assert reconstructed["social_tiles"] == analysis.to_dict()
+
+    forged_analysis = json.loads(json.dumps(analysis.to_dict()))
+    forged_analysis["capture_set"]["capture_set_id"] = "sha256:" + "0" * 64
+    with pytest.raises(cli.SocialCommunityLabCLIError):
+        cli.compose_social_tiles_lab_artifact(_manifest(), _acquisition(), forged_analysis)
+
+    mixed_top = json.loads(json.dumps(artifact))
+    mixed_top["version"] = cli.ARTIFACT_SCHEMA_VERSION
+    with pytest.raises(cli.SocialCommunityLabCLIError):
+        cli.reconstruct_social_tiles_lab_artifact(mixed_top)
+    with pytest.raises(cli.SocialCommunityLabCLIError):
+        cli.compose_social_tiles_lab_artifact(_manifest(), _acquisition(), artifact["community_analysis"])
+
+    missing_observations = json.loads(json.dumps(artifact))
+    missing_observations.pop("observations_by_role")
+    with pytest.raises(cli.SocialCommunityLabCLIError, match="reconstructable observations"):
+        cli.reconstruct_social_tiles_lab_artifact(missing_observations)
+
+
+def test_social_tiles_v2_options_are_fixed_and_not_requested_limitations_are_explicit() -> None:
+    cli = _load_cli()
+    analysis = _social_tiles_analysis(cli, evaluation_requested=False)
+    artifact = cli.compose_social_tiles_lab_artifact(_manifest(), _acquisition(), analysis)
+    assert artifact["run_identity"]["analysis_options"] == {
+        "attempt_policy": "component_one_shot",
+        "max_component_calls": 6,
+    }
+    assert "social_tiles_not_requested" in artifact["limitations"]
+    assert "analysis_not_requested" in artifact["limitations"]
+
+    for options in (
+        {"attempt_policy": "one_shot"},
+        {"max_component_calls": 5},
+        {"allowed_tile_ids": []},
+        {"native_sv9_ids": ["SV9-1"]},
+    ):
+        with pytest.raises(cli.SocialCommunityLabCLIError):
+            cli.compose_social_tiles_lab_artifact(_manifest(), _acquisition(), analysis, analysis_options=options)
 
 
 def test_cli_dry_run_never_requires_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
