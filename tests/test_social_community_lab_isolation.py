@@ -30,6 +30,7 @@ LAB_SOURCE_PATHS = (
     ROOT / "src/research/social_lab_contracts.py",
     ROOT / "src/research/scrapecreators_spike.py",
     ROOT / "src/research/social_community_lab.py",
+    ROOT / "src/research/social_tiles.py",
     ROOT / "scripts/scrapecreators_social_spike.py",
     ROOT / "scripts/run_social_community_lab.py",
 )

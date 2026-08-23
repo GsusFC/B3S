@@ -1082,6 +1082,39 @@ _SOCIAL_TILES_COMPONENT_TILES = {
     component.component_id: tuple(tile.tile_id for tile in component.tiles) for component in CATALOG.components
 }
 _SOCIAL_TILES_VALID_STATES = frozenset(COMPONENT_MODEL_STATES)
+_SOCIAL_TILES_REPLAY_FAILURE_PAIRS = frozenset(
+    {
+        ("provider_failure", "component_invocation"),
+        ("component_validation", "component_validation"),
+    }
+    | {
+        (reason_code, "component_decode")
+        for reason_code in {
+            "duplicate_json_keys",
+            "non_json_constant",
+            "malformed_envelope",
+            "malformed_inner_json",
+            "inner_not_object",
+        }
+    }
+    | {
+        (reason_code, "component_validation")
+        for reason_code in {
+            "invalid_component_shape",
+            "wrong_component_id",
+            "duplicate_tile_id",
+            "missing_tile",
+            "invalid_tile_shape",
+            "not_acquired_forbidden",
+            "invalid_state",
+            "invalid_citations",
+            "duplicate_citations",
+            "not_observed_requires_empty_citations",
+            "demonstrated_or_contradicted_requires_citations",
+            "citation_outside_relevant_content",
+        }
+    }
+)
 
 
 def _coerce_social_tiles_verdict(value: Any, *, index: int) -> TileVerdict:
@@ -1150,6 +1183,72 @@ def _social_tiles_observations(
     return normalized
 
 
+def _validate_social_tiles_replay_boundary(
+    eligibility: Mapping[str, Any],
+    verdict_by_id: Mapping[str, TileVerdict],
+    evaluation_requested: bool,
+    component_call_counts: tuple[int, ...],
+    total_call_count: int,
+) -> None:
+    """Accept only verdict metadata the local analyzer can produce."""
+    eligible_ids = [tile_id for tile_id in TILE_IDS if eligibility[tile_id].eligible]
+    for tile_id in TILE_IDS:
+        record = eligibility[tile_id]
+        if not record.eligible and verdict_by_id[tile_id] != synthesize_not_acquired_verdict(record):
+            raise _invalid(f"analysis_v2 ineligible verdict for {tile_id} is not eligibility-bound")
+
+    if not evaluation_requested:
+        if total_call_count != 0:
+            raise _invalid("analysis_v2 not_requested state must have zero component calls")
+        if any(
+            verdict_by_id[tile_id]
+            != TileVerdict(tile_id, TileState.NOT_ACQUIRED, reason_code="not_requested", failure_stage="evaluation")
+            for tile_id in eligible_ids
+        ):
+            raise _invalid("analysis_v2 not_requested state must use the exact code-owned verdict")
+        return
+
+    setup_unavailable = any(
+        verdict_by_id[tile_id].reason_code == "gemini_unavailable"
+        or verdict_by_id[tile_id].failure_stage == "provider_setup"
+        for tile_id in eligible_ids
+    )
+    if setup_unavailable:
+        expected = {
+            tile_id: TileVerdict(
+                tile_id, TileState.NOT_ACQUIRED, reason_code="gemini_unavailable", failure_stage="provider_setup"
+            )
+            for tile_id in eligible_ids
+        }
+        if total_call_count or any(verdict_by_id[tile_id] != verdict for tile_id, verdict in expected.items()):
+            raise _invalid("analysis_v2 provider setup failure is not globally call-bound")
+        return
+
+    for index, component_id in enumerate(COMPONENT_IDS):
+        component_ids = _SOCIAL_TILES_COMPONENT_TILES[component_id]
+        expected_count = int(any(eligibility[tile_id].eligible for tile_id in component_ids))
+        if component_call_counts[index] != expected_count:
+            raise _invalid(f"analysis_v2 component {component_id!r} has inconsistent call accounting")
+
+    for tile_id in eligible_ids:
+        record = eligibility[tile_id]
+        verdict = verdict_by_id[tile_id]
+        if verdict.state in {TileState.DEMONSTRATED, TileState.CONTRADICTED}:
+            if len(verdict.citations) != len(set(verdict.citations)):
+                raise _invalid(f"analysis_v2 {tile_id} has duplicate citations")
+            if not set(verdict.citations).issubset(record.relevant_content_ids):
+                raise _invalid(f"analysis_v2 {tile_id} has citations outside locally eligible evidence")
+        elif (
+            verdict.state is TileState.NOT_ACQUIRED
+            and (
+                verdict.reason_code,
+                verdict.failure_stage,
+            )
+            not in _SOCIAL_TILES_REPLAY_FAILURE_PAIRS
+        ):
+            raise _invalid(f"analysis_v2 {tile_id} has an untrusted failure marker")
+
+
 def _social_tiles_analysis_state(
     observations: tuple[SocialObservation, ...],
     evaluation_requested: bool,
@@ -1180,17 +1279,13 @@ def _social_tiles_analysis_state(
     total_call_count = sum(component_call_counts)
     if total_call_count > len(COMPONENT_IDS):
         raise _invalid("analysis_v2 total_call_count exceeds six")
-    for index, component_id in enumerate(COMPONENT_IDS):
-        component_eligible = [eligibility[tile_id].eligible for tile_id in _SOCIAL_TILES_COMPONENT_TILES[component_id]]
-        count = component_call_counts[index]
-        if not any(component_eligible) and count != 0:
-            raise _invalid(f"analysis_v2 component {component_id!r} has no eligible tiles but was called")
-        if count == 0 and any(
-            verdict_by_id[tile_id].state.value in _SOCIAL_TILES_VALID_STATES
-            for tile_id in _SOCIAL_TILES_COMPONENT_TILES[component_id]
-            if eligibility[tile_id].eligible
-        ):
-            raise _invalid(f"analysis_v2 component {component_id!r} has semantic verdicts without a call")
+    _validate_social_tiles_replay_boundary(
+        eligibility,
+        verdict_by_id,
+        evaluation_requested,
+        component_call_counts,
+        total_call_count,
+    )
 
     eligible_tile_count = sum(record.eligible for record in eligibility_records)
     valid_eligible_tile_count = sum(
@@ -1198,18 +1293,6 @@ def _social_tiles_analysis_state(
         for verdict in verdicts
     )
     if not evaluation_requested:
-        if total_call_count != 0:
-            raise _invalid("analysis_v2 not_requested state must have zero component calls")
-        if any(
-            eligibility[verdict.tile_id].eligible
-            and (
-                verdict.state is not TileState.NOT_ACQUIRED
-                or verdict.reason_code != "not_requested"
-                or verdict.failure_stage != "evaluation"
-            )
-            for verdict in verdicts
-        ):
-            raise _invalid("analysis_v2 not_requested state must use the exact code-owned verdict")
         status = "not_requested"
     elif eligible_tile_count == 0 or valid_eligible_tile_count == 0:
         status = "unavailable"

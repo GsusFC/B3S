@@ -153,6 +153,30 @@ _SENSITIVE_KEYS = frozenset(
         "set-cookie",
     }
 )
+_SOCIAL_TILES_LAB_ROOT_KEYS = frozenset(
+    {
+        "schema_version",
+        "version",
+        "artifact_type",
+        "runner_version",
+        "mode",
+        "privacy",
+        "created_at",
+        "run_identity",
+        "acquisition_matrix",
+        "role_coverage",
+        "observations_by_role",
+        "social_tiles",
+        "community_analysis",
+        "advisory_tile_candidates",
+        "metric_context",
+        "promotion_evidence",
+        "limitations",
+        "canonical_invariance",
+        "acquisition_summary",
+        "provider_responses",
+    }
+)
 
 
 class SocialCommunityLabCLIError(RuntimeError):
@@ -207,6 +231,13 @@ def _sha256_bytes(value: bytes) -> str:
 
 def _sha256_json(value: Any) -> str:
     return _sha256_bytes(_canonical_json(value).encode("utf-8"))
+
+
+def _is_sha256(value: Any, *, prefixed: bool) -> bool:
+    if not isinstance(value, str):
+        return False
+    digest = value.removeprefix("sha256:") if prefixed else value
+    return len(digest) == 64 and all(character in "0123456789abcdef" for character in digest)
 
 
 def _json_copy(value: Any) -> Any:
@@ -668,6 +699,21 @@ def _promotion_evidence_checklist() -> list[dict[str, Any]]:
     ]
 
 
+def _social_tiles_promotion_evidence() -> dict[str, Any]:
+    return {
+        "status": "insufficient",
+        "reason": "runner_cannot_promote_social_evidence",
+        "gates": _promotion_evidence_checklist(),
+    }
+
+
+def _social_tiles_canonical_invariance() -> dict[str, str]:
+    return {
+        "status": "not_checked",
+        "reason": "independent_canonical_invariance_gate_required",
+    }
+
+
 def _make_run_identity(
     manifest: TargetManifest,
     *,
@@ -947,6 +993,12 @@ def _social_tiles_limitations(
     return limitations
 
 
+def _social_tiles_analysis_failure(analysis: SocialTilesAnalysis, *, mode: str) -> dict[str, Any] | None:
+    if mode == "live_analysis" and analysis.status == "unavailable":
+        return _analysis_failure_metadata("social_tiles_unavailable", attempt_count=analysis.total_call_count)
+    return None
+
+
 def compose_social_tiles_lab_artifact(
     manifest: TargetManifest,
     acquisition: Mapping[str, Any],
@@ -985,7 +1037,7 @@ def compose_social_tiles_lab_artifact(
         analysis=analysis,
     )
     projection = _social_tiles_legacy_projection(analysis)
-    return {
+    artifact: dict[str, Any] = {
         "schema_version": SOCIAL_TILES_LAB_ARTIFACT_VERSION,
         "version": SOCIAL_TILES_LAB_ARTIFACT_VERSION,
         "artifact_type": SOCIAL_TILES_LAB_ARTIFACT_VERSION,
@@ -1001,24 +1053,20 @@ def compose_social_tiles_lab_artifact(
         "community_analysis": projection,
         "advisory_tile_candidates": [],
         "metric_context": _redact_value(_metric_context(observations), secrets=secrets),
-        "promotion_evidence": {
-            "status": "insufficient",
-            "reason": "runner_cannot_promote_social_evidence",
-            "gates": _promotion_evidence_checklist(),
-        },
+        "promotion_evidence": _social_tiles_promotion_evidence(),
         "limitations": _social_tiles_limitations(
             matrix,
             mode=mode,
             unclassified_count=coverage["unclassified"]["count"],
             analysis=analysis,
         ),
-        "canonical_invariance": {
-            "status": "not_checked",
-            "reason": "independent_canonical_invariance_gate_required",
-        },
+        "canonical_invariance": _social_tiles_canonical_invariance(),
         "acquisition_summary": _redact_value(acquisition.get("summary", {}), secrets=secrets),
         "provider_responses": _provider_responses(acquisition, include_raw=bool(include_raw), secrets=secrets),
     }
+    if failure := _social_tiles_analysis_failure(analysis, mode=mode):
+        artifact["analysis_failure"] = failure
+    return artifact
 
 
 def _social_tiles_artifact_observations(payload: Mapping[str, Any]) -> list[SocialObservation]:
@@ -1070,6 +1118,16 @@ def _validate_social_tiles_run_identity(value: Any, analysis: SocialTilesAnalysi
         {key: item for key, item in identity.items() if key != "run_id"}
     ):
         raise SocialCommunityLabCLIError("v2 artifact run_identity is invalid")
+    if not _is_sha256(identity["manifest_fingerprint"], prefixed=False) or any(
+        not _is_sha256(identity[key], prefixed=True)
+        for key in (
+            "social_tiles_capture_set_id",
+            "social_tiles_receipt_integrity_sha256",
+            "social_tiles_analysis_sha256",
+            "run_id",
+        )
+    ):
+        raise SocialCommunityLabCLIError("v2 artifact run_identity hashes are invalid")
     if identity.get("analysis_options") != _social_tiles_analysis_options(identity.get("analysis_options")):
         raise SocialCommunityLabCLIError("v2 artifact run_identity has invalid analysis options")
     contracts = identity.get("contract_versions")
@@ -1092,21 +1150,53 @@ def _validate_social_tiles_run_identity(value: Any, analysis: SocialTilesAnalysi
         raise SocialCommunityLabCLIError("v2 artifact social tiles binding is invalid")
 
 
+def _validate_social_tiles_artifact_root(payload: Mapping[str, Any], analysis: SocialTilesAnalysis) -> str:
+    mode = payload.get("mode")
+    if not isinstance(mode, str) or not mode.strip():
+        raise SocialCommunityLabCLIError("v2 artifact mode is invalid")
+    expected_failure = _social_tiles_analysis_failure(analysis, mode=mode)
+    expected_keys = _SOCIAL_TILES_LAB_ROOT_KEYS | ({"analysis_failure"} if expected_failure else set())
+    if set(payload) != expected_keys:
+        raise SocialCommunityLabCLIError("v2 artifact root schema is invalid")
+    if (
+        any(
+            payload.get(key) != SOCIAL_TILES_LAB_ARTIFACT_VERSION
+            for key in ("schema_version", "version", "artifact_type")
+        )
+        or payload.get("runner_version") != RUNNER_VERSION
+        or payload.get("privacy") != "private"
+    ):
+        raise SocialCommunityLabCLIError("unsupported social tiles lab artifact version")
+    created_at = payload.get("created_at")
+    if not isinstance(created_at, str) or not created_at.endswith("Z"):
+        raise SocialCommunityLabCLIError("v2 artifact created_at is invalid")
+    try:
+        datetime.fromisoformat(created_at.removesuffix("Z") + "+00:00")
+    except ValueError as exc:
+        raise SocialCommunityLabCLIError("v2 artifact created_at is invalid") from exc
+    _validate_social_tiles_run_identity(payload["run_identity"], analysis)
+    if payload["run_identity"]["mode"] != mode:
+        raise SocialCommunityLabCLIError("v2 artifact mode does not match its identity")
+    if payload["promotion_evidence"] != _social_tiles_promotion_evidence():
+        raise SocialCommunityLabCLIError("v2 artifact promotion evidence is invalid")
+    if payload["canonical_invariance"] != _social_tiles_canonical_invariance():
+        raise SocialCommunityLabCLIError("v2 artifact canonical invariance is invalid")
+    if expected_failure and payload["analysis_failure"] != expected_failure:
+        raise SocialCommunityLabCLIError("v2 artifact analysis failure is invalid")
+    return mode
+
+
 def reconstruct_social_tiles_lab_artifact(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Rebuild the v2 analysis from retained canonical observations only."""
 
-    if not isinstance(payload, Mapping) or any(
-        payload.get(key) != SOCIAL_TILES_LAB_ARTIFACT_VERSION for key in ("schema_version", "version", "artifact_type")
-    ):
+    if not isinstance(payload, Mapping):
         raise SocialCommunityLabCLIError("unsupported social tiles lab artifact version")
-    if payload.get("privacy") != "private":
-        raise SocialCommunityLabCLIError("social tiles artifact must remain private")
     observations = _social_tiles_artifact_observations(payload)
     analysis = _reconstruct_social_tiles_for_lab(payload.get("social_tiles"), observations)
+    mode = _validate_social_tiles_artifact_root(payload, analysis)
     projection = _social_tiles_legacy_projection(analysis)
     if payload.get("community_analysis") != projection or payload.get("advisory_tile_candidates") != []:
         raise SocialCommunityLabCLIError("v2 artifact compatibility projection is invalid")
-    _validate_social_tiles_run_identity(payload.get("run_identity"), analysis)
     limitations = payload.get("limitations")
     required = {"laboratory_only_no_canonical_scoring_or_persistence", "bounded_non_exhaustive_capture"}
     if analysis.status != "complete":
@@ -1115,10 +1205,30 @@ def reconstruct_social_tiles_lab_artifact(payload: Mapping[str, Any]) -> dict[st
         raise SocialCommunityLabCLIError("v2 artifact retains stale v1 analysis status")
     if not isinstance(limitations, list) or not required.issubset(limitations):
         raise SocialCommunityLabCLIError("v2 artifact limitations are invalid")
-    result = _json_copy(payload)
-    result["social_tiles"] = analysis.to_dict()
-    result["community_analysis"] = projection
-    result["advisory_tile_candidates"] = []
+    result = {
+        "schema_version": SOCIAL_TILES_LAB_ARTIFACT_VERSION,
+        "version": SOCIAL_TILES_LAB_ARTIFACT_VERSION,
+        "artifact_type": SOCIAL_TILES_LAB_ARTIFACT_VERSION,
+        "runner_version": RUNNER_VERSION,
+        "mode": mode,
+        "privacy": "private",
+        "created_at": payload["created_at"],
+        "run_identity": _json_copy(payload["run_identity"]),
+        "acquisition_matrix": _json_copy(payload["acquisition_matrix"]),
+        "role_coverage": _json_copy(payload["role_coverage"]),
+        "observations_by_role": _json_copy(payload["observations_by_role"]),
+        "social_tiles": analysis.to_dict(),
+        "community_analysis": projection,
+        "advisory_tile_candidates": [],
+        "metric_context": _json_copy(payload["metric_context"]),
+        "promotion_evidence": _social_tiles_promotion_evidence(),
+        "limitations": _json_copy(limitations),
+        "canonical_invariance": _social_tiles_canonical_invariance(),
+        "acquisition_summary": _json_copy(payload["acquisition_summary"]),
+        "provider_responses": _json_copy(payload["provider_responses"]),
+    }
+    if failure := _social_tiles_analysis_failure(analysis, mode=mode):
+        result["analysis_failure"] = failure
     return result
 
 
@@ -1322,9 +1432,6 @@ def _run_social_tiles_v2(
         output_path=output_path,
     )
     if analysis.status == "unavailable":
-        artifact["analysis_failure"] = _analysis_failure_metadata(
-            "social_tiles_unavailable", attempt_count=analysis.total_call_count
-        )
         atomic_write_json(output_path, artifact)
         print("error: Social Tiles live analysis is unavailable", file=sys.stderr)
         return 2

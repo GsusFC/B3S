@@ -477,6 +477,42 @@ def test_social_tiles_v2_composer_recomputes_analysis_and_rejects_mixed_or_tampe
         cli.reconstruct_social_tiles_lab_artifact(missing_observations)
 
 
+def test_social_tiles_v2_replay_rejects_unknown_or_tampered_owned_root_fields() -> None:
+    cli = _load_cli()
+    artifact = cli.compose_social_tiles_lab_artifact(
+        _manifest(), _acquisition(), _social_tiles_analysis(cli, evaluation_requested=True), mode="live_analysis"
+    )
+    assert artifact["analysis_failure"] == {
+        "status": "failed",
+        "reason": "social_tiles_unavailable",
+        "attempt_count": 0,
+        "claims_available": False,
+    }
+    assert cli.reconstruct_social_tiles_lab_artifact(artifact) == artifact
+
+    invalid_payloads = []
+    for key in ("score", "sv9_score", "vault_state"):
+        payload = json.loads(json.dumps(artifact))
+        payload[key] = "forged"
+        invalid_payloads.append(payload)
+    payload = json.loads(json.dumps(artifact))
+    payload["mode"] = "acquisition_only"
+    invalid_payloads.append(payload)
+    payload = json.loads(json.dumps(artifact))
+    payload["promotion_evidence"]["status"] = "allow"
+    invalid_payloads.append(payload)
+    payload = json.loads(json.dumps(artifact))
+    payload["canonical_invariance"]["reason"] = "forged"
+    invalid_payloads.append(payload)
+    payload = json.loads(json.dumps(artifact))
+    payload["analysis_failure"]["attempt_count"] = 6
+    invalid_payloads.append(payload)
+
+    for payload in invalid_payloads:
+        with pytest.raises(cli.SocialCommunityLabCLIError):
+            cli.reconstruct_social_tiles_lab_artifact(payload)
+
+
 def test_social_tiles_v2_options_are_fixed_and_not_requested_limitations_are_explicit() -> None:
     cli = _load_cli()
     analysis = _social_tiles_analysis(cli, evaluation_requested=False)
@@ -548,6 +584,7 @@ def test_social_tiles_v2_acquisition_only_is_not_requested_without_any_provider(
         and verdict["failure_stage"] == "evaluation"
         for verdict in analysis["verdicts"]
     )
+    assert cli.reconstruct_social_tiles_lab_artifact(payload) == payload
 
 
 def test_social_tiles_v2_live_checkpoints_then_calls_each_eligible_component_once(
@@ -595,6 +632,7 @@ def test_social_tiles_v2_live_checkpoints_then_calls_each_eligible_component_onc
     assert payload["social_tiles"]["component_call_counts"] == [1] * 6
     assert "analysis_not_requested" not in payload["limitations"]
     assert all(call["json_schema"] == _component_schema() for call in calls)
+    assert cli.reconstruct_social_tiles_lab_artifact(payload) == payload
 
 
 def test_social_tiles_v2_live_keeps_partial_survivors_and_fails_closed_when_unavailable(
@@ -646,6 +684,8 @@ def test_social_tiles_v2_live_keeps_partial_survivors_and_fails_closed_when_unav
         "claims_available": False,
     }
     assert "must-not-persist" not in json.dumps(unavailable)
+    assert cli.reconstruct_social_tiles_lab_artifact(partial) == partial
+    assert cli.reconstruct_social_tiles_lab_artifact(unavailable) == unavailable
 
 
 def test_social_tiles_v2_setup_failure_keeps_checkpoint_and_records_zero_calls(
@@ -677,6 +717,7 @@ def test_social_tiles_v2_setup_failure_keeps_checkpoint_and_records_zero_calls(
         for verdict in payload["social_tiles"]["verdicts"]
     )
     assert payload["analysis_failure"]["attempt_count"] == 0
+    assert cli.reconstruct_social_tiles_lab_artifact(payload) == payload
 
 
 def test_cli_dry_run_never_requires_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -651,6 +651,37 @@ def test_social_tiles_v2_replay_recomputes_capture_and_dispatches_exact_version(
         reconstruct_social_tiles_analysis(mixed, observations)
 
 
+def test_social_tiles_v2_replay_rejects_forged_citations_and_failure_metadata() -> None:
+    observations = [*_two_official_observations(), _observation("community_response.json")]
+    result = compose_social_tiles_analysis(
+        observations, True, _v2_verdicts(observations, semantic={"ST-VI-01"}), [1, 0, 0, 0, 0, 0]
+    )
+    valid_citation = result.to_dict()["verdicts"][0]["citations"][0]
+    invalid_payloads: list[dict[str, object]] = []
+
+    for citations in ([str(observations[-1].content_id)], ["sha256:" + "0" * 64], [valid_citation, valid_citation]):
+        payload = result.to_dict()
+        payload["verdicts"][0]["citations"] = citations
+        invalid_payloads.append(payload)
+    for reason_code, failure_stage in (
+        ("provider secret=forged", "component_invocation"),
+        ("provider_failure", "raw_trace"),
+    ):
+        payload = result.to_dict()
+        payload["verdicts"][0] = {
+            "tile_id": "ST-VI-01",
+            "state": "not_acquired",
+            "citations": [],
+            "reason_code": reason_code,
+            "failure_stage": failure_stage,
+        }
+        invalid_payloads.append(payload)
+
+    for payload in invalid_payloads:
+        with pytest.raises(SocialCommunityValidationError):
+            reconstruct_social_tiles_analysis(payload, observations)
+
+
 def _component_response(component_id: str, observations: list[SocialObservation]) -> dict[str, str]:
     eligibility = evaluate_tile_eligibility(observations)
     packet = build_component_prompt(component_id, observations, eligibility)
