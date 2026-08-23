@@ -9,14 +9,26 @@ import pytest
 
 from src.research.social_community_lab import (
     ANALYSIS_SECTIONS,
+    SOCIAL_TILES_ANALYSIS_VERSION,
+    SocialTilesAnalysis,
     SocialCommunityAnalyzer,
     SocialCommunityMalformedInputError,
     SocialCommunityValidationError,
     analyze_social_community,
     analysis_response_schema,
     build_prompt_packet,
+    compose_social_tiles_analysis,
+    reconstruct_social_tiles_analysis,
 )
 from src.research.social_lab_contracts import ActorRole, MetricContext, SocialLabContractError, SocialObservation
+from src.research.social_tiles import (
+    COMPONENT_IDS,
+    TILE_IDS,
+    TileState,
+    TileVerdict,
+    evaluate_tile_eligibility,
+    synthesize_not_acquired_verdict,
+)
 
 
 FIXTURE_DIR = Path("fixtures/social_lab")
@@ -515,3 +527,96 @@ def test_direct_forged_community_observation_cannot_support_brand_claim() -> Non
             actor_role=ActorRole.OFFICIAL_BRAND_POST,
             provenance=community.provenance,
         )
+
+
+def _v2_verdicts(observations: list[SocialObservation], *, semantic: set[str] = set()) -> tuple[TileVerdict, ...]:
+    eligibility = {item.tile_id: item for item in evaluate_tile_eligibility(observations)}
+    verdicts: list[TileVerdict] = []
+    for tile_id in TILE_IDS:
+        record = eligibility[tile_id]
+        if not record.eligible:
+            verdicts.append(synthesize_not_acquired_verdict(record))
+        elif tile_id in semantic:
+            verdicts.append(TileVerdict(tile_id, TileState.DEMONSTRATED, (record.relevant_content_ids[0],)))
+        else:
+            verdicts.append(TileVerdict(tile_id, TileState.NOT_ACQUIRED, reason_code="component_validation", failure_stage="component_validation"))
+    return tuple(verdicts)
+
+
+def _two_official_observations() -> list[SocialObservation]:
+    first = _observation("official_post.json")
+    second = replace(
+        first,
+        external_id="post-2",
+        canonical_url="https://social.example/brandco/status/post-2",
+        text="A second useful launch update.",
+        content_id=None,
+        semantic_fingerprint=None,
+    )
+    return [first, second]
+
+
+def _two_official_and_reply() -> list[SocialObservation]:
+    reply = replace(
+        _observation("official_post.json"), record_kind="reply", external_id="reply-1",
+        canonical_url="https://social.example/brandco/status/reply-1", parent_external_id="response-1",
+        thread_external_id="post-1", text="A useful reply.", actor_role=ActorRole.BRAND_REPLY,
+        content_id=None, semantic_fingerprint=None,
+    )
+    return [*_two_official_observations(), _observation("community_response.json"), reply]
+
+
+def test_social_tiles_v2_not_requested_and_zero_eligibility_are_scoreless() -> None:
+    observations = _observations()
+    result = compose_social_tiles_analysis(observations, False, _v2_verdicts(observations), [0] * 6)
+    assert result.version == SOCIAL_TILES_ANALYSIS_VERSION == "b3s-social-community-analysis-v2"
+    assert result.status == "not_requested"
+    assert result.total_call_count == 0
+    assert all(verdict.state is TileState.NOT_ACQUIRED for verdict in result.verdicts)
+
+    requested = compose_social_tiles_analysis(observations, True, _v2_verdicts(observations), [0] * 6)
+    assert requested.status == "unavailable"
+
+
+def test_social_tiles_v2_not_requested_requires_exact_code_owned_marker() -> None:
+    observations = _two_official_observations()
+    verdicts = list(_v2_verdicts(observations))
+    marker = lambda reason, stage: TileVerdict("ST-VI-01", TileState.NOT_ACQUIRED, reason_code=reason, failure_stage=stage)
+    verdicts[0] = marker("not_requested", "evaluation")
+    assert compose_social_tiles_analysis(observations, False, verdicts, [0] * 6).status == "not_requested"
+    verdicts[0] = marker("provider_failure", "component_invocation")
+    with pytest.raises(SocialCommunityValidationError):
+        compose_social_tiles_analysis(observations, False, verdicts, [0] * 6)
+
+
+def test_social_tiles_v2_status_fold_and_ordered_call_algebra() -> None:
+    observations = _two_official_and_reply()
+    eligible_ids = {record.tile_id for record in evaluate_tile_eligibility(observations) if record.eligible}
+    call_counts = tuple(1 if any(tile_id in eligible_ids for tile_id in component) else 0 for component in (("ST-VI-01", "ST-VI-02"), ("ST-CC-01", "ST-CC-02"), ("ST-LT-01", "ST-LT-02"), ("ST-RB-01", "ST-RB-02"), ("ST-RD-01", "ST-RD-02"), ("ST-TH-01", "ST-TH-02")))
+    complete = compose_social_tiles_analysis(
+        observations, True, _v2_verdicts(observations, semantic=eligible_ids), call_counts
+    )
+    assert complete.status == "complete"
+    assert tuple(item.tile_id for item in complete.verdicts) == TILE_IDS
+    assert complete.component_call_counts == call_counts
+    assert complete.total_call_count == sum(call_counts)
+
+    partial = compose_social_tiles_analysis(observations, True, _v2_verdicts(observations, semantic=eligible_ids - {"ST-VI-02"}), call_counts)
+    assert partial.status == "partial"
+    with pytest.raises(SocialCommunityValidationError):
+        compose_social_tiles_analysis(observations, True, tuple(reversed(partial.verdicts)), [1, 0, 0, 0, 0, 0])
+
+
+def test_social_tiles_v2_replay_recomputes_capture_and_dispatches_exact_version() -> None:
+    observations = _two_official_observations()
+    result = compose_social_tiles_analysis(
+        observations, True, _v2_verdicts(observations, semantic={"ST-VI-01"}), [1, 0, 0, 0, 0, 0]
+    )
+    payload = result.to_dict()
+    assert reconstruct_social_tiles_analysis(payload, observations) == result
+    payload["capture_set"]["capture_set_id"] = "sha256:forged"
+    with pytest.raises(SocialCommunityValidationError):
+        SocialTilesAnalysis.from_dict(payload, observations)
+    mixed = {**result.to_dict(), "analysis": {}}
+    with pytest.raises(SocialCommunityValidationError):
+        reconstruct_social_tiles_analysis(mixed, observations)
