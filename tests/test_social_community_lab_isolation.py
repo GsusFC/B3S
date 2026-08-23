@@ -111,6 +111,18 @@ def _analyst_response() -> dict[str, Any]:
     }
 
 
+def _analysis_envelope(payload: object | None = None) -> dict[str, str]:
+    return {
+        "analysis_json": json.dumps(
+            _analyst_response() if payload is None else payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    }
+
+
 def _canonical_fingerprint() -> tuple[str, str, str]:
     rows = [
         {
@@ -256,7 +268,7 @@ def test_isolated_dry_run_and_offline_replay_are_file_only_and_side_effect_free(
     replay_output = cli.OUTPUT_ROOT / "replay" / "artifact.json"
     manifest_path.write_text(json.dumps(_manifest().as_dict()), encoding="utf-8")
     acquisition_path.write_text(json.dumps(_acquisition()), encoding="utf-8")
-    analyst_path.write_text(json.dumps(_analyst_response()), encoding="utf-8")
+    analyst_path.write_text(json.dumps(_analysis_envelope()), encoding="utf-8")
 
     db_before = _default_db_snapshot()
     repo_outputs_before = _repo_output_snapshot()
@@ -342,7 +354,7 @@ def test_metric_and_provenance_mutations_cannot_change_canonical_sv9_or_lab_sema
                 original[1].provenance,
                 endpoint_key="different_endpoint",
                 response_sha256="d" * 64,
-            )
+            ),
         ),
     ]
     from src.research.social_community_lab import analyze_social_community, build_analysis_prompt
@@ -351,7 +363,7 @@ def test_metric_and_provenance_mutations_cannot_change_canonical_sv9_or_lab_sema
 
     def fake(**kwargs: Any) -> object:
         prompts.append(kwargs["user"])
-        return _valid_core_response(original)
+        return _analysis_envelope(_valid_core_response(original))
 
     first = analyze_social_community(original, fake)
     second = analyze_social_community(changed, fake)

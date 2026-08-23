@@ -11,7 +11,11 @@ from typing import Any
 import pytest
 
 from src.research.scrapecreators_spike import parse_target_manifest
-from src.research.social_community_lab import ANALYSIS_SECTIONS, SocialCommunityValidationError, analyze_social_community
+from src.research.social_community_lab import (
+    ANALYSIS_SECTIONS,
+    SocialCommunityValidationError,
+    analyze_social_community,
+)
 from src.research.social_lab_contracts import MetricContext, SocialObservation
 
 
@@ -147,6 +151,18 @@ def _community_response(observations: list[SocialObservation]) -> dict[str, Any]
     )
 
 
+def _analysis_envelope(payload: object) -> dict[str, str]:
+    return {
+        "analysis_json": json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    }
+
+
 def test_promotion_checklist_is_exactly_ordered_and_remains_insufficient() -> None:
     cli = _load_cli()
     artifact = cli.compose_lab_artifact(_manifest(), _acquisition())
@@ -179,7 +195,9 @@ def test_acquisition_and_caller_payloads_cannot_self_certify_promotion() -> None
     ]
     artifact = cli.compose_lab_artifact(_manifest(), acquisition)
     assert artifact["promotion_evidence"]["status"] == "insufficient"
-    assert all(gate["status"] == "not_checked" and gate["evidence"] == [] for gate in artifact["promotion_evidence"]["gates"])
+    assert all(
+        gate["status"] == "not_checked" and gate["evidence"] == [] for gate in artifact["promotion_evidence"]["gates"]
+    )
     assert artifact["canonical_invariance"]["status"] == "not_checked"
     assert artifact["canonical_invariance"]["reason"] == "independent_canonical_invariance_gate_required"
 
@@ -208,10 +226,18 @@ def test_metric_only_and_provenance_only_changes_preserve_prompt_semantics_and_c
     response = _community_response(original)
     response["tile_candidates"] = [candidate]
     first = cli.compose_lab_artifact(
-        _manifest(), _acquisition(original), mode="offline_analysis", analyst_response=response, allowed_tile_ids=["SOCIAL-ADVISORY"]
+        _manifest(),
+        _acquisition(original),
+        mode="offline_analysis",
+        analyst_response=_analysis_envelope(response),
+        allowed_tile_ids=["SOCIAL-ADVISORY"],
     )
     second = cli.compose_lab_artifact(
-        _manifest(), _acquisition(changed), mode="offline_analysis", analyst_response=response, allowed_tile_ids=["SOCIAL-ADVISORY"]
+        _manifest(),
+        _acquisition(changed),
+        mode="offline_analysis",
+        analyst_response=_analysis_envelope(response),
+        allowed_tile_ids=["SOCIAL-ADVISORY"],
     )
     first_analysis = first["community_analysis"]
     second_analysis = second["community_analysis"]
@@ -242,7 +268,7 @@ def test_role_boundaries_fail_closed_without_required_evidence(
         roles=roles,
     )
     with pytest.raises(SocialCommunityValidationError):
-        analyze_social_community(observations, lambda **_: response)
+        analyze_social_community(observations, lambda **_: _analysis_envelope(response))
 
 
 def test_brand_behavior_is_admitted_only_when_a_verified_brand_reply_exists() -> None:
@@ -254,7 +280,7 @@ def test_brand_behavior_is_admitted_only_when_a_verified_brand_reply_exists() ->
         citation_ids=[str(reply.content_id)],
         roles=["brand_reply"],
     )
-    result = analyze_social_community([*observations, reply], lambda **_: response)
+    result = analyze_social_community([*observations, reply], lambda **_: _analysis_envelope(response))
     assert result.status == "complete"
     assert result["cross_channel_voice"][0]["subject"] == "brand_behavior"
 
@@ -282,7 +308,7 @@ def test_unknown_duplicate_citations_and_unsupported_tiles_fail_closed(mutation:
         ]
     kwargs = {"allowed_tile_ids": {"allowed-only"}} if mutation == "unsupported_tile" else {}
     with pytest.raises(SocialCommunityValidationError):
-        analyze_social_community(observations, lambda **_: response, **kwargs)
+        analyze_social_community(observations, lambda **_: _analysis_envelope(response), **kwargs)
 
 
 def test_unsupported_x_interactions_are_explicitly_not_acquired() -> None:

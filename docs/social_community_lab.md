@@ -94,7 +94,9 @@ provider overcharge remains a diagnostic in the private artifact.
 ### Reproducible offline analysis
 
 An accepted acquisition result can be replayed from a local file. The
-recorded analyst response may be a JSON file path, `@path`, or inline JSON:
+recorded analyst response may be a JSON file path, `@path`, or inline JSON. It
+uses the same transport envelope as live analysis: one `analysis_json` string
+whose decoded value is the strict inner analysis object.
 
 ```bash
 .venv/bin/python scripts/run_social_community_lab.py \
@@ -147,6 +149,14 @@ C analyzer at one attempt. It never falls back to `_call_json`, another
 provider, or a hidden retry. If that path cannot be proven, the command fails
 closed with a concise unavailable error; it does not weaken the file-only
 boundary.
+
+The provider-facing Gemini schema is deliberately tiny: one required string
+field named `analysis_json`. The system prompt describes the exact inner JSON
+contract and caller-owned tile allowlist. The core decodes that string once,
+rejects malformed, non-object, or duplicate-key JSON, then passes the decoded
+object to the authoritative local post-validator. Non-empty strings, unique
+citations/roles, identity checks, source-role rules, and tile constraints remain
+local fail-closed invariants. Raw provider text is not persisted.
 
 ## Artifact shape and privacy
 
