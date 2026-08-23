@@ -35,11 +35,14 @@ from src.research.scrapecreators_spike import (
 )
 from src.research.social_community_lab import (
     ANALYSIS_SECTIONS,
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_TIMEOUT_SECONDS,
     SOCIAL_COMMUNITY_ANALYSIS_VERSION,
     SOCIAL_TILES_ANALYSIS_VERSION,
     SocialCommunityAnalyzer,
     SocialCommunityLabError,
     SocialTilesAnalysis,
+    SocialTilesAnalyzer,
     build_prompt_packet,
     reconstruct_social_community_analysis,
     reconstruct_social_tiles_analysis,
@@ -51,7 +54,14 @@ from src.research.social_lab_contracts import (
     SocialLabContractError,
     SocialObservation,
 )
-from src.research.social_tiles import SOCIAL_TILES_CATALOG_VERSION
+from src.research.social_tiles import (
+    COMPONENT_IDS,
+    SOCIAL_TILES_CATALOG_VERSION,
+    TileState,
+    TileVerdict,
+    evaluate_tile_eligibility,
+    synthesize_not_acquired_verdict,
+)
 
 
 ARTIFACT_SCHEMA_VERSION = CONTRACT_OUTPUT_SCHEMA_VERSION
@@ -629,10 +639,12 @@ def _analysis_failure_metadata(reason: str, *, attempt_count: int) -> dict[str, 
         "gemini_domain_validation_failed",
         "gemini_provider_failure",
         "gemini_unavailable",
+        "social_tiles_unavailable",
     }
     if reason not in allowed_reasons:
         raise SocialCommunityLabCLIError("unsupported live analysis failure reason")
-    if attempt_count not in {0, 1}:
+    valid_attempt_count = range(7) if reason == "social_tiles_unavailable" else {0, 1}
+    if attempt_count not in valid_attempt_count:
         raise SocialCommunityLabCLIError("unsupported live analysis attempt count")
     return {
         "status": "failed",
@@ -1208,6 +1220,92 @@ def _build_gemini_invoker():
     return invoke
 
 
+def _social_tiles_not_requested(observations: Sequence[SocialObservation]) -> SocialTilesAnalysis:
+    return SocialTilesAnalyzer(lambda *_args: None).analyze(observations, evaluation_requested=False)
+
+
+def _social_tiles_setup_unavailable(observations: Sequence[SocialObservation]) -> SocialTilesAnalysis:
+    verdicts = tuple(
+        TileVerdict(record.tile_id, TileState.NOT_ACQUIRED, reason_code="gemini_unavailable", failure_stage="provider_setup")
+        if record.eligible
+        else synthesize_not_acquired_verdict(record)
+        for record in evaluate_tile_eligibility(observations)
+    )
+    return SocialTilesAnalysis(observations, True, verdicts, [0] * len(COMPONENT_IDS))
+
+
+def _build_social_tiles_gemini_component_invoker():
+    """Adapt the approved cache-free native transport to the v2 core ABI."""
+
+    invoke_native = _build_gemini_invoker()
+    provider_calls = 0
+
+    def invoke_component(system_prompt: str, user_prompt: str, response_schema: Mapping[str, Any]) -> object:
+        nonlocal provider_calls
+        provider_calls += 1
+        return invoke_native(
+            system=system_prompt,
+            user=user_prompt,
+            json_schema=response_schema,
+            schema_name="b3s_social_tiles_component_v2",
+            max_tokens=DEFAULT_MAX_TOKENS,
+            timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+        )
+
+    return invoke_component, lambda: provider_calls
+
+
+def _run_social_tiles_v2(
+    args: argparse.Namespace,
+    manifest: TargetManifest,
+    acquisition: Mapping[str, Any],
+    acquisition_options: Mapping[str, Any],
+    output_path: Path,
+) -> int:
+    observations = _coerce_observations(acquisition)
+    mode = "live_analysis" if args.live_analysis else "acquisition_only"
+    analysis_options = {"attempt_policy": "component_one_shot", "max_component_calls": 6}
+    not_requested = _social_tiles_not_requested(observations)
+    if not args.live_analysis:
+        artifact = compose_social_tiles_lab_artifact(
+            manifest, acquisition, not_requested, mode=mode, acquisition_options=acquisition_options,
+            analysis_options=analysis_options, include_raw=args.include_raw, output_path=output_path,
+        )
+        atomic_write_json(output_path, artifact)
+        print(f"Social Tiles lab artifact written (status=not_requested, observations={len(observations)}).")
+        return 0
+
+    # The first durable v2 record binds acquisition evidence before a paid call.
+    checkpoint = compose_social_tiles_lab_artifact(
+        manifest, acquisition, not_requested, mode=mode, acquisition_options=acquisition_options,
+        analysis_options=analysis_options, include_raw=args.include_raw, output_path=output_path,
+    )
+    atomic_write_json(output_path, checkpoint)
+    try:
+        invoke_component, provider_call_count = _build_social_tiles_gemini_component_invoker()
+    except LiveAnalysisUnavailable:
+        analysis = _social_tiles_setup_unavailable(observations)
+    else:
+        analysis = SocialTilesAnalyzer(invoke_component).analyze(observations)
+        if provider_call_count() != analysis.total_call_count:
+            raise SocialCommunityLabCLIError("Social Tiles provider call accounting mismatch")
+
+    artifact = compose_social_tiles_lab_artifact(
+        manifest, acquisition, analysis, mode=mode, acquisition_options=acquisition_options,
+        analysis_options=analysis_options, include_raw=args.include_raw, output_path=output_path,
+    )
+    if analysis.status == "unavailable":
+        artifact["analysis_failure"] = _analysis_failure_metadata(
+            "social_tiles_unavailable", attempt_count=analysis.total_call_count
+        )
+        atomic_write_json(output_path, artifact)
+        print("error: Social Tiles live analysis is unavailable", file=sys.stderr)
+        return 2
+    atomic_write_json(output_path, artifact)
+    print(f"Social Tiles lab artifact written (status={analysis.status}, observations={len(observations)}).")
+    return 0
+
+
 def _options_from_args(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "max_post_pages": args.max_post_pages,
@@ -1236,6 +1334,12 @@ def _parser() -> argparse.ArgumentParser:
         "--analyst-response",
         help="Inline JSON or local JSON path containing one recorded structured analyst response.",
     )
+    parser.add_argument(
+        "--analysis-contract",
+        choices=("legacy-v1", "social-tiles-v2"),
+        default="legacy-v1",
+        help="Analysis contract; defaults to the legacy v1 artifact.",
+    )
     parser.add_argument("--live-analysis", action="store_true", help="Use one explicit Gemini-native analysis call.")
     parser.add_argument(
         "--allowed-tile-ids",
@@ -1263,6 +1367,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Validate before reading manifests, credentials, or constructing a
         # provider so rejected destinations cannot cause side effects.
         output_path = _validate_output_path(args.output)
+        if args.analysis_contract == "social-tiles-v2":
+            if args.dry_run:
+                raise SocialCommunityLabCLIError("social-tiles-v2 does not support --dry-run")
+            if args.analyst_response:
+                raise SocialCommunityLabCLIError("social-tiles-v2 does not accept --analyst-response")
+            if args.allowed_tile_ids is not None:
+                raise SocialCommunityLabCLIError("social-tiles-v2 does not accept --allowed-tile-ids")
         if args.dry_run and any((args.acquisition_result, args.analyst_response, args.live_analysis)):
             raise SocialCommunityLabCLIError("dry-run cannot be combined with acquisition or analysis inputs")
         if args.live_analysis and args.analyst_response:
@@ -1311,6 +1422,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     max_interaction_pages=args.max_interaction_pages,
                     max_interaction_credits=args.max_interaction_credits,
                 )
+
+        if args.analysis_contract == "social-tiles-v2":
+            return _run_social_tiles_v2(args, manifest, acquisition, acquisition_options, output_path)
 
         analyst_response = None
         analyst_response_hash = None

@@ -134,6 +134,93 @@ def _social_tiles_analysis(cli: object, *, evaluation_requested: bool) -> object
     )
 
 
+def _eligible_acquisition(cli: object) -> dict:
+    """Return capture evidence that makes every v2 component eligible."""
+
+    official, community = _observations()
+
+    def rebuild(source: dict, **changes: object) -> dict:
+        row = {**source, **changes}
+        row.pop("content_id")
+        row.pop("semantic_fingerprint")
+        return cli.SocialObservation.from_dict(row).to_dict()
+
+    observations = [
+        rebuild(official),
+        rebuild(
+            official,
+            platform="instagram",
+            external_id="post-2",
+            canonical_url="https://social.example/brandco/posts/post-2",
+            text="A second useful launch update.",
+        ),
+        rebuild(community),
+        rebuild(
+            community,
+            platform="instagram",
+            external_id="response-2",
+            canonical_url="https://social.example/community/posts/response-2",
+            parent_external_id="post-2",
+            thread_external_id="post-2",
+            text="This helped another team.",
+        ),
+        rebuild(
+            community,
+            external_id="reply-1",
+            canonical_url="https://social.example/brandco/status/reply-1",
+            author_account_id="brand-account-1",
+            author_handle="brandco",
+            parent_external_id="response-1",
+            thread_external_id="post-1",
+            actor_role="brand_reply",
+            text="We are glad the update helped.",
+        ),
+        rebuild(
+            community,
+            platform="instagram",
+            external_id="reply-2",
+            canonical_url="https://social.example/brandco/posts/reply-2",
+            author_account_id="brand-account-1",
+            author_handle="brandco",
+            parent_external_id="response-2",
+            thread_external_id="post-2",
+            actor_role="brand_reply",
+            text="We appreciate that useful feedback.",
+        ),
+    ]
+    acquisition = _acquisition()
+    acquisition["observations"] = observations
+    return acquisition
+
+
+def _component_response(kwargs: dict) -> dict[str, str]:
+    packet = json.loads(kwargs["user"])
+    return {
+        "analysis_json": json.dumps(
+            {
+                "component_id": packet["component_id"],
+                "tiles": [{"tile_id": tile["tile_id"], "state": "not_observed", "citations": []} for tile in packet["tiles"]],
+            }
+        )
+    }
+
+
+def _component_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["analysis_json"],
+        "properties": {"analysis_json": {"type": "string"}},
+        "additionalProperties": False,
+    }
+
+
+def _v2_args(manifest: Path, acquisition: Path, output: Path, *, live: bool = False) -> list[str]:
+    args = ["--manifest", str(manifest), "--acquisition-result", str(acquisition), "--analysis-contract", "social-tiles-v2"]
+    if live:
+        args.append("--live-analysis")
+    return [*args, "--output", str(output)]
+
+
 def test_compose_artifact_keeps_roles_metrics_and_analysis_separate() -> None:
     cli = _load_cli()
     response = _analyst_response()
@@ -400,6 +487,187 @@ def test_social_tiles_v2_options_are_fixed_and_not_requested_limitations_are_exp
     ):
         with pytest.raises(cli.SocialCommunityLabCLIError):
             cli.compose_social_tiles_lab_artifact(_manifest(), _acquisition(), analysis, analysis_options=options)
+
+
+def test_cli_analysis_contract_defaults_to_legacy_and_rejects_legacy_v2_inputs(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cli = _load_cli()
+    assert cli._parser().parse_args(["--manifest", "targets.json"]).analysis_contract == "legacy-v1"
+    assert (
+        cli.main(
+            [
+                "--manifest",
+                "unread-manifest.json",
+                "--analysis-contract",
+                "social-tiles-v2",
+                "--analyst-response",
+                "{}",
+            ]
+        )
+        == 2
+    )
+    assert "analyst-response" in capsys.readouterr().err
+
+
+def test_social_tiles_v2_acquisition_only_is_not_requested_without_any_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli = _load_cli()
+    manifest_path = tmp_path / "targets.json"
+    acquisition_path = tmp_path / "acquisition.json"
+    output_path = _test_output_path(cli, tmp_path, "v2-acquisition.json")
+    manifest_path.write_text(json.dumps(_manifest().as_dict()), encoding="utf-8")
+    acquisition_path.write_text(json.dumps(_eligible_acquisition(cli)), encoding="utf-8")
+    monkeypatch.setattr(
+        cli,
+        "ScrapeCreatorsClient",
+        lambda: pytest.fail("replayed v2 acquisition must not construct ScrapeCreators"),
+    )
+
+    assert cli.main(_v2_args(manifest_path, acquisition_path, output_path)) == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    analysis = payload["social_tiles"]
+    assert payload["schema_version"] == "b3s-social-community-lab-v2"
+    assert analysis["status"] == "not_requested"
+    assert analysis["evaluation_requested"] is False
+    assert analysis["total_call_count"] == 0
+    assert analysis["component_call_counts"] == [0] * 6
+    assert all(
+        verdict["state"] == "not_acquired"
+        and verdict["reason_code"] == "not_requested"
+        and verdict["failure_stage"] == "evaluation"
+        for verdict in analysis["verdicts"]
+    )
+
+
+def test_social_tiles_v2_live_checkpoints_then_calls_each_eligible_component_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli = _load_cli()
+    calls: list[dict] = []
+    writes: list[dict] = []
+    constructed: list[object] = []
+
+    class FakeLLMAnalyzer:
+        def __init__(self) -> None:
+            constructed.append(self)
+            self.use_cache = True
+            self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+        def _call_json_gemini_native(self, **kwargs):
+            assert self.use_cache is False
+            calls.append(kwargs)
+            return _component_response(kwargs)
+
+    real_write = cli.atomic_write_json
+
+    def record_write(path, payload):
+        writes.append(json.loads(json.dumps(payload)))
+        if len(writes) == 1:
+            assert constructed == []
+            assert payload["social_tiles"]["status"] == "not_requested"
+        return real_write(path, payload)
+
+    monkeypatch.setenv("GEMINI_API_KEY", "live-gemini-key")
+    monkeypatch.setattr(llm_analyzer_module, "LLMAnalyzer", FakeLLMAnalyzer)
+    monkeypatch.setattr(cli, "atomic_write_json", record_write)
+    manifest_path = tmp_path / "targets.json"
+    acquisition_path = tmp_path / "acquisition.json"
+    output_path = _test_output_path(cli, tmp_path, "v2-live.json")
+    manifest_path.write_text(json.dumps(_manifest().as_dict()), encoding="utf-8")
+    acquisition_path.write_text(json.dumps(_eligible_acquisition(cli)), encoding="utf-8")
+
+    assert cli.main(_v2_args(manifest_path, acquisition_path, output_path, live=True)) == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert len(writes) == 2 and len(calls) == 6
+    assert payload["social_tiles"]["status"] == "complete"
+    assert payload["social_tiles"]["total_call_count"] == 6
+    assert payload["social_tiles"]["component_call_counts"] == [1] * 6
+    assert "analysis_not_requested" not in payload["limitations"]
+    assert all(call["json_schema"] == _component_schema() for call in calls)
+
+
+def test_social_tiles_v2_live_keeps_partial_survivors_and_fails_closed_when_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli = _load_cli()
+    attempts: list[int] = []
+    all_fail = False
+
+    class MixedGeminiAnalyzer:
+        def __init__(self) -> None:
+            self.use_cache = True
+            self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+        def _call_json_gemini_native(self, **kwargs):
+            attempts.append(1)
+            if all_fail or len(attempts) > 1:
+                raise RuntimeError("provider secret=must-not-persist")
+            return _component_response(kwargs)
+
+    monkeypatch.setenv("GEMINI_API_KEY", "live-gemini-key")
+    monkeypatch.setattr(llm_analyzer_module, "LLMAnalyzer", MixedGeminiAnalyzer)
+    manifest_path = tmp_path / "targets.json"
+    acquisition_path = tmp_path / "acquisition.json"
+    output_path = _test_output_path(cli, tmp_path, "v2-partial.json")
+    manifest_path.write_text(json.dumps(_manifest().as_dict()), encoding="utf-8")
+    acquisition_path.write_text(json.dumps(_eligible_acquisition(cli)), encoding="utf-8")
+
+    assert cli.main(_v2_args(manifest_path, acquisition_path, output_path, live=True)) == 0
+    partial = json.loads(output_path.read_text(encoding="utf-8"))
+    assert len(attempts) == 6
+    assert partial["social_tiles"]["status"] == "partial"
+    assert partial["social_tiles"]["total_call_count"] == 6
+    assert "social_tiles_partial" in partial["limitations"]
+    assert "provider secret" not in json.dumps(partial)
+
+    attempts.clear()
+    all_fail = True
+    output_path = _test_output_path(cli, tmp_path, "v2-unavailable.json")
+    assert cli.main(_v2_args(manifest_path, acquisition_path, output_path, live=True)) == 2
+    unavailable = json.loads(output_path.read_text(encoding="utf-8"))
+    assert len(attempts) == 6
+    assert unavailable["social_tiles"]["status"] == "unavailable"
+    assert "social_tiles_unavailable" in unavailable["limitations"]
+    assert unavailable["analysis_failure"] == {
+        "status": "failed",
+        "reason": "social_tiles_unavailable",
+        "attempt_count": 6,
+        "claims_available": False,
+    }
+    assert "must-not-persist" not in json.dumps(unavailable)
+
+
+def test_social_tiles_v2_setup_failure_keeps_checkpoint_and_records_zero_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli = _load_cli()
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("BRAND3_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        cli,
+        "ScrapeCreatorsClient",
+        lambda: pytest.fail("replayed v2 acquisition must not construct ScrapeCreators"),
+    )
+    manifest_path = tmp_path / "targets.json"
+    acquisition_path = tmp_path / "acquisition.json"
+    output_path = _test_output_path(cli, tmp_path, "v2-setup-failure.json")
+    manifest_path.write_text(json.dumps(_manifest().as_dict()), encoding="utf-8")
+    acquisition_path.write_text(json.dumps(_eligible_acquisition(cli)), encoding="utf-8")
+
+    assert cli.main(_v2_args(manifest_path, acquisition_path, output_path, live=True)) == 2
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["social_tiles"]["status"] == "unavailable"
+    assert payload["social_tiles"]["total_call_count"] == 0
+    assert payload["social_tiles"]["component_call_counts"] == [0] * 6
+    assert all(
+        verdict["reason_code"] == "gemini_unavailable" and verdict["failure_stage"] == "provider_setup"
+        for verdict in payload["social_tiles"]["verdicts"]
+    )
+    assert payload["analysis_failure"]["attempt_count"] == 0
 
 
 def test_cli_dry_run_never_requires_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
