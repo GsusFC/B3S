@@ -38,6 +38,7 @@ from src.research.social_community_lab import (
     SOCIAL_COMMUNITY_ANALYSIS_VERSION,
     SocialCommunityAnalyzer,
     SocialCommunityLabError,
+    build_prompt_packet,
     reconstruct_social_community_analysis,
 )
 from src.research.social_lab_contracts import (
@@ -169,9 +170,7 @@ def _validate_output_path(path: str | Path) -> Path:
     try:
         relative = resolved_candidate.relative_to(resolved_root)
     except ValueError as exc:
-        raise SocialCommunityLabCLIError(
-            "output must remain beneath out/social-community-lab"
-        ) from exc
+        raise SocialCommunityLabCLIError("output must remain beneath out/social-community-lab") from exc
     if not relative.parts:
         raise SocialCommunityLabCLIError("output must name a file beneath out/social-community-lab")
     return absolute_candidate
@@ -205,11 +204,7 @@ def _json_copy(value: Any) -> Any:
 
 
 def _secret_values() -> tuple[str, ...]:
-    values = {
-        value.strip()
-        for name in _SECRET_ENV_NAMES
-        if (value := os.environ.get(name, "")).strip()
-    }
+    values = {value.strip() for name in _SECRET_ENV_NAMES if (value := os.environ.get(name, "")).strip()}
     return tuple(sorted(values, key=len, reverse=True))
 
 
@@ -228,8 +223,7 @@ def _redact_value(value: Any, *, secrets: Collection[str] | None = None, key: st
         return "[REDACTED]"
     if isinstance(value, Mapping):
         return {
-            str(item_key): _redact_value(item, secrets=secrets, key=str(item_key))
-            for item_key, item in value.items()
+            str(item_key): _redact_value(item, secrets=secrets, key=str(item_key)) for item_key, item in value.items()
         }
     if isinstance(value, list):
         return [_redact_value(item, secrets=secrets) for item in value]
@@ -415,8 +409,7 @@ def _matrix_from_acquisition(
                         isinstance(entry, Mapping)
                         and entry.get("provenance")
                         and any(
-                            isinstance(proof, Mapping)
-                            and proof.get("target_id") == candidate_id
+                            isinstance(proof, Mapping) and proof.get("target_id") == candidate_id
                             for proof in entry.get("provenance", [])
                         )
                         for entry in entries.values()
@@ -581,6 +574,66 @@ def _analysis_not_requested(observation_count: int, unclassified_count: int) -> 
         "prompt_packet": None,
         **{section: [] for section in ANALYSIS_SECTIONS},
         "tile_candidates": [],
+    }
+
+
+def _analysis_attempts_exhausted(observations: Sequence[SocialObservation]) -> dict[str, Any]:
+    """Build the canonical fail-closed analysis state after one attempted call."""
+
+    unclassified_count = sum(observation.actor_role == "unclassified" for observation in observations)
+    limitations = ["unclassified_observations_excluded"] if unclassified_count else []
+    limitations.append("analyst_attempts_exhausted")
+    return {
+        "version": SOCIAL_COMMUNITY_ANALYSIS_VERSION,
+        "status": "unavailable",
+        "reason": "analyst_attempts_exhausted",
+        "attempt_count": 1,
+        "observation_count": len(observations),
+        "unclassified_observation_count": unclassified_count,
+        "limitations": limitations,
+        "prompt_packet": build_prompt_packet(observations),
+        **{section: [] for section in ANALYSIS_SECTIONS},
+        "tile_candidates": [],
+    }
+
+
+def _analysis_preflight_failed(observations: Sequence[SocialObservation]) -> dict[str, Any]:
+    """Build a fail-closed state for rejection before the provider boundary."""
+
+    unclassified_count = sum(observation.actor_role == "unclassified" for observation in observations)
+    limitations = ["unclassified_observations_excluded"] if unclassified_count else []
+    limitations.append("analysis_preflight_failed")
+    return {
+        "version": SOCIAL_COMMUNITY_ANALYSIS_VERSION,
+        "status": "unavailable",
+        "reason": "analysis_preflight_failed",
+        "attempt_count": 0,
+        "observation_count": len(observations),
+        "unclassified_observation_count": unclassified_count,
+        "limitations": limitations,
+        "prompt_packet": None,
+        **{section: [] for section in ANALYSIS_SECTIONS},
+        "tile_candidates": [],
+    }
+
+
+def _analysis_failure_metadata(reason: str, *, attempt_count: int) -> dict[str, Any]:
+    """Return the runner-owned, non-claiming failure envelope."""
+
+    allowed_reasons = {
+        "gemini_domain_validation_failed",
+        "gemini_provider_failure",
+        "gemini_unavailable",
+    }
+    if reason not in allowed_reasons:
+        raise SocialCommunityLabCLIError("unsupported live analysis failure reason")
+    if attempt_count not in {0, 1}:
+        raise SocialCommunityLabCLIError("unsupported live analysis attempt count")
+    return {
+        "status": "failed",
+        "reason": reason,
+        "attempt_count": attempt_count,
+        "claims_available": False,
     }
 
 
@@ -760,9 +813,7 @@ def compose_lab_artifact(
         # Response metadata is safe to retain; raw payloads are included only
         # when the explicit A-layer opt-in was supplied and remain redacted.
         "acquisition_summary": _redact_value(acquisition.get("summary", {}), secrets=secrets),
-        "provider_responses": _provider_responses(
-            acquisition, include_raw=bool(include_raw), secrets=secrets
-        ),
+        "provider_responses": _provider_responses(acquisition, include_raw=bool(include_raw), secrets=secrets),
     }
     return artifact
 
@@ -850,9 +901,17 @@ def _build_gemini_invoker():
     if not callable(native_method) or hostname != "generativelanguage.googleapis.com":
         raise LiveAnalysisUnavailable("Gemini native structured output path is not available for this provider")
 
-    def invoke(*, system: str, user: str, json_schema: Mapping[str, Any], schema_name: str, max_tokens: int, timeout_seconds: int) -> object:
+    def invoke(
+        *,
+        system: str,
+        user: str,
+        json_schema: Mapping[str, Any],
+        schema_name: str,
+        max_tokens: int,
+        timeout_seconds: int,
+    ) -> object:
         # Exactly one call.  Do not call _call_json or wrap this in a retry.
-        return native_method(
+        result = native_method(
             system=system,
             user=user,
             json_schema=dict(json_schema),
@@ -860,6 +919,12 @@ def _build_gemini_invoker():
             max_tokens=max_tokens,
             timeout_seconds=timeout_seconds,
         )
+        # The native analyzer returns an empty mapping for transport/provider
+        # failures and records the safe reason on the analyzer instance.  Do
+        # not let that sentinel reach the domain validator as forged JSON.
+        if isinstance(result, Mapping) and not result and getattr(analyzer, "last_failure_reason", None):
+            raise RuntimeError("gemini native provider failure")
+        return result
 
     return invoke
 
@@ -970,6 +1035,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         analyst_response = None
         analyst_response_hash = None
+        analysis_artifact = None
         mode = "acquisition_only"
         if args.analyst_response:
             analyst_response, analyst_response_hash = _load_json_argument(
@@ -980,22 +1046,122 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise SocialCommunityLabCLIError("analyst response must be a JSON object")
             mode = "offline_analysis"
         elif args.live_analysis:
-            invoker = _build_gemini_invoker()
+            # Persist the acquisition before crossing into the paid, one-shot
+            # analysis call.  If the process is interrupted during analysis,
+            # this checkpoint still contains all admitted evidence and
+            # provider accounting.
+            mode = "live_analysis"
+            analysis_options = {
+                "mode": mode,
+                "allowed_tile_ids": allowed_tile_ids,
+                "attempt_policy": "one_shot",
+            }
+            checkpoint = compose_lab_artifact(
+                manifest,
+                acquisition,
+                mode=mode,
+                allowed_tile_ids=allowed_tile_ids,
+                acquisition_options=acquisition_options,
+                analysis_options=analysis_options,
+                include_raw=args.include_raw,
+                output_path=output_path,
+            )
+            atomic_write_json(output_path, checkpoint)
+
             # The analyzer core owns the only invocation made by this
             # composition edge; there is no retry configuration surface.
+            analysis_failure_reason: str | None = None
+            analysis_attempt_count = 0
             try:
+                invoker = _build_gemini_invoker()
+            except LiveAnalysisUnavailable:
+                analysis_failure_reason = "gemini_unavailable"
+            except Exception:
+                analysis_failure_reason = "gemini_provider_failure"
+            else:
+                try:
+                    observations = _coerce_observations(acquisition)
+
+                    def invoke_once(**kwargs: Any) -> object:
+                        nonlocal analysis_attempt_count
+                        if analysis_attempt_count:
+                            raise RuntimeError("Gemini analysis retry is not allowed")
+                        # Count only when the validated core crosses the
+                        # injected provider boundary, immediately before the
+                        # sole native invocation.
+                        analysis_attempt_count = 1
+                        return invoker(**kwargs)
+
+                    analyzer = SocialCommunityAnalyzer(
+                        invoke_once,
+                        allowed_tile_ids=allowed_tile_ids,
+                    )
+                    analysis_artifact = analyzer.analyze(observations)
+                    if (
+                        analysis_artifact.get("status") == "unavailable"
+                        and analysis_artifact.get("reason") == "analyst_attempts_exhausted"
+                    ):
+                        analysis_failure_reason = "gemini_provider_failure"
+                except SocialCommunityLabError:
+                    analysis_failure_reason = "gemini_domain_validation_failed"
+                except Exception:
+                    # Provider adapters own their diagnostics.  Persist only a
+                    # fixed safe reason and never copy exception text into the
+                    # artifact.
+                    analysis_failure_reason = "gemini_provider_failure"
+
+            if analysis_failure_reason is not None:
                 observations = _coerce_observations(acquisition)
-                analyzer = SocialCommunityAnalyzer(
-                    invoker,
+                if analysis_artifact is None:
+                    if analysis_attempt_count:
+                        try:
+                            analysis_artifact = _analysis_attempts_exhausted(observations)
+                        except SocialCommunityLabError:
+                            # Keep the acquisition checkpoint and explicit
+                            # top-level failure envelope even when the evidence is
+                            # outside the C analyzer's bounded reconstruction
+                            # envelope and cannot carry a canonical analysis body.
+                            analysis_artifact = None
+                    elif analysis_failure_reason == "gemini_domain_validation_failed":
+                        analysis_artifact = _analysis_preflight_failed(observations)
+                failed_artifact = compose_lab_artifact(
+                    manifest,
+                    acquisition,
+                    mode=mode,
                     allowed_tile_ids=allowed_tile_ids,
+                    analysis_artifact=analysis_artifact if analysis_attempt_count else None,
+                    acquisition_options=acquisition_options,
+                    analysis_options=analysis_options,
+                    include_raw=args.include_raw,
+                    output_path=output_path,
                 )
-                analysis_artifact = analyzer.analyze(observations)
-            except SocialCommunityLabError as exc:
-                raise SocialCommunityLabCLIError("live Gemini analysis failed domain validation") from exc
+                if analysis_artifact is not None and not analysis_attempt_count:
+                    # A bounds failure cannot be replayed through the core's
+                    # reconstruction path because it is intentionally outside
+                    # those same bounds. Replace the checkpoint's
+                    # not-requested state with the fixed, claim-free preflight
+                    # state constructed above.
+                    failed_artifact["community_analysis"] = analysis_artifact
+                    failed_artifact["limitations"] = [
+                        limitation
+                        for limitation in failed_artifact["limitations"]
+                        if limitation != "analysis_not_requested"
+                    ]
+                    failed_artifact["limitations"].append("analysis_preflight_failed")
+                failed_artifact["analysis_failure"] = _analysis_failure_metadata(
+                    analysis_failure_reason,
+                    attempt_count=analysis_attempt_count,
+                )
+                atomic_write_json(output_path, failed_artifact)
+                if analysis_failure_reason == "gemini_domain_validation_failed":
+                    raise SocialCommunityLabCLIError("live Gemini analysis failed domain validation")
+                if analysis_failure_reason == "gemini_unavailable":
+                    raise LiveAnalysisUnavailable("Gemini live analysis is unavailable")
+                raise SocialCommunityLabCLIError("live Gemini analysis failed")
+
             # Compose takes a recorded structured object so live output uses
             # exactly the same post-validation and artifact path.
             analyst_response = None
-            mode = "live_analysis"
 
         artifact = compose_lab_artifact(
             manifest,
@@ -1016,9 +1182,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         output_path = atomic_write_json(output_path, artifact)
         status = artifact["community_analysis"]["status"]
-        print(f"Social community lab artifact written (status={status}, observations={len(_coerce_observations(acquisition))}).")
+        print(
+            f"Social community lab artifact written (status={status}, observations={len(_coerce_observations(acquisition))})."
+        )
         return 0
-    except (ScrapeCreatorsSpikeError, SocialLabContractError, SocialCommunityLabError, SocialCommunityLabCLIError, ValueError) as exc:
+    except (
+        ScrapeCreatorsSpikeError,
+        SocialLabContractError,
+        SocialCommunityLabError,
+        SocialCommunityLabCLIError,
+        ValueError,
+    ) as exc:
         print(f"error: {_safe_exception_message(exc)}", file=sys.stderr)
         return 2
     except Exception as exc:  # pragma: no cover - fail-safe CLI envelope

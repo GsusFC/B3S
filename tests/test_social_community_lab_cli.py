@@ -373,6 +373,260 @@ def test_live_analysis_uses_one_uncached_gemini_native_call_and_secure_artifact(
     assert not list(tmp_path.rglob("*.sqlite3"))
 
 
+def test_live_analysis_domain_failure_preserves_acquisition_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed live analysis must not discard already-paid acquisition evidence."""
+
+    cli = _load_cli()
+    acquisition = _acquisition()
+    acquisition["summary"].update(
+        {
+            "successful_request_count": 1,
+            "failed_request_count": 0,
+            "credits_charged": 7,
+        }
+    )
+    acquisition["responses"][0].update({"status_code": 200, "attempts": 1, "credits_charged": 7})
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def fake_run_acquisition(*_args, **_kwargs):
+        return acquisition
+
+    calls: list[dict] = []
+
+    class FailingGeminiAnalyzer:
+        def __init__(self) -> None:
+            self.use_cache = True
+            self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+        def _call_json_gemini_native(self, **_kwargs):
+            calls.append({})
+            invalid = _analyst_response()
+            invalid["tile_candidates"][0]["tile_id"] = "forged-tile"
+            return invalid
+
+    monkeypatch.setattr(cli, "ScrapeCreatorsClient", FakeClient)
+    monkeypatch.setattr(cli, "run_acquisition", fake_run_acquisition)
+    monkeypatch.setenv("SCRAPECREATORS_API_KEY", "paid-acquisition-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "live-gemini-key")
+    monkeypatch.setattr(llm_analyzer_module, "LLMAnalyzer", FailingGeminiAnalyzer)
+
+    monkeypatch.chdir(tmp_path)
+    manifest_path = tmp_path / "targets.json"
+    output_path = _test_output_path(cli, tmp_path, "failed-live.json")
+    manifest_path.write_text(json.dumps(_manifest().as_dict()), encoding="utf-8")
+
+    assert (
+        cli.main(
+            [
+                "--manifest",
+                str(manifest_path),
+                "--live-analysis",
+                "--allowed-tile-ids",
+                '["tile-community"]',
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 2
+    )
+
+    assert output_path.exists()
+    # The failure checkpoint must not be bought by an implicit retry.
+    assert len(calls) == 1
+    assert os.stat(output_path).st_mode & 0o777 == 0o600
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["observations_by_role"]["official_brand_post"]
+    observation = payload["observations_by_role"]["official_brand_post"][0]
+    assert observation["provenance"]["response_sha256"]
+    assert payload["acquisition_summary"]["credits_charged"] == 7
+    assert payload["provider_responses"][0]["credits_charged"] == 7
+    assert payload["analysis_failure"] == {
+        "status": "failed",
+        "reason": "gemini_domain_validation_failed",
+        "attempt_count": 1,
+        "claims_available": False,
+    }
+    assert payload["community_analysis"]["status"] == "unavailable"
+    assert payload["community_analysis"]["reason"] == "analyst_attempts_exhausted"
+    assert payload["promotion_evidence"]["status"] == "insufficient"
+    assert all(gate["status"] == "not_checked" for gate in payload["promotion_evidence"]["gates"])
+    serialized = json.dumps(payload)
+    assert "paid-acquisition-key" not in serialized
+    assert "live-gemini-key" not in serialized
+    assert "forged-tile" not in serialized
+
+
+def test_live_analysis_preflight_bounds_failure_records_zero_provider_attempts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Core preflight rejection must not be recorded as a Gemini attempt."""
+
+    cli = _load_cli()
+    official, _community = _observations()
+    oversized_observations = []
+    for index in range(201):
+        row = {
+            **official,
+            "external_id": f"post-{index}",
+            "canonical_url": f"https://social.example/brandco/status/post-{index}",
+        }
+        row.pop("content_id", None)
+        row.pop("semantic_fingerprint", None)
+        oversized_observations.append(cli.SocialObservation.from_dict(row).to_dict())
+
+    acquisition = _acquisition()
+    acquisition["observations"] = oversized_observations
+    native_calls: list[dict] = []
+
+    class NeverCalledGeminiAnalyzer:
+        def __init__(self) -> None:
+            self.use_cache = True
+            self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+        def _call_json_gemini_native(self, **kwargs):
+            native_calls.append(kwargs)
+            return _analysis_envelope()
+
+    monkeypatch.setenv("GEMINI_API_KEY", "live-gemini-key")
+    monkeypatch.setattr(llm_analyzer_module, "LLMAnalyzer", NeverCalledGeminiAnalyzer)
+    manifest_path = tmp_path / "targets.json"
+    acquisition_path = tmp_path / "acquisition.json"
+    output_path = _test_output_path(cli, tmp_path, "preflight-failure.json")
+    manifest_path.write_text(json.dumps(_manifest().as_dict()), encoding="utf-8")
+    acquisition_path.write_text(json.dumps(acquisition), encoding="utf-8")
+
+    assert (
+        cli.main(
+            [
+                "--manifest",
+                str(manifest_path),
+                "--acquisition-result",
+                str(acquisition_path),
+                "--live-analysis",
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 2
+    )
+
+    assert native_calls == []
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["analysis_failure"] == {
+        "status": "failed",
+        "reason": "gemini_domain_validation_failed",
+        "attempt_count": 0,
+        "claims_available": False,
+    }
+    assert payload["community_analysis"]["status"] == "unavailable"
+    assert payload["community_analysis"]["reason"] == "analysis_preflight_failed"
+    assert payload["community_analysis"]["attempt_count"] == 0
+    assert payload["community_analysis"]["prompt_packet"] is None
+
+
+def test_live_analysis_provider_raise_preserves_checkpoint_and_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli = _load_cli()
+
+    class RaisingGeminiAnalyzer:
+        def __init__(self) -> None:
+            self.use_cache = True
+            self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+        def _call_json_gemini_native(self, **_kwargs):
+            raise RuntimeError("provider transport secret=must-not-persist")
+
+    monkeypatch.setenv("GEMINI_API_KEY", "live-gemini-key")
+    monkeypatch.setattr(llm_analyzer_module, "LLMAnalyzer", RaisingGeminiAnalyzer)
+    manifest_path = tmp_path / "targets.json"
+    acquisition_path = tmp_path / "acquisition.json"
+    output_path = _test_output_path(cli, tmp_path, "provider-failure.json")
+    manifest_path.write_text(json.dumps(_manifest().as_dict()), encoding="utf-8")
+    acquisition_path.write_text(json.dumps(_acquisition()), encoding="utf-8")
+
+    assert (
+        cli.main(
+            [
+                "--manifest",
+                str(manifest_path),
+                "--acquisition-result",
+                str(acquisition_path),
+                "--live-analysis",
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 2
+    )
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["analysis_failure"]["status"] == "failed"
+    assert payload["analysis_failure"]["reason"] == "gemini_provider_failure"
+    assert payload["analysis_failure"]["attempt_count"] == 1
+    assert payload["community_analysis"]["status"] == "unavailable"
+    assert payload["community_analysis"]["reason"] == "analyst_attempts_exhausted"
+    assert "provider transport" not in json.dumps(payload)
+    assert "must-not-persist" not in json.dumps(payload)
+
+
+def test_native_gemini_empty_failure_result_remains_provider_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli = _load_cli()
+
+    class EmptyFailureGeminiAnalyzer:
+        def __init__(self) -> None:
+            self.use_cache = True
+            self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+            self.last_failure_reason = "transport_error"
+
+        def _call_json_gemini_native(self, **_kwargs):
+            return {}
+
+    monkeypatch.setenv("GEMINI_API_KEY", "live-gemini-key")
+    monkeypatch.setattr(llm_analyzer_module, "LLMAnalyzer", EmptyFailureGeminiAnalyzer)
+    manifest_path = tmp_path / "targets.json"
+    acquisition_path = tmp_path / "acquisition.json"
+    output_path = _test_output_path(cli, tmp_path, "empty-provider-failure.json")
+    manifest_path.write_text(json.dumps(_manifest().as_dict()), encoding="utf-8")
+    acquisition_path.write_text(json.dumps(_acquisition()), encoding="utf-8")
+
+    assert (
+        cli.main(
+            [
+                "--manifest",
+                str(manifest_path),
+                "--acquisition-result",
+                str(acquisition_path),
+                "--live-analysis",
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 2
+    )
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["analysis_failure"] == {
+        "status": "failed",
+        "reason": "gemini_provider_failure",
+        "attempt_count": 1,
+        "claims_available": False,
+    }
+    assert payload["community_analysis"]["status"] == "unavailable"
+    assert payload["community_analysis"]["reason"] == "analyst_attempts_exhausted"
+    assert "transport_error" not in json.dumps(payload)
+
+
 def test_live_analysis_rejects_non_gemini_provider_before_native_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -411,7 +665,15 @@ def test_live_analysis_rejects_non_gemini_provider_before_native_call(
         == 2
     )
     assert native_calls == []
-    assert not output_path.exists()
+    assert output_path.exists()
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["analysis_failure"] == {
+        "status": "failed",
+        "reason": "gemini_unavailable",
+        "attempt_count": 0,
+        "claims_available": False,
+    }
+    assert payload["community_analysis"]["status"] == "not_requested"
 
 
 def test_cli_replay_supports_offline_end_to_end_and_secure_write(tmp_path: Path) -> None:
