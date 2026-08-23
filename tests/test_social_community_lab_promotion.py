@@ -243,8 +243,7 @@ def test_v2_demonstrated_and_contradicted_tiles_cannot_self_promote() -> None:
     assert artifact["promotion_evidence"]["status"] == "insufficient"
     assert len(artifact["promotion_evidence"]["gates"]) == 11
     assert all(
-        gate["status"] == "not_checked" and gate["evidence"] == []
-        for gate in artifact["promotion_evidence"]["gates"]
+        gate["status"] == "not_checked" and gate["evidence"] == [] for gate in artifact["promotion_evidence"]["gates"]
     )
     assert artifact["canonical_invariance"] == {
         "status": "not_checked",

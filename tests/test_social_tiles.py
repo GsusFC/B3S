@@ -38,9 +38,7 @@ def test_catalog_is_the_ordered_v1_six_component_twelve_tile_contract() -> None:
     assert len(TILE_IDS) == 12
     assert len(set(TILE_IDS)) == len(TILE_IDS)
     assert CATALOG.components[0].tiles[0].evidence_requirement == ">=2 official posts"
-    assert CATALOG.components[-1].tiles[-1].evidence_requirement == (
-        "tension-bearing response + linked brand reply"
-    )
+    assert CATALOG.components[-1].tiles[-1].evidence_requirement == ("tension-bearing response + linked brand reply")
 
 
 def test_catalog_integrity_rejects_unknown_duplicate_and_missing_values() -> None:
@@ -173,7 +171,10 @@ def _capture_observation(
 
 
 def test_capture_set_is_order_independent_and_serializes_deterministically() -> None:
-    observations = [_capture_observation(external_id="post-1"), _capture_observation(external_id="post-2", platform="instagram")]
+    observations = [
+        _capture_observation(external_id="post-1"),
+        _capture_observation(external_id="post-2", platform="instagram"),
+    ]
     first = build_capture_set(observations)
     second = build_capture_set(reversed(observations))
     assert first.capture_set_id == second.capture_set_id
@@ -213,8 +214,12 @@ def test_semantic_or_request_scope_changes_capture_set_id() -> None:
 def test_capture_set_derives_bounded_ranges_and_empty_sets_without_claiming_coverage() -> None:
     capture = build_capture_set(
         [
-            _capture_observation(external_id="post-1", published_at="2026-08-20T12:00:00Z", fetched_at="2026-08-21T08:00:00Z"),
-            _capture_observation(external_id="post-2", published_at="2026-08-22T12:00:00Z", fetched_at="2026-08-23T08:00:00Z"),
+            _capture_observation(
+                external_id="post-1", published_at="2026-08-20T12:00:00Z", fetched_at="2026-08-21T08:00:00Z"
+            ),
+            _capture_observation(
+                external_id="post-2", published_at="2026-08-22T12:00:00Z", fetched_at="2026-08-23T08:00:00Z"
+            ),
         ]
     )
     assert capture.observed_published_from == "2026-08-20T12:00:00Z"
@@ -400,7 +405,11 @@ def test_component_prompt_is_minimal_component_scoped_and_deterministic() -> Non
     assert packet == build_component_prompt("response_behavior", reversed(observations), reversed(eligibility))
     assert [tile["tile_id"] for tile in packet["tiles"]] == ["ST-RB-01", "ST-RB-02"]
     assert {key for observation in packet["observations"] for key in observation} == {
-        "content_id", "text", "actor_role", "platform", "parent_external_id"
+        "content_id",
+        "text",
+        "actor_role",
+        "platform",
+        "parent_external_id",
     }
     assert all("response_sha256" not in observation for observation in packet["observations"])
     assert all("canonical_url" not in observation for observation in packet["observations"])
@@ -421,7 +430,11 @@ def test_component_decoder_rejects_outer_inner_malformed_and_duplicate_json() ->
 def test_component_validator_accepts_each_model_state_without_not_acquired() -> None:
     observations = _eligibility_fixture()
     eligibility = evaluate_tile_eligibility(observations)
-    for state, citations in (("demonstrated", [observations[0].content_id]), ("contradicted", [observations[0].content_id]), ("not_observed", [])):
+    for state, citations in (
+        ("demonstrated", [observations[0].content_id]),
+        ("contradicted", [observations[0].content_id]),
+        ("not_observed", []),
+    ):
         result = validate_component_result(
             "voice_in_action",
             _component_response("voice_in_action", [{"tile_id": "ST-VI-01", "state": state, "citations": citations}]),
@@ -438,7 +451,9 @@ def test_component_validator_enforces_citation_subset_and_rejects_model_not_acqu
     eligibility = evaluate_tile_eligibility(observations)
     invalid_citation = validate_component_result(
         "voice_in_action",
-        _component_response("voice_in_action", [{"tile_id": "ST-VI-01", "state": "demonstrated", "citations": ["unknown"]}]),
+        _component_response(
+            "voice_in_action", [{"tile_id": "ST-VI-01", "state": "demonstrated", "citations": ["unknown"]}]
+        ),
         observations,
         eligibility,
     )

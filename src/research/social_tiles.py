@@ -387,9 +387,7 @@ class TileEligibility:
         if self.eligible and (self.reason_code is not None or self.failure_stage is not None):
             raise ValueError("eligible records cannot contain failure metadata")
         if not self.eligible and (
-            not isinstance(self.reason_code, str)
-            or not self.reason_code.strip()
-            or self.failure_stage != "eligibility"
+            not isinstance(self.reason_code, str) or not self.reason_code.strip() or self.failure_stage != "eligibility"
         ):
             raise ValueError("ineligible records require reason_code and eligibility failure_stage")
 
@@ -513,9 +511,7 @@ def evaluate_tile_eligibility(observations: Iterable[SocialObservation]) -> tupl
         "ST-CC-02": _eligibility_record(
             "ST-CC-02", len(official_platforms) >= 2, official, "insufficient_official_post_platforms"
         ),
-        "ST-LT-01": _eligibility_record(
-            "ST-LT-01", len(community) >= 2, community, "insufficient_community_responses"
-        ),
+        "ST-LT-01": _eligibility_record("ST-LT-01", len(community) >= 2, community, "insufficient_community_responses"),
         "ST-LT-02": _eligibility_record(
             "ST-LT-02", len(community) >= 2 and bool(linked_pairs), (*community, *linked_replies), lt2_reason
         ),
@@ -529,7 +525,10 @@ def evaluate_tile_eligibility(observations: Iterable[SocialObservation]) -> tupl
             "ST-RD-01", bool(linked_pairs), linked_pair_records[:2], "no_locally_linked_response_reply_pair"
         ),
         "ST-RD-02": _eligibility_record(
-            "ST-RD-02", bool(qualifying_chains), qualifying_chains[0] if qualifying_chains else (), "insufficient_parent_chain_depth"
+            "ST-RD-02",
+            bool(qualifying_chains),
+            qualifying_chains[0] if qualifying_chains else (),
+            "insufficient_parent_chain_depth",
         ),
         "ST-TH-01": _eligibility_record(
             "ST-TH-01", bool(linked_pairs), linked_pair_records[:2], "no_locally_linked_response_reply_pair"
@@ -579,11 +578,7 @@ def build_component_prompt(
         raise ValueError("duplicate content_id makes component prompt ambiguous")
     records = _component_eligibility(component_id, eligibility)
     eligible_tiles = [tile for tile in component.tiles if records[tile.tile_id].eligible]
-    relevant_ids = {
-        content_id
-        for tile in eligible_tiles
-        for content_id in records[tile.tile_id].relevant_content_ids
-    }
+    relevant_ids = {content_id for tile in eligible_tiles for content_id in records[tile.tile_id].relevant_content_ids}
     if not relevant_ids.issubset(by_content_id):
         raise ValueError("eligibility cites content absent from supplied observations")
     return {
@@ -604,7 +599,9 @@ def build_component_prompt(
                 "platform": observation.platform,
                 "parent_external_id": observation.parent_external_id,
             }
-            for observation in sorted((by_content_id[content_id] for content_id in relevant_ids), key=lambda item: item.content_id)
+            for observation in sorted(
+                (by_content_id[content_id] for content_id in relevant_ids), key=lambda item: item.content_id
+            )
         ],
     }
 
@@ -750,12 +747,16 @@ def validate_component_result(
     except ComponentDecodeError as error:
         return _component_failure_result(component_id, eligible_tiles, error.reason_code, "component_decode")
     if set(decoded) != COMPONENT_INNER_KEYS:
-        return _component_failure_result(component_id, eligible_tiles, "invalid_component_shape", "component_validation")
+        return _component_failure_result(
+            component_id, eligible_tiles, "invalid_component_shape", "component_validation"
+        )
     if decoded.get("component_id") != component_id:
         return _component_failure_result(component_id, eligible_tiles, "wrong_component_id", "component_validation")
     raw_tiles = decoded.get("tiles")
     if not isinstance(raw_tiles, list):
-        return _component_failure_result(component_id, eligible_tiles, "invalid_component_shape", "component_validation")
+        return _component_failure_result(
+            component_id, eligible_tiles, "invalid_component_shape", "component_validation"
+        )
     by_tile_id: dict[str, Mapping[str, object]] = {}
     duplicates: set[str] = set()
     eligible_ids = {tile.tile_id for tile in eligible_tiles}
@@ -834,9 +835,7 @@ class TileVerdict:
             raise ValueError(f"{state.value} requires citations and no failure metadata")
         if state is TileState.NOT_OBSERVED and (citations or has_failure_metadata):
             raise ValueError("not_observed requires empty citations and no failure metadata")
-        if state is TileState.NOT_ACQUIRED and (
-            citations or self.reason_code is None or self.failure_stage is None
-        ):
+        if state is TileState.NOT_ACQUIRED and (citations or self.reason_code is None or self.failure_stage is None):
             raise ValueError("not_acquired requires empty citations, reason_code, and failure_stage")
 
     def to_dict(self) -> dict[str, object]:
@@ -888,4 +887,12 @@ __all__ = [
     "synthesize_not_acquired_verdict",
     "validate_capture_set",
 ]
-__all__ += ["ComponentDecodeError", "ComponentValidationError", "ComponentValidationResult", "build_component_prompt", "component_response_schema", "decode_component_response", "validate_component_result"]
+__all__ += [
+    "ComponentDecodeError",
+    "ComponentValidationError",
+    "ComponentValidationResult",
+    "build_component_prompt",
+    "component_response_schema",
+    "decode_component_response",
+    "validate_component_result",
+]

@@ -215,8 +215,7 @@ _ADVISORY_SECTIONS = frozenset(
 
 def _is_advisory_confidence_path(path: str) -> bool:
     return any(
-        path.startswith(f"root.community_analysis.{section}[") and path.endswith("]")
-        for section in _ADVISORY_SECTIONS
+        path.startswith(f"root.community_analysis.{section}[") and path.endswith("]") for section in _ADVISORY_SECTIONS
     )
 
 

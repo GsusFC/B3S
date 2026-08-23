@@ -1034,10 +1034,14 @@ def _social_tiles_artifact_observations(payload: Mapping[str, Any]) -> list[Soci
             raise SocialCommunityLabCLIError("v2 artifact lacks reconstructable observations from acquisition fields")
         for record in records:
             if not isinstance(record, Mapping) or record.get("actor_role") != role or "metric_context" in record:
-                raise SocialCommunityLabCLIError("v2 artifact lacks reconstructable observations from acquisition fields")
+                raise SocialCommunityLabCLIError(
+                    "v2 artifact lacks reconstructable observations from acquisition fields"
+                )
             content_id = record.get("content_id")
             if not isinstance(content_id, str) or content_id in content_ids:
-                raise SocialCommunityLabCLIError("v2 artifact lacks reconstructable observations from acquisition fields")
+                raise SocialCommunityLabCLIError(
+                    "v2 artifact lacks reconstructable observations from acquisition fields"
+                )
             content_ids.add(content_id)
             row = dict(record)
             row["metric_context"] = metric_context.get(content_id)
@@ -1077,7 +1081,10 @@ def _validate_social_tiles_run_identity(value: Any, analysis: SocialTilesAnalysi
         "social_tiles_catalog": SOCIAL_TILES_CATALOG_VERSION,
         "acquisition": ARTIFACT_SCHEMA_VERSION,
     }
-    if contracts != expected_contracts or identity.get("social_tiles_capture_set_id") != analysis.capture_set.capture_set_id:
+    if (
+        contracts != expected_contracts
+        or identity.get("social_tiles_capture_set_id") != analysis.capture_set.capture_set_id
+    ):
         raise SocialCommunityLabCLIError("v2 artifact contract or capture binding is invalid")
     if identity.get("social_tiles_receipt_integrity_sha256") != analysis.capture_set.receipt_integrity_sha256:
         raise SocialCommunityLabCLIError("v2 artifact contract or capture binding is invalid")
@@ -1226,7 +1233,9 @@ def _social_tiles_not_requested(observations: Sequence[SocialObservation]) -> So
 
 def _social_tiles_setup_unavailable(observations: Sequence[SocialObservation]) -> SocialTilesAnalysis:
     verdicts = tuple(
-        TileVerdict(record.tile_id, TileState.NOT_ACQUIRED, reason_code="gemini_unavailable", failure_stage="provider_setup")
+        TileVerdict(
+            record.tile_id, TileState.NOT_ACQUIRED, reason_code="gemini_unavailable", failure_stage="provider_setup"
+        )
         if record.eligible
         else synthesize_not_acquired_verdict(record)
         for record in evaluate_tile_eligibility(observations)
@@ -1268,8 +1277,14 @@ def _run_social_tiles_v2(
     not_requested = _social_tiles_not_requested(observations)
     if not args.live_analysis:
         artifact = compose_social_tiles_lab_artifact(
-            manifest, acquisition, not_requested, mode=mode, acquisition_options=acquisition_options,
-            analysis_options=analysis_options, include_raw=args.include_raw, output_path=output_path,
+            manifest,
+            acquisition,
+            not_requested,
+            mode=mode,
+            acquisition_options=acquisition_options,
+            analysis_options=analysis_options,
+            include_raw=args.include_raw,
+            output_path=output_path,
         )
         atomic_write_json(output_path, artifact)
         print(f"Social Tiles lab artifact written (status=not_requested, observations={len(observations)}).")
@@ -1277,8 +1292,14 @@ def _run_social_tiles_v2(
 
     # The first durable v2 record binds acquisition evidence before a paid call.
     checkpoint = compose_social_tiles_lab_artifact(
-        manifest, acquisition, not_requested, mode=mode, acquisition_options=acquisition_options,
-        analysis_options=analysis_options, include_raw=args.include_raw, output_path=output_path,
+        manifest,
+        acquisition,
+        not_requested,
+        mode=mode,
+        acquisition_options=acquisition_options,
+        analysis_options=analysis_options,
+        include_raw=args.include_raw,
+        output_path=output_path,
     )
     atomic_write_json(output_path, checkpoint)
     try:
@@ -1291,8 +1312,14 @@ def _run_social_tiles_v2(
             raise SocialCommunityLabCLIError("Social Tiles provider call accounting mismatch")
 
     artifact = compose_social_tiles_lab_artifact(
-        manifest, acquisition, analysis, mode=mode, acquisition_options=acquisition_options,
-        analysis_options=analysis_options, include_raw=args.include_raw, output_path=output_path,
+        manifest,
+        acquisition,
+        analysis,
+        mode=mode,
+        acquisition_options=acquisition_options,
+        analysis_options=analysis_options,
+        include_raw=args.include_raw,
+        output_path=output_path,
     )
     if analysis.status == "unavailable":
         artifact["analysis_failure"] = _analysis_failure_metadata(

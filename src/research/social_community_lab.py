@@ -1298,7 +1298,11 @@ class SocialTilesAnalysis:
         if not isinstance(value["evaluation_requested"], bool):
             raise _malformed("analysis_v2.evaluation_requested must be a boolean")
         total_call_count = value["total_call_count"]
-        if isinstance(total_call_count, bool) or not isinstance(total_call_count, int) or not 0 <= total_call_count <= 6:
+        if (
+            isinstance(total_call_count, bool)
+            or not isinstance(total_call_count, int)
+            or not 0 <= total_call_count <= 6
+        ):
             raise _malformed("analysis_v2.total_call_count must be an integer from 0 through 6")
         normalized_observations = _social_tiles_observations(observations)
         try:
@@ -1353,7 +1357,9 @@ def _social_tiles_component_system_prompt(component_id: str, packet: Mapping[str
     )
 
 
-def _social_tiles_component_failure(tile_ids: Iterable[str], reason_code: str, failure_stage: str) -> tuple[TileVerdict, ...]:
+def _social_tiles_component_failure(
+    tile_ids: Iterable[str], reason_code: str, failure_stage: str
+) -> tuple[TileVerdict, ...]:
     return tuple(
         TileVerdict(tile_id, TileState.NOT_ACQUIRED, reason_code=reason_code, failure_stage=failure_stage)
         for tile_id in tile_ids
@@ -1367,7 +1373,12 @@ def _social_tiles_response_is_empty(raw: object) -> bool:
 class SocialTilesAnalyzer:
     """Run one no-retry, component-local Social Tiles v2 evaluation."""
 
-    def __init__(self, invoke_structured_json: Callable[..., object] | None = None, *, invoker: Callable[..., object] | None = None) -> None:
+    def __init__(
+        self,
+        invoke_structured_json: Callable[..., object] | None = None,
+        *,
+        invoker: Callable[..., object] | None = None,
+    ) -> None:
         if invoke_structured_json is not None and invoker is not None and invoke_structured_json is not invoker:
             raise _invalid("provide only one of invoke_structured_json or invoker")
         callback = invoke_structured_json if invoke_structured_json is not None else invoker
@@ -1434,9 +1445,14 @@ class SocialTilesAnalyzer:
                 )
             elif tile_id not in verdicts:
                 verdicts[tile_id] = TileVerdict(
-                    tile_id, TileState.NOT_ACQUIRED, reason_code="component_validation", failure_stage="component_validation"
+                    tile_id,
+                    TileState.NOT_ACQUIRED,
+                    reason_code="component_validation",
+                    failure_stage="component_validation",
                 )
-        return SocialTilesAnalysis(normalized, evaluation_requested, tuple(verdicts[tile_id] for tile_id in TILE_IDS), call_counts)
+        return SocialTilesAnalysis(
+            normalized, evaluation_requested, tuple(verdicts[tile_id] for tile_id in TILE_IDS), call_counts
+        )
 
 
 def analyze_social_tiles(

@@ -199,7 +199,9 @@ def _component_response(kwargs: dict) -> dict[str, str]:
         "analysis_json": json.dumps(
             {
                 "component_id": packet["component_id"],
-                "tiles": [{"tile_id": tile["tile_id"], "state": "not_observed", "citations": []} for tile in packet["tiles"]],
+                "tiles": [
+                    {"tile_id": tile["tile_id"], "state": "not_observed", "citations": []} for tile in packet["tiles"]
+                ],
             }
         )
     }
@@ -215,7 +217,14 @@ def _component_schema() -> dict:
 
 
 def _v2_args(manifest: Path, acquisition: Path, output: Path, *, live: bool = False) -> list[str]:
-    args = ["--manifest", str(manifest), "--acquisition-result", str(acquisition), "--analysis-contract", "social-tiles-v2"]
+    args = [
+        "--manifest",
+        str(manifest),
+        "--acquisition-result",
+        str(acquisition),
+        "--analysis-contract",
+        "social-tiles-v2",
+    ]
     if live:
         args.append("--live-analysis")
     return [*args, "--output", str(output)]
