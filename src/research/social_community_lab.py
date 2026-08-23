@@ -109,6 +109,7 @@ _REJECTED_OUTPUT_KEYS = frozenset(
     }
 )
 
+
 class InvokeStructuredJSON(Protocol):
     """One provider attempt accepted by the analysis core."""
 
@@ -329,99 +330,50 @@ def analysis_response_schema(
     *,
     allowed_tile_ids: Collection[str] | None = None,
 ) -> dict[str, Any]:
-    """Return a strict provider-facing schema for the advisory artifact.
+    """Return the tiny Gemini transport envelope; domain validation is local."""
 
-    The tile allowlist is caller-owned.  It is copied into a deterministic
-    sorted enum for provider guidance, while post-validation remains the
-    authority.  Without an allowlist, the schema explicitly permits no tile
-    candidates instead of encouraging a model to invent rubric identifiers.
-    """
-
-    normalized_allowed_tile_ids = _normalize_allowed_tile_ids(allowed_tile_ids)
-
-    conclusion = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["statement", "subject", "confidence", "citation_content_ids", "derived_source_roles"],
-        "properties": {
-            "statement": {"type": "string", "minLength": 1},
-            "subject": {"type": "string", "enum": list(CONCLUSION_SUBJECTS)},
-            "confidence": {"type": "string", "enum": list(CONFIDENCE_LEVELS)},
-            "citation_content_ids": {
-                "type": "array",
-                "items": {"type": "string", "minLength": 1},
-                "minItems": 1,
-                "maxItems": MAX_CITATIONS_PER_ITEM,
-                "uniqueItems": True,
-            },
-            "derived_source_roles": {
-                "type": "array",
-                "items": {"type": "string", "enum": list(_ADMITTED_ROLES)},
-                "minItems": 1,
-                "maxItems": len(_ADMITTED_ROLES),
-                "uniqueItems": True,
-            },
-        },
-    }
-    tile_id_schema: dict[str, Any] = {"type": "string", "minLength": 1}
-    if normalized_allowed_tile_ids:
-        tile_id_schema["enum"] = sorted(normalized_allowed_tile_ids)
-    tile_candidate = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": [
-            "tile_id",
-            "signal",
-            "rationale",
-            "citation_content_ids",
-            "source_roles",
-            "evidence_role",
-        ],
-        "properties": {
-            "tile_id": tile_id_schema,
-            "signal": {"type": "string", "enum": list(TILE_SIGNALS)},
-            "rationale": {"type": "string", "minLength": 1},
-            "citation_content_ids": {
-                "type": "array",
-                "items": {"type": "string", "minLength": 1},
-                "minItems": 1,
-                "maxItems": MAX_CITATIONS_PER_ITEM,
-                "uniqueItems": True,
-            },
-            "source_roles": {
-                "type": "array",
-                "items": {"type": "string", "enum": list(_ADMITTED_ROLES)},
-                "minItems": 1,
-                "maxItems": len(_ADMITTED_ROLES),
-                "uniqueItems": True,
-            },
-            "evidence_role": {"type": "string", "enum": list(EVIDENCE_ROLES)},
-        },
-    }
+    # Preserve caller validation even though the allowlist belongs to the inner
+    # domain contract rather than the provider-facing transport schema.
+    _normalize_allowed_tile_ids(allowed_tile_ids)
     return {
         "type": "object",
-        "additionalProperties": False,
-        "required": [*ANALYSIS_SECTIONS, "tile_candidates"],
-        "properties": {
-            section: {
-                "type": "array",
-                "maxItems": MAX_CONCLUSIONS_PER_SECTION,
-                "items": conclusion,
-            }
-            for section in ANALYSIS_SECTIONS
-        }
-        | {
-            "tile_candidates": {
-                "type": "array",
-                "maxItems": MAX_TILE_CANDIDATES if normalized_allowed_tile_ids else 0,
-                "items": tile_candidate,
-            }
-        },
+        "required": ["analysis_json"],
+        "properties": {"analysis_json": {"type": "string"}},
     }
 
 
 social_analysis_response_schema = analysis_response_schema
 social_community_analysis_schema = analysis_response_schema
+
+
+def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _invalid("analysis_json contains duplicate object keys")
+        result[key] = value
+    return result
+
+
+def _reject_non_json_constant(_: str) -> None:
+    raise _malformed("analysis_json must contain strict JSON")
+
+
+def _decode_analysis_envelope(raw: Any) -> Mapping[str, Any]:
+    envelope = _strict_object(raw, "analyst_envelope")
+    _require_exact_keys(envelope, {"analysis_json"}, "analyst_envelope")
+    encoded = _non_empty_text(envelope["analysis_json"], "analyst_envelope.analysis_json")
+    try:
+        decoded = json.loads(
+            encoded,
+            object_pairs_hook=_object_without_duplicate_keys,
+            parse_constant=_reject_non_json_constant,
+        )
+    except json.JSONDecodeError:
+        raise _malformed("analysis_json must contain valid JSON") from None
+    except RecursionError:
+        raise _malformed("analysis_json exceeds the supported nesting depth") from None
+    return _strict_object(decoded, "analysis_json")
 
 
 def _validate_bounds(
@@ -489,7 +441,9 @@ def _validate_conclusion(
     observations_by_id: Mapping[str, SocialObservation],
 ) -> dict[str, Any]:
     item = _strict_object(value, path)
-    _require_exact_keys(item, {"statement", "subject", "confidence", "citation_content_ids", "derived_source_roles"}, path)
+    _require_exact_keys(
+        item, {"statement", "subject", "confidence", "citation_content_ids", "derived_source_roles"}, path
+    )
     statement = _non_empty_text(item["statement"], f"{path}.statement")
     subject = _non_empty_text(item["subject"], f"{path}.subject")
     if subject not in CONCLUSION_SUBJECTS:
@@ -724,14 +678,8 @@ def reconstruct_social_community_analysis(
         max_observations=DEFAULT_MAX_OBSERVATIONS,
         max_total_text_chars=DEFAULT_MAX_TOTAL_TEXT_CHARS,
     )
-    unclassified_count = sum(
-        observation.actor_role == ActorRole.UNCLASSIFIED.value for observation in normalized
-    )
-    admitted = [
-        observation
-        for observation in normalized
-        if observation.actor_role != ActorRole.UNCLASSIFIED.value
-    ]
+    unclassified_count = sum(observation.actor_role == ActorRole.UNCLASSIFIED.value for observation in normalized)
+    admitted = [observation for observation in normalized if observation.actor_role != ActorRole.UNCLASSIFIED.value]
     observations_by_id = {str(observation.content_id): observation for observation in admitted}
     effective_allowed = _normalize_allowed_tile_ids(allowed_tile_ids)
 
@@ -920,14 +868,8 @@ class SocialCommunityAnalyzer:
             max_observations=self.max_observations,
             max_total_text_chars=self.max_total_text_chars,
         )
-        unclassified_count = sum(
-            observation.actor_role == ActorRole.UNCLASSIFIED.value for observation in normalized
-        )
-        admitted = [
-            observation
-            for observation in normalized
-            if observation.actor_role != ActorRole.UNCLASSIFIED.value
-        ]
+        unclassified_count = sum(observation.actor_role == ActorRole.UNCLASSIFIED.value for observation in normalized)
+        admitted = [observation for observation in normalized if observation.actor_role != ActorRole.UNCLASSIFIED.value]
         limitations: list[str] = []
         if unclassified_count:
             limitations.append("unclassified_observations_excluded")
@@ -956,9 +898,11 @@ class SocialCommunityAnalyzer:
             max_total_text_chars=self.max_total_text_chars,
         )
         user_prompt = _canonical_json(packet)
-        system_prompt = _system_prompt()
         observations_by_id = {str(observation.content_id): observation for observation in admitted}
-        effective_allowed = self.allowed_tile_ids if allowed_tile_ids is None else _normalize_allowed_tile_ids(allowed_tile_ids)
+        effective_allowed = (
+            self.allowed_tile_ids if allowed_tile_ids is None else _normalize_allowed_tile_ids(allowed_tile_ids)
+        )
+        system_prompt = _system_prompt(allowed_tile_ids=effective_allowed)
         provider_schema = analysis_response_schema(allowed_tile_ids=effective_allowed)
         try:
             raw = self.invoke_structured_json(
@@ -984,8 +928,9 @@ class SocialCommunityAnalyzer:
                 prompt_packet=packet,
             )
 
+        decoded = _decode_analysis_envelope(raw)
         sections, candidates = _validate_model_output(
-            raw,
+            decoded,
             observations_by_id=observations_by_id,
             allowed_tile_ids=effective_allowed,
         )
@@ -1064,10 +1009,36 @@ run_social_community_analysis = analyze_social_community
 analyze_social_lab = analyze_social_community
 
 
-def _system_prompt() -> str:
+def _system_prompt(*, allowed_tile_ids: Collection[str] | None = None) -> str:
+    normalized_allowed_tile_ids = _normalize_allowed_tile_ids(allowed_tile_ids) or frozenset()
+    allowed_tile_ids_json = _canonical_json(sorted(normalized_allowed_tile_ids))
+    section_names_json = _canonical_json(list(ANALYSIS_SECTIONS))
+    subjects_json = _canonical_json(list(CONCLUSION_SUBJECTS))
+    confidence_json = _canonical_json(list(CONFIDENCE_LEVELS))
+    roles_json = _canonical_json(list(_ADMITTED_ROLES))
+    signals_json = _canonical_json(list(TILE_SIGNALS))
+    evidence_roles_json = _canonical_json(list(EVIDENCE_ROLES))
     return (
         "You are the advisory analyst for an isolated social/community laboratory. "
-        "Return only the requested structured JSON object. "
+        "Return exactly one outer JSON object with exactly one key, analysis_json. "
+        "analysis_json must be a JSON-encoded string whose decoded value is the inner analysis object. "
+        f"The inner object must have exactly these section keys plus tile_candidates: {section_names_json}. "
+        f"Each section is an array of at most {MAX_CONCLUSIONS_PER_SECTION} conclusion objects. "
+        "Each conclusion has exactly statement, subject, confidence, citation_content_ids, and "
+        "derived_source_roles. statement is non-empty text. "
+        f"subject is one of {subjects_json}; confidence is one of {confidence_json}. "
+        f"citation_content_ids contains 1 to {MAX_CITATIONS_PER_ITEM} unique supplied content IDs. "
+        f"derived_source_roles contains unique values from {roles_json} and must exactly match cited roles. "
+        "brand_claim requires official_brand_post evidence; brand_behavior requires brand_reply evidence; "
+        "community_perception requires community_response evidence; tension requires at least two source roles. "
+        f"tile_candidates is an array of at most {MAX_TILE_CANDIDATES} objects with unique tile_id values. "
+        "Each tile candidate has exactly tile_id, signal, rationale, citation_content_ids, source_roles, and "
+        "evidence_role. rationale is non-empty text; citations and source_roles follow the same rules as conclusions. "
+        f"signal is one of {signals_json}; evidence_role is one of {evidence_roles_json}. "
+        "brand_direct requires official_brand_post evidence; brand_behavior requires brand_reply evidence; "
+        "community_corroboration requires community_response evidence; mixed_tension requires at least two roles. "
+        f"Allowed tile IDs JSON: {allowed_tile_ids_json}. "
+        "When that list is empty, tile_candidates must be empty. "
         "Use only the supplied observation content and citations; do not invent evidence. "
         "Community speech is perception evidence, not a brand-owned claim. "
         "Do not emit scores, states, activation decisions, direct actor identity, metrics, or provenance."

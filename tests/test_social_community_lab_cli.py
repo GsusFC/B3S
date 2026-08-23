@@ -113,6 +113,18 @@ def _analyst_response() -> dict:
     }
 
 
+def _analysis_envelope(payload: object | None = None) -> dict[str, str]:
+    return {
+        "analysis_json": json.dumps(
+            _analyst_response() if payload is None else payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    }
+
+
 def test_compose_artifact_keeps_roles_metrics_and_analysis_separate() -> None:
     cli = _load_cli()
     response = _analyst_response()
@@ -127,7 +139,7 @@ def test_compose_artifact_keeps_roles_metrics_and_analysis_separate() -> None:
         acquisition,
         mode="offline_analysis",
         allowed_tile_ids=["tile-community"],
-        analyst_response=response,
+        analyst_response=_analysis_envelope(response),
         analyst_response_hash="sha256:" + hashlib.sha256(b"recorded").hexdigest(),
     )
 
@@ -168,10 +180,7 @@ def test_compose_artifact_keeps_roles_metrics_and_analysis_separate() -> None:
     ]
     gates = artifact["promotion_evidence"]["gates"]
     assert [gate["id"] for gate in gates] == expected_gate_ids
-    assert all(
-        gate["status"] == "not_checked" and gate["evidence"] == [] and gate["requirement"]
-        for gate in gates
-    )
+    assert all(gate["status"] == "not_checked" and gate["evidence"] == [] and gate["requirement"] for gate in gates)
     assert artifact["canonical_invariance"]["status"] == "not_checked"
     serialized = json.dumps(artifact)
     assert "score" not in serialized.casefold()
@@ -233,7 +242,7 @@ def test_compose_artifact_revalidates_prebuilt_analysis_against_observations_and
         acquisition,
         mode="offline_analysis",
         allowed_tile_ids=["tile-community"],
-        analyst_response=_analyst_response(),
+        analyst_response=_analysis_envelope(),
     )["community_analysis"]
 
     replayed = cli.compose_lab_artifact(
@@ -328,7 +337,7 @@ def test_live_analysis_uses_one_uncached_gemini_native_call_and_secure_artifact(
         def _call_json_gemini_native(self, **kwargs):
             assert self.use_cache is False
             calls.append(kwargs)
-            return _analyst_response()
+            return _analysis_envelope()
 
     monkeypatch.setenv("GEMINI_API_KEY", "live-gemini-key")
     monkeypatch.setattr(llm_analyzer_module, "LLMAnalyzer", FakeLLMAnalyzer)
@@ -413,7 +422,7 @@ def test_cli_replay_supports_offline_end_to_end_and_secure_write(tmp_path: Path)
     output_path = _test_output_path(cli, tmp_path, "result.json")
     manifest_path.write_text(json.dumps(_manifest().as_dict()), encoding="utf-8")
     acquisition_path.write_text(json.dumps(_acquisition()), encoding="utf-8")
-    analyst_path.write_text(json.dumps(_analyst_response()), encoding="utf-8")
+    analyst_path.write_text(json.dumps(_analysis_envelope()), encoding="utf-8")
 
     assert (
         cli.main(
@@ -483,7 +492,7 @@ def test_cli_replay_rejects_forged_observation_role_before_analysis(tmp_path: Pa
     acquisition["observations"][1].pop("semantic_fingerprint")
     manifest_path.write_text(json.dumps(_manifest().as_dict()), encoding="utf-8")
     acquisition_path.write_text(json.dumps(acquisition), encoding="utf-8")
-    analyst_path.write_text(json.dumps(_analyst_response()), encoding="utf-8")
+    analyst_path.write_text(json.dumps(_analysis_envelope()), encoding="utf-8")
 
     assert (
         cli.main(

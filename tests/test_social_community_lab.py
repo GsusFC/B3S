@@ -10,8 +10,10 @@ import pytest
 from src.research.social_community_lab import (
     ANALYSIS_SECTIONS,
     SocialCommunityAnalyzer,
+    SocialCommunityMalformedInputError,
     SocialCommunityValidationError,
     analyze_social_community,
+    analysis_response_schema,
     build_prompt_packet,
 )
 from src.research.social_lab_contracts import ActorRole, MetricContext, SocialLabContractError, SocialObservation
@@ -73,6 +75,57 @@ def _response(
     }
 
 
+def _envelope(payload: object) -> dict[str, str]:
+    return {
+        "analysis_json": json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    }
+
+
+def test_provider_schema_is_a_tiny_analysis_json_envelope() -> None:
+    assert analysis_response_schema(allowed_tile_ids={"SOC1"}) == {
+        "type": "object",
+        "required": ["analysis_json"],
+        "properties": {"analysis_json": {"type": "string"}},
+    }
+
+
+def test_analysis_json_envelope_decodes_once_and_prompt_names_inner_contract() -> None:
+    observations = _observations()
+    calls: list[dict[str, Any]] = []
+
+    def fake(**kwargs: Any) -> object:
+        calls.append(kwargs)
+        return _envelope(_response(observations))
+
+    result = analyze_social_community(observations, fake, allowed_tile_ids={"SOC-Z", "SOC-A"})
+
+    assert result.status == "complete"
+    assert set(calls[0]["json_schema"]["properties"]) == {"analysis_json"}
+    assert 'Allowed tile IDs JSON: ["SOC-A","SOC-Z"]' in calls[0]["system"]
+    assert "cross_channel_voice" in calls[0]["system"]
+    assert "citation_content_ids" in calls[0]["system"]
+
+
+@pytest.mark.parametrize("analysis_json", ["not-json", "[]"])
+def test_analysis_json_envelope_rejects_malformed_or_non_object_inner_json(analysis_json: str) -> None:
+    with pytest.raises(SocialCommunityMalformedInputError, match="analysis_json"):
+        analyze_social_community(_observations(), lambda **_: {"analysis_json": analysis_json})
+
+
+def test_analysis_json_envelope_rejects_duplicate_inner_object_keys() -> None:
+    with pytest.raises(SocialCommunityValidationError, match="duplicate object keys"):
+        analyze_social_community(
+            _observations(),
+            lambda **_: {"analysis_json": '{"cross_channel_voice":[],"cross_channel_voice":[]}'},
+        )
+
+
 def test_valid_mixed_role_analysis_is_citation_bound() -> None:
     observations = _observations()
     ids = [str(item.content_id) for item in observations]
@@ -92,7 +145,7 @@ def test_valid_mixed_role_analysis_is_citation_bound() -> None:
 
     result = analyze_social_community(
         observations,
-        lambda **_: response,
+        lambda **_: _envelope(response),
         allowed_tile_ids={"SOC1"},
     )
 
@@ -134,29 +187,76 @@ def test_system_prompt_names_community_perception_boundary() -> None:
 
     def fake(**kwargs: Any) -> object:
         calls.append(kwargs)
-        return _response(observations)
+        return _envelope(_response(observations))
 
     analyze_social_community(observations, fake)
     assert "community speech is perception evidence, not a brand-owned claim" in calls[0]["system"].casefold()
 
 
-def test_provider_schema_constrains_tile_ids_to_sorted_allowlist() -> None:
+def test_system_prompt_constrains_tile_ids_to_sorted_allowlist() -> None:
     observations = _observations()
     calls: list[dict[str, Any]] = []
 
     def fake(**kwargs: Any) -> object:
         calls.append(kwargs)
-        return _response(observations)
+        return _envelope(_response(observations))
 
     analyze_social_community(observations, fake, allowed_tile_ids={"SOC-Z", "SOC-A", "SOC-M"})
-    tile_schema = calls[0]["json_schema"]["properties"]["tile_candidates"]
-    tile_id_schema = tile_schema["items"]["properties"]["tile_id"]
-    assert tile_id_schema["enum"] == ["SOC-A", "SOC-M", "SOC-Z"]
-    assert tile_schema["maxItems"] == 32
+    assert 'Allowed tile IDs JSON: ["SOC-A","SOC-M","SOC-Z"]' in calls[0]["system"]
+
+
+def test_provider_schema_uses_only_gemini_response_format_keywords() -> None:
+    schema = analysis_response_schema(allowed_tile_ids={"SOC1"})
+
+    def all_keys(value: Any) -> list[str]:
+        if isinstance(value, dict):
+            keys: list[str] = []
+            for key, item in value.items():
+                keys.append(key)
+                keys.extend(all_keys(item))
+            return keys
+        if isinstance(value, list):
+            return [key for item in value for key in all_keys(item)]
+        return []
+
+    keys = all_keys(schema)
+    assert "minLength" not in keys
+    assert "uniqueItems" not in keys
+    assert "additionalProperties" not in keys
+    assert schema["type"] == "object"
+    assert schema["required"] == ["analysis_json"]
+
+
+def test_provider_schema_is_compact_transport_guidance_not_semantic_authority() -> None:
+    schema = analysis_response_schema(allowed_tile_ids={"SOC1"})
+    serialized = json.dumps(schema, separators=(",", ":"), sort_keys=True)
+
+    assert len(serialized.encode("utf-8")) <= 128
+    assert "additionalProperties" not in serialized
+    assert "minItems" not in serialized
+
+
+def test_provider_schema_relaxation_preserves_nonempty_and_duplicate_domain_guards() -> None:
+    observations = _observations()
+    ids = [str(item.content_id) for item in observations]
+    schema = analysis_response_schema(allowed_tile_ids={"SOC1"})
+
+    invalid_empty = _response(observations)
+    invalid_empty["cross_channel_voice"][0]["statement"] = ""
+    with pytest.raises(SocialCommunityValidationError):
+        analyze_social_community(observations, lambda **_: _envelope(invalid_empty), allowed_tile_ids={"SOC1"})
+
+    invalid_duplicate = _response(observations)
+    invalid_duplicate["cross_channel_voice"][0]["citation_content_ids"] = [ids[0], ids[0]]
+    with pytest.raises(SocialCommunityValidationError):
+        analyze_social_community(observations, lambda **_: _envelope(invalid_duplicate), allowed_tile_ids={"SOC1"})
+
+    assert "minLength" not in json.dumps(schema)
+    assert "uniqueItems" not in json.dumps(schema)
 
 
 @pytest.mark.parametrize("allowlist", [None, set()])
-def test_provider_schema_disallows_candidates_without_allowlist(
+def test_system_prompt_disallows_candidates_without_allowlist(
     allowlist: set[str] | None,
 ) -> None:
     observations = _observations()
@@ -164,11 +264,10 @@ def test_provider_schema_disallows_candidates_without_allowlist(
 
     def fake(**kwargs: Any) -> object:
         calls.append(kwargs)
-        return _response(observations)
+        return _envelope(_response(observations))
 
     analyze_social_community(observations, fake, allowed_tile_ids=allowlist)
-    tile_schema = calls[0]["json_schema"]["properties"]["tile_candidates"]
-    assert tile_schema["maxItems"] == 0
+    assert "Allowed tile IDs JSON: []." in calls[0]["system"]
 
 
 def test_candidate_without_allowlist_still_fails_post_validation() -> None:
@@ -186,11 +285,11 @@ def test_candidate_without_allowlist_still_fails_post_validation() -> None:
 
     def fake(**kwargs: Any) -> object:
         calls.append(kwargs)
-        return _response(observations, tile_candidates=[candidate])
+        return _envelope(_response(observations, tile_candidates=[candidate]))
 
     with pytest.raises(SocialCommunityValidationError):
         analyze_social_community(observations, fake)
-    assert calls[0]["json_schema"]["properties"]["tile_candidates"]["maxItems"] == 0
+    assert "Allowed tile IDs JSON: []." in calls[0]["system"]
 
 
 def test_unclassified_observations_are_excluded_and_reported() -> None:
@@ -202,7 +301,7 @@ def test_unclassified_observations_are_excluded_and_reported() -> None:
         calls.append(True)
         response = _response(observations)
         response["cross_channel_voice"] = []
-        return response
+        return _envelope(response)
 
     result = analyze_social_community([unclassified, observations[1]], fake)
     assert result.status == "complete"
@@ -260,7 +359,7 @@ def test_invalid_conclusion_role_evidence_fails_closed(
     sections = {section: [] for section in ANALYSIS_SECTIONS}
     sections["cross_channel_voice"] = [conclusion]
     with pytest.raises(SocialCommunityValidationError):
-        analyze_social_community(observations, lambda **_: _response(observations, sections=sections))
+        analyze_social_community(observations, lambda **_: _envelope(_response(observations, sections=sections)))
 
 
 def test_unknown_duplicate_citations_and_score_fields_fail_closed() -> None:
@@ -269,17 +368,17 @@ def test_unknown_duplicate_citations_and_score_fields_fail_closed() -> None:
     invalid = _response(observations)
     invalid["cross_channel_voice"][0]["citation_content_ids"] = [ids[0], ids[0]]
     with pytest.raises(SocialCommunityValidationError):
-        analyze_social_community(observations, lambda **_: invalid)
+        analyze_social_community(observations, lambda **_: _envelope(invalid))
 
     invalid = _response(observations)
     invalid["cross_channel_voice"][0]["citation_content_ids"] = ["sha256:" + "0" * 64]
     with pytest.raises(SocialCommunityValidationError):
-        analyze_social_community(observations, lambda **_: invalid)
+        analyze_social_community(observations, lambda **_: _envelope(invalid))
 
     invalid = _response(observations)
     invalid["score"] = 7
     with pytest.raises(SocialCommunityValidationError):
-        analyze_social_community(observations, lambda **_: invalid)
+        analyze_social_community(observations, lambda **_: _envelope(invalid))
 
 
 def test_candidate_requires_caller_tile_allowlist_and_has_no_scoring_surface() -> None:
@@ -294,13 +393,15 @@ def test_candidate_requires_caller_tile_allowlist_and_has_no_scoring_surface() -
         "evidence_role": "brand_direct",
     }
     with pytest.raises(SocialCommunityValidationError):
-        analyze_social_community(observations, lambda **_: _response(observations, tile_candidates=[candidate]))
+        analyze_social_community(
+            observations, lambda **_: _envelope(_response(observations, tile_candidates=[candidate]))
+        )
 
     candidate["score"] = 1
     with pytest.raises(SocialCommunityValidationError):
         analyze_social_community(
             observations,
-            lambda **_: _response(observations, tile_candidates=[candidate]),
+            lambda **_: _envelope(_response(observations, tile_candidates=[candidate])),
             allowed_tile_ids={"SOC1"},
         )
 
@@ -309,7 +410,7 @@ def test_candidate_requires_caller_tile_allowlist_and_has_no_scoring_surface() -
     with pytest.raises(SocialCommunityValidationError):
         analyze_social_community(
             observations,
-            lambda **_: _response(observations, tile_candidates=[candidate]),
+            lambda **_: _envelope(_response(observations, tile_candidates=[candidate])),
             allowed_tile_ids={"SOC1"},
         )
 
@@ -319,8 +420,12 @@ def test_metric_and_provenance_changes_do_not_change_prompt_or_analysis() -> Non
     changed = [
         replace(
             observations[0],
-            metric_context=MetricContext(metrics={"likes": 99999, "followers": 500000}, observed_at="2026-09-01T00:00:00Z"),
-            provenance=replace(observations[0].provenance, request_fingerprint="request-fingerprint-2", response_sha256="c" * 64),
+            metric_context=MetricContext(
+                metrics={"likes": 99999, "followers": 500000}, observed_at="2026-09-01T00:00:00Z"
+            ),
+            provenance=replace(
+                observations[0].provenance, request_fingerprint="request-fingerprint-2", response_sha256="c" * 64
+            ),
         ),
         replace(
             observations[1],
@@ -333,7 +438,7 @@ def test_metric_and_provenance_changes_do_not_change_prompt_or_analysis() -> Non
         prompts.append(kwargs["user"])
         # Echo only the citation-bound fixture output; this fake is intentionally
         # independent of all acquisition/metric fields.
-        return _response(observations)
+        return _envelope(_response(observations))
 
     first = analyze_social_community(observations, fake)
     second = analyze_social_community(changed, fake)
@@ -364,7 +469,7 @@ def test_analysis_has_no_public_retry_configuration() -> None:
     observations = _observations()
 
     def fake(**_: Any) -> object:
-        return _response(observations)
+        return _envelope(_response(observations))
 
     with pytest.raises(TypeError):
         SocialCommunityAnalyzer(fake, max_attempts=2)  # type: ignore[call-arg]
@@ -377,18 +482,18 @@ def test_identity_leakage_in_semantic_prose_is_rejected() -> None:
     invalid = _response(observations)
     invalid["cross_channel_voice"][0]["statement"] = "@brandco says this."
     with pytest.raises(SocialCommunityValidationError):
-        analyze_social_community(observations, lambda **_: invalid)
+        analyze_social_community(observations, lambda **_: _envelope(invalid))
 
 
 def test_mapping_equivalent_observations_are_decoded_strictly() -> None:
     observations = _observations()
     payloads = [item.to_dict() for item in observations]
-    result = analyze_social_community(payloads, lambda **_: _response(observations))
+    result = analyze_social_community(payloads, lambda **_: _envelope(_response(observations)))
     assert result.status == "complete"
     with pytest.raises(SocialCommunityValidationError):
         analyze_social_community(
             [{**payloads[0], "unexpected": "field"}, payloads[1]],
-            lambda **_: _response(observations),
+            lambda **_: _envelope(_response(observations)),
         )
 
 
