@@ -346,6 +346,199 @@ validate_capture_set = reconstruct_capture_set
 
 
 @dataclass(frozen=True, slots=True)
+class TileEligibility:
+    tile_id: str
+    eligible: bool
+    relevant_content_ids: tuple[str, ...] = ()
+    reason_code: str | None = None
+    failure_stage: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.tile_id not in TILE_IDS:
+            raise ValueError(f"unknown tile_id: {self.tile_id!r}")
+        if not isinstance(self.eligible, bool):
+            raise ValueError("eligible must be a boolean")
+        if isinstance(self.relevant_content_ids, str):
+            raise ValueError("relevant_content_ids must be an iterable of strings")
+        try:
+            raw_ids = tuple(self.relevant_content_ids)
+        except TypeError as exc:
+            raise ValueError("relevant_content_ids must be iterable") from exc
+        if any(not isinstance(content_id, str) or not content_id for content_id in raw_ids):
+            raise ValueError("relevant_content_ids must contain strings")
+        ids = tuple(sorted(set(raw_ids)))
+        object.__setattr__(self, "relevant_content_ids", ids)
+        if self.eligible and (self.reason_code is not None or self.failure_stage is not None):
+            raise ValueError("eligible records cannot contain failure metadata")
+        if not self.eligible and (
+            not isinstance(self.reason_code, str)
+            or not self.reason_code.strip()
+            or self.failure_stage != "eligibility"
+        ):
+            raise ValueError("ineligible records require reason_code and eligibility failure_stage")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "tile_id": self.tile_id,
+            "eligible": self.eligible,
+            "relevant_content_ids": list(self.relevant_content_ids),
+            "reason_code": self.reason_code,
+            "failure_stage": self.failure_stage,
+        }
+
+    def to_json(self) -> str:
+        return _canonical_json(self.to_dict())
+
+
+def _eligibility_record(
+    tile_id: str,
+    eligible: bool,
+    observations: Iterable[SocialObservation],
+    reason_code: str,
+) -> TileEligibility:
+    return TileEligibility(
+        tile_id=tile_id,
+        eligible=eligible,
+        relevant_content_ids=tuple(observation.content_id for observation in observations),
+        reason_code=None if eligible else reason_code,
+        failure_stage=None if eligible else "eligibility",
+    )
+
+
+def _eligibility_observations(observations: Iterable[SocialObservation]) -> tuple[SocialObservation, ...]:
+    if isinstance(observations, (str, bytes, Mapping)):
+        raise ValueError("observations must be an iterable of validated SocialObservation records")
+    try:
+        values = tuple(observations)
+    except TypeError as exc:
+        raise ValueError("observations must be iterable") from exc
+    if any(not isinstance(observation, SocialObservation) for observation in values):
+        raise ValueError("eligibility accepts only validated SocialObservation records")
+    external_ids = [observation.external_id for observation in values]
+    if len(set(external_ids)) != len(external_ids):
+        raise ValueError("duplicate external_id makes local parent linkage ambiguous")
+    return tuple(sorted(values, key=lambda observation: observation.external_id))
+
+
+def _parent_map(observations: tuple[SocialObservation, ...]) -> dict[str, SocialObservation]:
+    by_external_id = {observation.external_id: observation for observation in observations}
+    return {
+        observation.external_id: by_external_id[observation.parent_external_id]
+        for observation in observations
+        if observation.parent_external_id in by_external_id
+    }
+
+
+def _parent_chain(
+    observation: SocialObservation,
+    parent_map: Mapping[str, SocialObservation],
+) -> tuple[SocialObservation, ...]:
+    chain: list[SocialObservation] = []
+    seen: set[str] = set()
+    current: SocialObservation | None = observation
+    while current is not None and current.external_id not in seen:
+        seen.add(current.external_id)
+        chain.append(current)
+        current = parent_map.get(current.external_id)
+    return tuple(reversed(chain))
+
+
+def _linked_pairs(
+    observations: tuple[SocialObservation, ...],
+) -> tuple[tuple[SocialObservation, SocialObservation], ...]:
+    by_external_id = {observation.external_id: observation for observation in observations}
+    pairs = [
+        (parent, child)
+        for child in observations
+        if child.actor_role == "brand_reply"
+        and child.parent_external_id in by_external_id
+        and (parent := by_external_id[child.parent_external_id]).actor_role == "community_response"
+    ]
+    return tuple(sorted(pairs, key=lambda pair: (pair[0].content_id, pair[1].content_id)))
+
+
+def evaluate_tile_eligibility(observations: Iterable[SocialObservation]) -> tuple[TileEligibility, ...]:
+    """Evaluate only deterministic local prerequisites; provider semantics remain downstream."""
+    values = _eligibility_observations(observations)
+    parent_map = _parent_map(values)
+    official = tuple(observation for observation in values if observation.actor_role == "official_brand_post")
+    community = tuple(observation for observation in values if observation.actor_role == "community_response")
+    linked_pairs = _linked_pairs(values)
+    linked_replies = tuple(reply for _, reply in linked_pairs)
+    linked_pair_records = tuple(item for pair in linked_pairs for item in pair)
+    qualifying_chains = tuple(
+        chain
+        for observation in values
+        if observation.actor_role == "brand_reply"
+        for chain in (_parent_chain(observation, parent_map),)
+        if len(chain) >= 3
+        and any(node.actor_role == "community_response" for node in chain)
+        and any(node.actor_role == "brand_reply" for node in chain)
+    )
+    official_platforms = {observation.platform for observation in official}
+    linked_thread_replies = tuple(
+        reply
+        for reply in linked_replies
+        if any(node.actor_role == "official_brand_post" for node in _parent_chain(reply, parent_map))
+    )
+    vi2_reason = "insufficient_official_posts" if len(official) < 1 else "no_locally_linked_brand_reply_thread"
+    lt2_reason = "insufficient_community_responses" if len(community) < 2 else "missing_locally_linked_brand_reply"
+    records = {
+        "ST-VI-01": _eligibility_record("ST-VI-01", len(official) >= 2, official, "insufficient_official_posts"),
+        "ST-VI-02": _eligibility_record(
+            "ST-VI-02",
+            bool(linked_thread_replies),
+            tuple((*official, *linked_thread_replies)),
+            vi2_reason,
+        ),
+        "ST-CC-01": _eligibility_record(
+            "ST-CC-01", len(official_platforms) >= 2, official, "insufficient_official_post_platforms"
+        ),
+        "ST-CC-02": _eligibility_record(
+            "ST-CC-02", len(official_platforms) >= 2, official, "insufficient_official_post_platforms"
+        ),
+        "ST-LT-01": _eligibility_record(
+            "ST-LT-01", len(community) >= 2, community, "insufficient_community_responses"
+        ),
+        "ST-LT-02": _eligibility_record(
+            "ST-LT-02", len(community) >= 2 and bool(linked_pairs), (*community, *linked_replies), lt2_reason
+        ),
+        "ST-RB-01": _eligibility_record(
+            "ST-RB-01", bool(linked_pairs), linked_pair_records[:2], "no_locally_linked_response_reply_pair"
+        ),
+        "ST-RB-02": _eligibility_record(
+            "ST-RB-02", len(linked_pairs) >= 2, linked_pair_records, "insufficient_locally_linked_pairs"
+        ),
+        "ST-RD-01": _eligibility_record(
+            "ST-RD-01", bool(linked_pairs), linked_pair_records[:2], "no_locally_linked_response_reply_pair"
+        ),
+        "ST-RD-02": _eligibility_record(
+            "ST-RD-02", bool(qualifying_chains), qualifying_chains[0] if qualifying_chains else (), "insufficient_parent_chain_depth"
+        ),
+        "ST-TH-01": _eligibility_record(
+            "ST-TH-01", bool(linked_pairs), linked_pair_records[:2], "no_locally_linked_response_reply_pair"
+        ),
+        "ST-TH-02": _eligibility_record(
+            "ST-TH-02", bool(linked_pairs), linked_pair_records[:2], "no_locally_linked_response_reply_pair"
+        ),
+    }
+    return tuple(records[tile_id] for tile_id in TILE_IDS)
+
+
+def synthesize_not_acquired_verdict(eligibility: TileEligibility) -> TileVerdict:
+    if not isinstance(eligibility, TileEligibility):
+        raise TypeError("eligibility must be a TileEligibility")
+    if eligibility.eligible:
+        raise ValueError("eligible tiles cannot be synthesized as not_acquired")
+    return TileVerdict(
+        tile_id=eligibility.tile_id,
+        state=TileState.NOT_ACQUIRED,
+        reason_code=eligibility.reason_code,
+        failure_stage=eligibility.failure_stage,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class TileVerdict:
     tile_id: str
     state: TileState
@@ -411,6 +604,7 @@ __all__ = [
     "COMPONENT_IDS",
     "CatalogIntegrityError",
     "ComponentDefinition",
+    "TileEligibility",
     "SOCIAL_TILES_CATALOG",
     "SOCIAL_TILES_CATALOG_VERSION",
     "SocialTilesCatalog",
@@ -423,7 +617,9 @@ __all__ = [
     "VerdictState",
     "assert_catalog_integrity",
     "build_capture_set",
+    "evaluate_tile_eligibility",
     "reconstruct_capture_set",
     "serialize_verdict",
+    "synthesize_not_acquired_verdict",
     "validate_capture_set",
 ]

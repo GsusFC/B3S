@@ -14,10 +14,13 @@ from src.research.social_tiles import (
     CatalogIntegrityError,
     ComponentDefinition,
     TileDefinition,
+    TileEligibility,
     TileState,
     TileVerdict,
     assert_catalog_integrity,
     build_capture_set,
+    evaluate_tile_eligibility,
+    synthesize_not_acquired_verdict,
 )
 from src.research.social_lab_contracts import MetricContext, Provenance, SocialObservation, build_social_observation
 
@@ -232,3 +235,150 @@ def test_capture_set_reconstruction_rejects_tampered_model_hashes_and_unvalidate
         CaptureSet.from_dict(tampered_receipt, [observation])
     with pytest.raises(ValueError):
         build_capture_set([observation.to_dict()])
+
+
+def _interaction_observation(
+    *,
+    record_kind: str,
+    external_id: str,
+    author_account_id: str,
+    author_handle: str,
+    parent_external_id: str,
+    thread_external_id: str,
+    platform: str = "x",
+) -> SocialObservation:
+    provenance = _capture_observation(external_id=f"seed-{external_id}").provenance
+    return build_social_observation(
+        platform=platform,
+        record_kind=record_kind,
+        external_id=external_id,
+        canonical_url=f"https://social.example/brandco/status/{external_id}",
+        author_account_id=author_account_id,
+        author_handle=author_handle,
+        parent_external_id=parent_external_id,
+        thread_external_id=thread_external_id,
+        text=f"Text for {external_id}",
+        media_kind="text",
+        published_at="2026-08-22T12:00:00Z",
+        provenance=provenance,
+        bound_brand_identity={"account_id": "brand-account-1", "handle": "brandco"},
+    )
+
+
+def _eligibility_fixture() -> list[SocialObservation]:
+    posts = [
+        _capture_observation(external_id="post-1", platform="x"),
+        _capture_observation(external_id="post-2", platform="instagram"),
+    ]
+    responses = [
+        _interaction_observation(
+            record_kind="response",
+            external_id="response-1",
+            author_account_id="community-1",
+            author_handle="community-1",
+            parent_external_id="post-1",
+            thread_external_id="post-1",
+        ),
+        _interaction_observation(
+            record_kind="response",
+            external_id="response-2",
+            author_account_id="community-2",
+            author_handle="community-2",
+            parent_external_id="post-2",
+            thread_external_id="post-2",
+        ),
+    ]
+    replies = [
+        _interaction_observation(
+            record_kind="reply",
+            external_id="reply-1",
+            author_account_id="brand-account-1",
+            author_handle="brandco",
+            parent_external_id="response-1",
+            thread_external_id="post-1",
+        ),
+        _interaction_observation(
+            record_kind="reply",
+            external_id="reply-2",
+            author_account_id="brand-account-1",
+            author_handle="brandco",
+            parent_external_id="response-2",
+            thread_external_id="post-2",
+        ),
+    ]
+    return [*posts, *responses, *replies]
+
+
+def test_tile_eligibility_evaluates_all_twelve_catalog_tiles_in_order() -> None:
+    records = evaluate_tile_eligibility(_eligibility_fixture())
+    assert len(records) == 12
+    assert tuple(record.tile_id for record in records) == TILE_IDS
+    assert all(record.eligible for record in records)
+    assert all(record.failure_stage is None for record in records)
+    assert all(record.relevant_content_ids == tuple(sorted(record.relevant_content_ids)) for record in records)
+
+
+def test_empty_and_unvalidated_inputs_fail_closed_at_eligibility() -> None:
+    records = evaluate_tile_eligibility([])
+    assert len(records) == 12
+    assert all(not record.eligible for record in records)
+    assert all(record.failure_stage == "eligibility" for record in records)
+    assert all(record.reason_code for record in records)
+    with pytest.raises(ValueError):
+        evaluate_tile_eligibility([_capture_observation().to_dict()])
+
+
+def test_eligibility_is_input_order_and_metric_invariant() -> None:
+    observations = _eligibility_fixture()
+    baseline = evaluate_tile_eligibility(observations)
+    reordered = evaluate_tile_eligibility(reversed(observations))
+    metric_changed = dataclasses.replace(
+        observations[0],
+        metric_context=MetricContext(metrics={"likes": 99}, observed_at="2026-08-22T13:00:00Z"),
+    )
+    metric_input = [metric_changed, *observations[1:]]
+    assert baseline == reordered == evaluate_tile_eligibility(metric_input)
+
+
+def test_thread_id_without_local_parent_edge_is_not_linkage() -> None:
+    post = _capture_observation(external_id="post-1")
+    response = _interaction_observation(
+        record_kind="response",
+        external_id="response-1",
+        author_account_id="community-1",
+        author_handle="community-1",
+        parent_external_id="missing-parent",
+        thread_external_id="post-1",
+    )
+    reply = _interaction_observation(
+        record_kind="reply",
+        external_id="reply-1",
+        author_account_id="brand-account-1",
+        author_handle="brandco",
+        parent_external_id="missing-response",
+        thread_external_id="post-1",
+    )
+    records = {record.tile_id: record for record in evaluate_tile_eligibility([post, response, reply])}
+    for tile_id in ("ST-VI-02", "ST-RB-01", "ST-RD-01", "ST-TH-01", "ST-TH-02"):
+        assert not records[tile_id].eligible
+    assert not records["ST-RD-02"].eligible
+
+
+def test_depth_and_distinct_pair_prerequisites_are_locally_reconstructed() -> None:
+    records = {record.tile_id: record for record in evaluate_tile_eligibility(_eligibility_fixture())}
+    assert records["ST-RB-02"].eligible
+    assert len(records["ST-RB-02"].relevant_content_ids) == 4
+    assert records["ST-RD-02"].eligible
+    assert len(records["ST-RD-02"].relevant_content_ids) >= 3
+
+
+def test_not_acquired_synthesis_is_limited_to_ineligible_records() -> None:
+    records = evaluate_tile_eligibility([])
+    verdict = synthesize_not_acquired_verdict(records[0])
+    assert verdict.state is TileState.NOT_ACQUIRED
+    assert verdict.citations == ()
+    assert verdict.reason_code == records[0].reason_code
+    assert verdict.failure_stage == "eligibility"
+    eligible = evaluate_tile_eligibility(_eligibility_fixture())[0]
+    with pytest.raises(ValueError):
+        synthesize_not_acquired_verdict(eligible)
