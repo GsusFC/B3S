@@ -15,8 +15,17 @@ from src.research.social_community_lab import (
     ANALYSIS_SECTIONS,
     SocialCommunityValidationError,
     analyze_social_community,
+    compose_social_tiles_analysis,
 )
 from src.research.social_lab_contracts import MetricContext, SocialObservation
+from src.research.social_tiles import (
+    CATALOG,
+    TILE_IDS,
+    TileState,
+    TileVerdict,
+    evaluate_tile_eligibility,
+    synthesize_not_acquired_verdict,
+)
 
 
 ROOT = Path(__file__).parents[1]
@@ -119,6 +128,50 @@ def _acquisition(observations: list[SocialObservation] | None = None) -> dict[st
     }
 
 
+def _v2_observations() -> list[SocialObservation]:
+    """Build a capture set with two official posts on different platforms."""
+
+    official, _community = _raw_observations()
+    official["platform"] = "twitter"
+    official["provenance"]["linkage_evidence"] = {"target_id": "brand-x"}
+    official.pop("content_id", None)
+    official.pop("semantic_fingerprint", None)
+    first = SocialObservation.from_dict(official)
+    second = replace(
+        first,
+        platform="instagram",
+        external_id="post-2",
+        canonical_url="https://social.example/brandco/posts/post-2",
+        text="A second useful launch update.",
+        provenance=replace(first.provenance, linkage_evidence={"target_id": "brand-y"}),
+        content_id=None,
+        semantic_fingerprint=None,
+    )
+    return [first, second]
+
+
+def _v2_analysis_with_mixed_verdicts() -> tuple[list[SocialObservation], Any]:
+    observations = _v2_observations()
+    eligibility = {item.tile_id: item for item in evaluate_tile_eligibility(observations)}
+    eligible_ids = [tile_id for tile_id in TILE_IDS if eligibility[tile_id].eligible]
+    assert len(eligible_ids) >= 2
+    verdicts: list[TileVerdict] = []
+    for tile_id in TILE_IDS:
+        record = eligibility[tile_id]
+        if not record.eligible:
+            verdicts.append(synthesize_not_acquired_verdict(record))
+        elif tile_id == eligible_ids[0]:
+            verdicts.append(TileVerdict(tile_id, TileState.DEMONSTRATED, record.relevant_content_ids))
+        elif tile_id == eligible_ids[1]:
+            verdicts.append(TileVerdict(tile_id, TileState.CONTRADICTED, record.relevant_content_ids))
+        else:
+            verdicts.append(TileVerdict(tile_id, TileState.NOT_OBSERVED))
+    component_call_counts = tuple(
+        int(any(eligibility[tile.tile_id].eligible for tile in component.tiles)) for component in CATALOG.components
+    )
+    return observations, compose_social_tiles_analysis(observations, True, verdicts, component_call_counts)
+
+
 def _response(
     *,
     observations: list[SocialObservation],
@@ -177,6 +230,65 @@ def test_promotion_checklist_is_exactly_ordered_and_remains_insufficient() -> No
         "status": "not_checked",
         "reason": "independent_canonical_invariance_gate_required",
     }
+
+
+def test_v2_demonstrated_and_contradicted_tiles_cannot_self_promote() -> None:
+    cli = _load_cli()
+    observations, analysis = _v2_analysis_with_mixed_verdicts()
+    acquisition = _acquisition(observations)
+    acquisition["promotion_evidence"] = {
+        "status": "allow",
+        "gates": [{"id": gate_id, "status": "passed", "evidence": ["caller"]} for gate_id in EXPECTED_GATE_IDS],
+    }
+    acquisition["canonical_invariance"] = {"status": "verified", "evidence": ["caller"]}
+
+    manifest = _manifest().as_dict()
+    manifest["targets"].append({"target_id": "brand-y", "platform": "instagram", "handle": "brandco_alt"})
+    artifact = cli.compose_social_tiles_lab_artifact(parse_target_manifest(manifest), acquisition, analysis)
+    states = {verdict["state"] for verdict in artifact["social_tiles"]["verdicts"]}
+    assert {TileState.DEMONSTRATED.value, TileState.CONTRADICTED.value} <= states
+    assert artifact["promotion_evidence"]["status"] == "insufficient"
+    assert len(artifact["promotion_evidence"]["gates"]) == 11
+    assert all(
+        gate["status"] == "not_checked" and gate["evidence"] == [] for gate in artifact["promotion_evidence"]["gates"]
+    )
+    assert artifact["canonical_invariance"] == {
+        "status": "not_checked",
+        "reason": "independent_canonical_invariance_gate_required",
+    }
+
+
+def test_v2_metric_and_provenance_context_preserve_semantic_tile_identity() -> None:
+    observations, baseline = _v2_analysis_with_mixed_verdicts()
+    changed_metrics = [
+        replace(
+            observations[0],
+            metric_context=MetricContext(
+                metrics={"likes": 99999, "followers": 500000}, observed_at="2026-09-01T00:00:00Z"
+            ),
+        ),
+        observations[1],
+    ]
+    changed_provenance = [
+        replace(observations[0], provenance=replace(observations[0].provenance, endpoint_key="changed-endpoint")),
+        observations[1],
+    ]
+
+    def rebuild(changed: list[SocialObservation]) -> Any:
+        return compose_social_tiles_analysis(
+            changed,
+            baseline.evaluation_requested,
+            baseline.verdicts,
+            baseline.component_call_counts,
+        )
+
+    metric_analysis = rebuild(changed_metrics)
+    provenance_analysis = rebuild(changed_provenance)
+    semantic = lambda result: [(item.tile_id, item.state, item.citations) for item in result.verdicts]
+    assert semantic(metric_analysis) == semantic(baseline)
+    assert semantic(provenance_analysis) == semantic(baseline)
+    assert metric_analysis.capture_set.capture_set_id == baseline.capture_set.capture_set_id
+    assert provenance_analysis.capture_set.capture_set_id != baseline.capture_set.capture_set_id
 
 
 def test_failed_analysis_state_keeps_promotion_unchecked() -> None:
