@@ -27,10 +27,10 @@ from src.research.scrapecreators_spike import (
     CONTRACT_OUTPUT_SCHEMA_VERSION,
     ScrapeCreatorsClient,
     ScrapeCreatorsSpikeError,
-    SocialTarget,
     TargetManifest,
     atomic_write_json as _atomic_write_json,
     load_target_manifest,
+    parse_target_manifest,
     plan_requests,
     run_acquisition,
 )
@@ -977,8 +977,8 @@ def _social_tiles_diagnostics(
 def _social_tiles_replay_manifest(matrix: Any) -> TargetManifest:
     if not isinstance(matrix, Mapping) or not matrix:
         raise SocialCommunityLabCLIError("v2 artifact acquisition matrix is invalid")
-    targets: list[SocialTarget] = []
-    for target_id, entries in matrix.items():
+    targets: list[dict[str, Any]] = []
+    for index, (target_id, entries) in enumerate(matrix.items()):
         if (
             not isinstance(target_id, str)
             or not target_id
@@ -995,8 +995,15 @@ def _social_tiles_replay_manifest(matrix: Any) -> TargetManifest:
             raise SocialCommunityLabCLIError("v2 artifact acquisition matrix is invalid")
         if len(set(platforms)) != 1:
             raise SocialCommunityLabCLIError("v2 artifact acquisition matrix is invalid")
-        targets.append(SocialTarget(target_id, platforms[0]))
-    return TargetManifest(schema_version=1, targets=tuple(targets))
+        target = {"target_id": target_id, "platform": platforms[0]}
+        target["company_url" if platforms[0] == "linkedin" else "handle"] = (
+            f"https://linkedin.com/company/replay-{index}" if platforms[0] == "linkedin" else f"replay{index}"
+        )
+        targets.append(target)
+    try:
+        return parse_target_manifest({"schema_version": 1, "targets": targets})
+    except ScrapeCreatorsSpikeError:
+        raise SocialCommunityLabCLIError("v2 artifact acquisition matrix is invalid") from None
 
 
 def _make_social_tiles_run_identity_for_fingerprint(

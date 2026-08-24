@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from src.research.scrapecreators_spike import parse_target_manifest
+from src.research.scrapecreators_spike import SocialTarget, TargetManifest, parse_target_manifest
 from src.research.social_community_lab import SocialTilesAnalyzer
 from src.features import llm_analyzer as llm_analyzer_module
 
@@ -46,6 +46,23 @@ def _two_target_manifest():
             "targets": [
                 {"target_id": "brand-x", "platform": "twitter", "handle": "brandco"},
                 {"target_id": "brand-y", "platform": "instagram", "handle": "brandco_alt"},
+            ],
+        }
+    )
+
+
+def _three_target_manifest():
+    return parse_target_manifest(
+        {
+            "schema_version": 1,
+            "targets": [
+                {"target_id": "brand-x", "platform": "twitter", "handle": "brandco"},
+                {"target_id": "brand-y", "platform": "instagram", "handle": "brandco_alt"},
+                {
+                    "target_id": "brand-z",
+                    "platform": "linkedin",
+                    "company_url": "https://linkedin.com/company/brandz",
+                },
             ],
         }
     )
@@ -152,6 +169,30 @@ def _observation_with_target(cli: object, source: dict, target_id: str) -> dict:
     row.pop("content_id")
     row.pop("semantic_fingerprint")
     return cli.SocialObservation.from_dict(row).to_dict()
+
+
+def _coordinated_replay_payload(cli: object, manifest: TargetManifest) -> dict:
+    artifact = cli.compose_social_tiles_lab_artifact(
+        _manifest(), _acquisition(), _social_tiles_analysis(cli, evaluation_requested=False)
+    )
+    payload = json.loads(json.dumps(artifact))
+    observations = cli._social_tiles_artifact_observations(payload)
+    analysis = cli._reconstruct_social_tiles_for_lab(payload["social_tiles"], observations)
+    matrix, coverage = cli._social_tiles_diagnostics(manifest, observations)
+    payload["acquisition_matrix"] = matrix
+    payload["role_coverage"] = coverage
+    payload["limitations"] = cli._social_tiles_limitations(
+        matrix, mode=payload["mode"], unclassified_count=coverage["unclassified"]["count"], analysis=analysis
+    )
+    payload["run_identity"] = cli._make_social_tiles_run_identity(
+        manifest,
+        mode=payload["mode"],
+        acquisition_options=payload["run_identity"]["acquisition_options"],
+        analysis_options=payload["run_identity"]["analysis_options"],
+        acquisition_contract_version=cli.ARTIFACT_SCHEMA_VERSION,
+        analysis=analysis,
+    )
+    return payload
 
 
 def _eligible_acquisition(cli: object) -> dict:
@@ -501,6 +542,40 @@ def test_social_tiles_v2_reconstructs_multi_target_diagnostics_from_provenance()
     forged["role_coverage"]["official_brand_post"]["by_target"]["brand-x"]["count"] = 0
     with pytest.raises(cli.SocialCommunityLabCLIError):
         cli.reconstruct_social_tiles_lab_artifact(forged)
+
+
+def test_social_tiles_v2_replay_rejects_coordinated_invalid_platform_manifest() -> None:
+    cli = _load_cli()
+    payload = _coordinated_replay_payload(cli, TargetManifest(1, (SocialTarget("brand-x", "mastodon"),)))
+
+    with pytest.raises(cli.SocialCommunityLabCLIError):
+        cli.reconstruct_social_tiles_lab_artifact(payload)
+
+
+def test_social_tiles_v2_replay_rejects_coordinated_invalid_target_id_manifest() -> None:
+    cli = _load_cli()
+    payload = _coordinated_replay_payload(cli, TargetManifest(1, (SocialTarget("bad target", "twitter"),)))
+
+    with pytest.raises(cli.SocialCommunityLabCLIError):
+        cli.reconstruct_social_tiles_lab_artifact(payload)
+
+
+def test_social_tiles_v2_replays_three_platform_manifest_in_order() -> None:
+    cli = _load_cli()
+    official, community = _observations()
+    acquisition = _acquisition()
+    acquisition["observations"] = [
+        _observation_with_target(cli, official, "brand-x"),
+        _observation_with_target(cli, community, "brand-y"),
+    ]
+    observations = [cli.SocialObservation.from_dict(row) for row in acquisition["observations"]]
+    analysis = SocialTilesAnalyzer(lambda *_args: pytest.fail("acquisition-only analysis must not invoke")).analyze(
+        observations, evaluation_requested=False
+    )
+
+    artifact = cli.compose_social_tiles_lab_artifact(_three_target_manifest(), acquisition, analysis)
+    assert tuple(artifact["acquisition_matrix"]) == ("brand-x", "brand-y", "brand-z")
+    assert cli.reconstruct_social_tiles_lab_artifact(artifact) == artifact
 
 
 def test_social_tiles_v2_composer_recomputes_analysis_and_rejects_mixed_or_tampered_payloads() -> None:
