@@ -8,8 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from src.research.scrapecreators_spike import parse_target_manifest
+from src.research.scrapecreators_spike import SocialTarget, TargetManifest, parse_target_manifest
 from src.research.social_community_lab import SocialTilesAnalyzer
+from src.research.social_lab_contracts import MetricContext
 from src.features import llm_analyzer as llm_analyzer_module
 
 
@@ -46,6 +47,23 @@ def _two_target_manifest():
             "targets": [
                 {"target_id": "brand-x", "platform": "twitter", "handle": "brandco"},
                 {"target_id": "brand-y", "platform": "instagram", "handle": "brandco_alt"},
+            ],
+        }
+    )
+
+
+def _three_target_manifest():
+    return parse_target_manifest(
+        {
+            "schema_version": 1,
+            "targets": [
+                {"target_id": "brand-x", "platform": "twitter", "handle": "brandco"},
+                {"target_id": "brand-y", "platform": "instagram", "handle": "brandco_alt"},
+                {
+                    "target_id": "brand-z",
+                    "platform": "linkedin",
+                    "company_url": "https://linkedin.com/company/brandz",
+                },
             ],
         }
     )
@@ -138,20 +156,68 @@ def _analysis_envelope(payload: object | None = None) -> dict[str, str]:
     }
 
 
-def _social_tiles_analysis(cli: object, *, evaluation_requested: bool) -> object:
-    observations = [cli.SocialObservation.from_dict(row) for row in _acquisition()["observations"]]
+def _v2_observation(cli: object, source: dict, *, target_id: str, platform: str, **changes: object) -> dict:
+    row = json.loads(json.dumps(source))
+    row.update(changes)
+    row["platform"] = platform
+    row["provenance"]["linkage_evidence"] = {
+        **row["provenance"]["linkage_evidence"],
+        "target_id": target_id,
+    }
+    row.pop("content_id")
+    row.pop("semantic_fingerprint")
+    return cli.SocialObservation.from_dict(row).to_dict()
+
+
+def _v2_acquisition(cli: object) -> dict:
+    official, community = _observations()
+    acquisition = _acquisition()
+    acquisition["observations"] = [
+        _v2_observation(cli, official, target_id="brand-x", platform="twitter"),
+        _v2_observation(cli, community, target_id="brand-x", platform="twitter"),
+    ]
+    return acquisition
+
+
+def _social_tiles_analysis(cli: object, *, evaluation_requested: bool, acquisition: dict | None = None) -> object:
+    source = _v2_acquisition(cli) if acquisition is None else acquisition
+    observations = [cli.SocialObservation.from_dict(row) for row in source["observations"]]
     return SocialTilesAnalyzer(lambda *_args: pytest.fail("zero-eligible fixture must not invoke a provider")).analyze(
         observations,
         evaluation_requested=evaluation_requested,
     )
 
 
-def _observation_with_target(cli: object, source: dict, target_id: str) -> dict:
-    row = json.loads(json.dumps(source))
-    row["provenance"]["linkage_evidence"] = {**row["provenance"]["linkage_evidence"], "target_id": target_id}
-    row.pop("content_id")
-    row.pop("semantic_fingerprint")
-    return cli.SocialObservation.from_dict(row).to_dict()
+def _v2_artifact(cli: object, *, manifest: TargetManifest | None = None, acquisition: dict | None = None) -> dict:
+    source = _v2_acquisition(cli) if acquisition is None else acquisition
+    analysis = _social_tiles_analysis(cli, evaluation_requested=False, acquisition=source)
+    return cli.compose_social_tiles_lab_artifact(_manifest() if manifest is None else manifest, source, analysis)
+
+
+def _coordinated_replay_payload(cli: object, manifest: TargetManifest) -> dict:
+    artifact = cli.compose_social_tiles_lab_artifact(
+        _manifest(), _v2_acquisition(cli), _social_tiles_analysis(cli, evaluation_requested=False)
+    )
+    payload = json.loads(json.dumps(artifact))
+    observations = cli._social_tiles_artifact_observations(payload)
+    analysis = cli._reconstruct_social_tiles_for_lab(payload["social_tiles"], observations)
+    matrix = cli._empty_capability_matrix(manifest, reason="acquisition_not_attempted")
+    coverage = cli._role_coverage(matrix, observations, {}, ())
+    payload["acquisition_matrix"] = matrix
+    payload["role_coverage"] = coverage
+    payload["limitations"] = cli._social_tiles_limitations(
+        matrix, mode=payload["mode"], unclassified_count=coverage["unclassified"]["count"], analysis=analysis
+    )
+    payload["acquisition_summary"] = cli._social_tiles_acquisition_summary(manifest, observations, matrix)
+    payload["run_identity"] = cli._make_social_tiles_run_identity(
+        manifest,
+        mode=payload["mode"],
+        acquisition_options=payload["run_identity"]["acquisition_options"],
+        analysis_options=payload["run_identity"]["analysis_options"],
+        acquisition_contract_version=cli.ARTIFACT_SCHEMA_VERSION,
+        analysis=analysis,
+    )
+    return payload
 
 
 def _eligible_acquisition(cli: object) -> dict:
@@ -159,24 +225,22 @@ def _eligible_acquisition(cli: object) -> dict:
 
     official, community = _observations()
 
-    def rebuild(source: dict, **changes: object) -> dict:
-        row = {**source, **changes}
-        row.pop("content_id")
-        row.pop("semantic_fingerprint")
-        return cli.SocialObservation.from_dict(row).to_dict()
-
     observations = [
-        rebuild(official),
-        rebuild(
+        _v2_observation(cli, official, target_id="brand-x", platform="twitter"),
+        _v2_observation(
+            cli,
             official,
+            target_id="brand-y",
             platform="instagram",
             external_id="post-2",
             canonical_url="https://social.example/brandco/posts/post-2",
             text="A second useful launch update.",
         ),
-        rebuild(community),
-        rebuild(
+        _v2_observation(cli, community, target_id="brand-x", platform="twitter"),
+        _v2_observation(
+            cli,
             community,
+            target_id="brand-y",
             platform="instagram",
             external_id="response-2",
             canonical_url="https://social.example/community/posts/response-2",
@@ -184,8 +248,11 @@ def _eligible_acquisition(cli: object) -> dict:
             thread_external_id="post-2",
             text="This helped another team.",
         ),
-        rebuild(
+        _v2_observation(
+            cli,
             community,
+            target_id="brand-x",
+            platform="twitter",
             external_id="reply-1",
             canonical_url="https://social.example/brandco/status/reply-1",
             author_account_id="brand-account-1",
@@ -195,8 +262,10 @@ def _eligible_acquisition(cli: object) -> dict:
             actor_role="brand_reply",
             text="We are glad the update helped.",
         ),
-        rebuild(
+        _v2_observation(
+            cli,
             community,
+            target_id="brand-y",
             platform="instagram",
             external_id="reply-2",
             canonical_url="https://social.example/brandco/posts/reply-2",
@@ -425,21 +494,21 @@ def test_social_tiles_v2_artifact_has_recomputed_identity_and_empty_legacy_proje
     analysis = _social_tiles_analysis(cli, evaluation_requested=True)
     first = cli.compose_social_tiles_lab_artifact(
         _manifest(),
-        _acquisition(),
+        _v2_acquisition(cli),
         analysis,
         mode="live_analysis",
         output_path="/tmp/one.json",
     )
     second = cli.compose_social_tiles_lab_artifact(
         _manifest(),
-        _acquisition(),
+        _v2_acquisition(cli),
         analysis.to_dict(),
         mode="live_analysis",
         output_path="/tmp/two.json",
     )
 
     assert first["schema_version"] == first["version"] == first["artifact_type"] == "b3s-social-community-lab-v2"
-    assert first["social_tiles"] == analysis.to_dict()
+    assert first["social_tiles"] == second["social_tiles"]
     assert first["advisory_tile_candidates"] == []
     assert first["community_analysis"] == {
         "version": "b3s-social-community-analysis-v2",
@@ -462,8 +531,11 @@ def test_social_tiles_v2_artifact_has_recomputed_identity_and_empty_legacy_proje
         "social_tiles_catalog": "b3s-social-tiles-v1",
         "acquisition": "b3s-social-community-lab-v1",
     }
-    assert identity["social_tiles_capture_set_id"] == analysis.capture_set.capture_set_id
-    assert identity["social_tiles_receipt_integrity_sha256"] == analysis.capture_set.receipt_integrity_sha256
+    assert identity["social_tiles_capture_set_id"] == first["social_tiles"]["capture_set"]["capture_set_id"]
+    assert (
+        identity["social_tiles_receipt_integrity_sha256"]
+        == first["social_tiles"]["capture_set"]["receipt_integrity_sha256"]
+    )
     assert identity["run_id"] == cli._sha256_json({key: value for key, value in identity.items() if key != "run_id"})
     assert "analysis_not_requested" not in first["limitations"]
     assert "social_tiles_unavailable" in first["limitations"]
@@ -476,8 +548,8 @@ def test_social_tiles_v2_reconstructs_multi_target_diagnostics_from_provenance()
     official, community = _observations()
     acquisition = _acquisition()
     acquisition["observations"] = [
-        _observation_with_target(cli, official, "brand-x"),
-        _observation_with_target(cli, community, "brand-y"),
+        _v2_observation(cli, official, target_id="brand-x", platform="twitter"),
+        _v2_observation(cli, community, target_id="brand-y", platform="instagram"),
     ]
     acquisition["acquisition_matrix"] = {"forged": {}}
     observations = [cli.SocialObservation.from_dict(row) for row in acquisition["observations"]]
@@ -503,25 +575,59 @@ def test_social_tiles_v2_reconstructs_multi_target_diagnostics_from_provenance()
         cli.reconstruct_social_tiles_lab_artifact(forged)
 
 
+def test_social_tiles_v2_replay_rejects_coordinated_invalid_platform_manifest() -> None:
+    cli = _load_cli()
+    payload = _coordinated_replay_payload(cli, TargetManifest(1, (SocialTarget("brand-x", "mastodon"),)))
+
+    with pytest.raises(cli.SocialCommunityLabCLIError):
+        cli.reconstruct_social_tiles_lab_artifact(payload)
+
+
+def test_social_tiles_v2_replay_rejects_coordinated_invalid_target_id_manifest() -> None:
+    cli = _load_cli()
+    payload = _coordinated_replay_payload(cli, TargetManifest(1, (SocialTarget("bad target", "twitter"),)))
+
+    with pytest.raises(cli.SocialCommunityLabCLIError):
+        cli.reconstruct_social_tiles_lab_artifact(payload)
+
+
+def test_social_tiles_v2_replays_three_platform_manifest_in_order() -> None:
+    cli = _load_cli()
+    official, community = _observations()
+    acquisition = _acquisition()
+    acquisition["observations"] = [
+        _v2_observation(cli, official, target_id="brand-x", platform="twitter"),
+        _v2_observation(cli, community, target_id="brand-y", platform="instagram"),
+    ]
+    observations = [cli.SocialObservation.from_dict(row) for row in acquisition["observations"]]
+    analysis = SocialTilesAnalyzer(lambda *_args: pytest.fail("acquisition-only analysis must not invoke")).analyze(
+        observations, evaluation_requested=False
+    )
+
+    artifact = cli.compose_social_tiles_lab_artifact(_three_target_manifest(), acquisition, analysis)
+    assert tuple(artifact["acquisition_matrix"]) == ("brand-x", "brand-y", "brand-z")
+    assert cli.reconstruct_social_tiles_lab_artifact(artifact) == artifact
+
+
 def test_social_tiles_v2_composer_recomputes_analysis_and_rejects_mixed_or_tampered_payloads() -> None:
     cli = _load_cli()
     analysis = _social_tiles_analysis(cli, evaluation_requested=True)
-    artifact = cli.compose_social_tiles_lab_artifact(_manifest(), _acquisition(), analysis)
+    artifact = cli.compose_social_tiles_lab_artifact(_manifest(), _v2_acquisition(cli), analysis)
 
     reconstructed = cli.reconstruct_social_tiles_lab_artifact(artifact)
-    assert reconstructed["social_tiles"] == analysis.to_dict()
+    assert reconstructed["social_tiles"] == artifact["social_tiles"]
 
     forged_analysis = json.loads(json.dumps(analysis.to_dict()))
     forged_analysis["capture_set"]["capture_set_id"] = "sha256:" + "0" * 64
     with pytest.raises(cli.SocialCommunityLabCLIError):
-        cli.compose_social_tiles_lab_artifact(_manifest(), _acquisition(), forged_analysis)
+        cli.compose_social_tiles_lab_artifact(_manifest(), _v2_acquisition(cli), forged_analysis)
 
     mixed_top = json.loads(json.dumps(artifact))
     mixed_top["version"] = cli.ARTIFACT_SCHEMA_VERSION
     with pytest.raises(cli.SocialCommunityLabCLIError):
         cli.reconstruct_social_tiles_lab_artifact(mixed_top)
     with pytest.raises(cli.SocialCommunityLabCLIError):
-        cli.compose_social_tiles_lab_artifact(_manifest(), _acquisition(), artifact["community_analysis"])
+        cli.compose_social_tiles_lab_artifact(_manifest(), _v2_acquisition(cli), artifact["community_analysis"])
 
     missing_observations = json.loads(json.dumps(artifact))
     missing_observations.pop("observations_by_role")
@@ -532,7 +638,7 @@ def test_social_tiles_v2_composer_recomputes_analysis_and_rejects_mixed_or_tampe
 def test_social_tiles_v2_replay_rejects_unknown_or_tampered_owned_root_fields() -> None:
     cli = _load_cli()
     artifact = cli.compose_social_tiles_lab_artifact(
-        _manifest(), _acquisition(), _social_tiles_analysis(cli, evaluation_requested=True), mode="live_analysis"
+        _manifest(), _v2_acquisition(cli), _social_tiles_analysis(cli, evaluation_requested=True), mode="live_analysis"
     )
     assert artifact["analysis_failure"] == {
         "status": "failed",
@@ -588,10 +694,115 @@ def test_social_tiles_v2_replay_rejects_unknown_or_tampered_owned_root_fields() 
             cli.reconstruct_social_tiles_lab_artifact(payload)
 
 
+def test_social_tiles_v2_replay_rejects_nested_passthrough_sections() -> None:
+    cli = _load_cli()
+    artifact = _v2_artifact(cli)
+    content_id = artifact["observations_by_role"]["official_brand_post"][0]["content_id"]
+    invalid_payloads = []
+
+    payload = json.loads(json.dumps(artifact))
+    payload["observations_by_role"]["official_brand_post"][0]["score"] = 9
+    invalid_payloads.append(payload)
+    payload = json.loads(json.dumps(artifact))
+    payload["observations_by_role"]["official_brand_post"][0]["provenance"]["vault_state"] = "forged"
+    invalid_payloads.append(payload)
+    payload = json.loads(json.dumps(artifact))
+    payload["metric_context"][content_id]["state"] = "forged"
+    invalid_payloads.append(payload)
+    payload = json.loads(json.dumps(artifact))
+    payload["acquisition_summary"]["score"] = 9
+    invalid_payloads.append(payload)
+    payload = json.loads(json.dumps(artifact))
+    payload["provider_responses"].append({"raw_payload_redacted": {"access_token": "raw-provider-secret"}})
+    invalid_payloads.append(payload)
+
+    for payload in invalid_payloads:
+        identity = payload["run_identity"]
+        identity["run_id"] = cli._sha256_json({key: value for key, value in identity.items() if key != "run_id"})
+        with pytest.raises(cli.SocialCommunityLabCLIError):
+            cli.reconstruct_social_tiles_lab_artifact(payload)
+
+
+@pytest.mark.parametrize(
+    "metric_name",
+    (
+        "score",
+        "SV9_SCORE",
+        "vault-score",
+        "canonical.score",
+        "tile state",
+        "Activation",
+        "enabled",
+        "confidence",
+        "promotion_score",
+        "assessment_fingerprint",
+    ),
+)
+def test_social_tiles_v2_rejects_forbidden_metric_names_on_compose_and_replay(metric_name: str) -> None:
+    cli = _load_cli()
+    acquisition = _v2_acquisition(cli)
+    context = acquisition["observations"][0]["metric_context"]
+    metrics = {**context["metrics"], metric_name: 1}
+    acquisition["observations"][0]["metric_context"] = MetricContext(
+        metrics=metrics, observed_at=context["observed_at"]
+    ).to_dict()
+    analysis = _social_tiles_analysis(cli, evaluation_requested=False, acquisition=acquisition)
+    with pytest.raises(cli.SocialCommunityLabCLIError):
+        cli.compose_social_tiles_lab_artifact(_manifest(), acquisition, analysis)
+
+    artifact = _v2_artifact(cli)
+    content_id = artifact["observations_by_role"]["official_brand_post"][0]["content_id"]
+    context = artifact["metric_context"][content_id]
+    artifact["metric_context"][content_id] = MetricContext(
+        metrics={**context["metrics"], metric_name: 1}, observed_at=context["observed_at"]
+    ).to_dict()
+    identity = artifact["run_identity"]
+    identity["run_id"] = cli._sha256_json({key: value for key, value in identity.items() if key != "run_id"})
+    with pytest.raises(cli.SocialCommunityLabCLIError):
+        cli.reconstruct_social_tiles_lab_artifact(artifact)
+
+
+def test_social_tiles_v2_preserves_descriptive_metrics_in_canonical_round_trip() -> None:
+    cli = _load_cli()
+    artifact = _v2_artifact(cli)
+    metrics = next(iter(artifact["metric_context"].values()))["metrics"]
+    assert {"likes", "followers"} <= set(metrics)
+    assert cli.reconstruct_social_tiles_lab_artifact(artifact) == artifact
+
+
+def test_social_tiles_v2_rejects_nonmanifest_observation_bindings_and_preserves_v1() -> None:
+    cli = _load_cli()
+    official, community = _observations()
+
+    single_mismatch = _v2_acquisition(cli)
+    single_mismatch["observations"][0] = _v2_observation(cli, official, target_id="brand-x", platform="instagram")
+    explicit_mismatch = _v2_acquisition(cli)
+    explicit_mismatch["observations"][1] = _v2_observation(cli, community, target_id="brand-x", platform="instagram")
+    unbound_multi = _v2_acquisition(cli)
+    for row in unbound_multi["observations"]:
+        row["provenance"]["linkage_evidence"].pop("target_id")
+
+    for manifest, acquisition in (
+        (_manifest(), single_mismatch),
+        (_manifest(), explicit_mismatch),
+        (_two_target_manifest(), unbound_multi),
+    ):
+        analysis = _social_tiles_analysis(cli, evaluation_requested=False, acquisition=acquisition)
+        with pytest.raises(cli.SocialCommunityLabCLIError):
+            cli.compose_social_tiles_lab_artifact(manifest, acquisition, analysis)
+
+    single_artifact = _v2_artifact(cli)
+    assert cli.reconstruct_social_tiles_lab_artifact(single_artifact) == single_artifact
+    multi = _eligible_acquisition(cli)
+    multi_artifact = _v2_artifact(cli, manifest=_two_target_manifest(), acquisition=multi)
+    assert cli.reconstruct_social_tiles_lab_artifact(multi_artifact) == multi_artifact
+    assert cli.compose_lab_artifact(_manifest(), _acquisition())["schema_version"] == cli.ARTIFACT_SCHEMA_VERSION
+
+
 def test_social_tiles_v2_options_are_fixed_and_not_requested_limitations_are_explicit() -> None:
     cli = _load_cli()
     analysis = _social_tiles_analysis(cli, evaluation_requested=False)
-    artifact = cli.compose_social_tiles_lab_artifact(_manifest(), _acquisition(), analysis)
+    artifact = cli.compose_social_tiles_lab_artifact(_manifest(), _v2_acquisition(cli), analysis)
     assert artifact["run_identity"]["analysis_options"] == {
         "attempt_policy": "component_one_shot",
         "max_component_calls": 6,
@@ -606,9 +817,9 @@ def test_social_tiles_v2_options_are_fixed_and_not_requested_limitations_are_exp
         {"native_sv9_ids": ["SV9-1"]},
     ):
         with pytest.raises(cli.SocialCommunityLabCLIError):
-            cli.compose_social_tiles_lab_artifact(_manifest(), _acquisition(), analysis, analysis_options=options)
+            cli.compose_social_tiles_lab_artifact(_manifest(), _v2_acquisition(cli), analysis, analysis_options=options)
     with pytest.raises(cli.SocialCommunityLabCLIError):
-        cli.compose_social_tiles_lab_artifact(_manifest(), _acquisition(), analysis, mode="offline_social_tiles")
+        cli.compose_social_tiles_lab_artifact(_manifest(), _v2_acquisition(cli), analysis, mode="offline_social_tiles")
 
 
 def test_cli_analysis_contract_defaults_to_legacy_and_rejects_legacy_v2_inputs(
@@ -639,7 +850,7 @@ def test_social_tiles_v2_acquisition_only_is_not_requested_without_any_provider(
     manifest_path = tmp_path / "targets.json"
     acquisition_path = tmp_path / "acquisition.json"
     output_path = _test_output_path(cli, tmp_path, "v2-acquisition.json")
-    manifest_path.write_text(json.dumps(_manifest().as_dict()), encoding="utf-8")
+    manifest_path.write_text(json.dumps(_two_target_manifest().as_dict()), encoding="utf-8")
     acquisition_path.write_text(json.dumps(_eligible_acquisition(cli)), encoding="utf-8")
     monkeypatch.setattr(
         cli,
@@ -698,7 +909,7 @@ def test_social_tiles_v2_live_checkpoints_then_calls_each_eligible_component_onc
     manifest_path = tmp_path / "targets.json"
     acquisition_path = tmp_path / "acquisition.json"
     output_path = _test_output_path(cli, tmp_path, "v2-live.json")
-    manifest_path.write_text(json.dumps(_manifest().as_dict()), encoding="utf-8")
+    manifest_path.write_text(json.dumps(_two_target_manifest().as_dict()), encoding="utf-8")
     acquisition_path.write_text(json.dumps(_eligible_acquisition(cli)), encoding="utf-8")
 
     assert cli.main(_v2_args(manifest_path, acquisition_path, output_path, live=True)) == 0
@@ -735,7 +946,7 @@ def test_social_tiles_v2_live_keeps_partial_survivors_and_fails_closed_when_unav
     manifest_path = tmp_path / "targets.json"
     acquisition_path = tmp_path / "acquisition.json"
     output_path = _test_output_path(cli, tmp_path, "v2-partial.json")
-    manifest_path.write_text(json.dumps(_manifest().as_dict()), encoding="utf-8")
+    manifest_path.write_text(json.dumps(_two_target_manifest().as_dict()), encoding="utf-8")
     acquisition_path.write_text(json.dumps(_eligible_acquisition(cli)), encoding="utf-8")
 
     assert cli.main(_v2_args(manifest_path, acquisition_path, output_path, live=True)) == 0
@@ -781,7 +992,7 @@ def test_social_tiles_v2_setup_failure_keeps_checkpoint_and_records_zero_calls(
     manifest_path = tmp_path / "targets.json"
     acquisition_path = tmp_path / "acquisition.json"
     output_path = _test_output_path(cli, tmp_path, "v2-setup-failure.json")
-    manifest_path.write_text(json.dumps(_manifest().as_dict()), encoding="utf-8")
+    manifest_path.write_text(json.dumps(_two_target_manifest().as_dict()), encoding="utf-8")
     acquisition_path.write_text(json.dumps(_eligible_acquisition(cli)), encoding="utf-8")
 
     assert cli.main(_v2_args(manifest_path, acquisition_path, output_path, live=True)) == 2
