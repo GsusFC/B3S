@@ -8,6 +8,7 @@ fixture cannot accidentally make a forbidden production dependency look safe.
 from __future__ import annotations
 
 import ast
+from copy import deepcopy
 from dataclasses import replace
 import hashlib
 import importlib.util
@@ -29,6 +30,7 @@ LAB_SOURCE_PATHS = (
     ROOT / "src/research/social_lab_contracts.py",
     ROOT / "src/research/scrapecreators_spike.py",
     ROOT / "src/research/social_community_lab.py",
+    ROOT / "src/research/social_tiles.py",
     ROOT / "scripts/scrapecreators_social_spike.py",
     ROOT / "scripts/run_social_community_lab.py",
 )
@@ -38,16 +40,38 @@ CANONICAL_OUTPUT_KEYS = frozenset(
         "scores",
         "numeric_score",
         "numeric_scores",
+        "numeric_aggregate",
+        "numeric_aggregates",
+        "aggregate",
+        "aggregates",
+        "aggregate_score",
+        "total_score",
+        "points",
         "component_score",
         "component_scores",
         "canonical_score",
+        "promotion_score",
+        "canonical_assessment",
+        "canonical_state",
+        "assessment",
+        "assessment_result",
         "sv9_score",
+        "sv9",
+        "sv9_assessment",
+        "sv9_state",
+        "vault",
+        "vault_score",
+        "vault_state",
         "assessment_state",
         "state",
         "tile_state",
         "activation",
         "activated",
         "enabled",
+        "confidence",
+        "confidence_level",
+        "confidence_score",
+        "detection_confidence",
         "assessment_fingerprint",
         "score_fingerprint",
     }
@@ -186,17 +210,106 @@ def _assert_secure_file(path: Path) -> None:
     json.loads(path.read_text(encoding="utf-8"))
 
 
-def _assert_no_canonical_fields(value: Any, *, path: str = "root", inside_raw: bool = False) -> None:
+_ADVISORY_SECTIONS = frozenset(
+    {"cross_channel_voice", "recurring_community_themes", "response_behavior", "corroborations", "tensions"}
+)
+
+
+def _is_advisory_confidence_path(path: str) -> bool:
+    return any(
+        path.startswith(f"root.community_analysis.{section}[") and path.endswith("]") for section in _ADVISORY_SECTIONS
+    )
+
+
+def _is_v2_verdict_path(path: str) -> bool:
+    prefix = "root.social_tiles.verdicts["
+    return path.startswith(prefix) and path.endswith("]") and path[len(prefix) : -1].isdigit()
+
+
+def _assert_no_canonical_fields(
+    value: Any,
+    *,
+    path: str = "root",
+    inside_raw: bool = False,
+    authoritative_v2: bool = False,
+) -> None:
+    if path == "root" and isinstance(value, dict):
+        authoritative_v2 = (
+            value.get("schema_version") == "b3s-social-community-lab-v2"
+            and value.get("version") == "b3s-social-community-lab-v2"
+            and value.get("artifact_type") == "b3s-social-community-lab-v2"
+        )
     if isinstance(value, dict):
         for key, item in value.items():
             key_text = str(key).casefold()
             raw_child = inside_raw or key_text == "raw_payload_redacted"
             if not raw_child:
-                assert key_text not in CANONICAL_OUTPUT_KEYS, f"{path}.{key} leaked canonical output"
-            _assert_no_canonical_fields(item, path=f"{path}.{key}", inside_raw=raw_child)
+                advisory_confidence = key_text == "confidence" and _is_advisory_confidence_path(path)
+                v2_verdict_state = authoritative_v2 and key_text == "state" and _is_v2_verdict_path(path)
+                assert key_text not in CANONICAL_OUTPUT_KEYS or advisory_confidence or v2_verdict_state, (
+                    f"{path}.{key} leaked canonical output"
+                )
+            _assert_no_canonical_fields(
+                item,
+                path=f"{path}.{key}",
+                inside_raw=raw_child,
+                authoritative_v2=authoritative_v2,
+            )
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            _assert_no_canonical_fields(item, path=f"{path}[{index}]", inside_raw=inside_raw)
+            _assert_no_canonical_fields(
+                item,
+                path=f"{path}[{index}]",
+                inside_raw=inside_raw,
+                authoritative_v2=authoritative_v2,
+            )
+
+
+def test_canonical_field_scanner_allows_only_authoritative_v2_verdict_state() -> None:
+    payload: dict[str, Any] = {
+        "schema_version": "b3s-social-community-lab-v2",
+        "version": "b3s-social-community-lab-v2",
+        "artifact_type": "b3s-social-community-lab-v2",
+        "social_tiles": {
+            "verdicts": [{"tile_id": "ST-VI-01", "state": "demonstrated", "citations": []}],
+        },
+    }
+    _assert_no_canonical_fields(payload)
+
+    misplaced = deepcopy(payload)
+    misplaced["social_tiles"]["state"] = "demonstrated"
+    with pytest.raises(AssertionError):
+        _assert_no_canonical_fields(misplaced)
+
+    legacy_marker = deepcopy(payload)
+    legacy_marker["schema_version"] = "b3s-social-community-lab-v1"
+    with pytest.raises(AssertionError):
+        _assert_no_canonical_fields(legacy_marker)
+
+    forbidden = deepcopy(payload)
+    forbidden["social_tiles"]["verdicts"][0]["tile_state"] = "demonstrated"
+    with pytest.raises(AssertionError):
+        _assert_no_canonical_fields(forbidden)
+
+
+@pytest.mark.parametrize(
+    "forbidden_key",
+    [
+        "score",
+        "numeric_aggregate",
+        "activation",
+        "confidence",
+        "promotion_score",
+        "canonical_assessment",
+        "sv9_score",
+        "vault_state",
+        "state",
+        "tile_state",
+    ],
+)
+def test_canonical_field_scanner_rejects_forbidden_fields_outside_owned_context(forbidden_key: str) -> None:
+    with pytest.raises(AssertionError):
+        _assert_no_canonical_fields({forbidden_key: "forged"})
 
 
 def _fail_constructor(*_args: Any, **_kwargs: Any) -> Any:
@@ -216,7 +329,7 @@ def test_lab_sources_have_no_canonical_or_persistence_imports() -> None:
         "psycopg",
         "psycopg2",
     )
-    forbidden_segments = {"scanner", "vault", "store", "storage", "database", "db"}
+    forbidden_segments = {"scanner", "vault", "store", "storage", "persistence", "database", "db"}
     violations: list[str] = []
 
     for path in LAB_SOURCE_PATHS:

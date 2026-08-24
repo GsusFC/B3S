@@ -23,6 +23,7 @@ from src.research.social_community_lab import (
 )
 from src.research.social_lab_contracts import ActorRole, MetricContext, SocialLabContractError, SocialObservation
 from src.research.social_tiles import (
+    CATALOG,
     COMPONENT_IDS,
     TILE_IDS,
     TileState,
@@ -539,9 +540,16 @@ def _v2_verdicts(observations: list[SocialObservation], *, semantic: set[str] = 
         if not record.eligible:
             verdicts.append(synthesize_not_acquired_verdict(record))
         elif tile_id in semantic:
-            verdicts.append(TileVerdict(tile_id, TileState.DEMONSTRATED, (record.relevant_content_ids[0],)))
+            verdicts.append(TileVerdict(tile_id, TileState.DEMONSTRATED, record.relevant_content_ids))
         else:
-            verdicts.append(TileVerdict(tile_id, TileState.NOT_ACQUIRED, reason_code="component_validation", failure_stage="component_validation"))
+            verdicts.append(
+                TileVerdict(
+                    tile_id,
+                    TileState.NOT_ACQUIRED,
+                    reason_code="missing_tile",
+                    failure_stage="component_validation",
+                )
+            )
     return tuple(verdicts)
 
 
@@ -560,10 +568,16 @@ def _two_official_observations() -> list[SocialObservation]:
 
 def _two_official_and_reply() -> list[SocialObservation]:
     reply = replace(
-        _observation("official_post.json"), record_kind="reply", external_id="reply-1",
-        canonical_url="https://social.example/brandco/status/reply-1", parent_external_id="response-1",
-        thread_external_id="post-1", text="A useful reply.", actor_role=ActorRole.BRAND_REPLY,
-        content_id=None, semantic_fingerprint=None,
+        _observation("official_post.json"),
+        record_kind="reply",
+        external_id="reply-1",
+        canonical_url="https://social.example/brandco/status/reply-1",
+        parent_external_id="response-1",
+        thread_external_id="post-1",
+        text="A useful reply.",
+        actor_role=ActorRole.BRAND_REPLY,
+        content_id=None,
+        semantic_fingerprint=None,
     )
     return [*_two_official_observations(), _observation("community_response.json"), reply]
 
@@ -583,7 +597,9 @@ def test_social_tiles_v2_not_requested_and_zero_eligibility_are_scoreless() -> N
 def test_social_tiles_v2_not_requested_requires_exact_code_owned_marker() -> None:
     observations = _two_official_observations()
     verdicts = list(_v2_verdicts(observations))
-    marker = lambda reason, stage: TileVerdict("ST-VI-01", TileState.NOT_ACQUIRED, reason_code=reason, failure_stage=stage)
+    marker = lambda reason, stage: TileVerdict(
+        "ST-VI-01", TileState.NOT_ACQUIRED, reason_code=reason, failure_stage=stage
+    )
     verdicts[0] = marker("not_requested", "evaluation")
     assert compose_social_tiles_analysis(observations, False, verdicts, [0] * 6).status == "not_requested"
     verdicts[0] = marker("provider_failure", "component_invocation")
@@ -594,7 +610,17 @@ def test_social_tiles_v2_not_requested_requires_exact_code_owned_marker() -> Non
 def test_social_tiles_v2_status_fold_and_ordered_call_algebra() -> None:
     observations = _two_official_and_reply()
     eligible_ids = {record.tile_id for record in evaluate_tile_eligibility(observations) if record.eligible}
-    call_counts = tuple(1 if any(tile_id in eligible_ids for tile_id in component) else 0 for component in (("ST-VI-01", "ST-VI-02"), ("ST-CC-01", "ST-CC-02"), ("ST-LT-01", "ST-LT-02"), ("ST-RB-01", "ST-RB-02"), ("ST-RD-01", "ST-RD-02"), ("ST-TH-01", "ST-TH-02")))
+    call_counts = tuple(
+        1 if any(tile_id in eligible_ids for tile_id in component) else 0
+        for component in (
+            ("ST-VI-01", "ST-VI-02"),
+            ("ST-CC-01", "ST-CC-02"),
+            ("ST-LT-01", "ST-LT-02"),
+            ("ST-RB-01", "ST-RB-02"),
+            ("ST-RD-01", "ST-RD-02"),
+            ("ST-TH-01", "ST-TH-02"),
+        )
+    )
     complete = compose_social_tiles_analysis(
         observations, True, _v2_verdicts(observations, semantic=eligible_ids), call_counts
     )
@@ -603,7 +629,9 @@ def test_social_tiles_v2_status_fold_and_ordered_call_algebra() -> None:
     assert complete.component_call_counts == call_counts
     assert complete.total_call_count == sum(call_counts)
 
-    partial = compose_social_tiles_analysis(observations, True, _v2_verdicts(observations, semantic=eligible_ids - {"ST-VI-02"}), call_counts)
+    partial = compose_social_tiles_analysis(
+        observations, True, _v2_verdicts(observations, semantic=eligible_ids - {"ST-VI-02"}), call_counts
+    )
     assert partial.status == "partial"
     with pytest.raises(SocialCommunityValidationError):
         compose_social_tiles_analysis(observations, True, tuple(reversed(partial.verdicts)), [1, 0, 0, 0, 0, 0])
@@ -624,12 +652,92 @@ def test_social_tiles_v2_replay_recomputes_capture_and_dispatches_exact_version(
         reconstruct_social_tiles_analysis(mixed, observations)
 
 
+def test_social_tiles_v2_replay_rejects_forged_citations_and_failure_metadata() -> None:
+    observations = [*_two_official_observations(), _observation("community_response.json")]
+    result = compose_social_tiles_analysis(
+        observations, True, _v2_verdicts(observations, semantic={"ST-VI-01"}), [1, 0, 0, 0, 0, 0]
+    )
+    valid_citation = result.to_dict()["verdicts"][0]["citations"][0]
+    invalid_payloads: list[dict[str, object]] = []
+
+    for citations in (
+        [valid_citation],
+        [str(observations[-1].content_id)],
+        ["sha256:" + "0" * 64],
+        [valid_citation, valid_citation],
+    ):
+        payload = result.to_dict()
+        payload["verdicts"][0]["citations"] = citations
+        invalid_payloads.append(payload)
+    for reason_code, failure_stage in (
+        ("provider secret=forged", "component_invocation"),
+        ("provider_failure", "raw_trace"),
+    ):
+        payload = result.to_dict()
+        payload["verdicts"][0] = {
+            "tile_id": "ST-VI-01",
+            "state": "not_acquired",
+            "citations": [],
+            "reason_code": reason_code,
+            "failure_stage": failure_stage,
+        }
+        invalid_payloads.append(payload)
+
+    for payload in invalid_payloads:
+        with pytest.raises(SocialCommunityValidationError):
+            reconstruct_social_tiles_analysis(payload, observations)
+
+
+def test_social_tiles_v2_replay_preserves_only_live_component_failure_algebra() -> None:
+    observations = _two_official_and_reply()
+    eligibility = {record.tile_id: record for record in evaluate_tile_eligibility(observations)}
+    eligible_ids = {tile_id for tile_id, record in eligibility.items() if record.eligible}
+    call_counts = tuple(
+        int(any(eligibility[tile.tile_id].eligible for tile in component.tiles)) for component in CATALOG.components
+    )
+    verdicts = list(_v2_verdicts(observations, semantic=eligible_ids))
+    verdicts[0] = TileVerdict(
+        "ST-VI-01", TileState.DEMONSTRATED, citations=eligibility["ST-VI-01"].relevant_content_ids
+    )
+    complete = compose_social_tiles_analysis(observations, True, verdicts, call_counts)
+
+    unsorted = complete.to_dict()
+    unsorted["verdicts"][0]["citations"] = list(reversed(unsorted["verdicts"][0]["citations"]))
+    with pytest.raises(SocialCommunityValidationError):
+        reconstruct_social_tiles_analysis(unsorted, observations)
+
+    global_failure = complete.to_dict()
+    global_failure["verdicts"][1] = {
+        "tile_id": "ST-VI-02",
+        "state": "not_acquired",
+        "citations": [],
+        "reason_code": "provider_failure",
+        "failure_stage": "component_invocation",
+    }
+    global_failure["status"] = "partial"
+    with pytest.raises(SocialCommunityValidationError):
+        reconstruct_social_tiles_analysis(global_failure, observations)
+
+    local_verdicts = list(complete.verdicts)
+    local_verdicts[1] = TileVerdict(
+        "ST-VI-02", TileState.NOT_ACQUIRED, reason_code="missing_tile", failure_stage="component_validation"
+    )
+    local = compose_social_tiles_analysis(observations, True, local_verdicts, call_counts)
+    assert local.status == "partial"
+    assert reconstruct_social_tiles_analysis(local.to_dict(), observations) == local
+
+
 def _component_response(component_id: str, observations: list[SocialObservation]) -> dict[str, str]:
     eligibility = evaluate_tile_eligibility(observations)
     packet = build_component_prompt(component_id, observations, eligibility)
     return {
         "analysis_json": json.dumps(
-            {"component_id": component_id, "tiles": [{"tile_id": tile["tile_id"], "state": "not_observed", "citations": []} for tile in packet["tiles"]]},
+            {
+                "component_id": component_id,
+                "tiles": [
+                    {"tile_id": tile["tile_id"], "state": "not_observed", "citations": []} for tile in packet["tiles"]
+                ],
+            },
             separators=(",", ":"),
         )
     }
@@ -661,7 +769,24 @@ def test_social_tiles_analyzer_calls_each_eligible_component_once_in_catalog_ord
 
     result = SocialTilesAnalyzer(invoke).analyze(observations)
     eligible = {item.tile_id: item for item in evaluate_tile_eligibility(observations)}
-    assert calls == [component for component in COMPONENT_IDS if any(eligible[tile].eligible for tile in TILE_IDS if tile.startswith({"voice_in_action": "ST-VI", "cross_channel_consistency": "ST-CC", "listening_themes": "ST-LT", "response_behavior": "ST-RB", "reciprocity_dialogue": "ST-RD", "tension_handling": "ST-TH"}[component]))]
+    assert calls == [
+        component
+        for component in COMPONENT_IDS
+        if any(
+            eligible[tile].eligible
+            for tile in TILE_IDS
+            if tile.startswith(
+                {
+                    "voice_in_action": "ST-VI",
+                    "cross_channel_consistency": "ST-CC",
+                    "listening_themes": "ST-LT",
+                    "response_behavior": "ST-RB",
+                    "reciprocity_dialogue": "ST-RD",
+                    "tension_handling": "ST-TH",
+                }[component]
+            )
+        )
+    ]
     assert result.total_call_count == len(calls) <= 6
     assert tuple(item.tile_id for item in result.verdicts) == TILE_IDS
 
@@ -732,5 +857,7 @@ def test_social_tiles_analyzer_prompt_is_canonical_and_private() -> None:
     system, user = seen[0]
     assert "exactly one" in system.casefold()
     assert "demonstrated" in system and "contradicted" in system and "not_observed" in system
-    assert "metric_context" not in user and "provenance" not in user and "https://" not in user and "brandco" not in user
+    assert (
+        "metric_context" not in user and "provenance" not in user and "https://" not in user and "brandco" not in user
+    )
     assert "analysis_json" not in user
