@@ -12,6 +12,7 @@ from src.research.social_tiles import (
     CaptureSet,
     ComponentDecodeError,
     ComponentValidationResult,
+    ComponentValidationError,
     TILE_IDS,
     CatalogIntegrityError,
     ComponentDefinition,
@@ -26,8 +27,10 @@ from src.research.social_tiles import (
     decode_component_response,
     synthesize_not_acquired_verdict,
     validate_component_result,
+    validate_tile_citation_proof,
 )
 from src.research.social_lab_contracts import MetricContext, Provenance, SocialObservation, build_social_observation
+from src.research.social_community_lab import SocialTilesAnalysis, SocialTilesAnalyzer
 
 
 def test_catalog_is_the_ordered_v1_six_component_twelve_tile_contract() -> None:
@@ -327,6 +330,33 @@ def _eligibility_fixture() -> list[SocialObservation]:
     return [*posts, *responses, *replies]
 
 
+def _cyclic_interactions() -> tuple[SocialObservation, SocialObservation, SocialObservation]:
+    _post, _other_post, first, second, reply, _other_reply = _eligibility_fixture()
+    first = dataclasses.replace(
+        first,
+        parent_external_id=second.external_id,
+        thread_external_id=second.external_id,
+        content_id=None,
+        semantic_fingerprint=None,
+    )
+    reply = dataclasses.replace(
+        reply,
+        parent_external_id=first.external_id,
+        thread_external_id=first.external_id,
+        content_id=None,
+        semantic_fingerprint=None,
+    )
+    second = dataclasses.replace(
+        second,
+        platform="x",
+        parent_external_id=reply.external_id,
+        thread_external_id=reply.external_id,
+        content_id=None,
+        semantic_fingerprint=None,
+    )
+    return first, reply, second
+
+
 def test_tile_eligibility_evaluates_all_twelve_catalog_tiles_in_order() -> None:
     records = evaluate_tile_eligibility(_eligibility_fixture())
     assert len(records) == 12
@@ -390,6 +420,80 @@ def test_depth_and_distinct_pair_prerequisites_are_locally_reconstructed() -> No
     assert len(records["ST-RD-02"].relevant_content_ids) >= 3
 
 
+@pytest.mark.parametrize("state", ("demonstrated", "contradicted"))
+def test_cyclic_parent_paths_cannot_prove_reciprocity(state: str) -> None:
+    observations = _cyclic_interactions()
+    records = {record.tile_id: record for record in evaluate_tile_eligibility(observations)}
+    citations = tuple(item.content_id for item in observations)
+    assert not records["ST-RD-02"].eligible
+    assert records["ST-RD-02"].relevant_content_ids == ()
+    with pytest.raises(ComponentValidationError):
+        validate_tile_citation_proof("ST-RD-02", citations, observations)
+    result = validate_component_result(
+        "reciprocity_dialogue",
+        _component_response(
+            "reciprocity_dialogue",
+            [
+                {"tile_id": "ST-RD-01", "state": "not_observed", "citations": []},
+                {"tile_id": "ST-RD-02", "state": state, "citations": list(citations)},
+            ],
+        ),
+        observations,
+        records.values(),
+    )
+    assert tuple(verdict.tile_id for verdict in result.verdicts) == ("ST-RD-01",)
+
+
+def test_two_node_loop_keeps_direct_pair_but_not_depth_proof() -> None:
+    response, reply, _other_response = _cyclic_interactions()
+    response = dataclasses.replace(
+        response,
+        parent_external_id=reply.external_id,
+        thread_external_id=reply.external_id,
+        content_id=None,
+        semantic_fingerprint=None,
+    )
+    observations = (response, reply)
+    records = {record.tile_id: record for record in evaluate_tile_eligibility(observations)}
+    assert records["ST-RD-01"].eligible
+    assert not records["ST-RD-02"].eligible
+    validate_tile_citation_proof("ST-RD-01", tuple(item.content_id for item in observations), observations)
+
+
+def test_unclassified_bridge_is_excluded_from_social_tiles_evidence_and_prompts() -> None:
+    post, _other_post, response, _other_response, reply, _other_reply = _eligibility_fixture()
+    bridge = _interaction_observation(
+        record_kind="unknown",
+        external_id="bridge-1",
+        author_account_id="bridge-account",
+        author_handle="bridge",
+        parent_external_id=response.external_id,
+        thread_external_id=post.external_id,
+    )
+    reply = dataclasses.replace(
+        reply, parent_external_id=bridge.external_id, content_id=None, semantic_fingerprint=None
+    )
+    observations = (post, response, bridge, reply)
+    records = {record.tile_id: record for record in evaluate_tile_eligibility(observations)}
+
+    assert bridge.actor_role == "unclassified"
+    assert build_capture_set(observations).observation_count == 4
+    assert not records["ST-RD-02"].eligible
+    assert all(bridge.content_id not in record.relevant_content_ids for record in records.values())
+    with pytest.raises(ComponentValidationError):
+        validate_tile_citation_proof("ST-RD-02", tuple(item.content_id for item in observations), observations)
+    packet = build_component_prompt("reciprocity_dialogue", observations, records.values())
+    assert bridge.content_id not in {row["content_id"] for row in packet["observations"]}
+
+
+def test_classified_same_scope_chain_remains_valid_for_reciprocity_proof() -> None:
+    post, _other_post, response, _other_response, reply, _other_reply = _eligibility_fixture()
+    observations = (post, response, reply)
+    record = {item.tile_id: item for item in evaluate_tile_eligibility(observations)}["ST-RD-02"]
+    assert record.eligible
+    validate_tile_citation_proof("ST-RD-02", record.relevant_content_ids, observations)
+
+
 def test_not_acquired_synthesis_is_limited_to_ineligible_records() -> None:
     records = evaluate_tile_eligibility([])
     verdict = synthesize_not_acquired_verdict(records[0])
@@ -404,6 +508,23 @@ def test_not_acquired_synthesis_is_limited_to_ineligible_records() -> None:
 
 def _component_response(component_id: str, tiles: list[dict[str, object]]) -> dict[str, str]:
     return {"analysis_json": json.dumps({"component_id": component_id, "tiles": tiles})}
+
+
+def test_cyclic_semantic_verdict_is_rejected_during_replay() -> None:
+    observations = _cyclic_interactions()
+
+    def fake(_system: str, user: str, _schema: dict[str, object]) -> dict[str, str]:
+        packet = json.loads(user)
+        return _component_response(
+            packet["component_id"],
+            [{"tile_id": tile["tile_id"], "state": "not_observed", "citations": []} for tile in packet["tiles"]],
+        )
+
+    payload = SocialTilesAnalyzer(fake).analyze(observations).to_dict()
+    verdict = next(item for item in payload["verdicts"] if item["tile_id"] == "ST-RD-02")
+    verdict.update({"state": "demonstrated", "citations": sorted(item.content_id for item in observations)})
+    with pytest.raises(ValueError):
+        SocialTilesAnalysis.from_dict(payload, observations)
 
 
 def test_component_prompt_is_minimal_component_scoped_and_deterministic() -> None:
