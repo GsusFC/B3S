@@ -112,6 +112,32 @@ _TILE_ROWS = (
 
 
 @dataclass(frozen=True, slots=True)
+class _CitationProofRequirement:
+    minimum_records: int
+    role_minimums: tuple[tuple[str, int], ...] = ()
+    minimum_platforms: int = 0
+    platform_role: str | None = None
+    minimum_linked_pairs: int = 0
+    minimum_parent_depth: int = 0
+
+
+_CITATION_PROOF_REQUIREMENTS = {
+    "ST-VI-01": _CitationProofRequirement(2, (("official_brand_post", 2),)),
+    "ST-VI-02": _CitationProofRequirement(2, (("official_brand_post", 1), ("brand_reply", 1))),
+    "ST-CC-01": _CitationProofRequirement(2, (("official_brand_post", 2),), 2, "official_brand_post"),
+    "ST-CC-02": _CitationProofRequirement(2, (("official_brand_post", 2),), 2, "official_brand_post"),
+    "ST-LT-01": _CitationProofRequirement(2, (("community_response", 2),)),
+    "ST-LT-02": _CitationProofRequirement(3, (("community_response", 2), ("brand_reply", 1)), 0, None, 1),
+    "ST-RB-01": _CitationProofRequirement(2, (("community_response", 1), ("brand_reply", 1)), 0, None, 1),
+    "ST-RB-02": _CitationProofRequirement(4, (("community_response", 2), ("brand_reply", 2)), 0, None, 2),
+    "ST-RD-01": _CitationProofRequirement(2, (("community_response", 1), ("brand_reply", 1)), 0, None, 1),
+    "ST-RD-02": _CitationProofRequirement(3, (("community_response", 1), ("brand_reply", 1)), 0, None, 1, 3),
+    "ST-TH-01": _CitationProofRequirement(2, (("community_response", 1), ("brand_reply", 1)), 0, None, 1),
+    "ST-TH-02": _CitationProofRequirement(2, (("community_response", 1), ("brand_reply", 1)), 0, None, 1),
+}
+
+
+@dataclass(frozen=True, slots=True)
 class TileDefinition:
     tile_id: str
     component_id: str
@@ -218,6 +244,8 @@ def assert_catalog_integrity(catalog: SocialTilesCatalog = CATALOG) -> None:
         raise CatalogIntegrityError("catalog components are missing, unknown, or out of order")
     if catalog.tile_ids != TILE_IDS or len(set(catalog.tile_ids)) != len(catalog.tile_ids):
         raise CatalogIntegrityError("catalog tiles are missing, unknown, duplicated, or out of order")
+    if set(_CITATION_PROOF_REQUIREMENTS) != set(TILE_IDS):
+        raise CatalogIntegrityError("catalog citation proof requirements are missing or unknown")
     for actual_component, expected_component in zip(catalog.components, CATALOG.components):
         if actual_component != expected_component:
             raise CatalogIntegrityError(f"catalog component {actual_component.component_id!r} differs from v1")
@@ -428,19 +456,55 @@ def _eligibility_observations(observations: Iterable[SocialObservation]) -> tupl
         raise ValueError("observations must be iterable") from exc
     if any(not isinstance(observation, SocialObservation) for observation in values):
         raise ValueError("eligibility accepts only validated SocialObservation records")
+    values = tuple(item for item in values if item.actor_role != "unclassified")
     external_ids = [observation.external_id for observation in values]
     if len(set(external_ids)) != len(external_ids):
         raise ValueError("duplicate external_id makes local parent linkage ambiguous")
-    return tuple(sorted(values, key=lambda observation: observation.external_id))
+    return tuple(sorted(values, key=lambda item: item.external_id))
+
+
+ScopedTargetIdentity = tuple[str, str]
+
+
+def _provenance_target_id(observation: SocialObservation) -> str | None:
+    target_id = observation.provenance.linkage_evidence.get("target_id")
+    if isinstance(target_id, str) and target_id and target_id == target_id.strip():
+        return target_id
+    return None
+
+
+def _target_scopes(observations: tuple[SocialObservation, ...]) -> dict[str, ScopedTargetIdentity | None]:
+    target_ids = {_provenance_target_id(observation) for observation in observations}
+    target_ids.discard(None)
+    target_fingerprints = {observation.provenance.target_fingerprint for observation in observations}
+    fallback_fingerprint = next(iter(target_fingerprints)) if len(target_fingerprints) == 1 and not target_ids else None
+    return {
+        observation.content_id: (
+            (target_id, observation.provenance.target_fingerprint)
+            if (target_id := _provenance_target_id(observation)) is not None
+            else ("", fallback_fingerprint)
+            if fallback_fingerprint is not None
+            else None
+        )
+        for observation in observations
+    }
 
 
 def _parent_map(observations: tuple[SocialObservation, ...]) -> dict[str, SocialObservation]:
-    by_external_id = {observation.external_id: observation for observation in observations}
-    return {
-        observation.external_id: by_external_id[observation.parent_external_id]
-        for observation in observations
-        if observation.parent_external_id in by_external_id
-    }
+    scopes = _target_scopes(observations)
+    by_scoped_external_id: dict[tuple[str, ScopedTargetIdentity, str], SocialObservation] = {}
+    for observation in observations:
+        if (scope := scopes[observation.content_id]) is not None:
+            by_scoped_external_id[(observation.platform, scope, observation.external_id)] = observation
+    parents: dict[str, SocialObservation] = {}
+    for observation in observations:
+        scope = scopes[observation.content_id]
+        if scope is None or observation.parent_external_id is None:
+            continue
+        parent = by_scoped_external_id.get((observation.platform, scope, observation.parent_external_id))
+        if parent is not None:
+            parents[observation.content_id] = parent
+    return parents
 
 
 def _parent_chain(
@@ -450,23 +514,25 @@ def _parent_chain(
     chain: list[SocialObservation] = []
     seen: set[str] = set()
     current: SocialObservation | None = observation
-    while current is not None and current.external_id not in seen:
-        seen.add(current.external_id)
+    while current is not None:
+        if current.content_id in seen:
+            return ()
+        seen.add(current.content_id)
         chain.append(current)
-        current = parent_map.get(current.external_id)
+        current = parent_map.get(current.content_id)
     return tuple(reversed(chain))
 
 
 def _linked_pairs(
     observations: tuple[SocialObservation, ...],
+    parent_map: Mapping[str, SocialObservation],
 ) -> tuple[tuple[SocialObservation, SocialObservation], ...]:
-    by_external_id = {observation.external_id: observation for observation in observations}
     pairs = [
         (parent, child)
         for child in observations
         if child.actor_role == "brand_reply"
-        and child.parent_external_id in by_external_id
-        and (parent := by_external_id[child.parent_external_id]).actor_role == "community_response"
+        and (parent := parent_map.get(child.content_id)) is not None
+        and parent.actor_role == "community_response"
     ]
     return tuple(sorted(pairs, key=lambda pair: (pair[0].content_id, pair[1].content_id)))
 
@@ -477,7 +543,7 @@ def evaluate_tile_eligibility(observations: Iterable[SocialObservation]) -> tupl
     parent_map = _parent_map(values)
     official = tuple(observation for observation in values if observation.actor_role == "official_brand_post")
     community = tuple(observation for observation in values if observation.actor_role == "community_response")
-    linked_pairs = _linked_pairs(values)
+    linked_pairs = _linked_pairs(values, parent_map)
     linked_replies = tuple(reply for _, reply in linked_pairs)
     linked_pair_records = tuple(item for pair in linked_pairs for item in pair)
     qualifying_chains = tuple(
@@ -538,6 +604,61 @@ def evaluate_tile_eligibility(observations: Iterable[SocialObservation]) -> tupl
         ),
     }
     return tuple(records[tile_id] for tile_id in TILE_IDS)
+
+
+def validate_tile_citation_proof(
+    tile_id: str,
+    citations: Iterable[str],
+    observations: Iterable[SocialObservation],
+) -> None:
+    """Fail closed unless cited evidence satisfies the catalog's local proof shape."""
+    if tile_id not in TILE_IDS or isinstance(citations, (str, bytes, Mapping)):
+        raise ComponentValidationError("citation_proof_requirements_not_met")
+    try:
+        citation_ids = tuple(citations)
+    except TypeError as exc:
+        raise ComponentValidationError("citation_proof_requirements_not_met") from exc
+    values = _eligibility_observations(observations)
+    by_content_id = {observation.content_id: observation for observation in values}
+    eligibility = {record.tile_id: record for record in evaluate_tile_eligibility(values)}[tile_id]
+    if (
+        len(by_content_id) != len(values)
+        or any(not isinstance(citation, str) or not citation for citation in citation_ids)
+        or len(citation_ids) != len(set(citation_ids))
+        or not eligibility.eligible
+        or not set(citation_ids).issubset(eligibility.relevant_content_ids)
+    ):
+        raise ComponentValidationError("citation_proof_requirements_not_met")
+    cited = tuple(by_content_id[citation] for citation in citation_ids)
+    requirement = _CITATION_PROOF_REQUIREMENTS[tile_id]
+    if len(cited) < requirement.minimum_records or any(
+        sum(observation.actor_role == role for observation in cited) < minimum
+        for role, minimum in requirement.role_minimums
+    ):
+        raise ComponentValidationError("citation_proof_requirements_not_met")
+    platforms = {
+        observation.platform
+        for observation in cited
+        if requirement.platform_role is None or observation.actor_role == requirement.platform_role
+    }
+    if len(platforms) < requirement.minimum_platforms:
+        raise ComponentValidationError("citation_proof_requirements_not_met")
+    parent_map = _parent_map(values)
+    cited_ids = set(citation_ids)
+    cited_pairs = tuple(
+        pair
+        for pair in _linked_pairs(values, parent_map)
+        if pair[0].content_id in cited_ids and pair[1].content_id in cited_ids
+    )
+    if len(cited_pairs) < requirement.minimum_linked_pairs:
+        raise ComponentValidationError("citation_proof_requirements_not_met")
+    if requirement.minimum_parent_depth and not any(
+        len(chain) >= requirement.minimum_parent_depth and all(node.content_id in cited_ids for node in chain)
+        for observation in cited
+        if observation.actor_role == "brand_reply"
+        for chain in (_parent_chain(observation, parent_map),)
+    ):
+        raise ComponentValidationError("citation_proof_requirements_not_met")
 
 
 def _component_definition(component_id: str) -> ComponentDefinition:
@@ -702,6 +823,7 @@ def _component_failure_result(
 def _validated_model_tile(
     tile: Mapping[str, object],
     eligibility: TileEligibility,
+    observations: tuple[SocialObservation, ...],
 ) -> TileVerdict:
     if set(tile) != COMPONENT_TILE_KEYS:
         raise ComponentValidationError("invalid_tile_shape")
@@ -721,6 +843,8 @@ def _validated_model_tile(
         raise ComponentValidationError("demonstrated_or_contradicted_requires_citations")
     if not set(citations).issubset(set(eligibility.relevant_content_ids)):
         raise ComponentValidationError("citation_outside_relevant_content")
+    if state in {TileState.DEMONSTRATED.value, TileState.CONTRADICTED.value}:
+        validate_tile_citation_proof(str(tile["tile_id"]), citations, observations)
     return TileVerdict(
         tile_id=str(tile["tile_id"]),
         state=TileState(state),
@@ -778,7 +902,7 @@ def validate_component_result(
                 raise ComponentValidationError("duplicate_tile_id")
             if tile.tile_id not in by_tile_id:
                 raise ComponentValidationError("missing_tile")
-            verdicts.append(_validated_model_tile(by_tile_id[tile.tile_id], record))
+            verdicts.append(_validated_model_tile(by_tile_id[tile.tile_id], record, values))
         except ComponentValidationError as error:
             verdicts.append(
                 TileVerdict(
@@ -885,6 +1009,7 @@ __all__ = [
     "reconstruct_capture_set",
     "serialize_verdict",
     "synthesize_not_acquired_verdict",
+    "validate_tile_citation_proof",
     "validate_capture_set",
 ]
 __all__ += [

@@ -30,6 +30,7 @@ LAB_SOURCE_PATHS = (
     ROOT / "src/research/social_lab_contracts.py",
     ROOT / "src/research/scrapecreators_spike.py",
     ROOT / "src/research/social_community_lab.py",
+    ROOT / "src/research/social_tiles.py",
     ROOT / "scripts/scrapecreators_social_spike.py",
     ROOT / "scripts/run_social_community_lab.py",
 )
@@ -49,6 +50,7 @@ CANONICAL_OUTPUT_KEYS = frozenset(
         "component_score",
         "component_scores",
         "canonical_score",
+        "promotion_score",
         "canonical_assessment",
         "canonical_state",
         "assessment",
@@ -297,6 +299,7 @@ def test_canonical_field_scanner_allows_only_authoritative_v2_verdict_state() ->
         "numeric_aggregate",
         "activation",
         "confidence",
+        "promotion_score",
         "canonical_assessment",
         "sv9_score",
         "vault_state",
