@@ -514,7 +514,9 @@ def _parent_chain(
     chain: list[SocialObservation] = []
     seen: set[str] = set()
     current: SocialObservation | None = observation
-    while current is not None and current.content_id not in seen:
+    while current is not None:
+        if current.content_id in seen:
+            return ()
         seen.add(current.content_id)
         chain.append(current)
         current = parent_map.get(current.content_id)
