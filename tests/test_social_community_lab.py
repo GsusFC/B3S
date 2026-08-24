@@ -540,7 +540,7 @@ def _v2_verdicts(observations: list[SocialObservation], *, semantic: set[str] = 
         if not record.eligible:
             verdicts.append(synthesize_not_acquired_verdict(record))
         elif tile_id in semantic:
-            verdicts.append(TileVerdict(tile_id, TileState.DEMONSTRATED, (record.relevant_content_ids[0],)))
+            verdicts.append(TileVerdict(tile_id, TileState.DEMONSTRATED, record.relevant_content_ids))
         else:
             verdicts.append(
                 TileVerdict(
@@ -660,7 +660,12 @@ def test_social_tiles_v2_replay_rejects_forged_citations_and_failure_metadata() 
     valid_citation = result.to_dict()["verdicts"][0]["citations"][0]
     invalid_payloads: list[dict[str, object]] = []
 
-    for citations in ([str(observations[-1].content_id)], ["sha256:" + "0" * 64], [valid_citation, valid_citation]):
+    for citations in (
+        [valid_citation],
+        [str(observations[-1].content_id)],
+        ["sha256:" + "0" * 64],
+        [valid_citation, valid_citation],
+    ):
         payload = result.to_dict()
         payload["verdicts"][0]["citations"] = citations
         invalid_payloads.append(payload)
