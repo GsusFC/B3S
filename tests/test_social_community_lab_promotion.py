@@ -132,6 +132,10 @@ def _v2_observations() -> list[SocialObservation]:
     """Build a capture set with two official posts on different platforms."""
 
     official, _community = _raw_observations()
+    official["platform"] = "twitter"
+    official["provenance"]["linkage_evidence"] = {"target_id": "brand-x"}
+    official.pop("content_id", None)
+    official.pop("semantic_fingerprint", None)
     first = SocialObservation.from_dict(official)
     second = replace(
         first,
@@ -139,6 +143,7 @@ def _v2_observations() -> list[SocialObservation]:
         external_id="post-2",
         canonical_url="https://social.example/brandco/posts/post-2",
         text="A second useful launch update.",
+        provenance=replace(first.provenance, linkage_evidence={"target_id": "brand-y"}),
         content_id=None,
         semantic_fingerprint=None,
     )
@@ -156,9 +161,9 @@ def _v2_analysis_with_mixed_verdicts() -> tuple[list[SocialObservation], Any]:
         if not record.eligible:
             verdicts.append(synthesize_not_acquired_verdict(record))
         elif tile_id == eligible_ids[0]:
-            verdicts.append(TileVerdict(tile_id, TileState.DEMONSTRATED, (record.relevant_content_ids[0],)))
+            verdicts.append(TileVerdict(tile_id, TileState.DEMONSTRATED, record.relevant_content_ids))
         elif tile_id == eligible_ids[1]:
-            verdicts.append(TileVerdict(tile_id, TileState.CONTRADICTED, (record.relevant_content_ids[0],)))
+            verdicts.append(TileVerdict(tile_id, TileState.CONTRADICTED, record.relevant_content_ids))
         else:
             verdicts.append(TileVerdict(tile_id, TileState.NOT_OBSERVED))
     component_call_counts = tuple(
@@ -237,14 +242,15 @@ def test_v2_demonstrated_and_contradicted_tiles_cannot_self_promote() -> None:
     }
     acquisition["canonical_invariance"] = {"status": "verified", "evidence": ["caller"]}
 
-    artifact = cli.compose_social_tiles_lab_artifact(_manifest(), acquisition, analysis)
+    manifest = _manifest().as_dict()
+    manifest["targets"].append({"target_id": "brand-y", "platform": "instagram", "handle": "brandco_alt"})
+    artifact = cli.compose_social_tiles_lab_artifact(parse_target_manifest(manifest), acquisition, analysis)
     states = {verdict["state"] for verdict in artifact["social_tiles"]["verdicts"]}
     assert {TileState.DEMONSTRATED.value, TileState.CONTRADICTED.value} <= states
     assert artifact["promotion_evidence"]["status"] == "insufficient"
     assert len(artifact["promotion_evidence"]["gates"]) == 11
     assert all(
-        gate["status"] == "not_checked" and gate["evidence"] == []
-        for gate in artifact["promotion_evidence"]["gates"]
+        gate["status"] == "not_checked" and gate["evidence"] == [] for gate in artifact["promotion_evidence"]["gates"]
     )
     assert artifact["canonical_invariance"] == {
         "status": "not_checked",
