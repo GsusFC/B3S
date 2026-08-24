@@ -154,6 +154,22 @@ _SENSITIVE_KEYS = frozenset(
         "set-cookie",
     }
 )
+_SOCIAL_TILES_FORBIDDEN_METRIC_TOKENS = frozenset(
+    {
+        "score",
+        "aggregate",
+        "point",
+        "assess",
+        "sv9",
+        "vault",
+        "canonical",
+        "state",
+        "activat",
+        "enabled",
+        "confidence",
+        "promot",
+    }
+)
 _SOCIAL_TILES_LAB_ROOT_KEYS = frozenset(
     {
         "schema_version",
@@ -929,6 +945,13 @@ def _social_tiles_acquisition_options(value: Mapping[str, Any] | None) -> dict[s
     return raw
 
 
+def _social_tiles_forbidden_metric_name(name: str) -> bool:
+    normalized = "".join(character for character in name.casefold() if character.isalnum())
+    return any(token in normalized for token in _SOCIAL_TILES_FORBIDDEN_METRIC_TOKENS) or any(
+        "".join(character for character in key if character.isalnum()) in normalized for key in _SENSITIVE_KEYS
+    )
+
+
 def _social_tiles_acquisition_contract(acquisition: Mapping[str, Any]) -> str:
     version = acquisition.get("contract_version", ARTIFACT_SCHEMA_VERSION)
     if version != ARTIFACT_SCHEMA_VERSION:
@@ -1021,9 +1044,9 @@ def _social_tiles_canonical_observations(
     target_map = _social_tiles_provenance_target_map(manifest, observations)
     result: list[SocialObservation] = []
     for observation in observations:
-        if observation.metric_context and (
-            {"score", "scores", "state", "sv9_score", "vault_state"} | _SENSITIVE_KEYS
-        ) & {str(name).casefold() for name in observation.metric_context.metrics}:
+        if observation.metric_context and any(
+            _social_tiles_forbidden_metric_name(name) for name in observation.metric_context.metrics
+        ):
             raise SocialCommunityLabCLIError("social tiles observation metrics are invalid")
         row = observation.to_dict()
         provenance = dict(row["provenance"])
