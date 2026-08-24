@@ -35,6 +35,7 @@ from src.research.social_tiles import (
     evaluate_tile_eligibility,
     synthesize_not_acquired_verdict,
     validate_component_result,
+    validate_tile_citation_proof,
 )
 
 
@@ -1082,6 +1083,58 @@ _SOCIAL_TILES_COMPONENT_TILES = {
     component.component_id: tuple(tile.tile_id for tile in component.tiles) for component in CATALOG.components
 }
 _SOCIAL_TILES_VALID_STATES = frozenset(COMPONENT_MODEL_STATES)
+_SOCIAL_TILES_REPLAY_FAILURE_PAIRS = frozenset(
+    {
+        ("provider_failure", "component_invocation"),
+        ("component_validation", "component_validation"),
+    }
+    | {
+        (reason_code, "component_decode")
+        for reason_code in {
+            "duplicate_json_keys",
+            "non_json_constant",
+            "malformed_envelope",
+            "malformed_inner_json",
+            "inner_not_object",
+        }
+    }
+    | {
+        (reason_code, "component_validation")
+        for reason_code in {
+            "invalid_component_shape",
+            "wrong_component_id",
+            "duplicate_tile_id",
+            "missing_tile",
+            "invalid_tile_shape",
+            "not_acquired_forbidden",
+            "invalid_state",
+            "invalid_citations",
+            "duplicate_citations",
+            "not_observed_requires_empty_citations",
+            "demonstrated_or_contradicted_requires_citations",
+            "citation_outside_relevant_content",
+            "citation_proof_requirements_not_met",
+        }
+    }
+)
+_SOCIAL_TILES_COMPONENT_GLOBAL_FAILURE_PAIRS = frozenset(
+    {
+        ("provider_failure", "component_invocation"),
+        ("component_validation", "component_validation"),
+        ("invalid_component_shape", "component_validation"),
+        ("wrong_component_id", "component_validation"),
+    }
+    | {
+        (reason_code, "component_decode")
+        for reason_code in {
+            "duplicate_json_keys",
+            "non_json_constant",
+            "malformed_envelope",
+            "malformed_inner_json",
+            "inner_not_object",
+        }
+    }
+)
 
 
 def _coerce_social_tiles_verdict(value: Any, *, index: int) -> TileVerdict:
@@ -1150,6 +1203,96 @@ def _social_tiles_observations(
     return normalized
 
 
+def _validate_social_tiles_replay_boundary(
+    observations: tuple[SocialObservation, ...],
+    eligibility: Mapping[str, Any],
+    verdict_by_id: Mapping[str, TileVerdict],
+    evaluation_requested: bool,
+    component_call_counts: tuple[int, ...],
+    total_call_count: int,
+) -> None:
+    """Accept only verdict metadata the local analyzer can produce."""
+    eligible_ids = [tile_id for tile_id in TILE_IDS if eligibility[tile_id].eligible]
+    for tile_id in TILE_IDS:
+        record = eligibility[tile_id]
+        if not record.eligible and verdict_by_id[tile_id] != synthesize_not_acquired_verdict(record):
+            raise _invalid(f"analysis_v2 ineligible verdict for {tile_id} is not eligibility-bound")
+
+    if not evaluation_requested:
+        if total_call_count != 0:
+            raise _invalid("analysis_v2 not_requested state must have zero component calls")
+        if any(
+            verdict_by_id[tile_id]
+            != TileVerdict(tile_id, TileState.NOT_ACQUIRED, reason_code="not_requested", failure_stage="evaluation")
+            for tile_id in eligible_ids
+        ):
+            raise _invalid("analysis_v2 not_requested state must use the exact code-owned verdict")
+        return
+
+    setup_unavailable = any(
+        verdict_by_id[tile_id].reason_code == "gemini_unavailable"
+        or verdict_by_id[tile_id].failure_stage == "provider_setup"
+        for tile_id in eligible_ids
+    )
+    if setup_unavailable:
+        expected = {
+            tile_id: TileVerdict(
+                tile_id, TileState.NOT_ACQUIRED, reason_code="gemini_unavailable", failure_stage="provider_setup"
+            )
+            for tile_id in eligible_ids
+        }
+        if total_call_count or any(verdict_by_id[tile_id] != verdict for tile_id, verdict in expected.items()):
+            raise _invalid("analysis_v2 provider setup failure is not globally call-bound")
+        return
+
+    for index, component_id in enumerate(COMPONENT_IDS):
+        component_ids = _SOCIAL_TILES_COMPONENT_TILES[component_id]
+        expected_count = int(any(eligibility[tile_id].eligible for tile_id in component_ids))
+        if component_call_counts[index] != expected_count:
+            raise _invalid(f"analysis_v2 component {component_id!r} has inconsistent call accounting")
+        eligible_component_ids = [tile_id for tile_id in component_ids if eligibility[tile_id].eligible]
+        global_pairs = {
+            (verdict_by_id[tile_id].reason_code, verdict_by_id[tile_id].failure_stage)
+            for tile_id in eligible_component_ids
+            if (verdict_by_id[tile_id].reason_code, verdict_by_id[tile_id].failure_stage)
+            in _SOCIAL_TILES_COMPONENT_GLOBAL_FAILURE_PAIRS
+        }
+        if global_pairs:
+            if len(global_pairs) != 1:
+                raise _invalid(f"analysis_v2 component {component_id!r} mixes global failures")
+            reason_code, failure_stage = next(iter(global_pairs))
+            if any(
+                verdict_by_id[tile_id]
+                != TileVerdict(tile_id, TileState.NOT_ACQUIRED, reason_code=reason_code, failure_stage=failure_stage)
+                for tile_id in eligible_component_ids
+            ):
+                raise _invalid(f"analysis_v2 component {component_id!r} has a non-global failure sibling")
+
+    for tile_id in eligible_ids:
+        record = eligibility[tile_id]
+        verdict = verdict_by_id[tile_id]
+        if verdict.state in {TileState.DEMONSTRATED, TileState.CONTRADICTED}:
+            if verdict.citations != tuple(sorted(verdict.citations)):
+                raise _invalid(f"analysis_v2 {tile_id} has noncanonical citations")
+            if len(verdict.citations) != len(set(verdict.citations)):
+                raise _invalid(f"analysis_v2 {tile_id} has duplicate citations")
+            if not set(verdict.citations).issubset(record.relevant_content_ids):
+                raise _invalid(f"analysis_v2 {tile_id} has citations outside locally eligible evidence")
+            try:
+                validate_tile_citation_proof(tile_id, verdict.citations, observations)
+            except (TypeError, ValueError):
+                raise _invalid(f"analysis_v2 {tile_id} does not satisfy cited proof requirements") from None
+        elif (
+            verdict.state is TileState.NOT_ACQUIRED
+            and (
+                verdict.reason_code,
+                verdict.failure_stage,
+            )
+            not in _SOCIAL_TILES_REPLAY_FAILURE_PAIRS
+        ):
+            raise _invalid(f"analysis_v2 {tile_id} has an untrusted failure marker")
+
+
 def _social_tiles_analysis_state(
     observations: tuple[SocialObservation, ...],
     evaluation_requested: bool,
@@ -1180,17 +1323,14 @@ def _social_tiles_analysis_state(
     total_call_count = sum(component_call_counts)
     if total_call_count > len(COMPONENT_IDS):
         raise _invalid("analysis_v2 total_call_count exceeds six")
-    for index, component_id in enumerate(COMPONENT_IDS):
-        component_eligible = [eligibility[tile_id].eligible for tile_id in _SOCIAL_TILES_COMPONENT_TILES[component_id]]
-        count = component_call_counts[index]
-        if not any(component_eligible) and count != 0:
-            raise _invalid(f"analysis_v2 component {component_id!r} has no eligible tiles but was called")
-        if count == 0 and any(
-            verdict_by_id[tile_id].state.value in _SOCIAL_TILES_VALID_STATES
-            for tile_id in _SOCIAL_TILES_COMPONENT_TILES[component_id]
-            if eligibility[tile_id].eligible
-        ):
-            raise _invalid(f"analysis_v2 component {component_id!r} has semantic verdicts without a call")
+    _validate_social_tiles_replay_boundary(
+        observations,
+        eligibility,
+        verdict_by_id,
+        evaluation_requested,
+        component_call_counts,
+        total_call_count,
+    )
 
     eligible_tile_count = sum(record.eligible for record in eligibility_records)
     valid_eligible_tile_count = sum(
@@ -1198,18 +1338,6 @@ def _social_tiles_analysis_state(
         for verdict in verdicts
     )
     if not evaluation_requested:
-        if total_call_count != 0:
-            raise _invalid("analysis_v2 not_requested state must have zero component calls")
-        if any(
-            eligibility[verdict.tile_id].eligible
-            and (
-                verdict.state is not TileState.NOT_ACQUIRED
-                or verdict.reason_code != "not_requested"
-                or verdict.failure_stage != "evaluation"
-            )
-            for verdict in verdicts
-        ):
-            raise _invalid("analysis_v2 not_requested state must use the exact code-owned verdict")
         status = "not_requested"
     elif eligible_tile_count == 0 or valid_eligible_tile_count == 0:
         status = "unavailable"
@@ -1298,7 +1426,11 @@ class SocialTilesAnalysis:
         if not isinstance(value["evaluation_requested"], bool):
             raise _malformed("analysis_v2.evaluation_requested must be a boolean")
         total_call_count = value["total_call_count"]
-        if isinstance(total_call_count, bool) or not isinstance(total_call_count, int) or not 0 <= total_call_count <= 6:
+        if (
+            isinstance(total_call_count, bool)
+            or not isinstance(total_call_count, int)
+            or not 0 <= total_call_count <= 6
+        ):
             raise _malformed("analysis_v2.total_call_count must be an integer from 0 through 6")
         normalized_observations = _social_tiles_observations(observations)
         try:
@@ -1353,7 +1485,9 @@ def _social_tiles_component_system_prompt(component_id: str, packet: Mapping[str
     )
 
 
-def _social_tiles_component_failure(tile_ids: Iterable[str], reason_code: str, failure_stage: str) -> tuple[TileVerdict, ...]:
+def _social_tiles_component_failure(
+    tile_ids: Iterable[str], reason_code: str, failure_stage: str
+) -> tuple[TileVerdict, ...]:
     return tuple(
         TileVerdict(tile_id, TileState.NOT_ACQUIRED, reason_code=reason_code, failure_stage=failure_stage)
         for tile_id in tile_ids
@@ -1367,7 +1501,12 @@ def _social_tiles_response_is_empty(raw: object) -> bool:
 class SocialTilesAnalyzer:
     """Run one no-retry, component-local Social Tiles v2 evaluation."""
 
-    def __init__(self, invoke_structured_json: Callable[..., object] | None = None, *, invoker: Callable[..., object] | None = None) -> None:
+    def __init__(
+        self,
+        invoke_structured_json: Callable[..., object] | None = None,
+        *,
+        invoker: Callable[..., object] | None = None,
+    ) -> None:
         if invoke_structured_json is not None and invoker is not None and invoke_structured_json is not invoker:
             raise _invalid("provide only one of invoke_structured_json or invoker")
         callback = invoke_structured_json if invoke_structured_json is not None else invoker
@@ -1434,9 +1573,14 @@ class SocialTilesAnalyzer:
                 )
             elif tile_id not in verdicts:
                 verdicts[tile_id] = TileVerdict(
-                    tile_id, TileState.NOT_ACQUIRED, reason_code="component_validation", failure_stage="component_validation"
+                    tile_id,
+                    TileState.NOT_ACQUIRED,
+                    reason_code="component_validation",
+                    failure_stage="component_validation",
                 )
-        return SocialTilesAnalysis(normalized, evaluation_requested, tuple(verdicts[tile_id] for tile_id in TILE_IDS), call_counts)
+        return SocialTilesAnalysis(
+            normalized, evaluation_requested, tuple(verdicts[tile_id] for tile_id in TILE_IDS), call_counts
+        )
 
 
 def analyze_social_tiles(
