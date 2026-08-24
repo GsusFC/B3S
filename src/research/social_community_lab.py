@@ -35,6 +35,7 @@ from src.research.social_tiles import (
     evaluate_tile_eligibility,
     synthesize_not_acquired_verdict,
     validate_component_result,
+    validate_tile_citation_proof,
 )
 
 
@@ -1112,6 +1113,25 @@ _SOCIAL_TILES_REPLAY_FAILURE_PAIRS = frozenset(
             "not_observed_requires_empty_citations",
             "demonstrated_or_contradicted_requires_citations",
             "citation_outside_relevant_content",
+            "citation_proof_requirements_not_met",
+        }
+    }
+)
+_SOCIAL_TILES_COMPONENT_GLOBAL_FAILURE_PAIRS = frozenset(
+    {
+        ("provider_failure", "component_invocation"),
+        ("component_validation", "component_validation"),
+        ("invalid_component_shape", "component_validation"),
+        ("wrong_component_id", "component_validation"),
+    }
+    | {
+        (reason_code, "component_decode")
+        for reason_code in {
+            "duplicate_json_keys",
+            "non_json_constant",
+            "malformed_envelope",
+            "malformed_inner_json",
+            "inner_not_object",
         }
     }
 )
@@ -1184,6 +1204,7 @@ def _social_tiles_observations(
 
 
 def _validate_social_tiles_replay_boundary(
+    observations: tuple[SocialObservation, ...],
     eligibility: Mapping[str, Any],
     verdict_by_id: Mapping[str, TileVerdict],
     evaluation_requested: bool,
@@ -1229,15 +1250,38 @@ def _validate_social_tiles_replay_boundary(
         expected_count = int(any(eligibility[tile_id].eligible for tile_id in component_ids))
         if component_call_counts[index] != expected_count:
             raise _invalid(f"analysis_v2 component {component_id!r} has inconsistent call accounting")
+        eligible_component_ids = [tile_id for tile_id in component_ids if eligibility[tile_id].eligible]
+        global_pairs = {
+            (verdict_by_id[tile_id].reason_code, verdict_by_id[tile_id].failure_stage)
+            for tile_id in eligible_component_ids
+            if (verdict_by_id[tile_id].reason_code, verdict_by_id[tile_id].failure_stage)
+            in _SOCIAL_TILES_COMPONENT_GLOBAL_FAILURE_PAIRS
+        }
+        if global_pairs:
+            if len(global_pairs) != 1:
+                raise _invalid(f"analysis_v2 component {component_id!r} mixes global failures")
+            reason_code, failure_stage = next(iter(global_pairs))
+            if any(
+                verdict_by_id[tile_id]
+                != TileVerdict(tile_id, TileState.NOT_ACQUIRED, reason_code=reason_code, failure_stage=failure_stage)
+                for tile_id in eligible_component_ids
+            ):
+                raise _invalid(f"analysis_v2 component {component_id!r} has a non-global failure sibling")
 
     for tile_id in eligible_ids:
         record = eligibility[tile_id]
         verdict = verdict_by_id[tile_id]
         if verdict.state in {TileState.DEMONSTRATED, TileState.CONTRADICTED}:
+            if verdict.citations != tuple(sorted(verdict.citations)):
+                raise _invalid(f"analysis_v2 {tile_id} has noncanonical citations")
             if len(verdict.citations) != len(set(verdict.citations)):
                 raise _invalid(f"analysis_v2 {tile_id} has duplicate citations")
             if not set(verdict.citations).issubset(record.relevant_content_ids):
                 raise _invalid(f"analysis_v2 {tile_id} has citations outside locally eligible evidence")
+            try:
+                validate_tile_citation_proof(tile_id, verdict.citations, observations)
+            except (TypeError, ValueError):
+                raise _invalid(f"analysis_v2 {tile_id} does not satisfy cited proof requirements") from None
         elif (
             verdict.state is TileState.NOT_ACQUIRED
             and (
@@ -1280,6 +1324,7 @@ def _social_tiles_analysis_state(
     if total_call_count > len(COMPONENT_IDS):
         raise _invalid("analysis_v2 total_call_count exceeds six")
     _validate_social_tiles_replay_boundary(
+        observations,
         eligibility,
         verdict_by_id,
         evaluation_requested,

@@ -23,6 +23,7 @@ from src.research.social_community_lab import (
 )
 from src.research.social_lab_contracts import ActorRole, MetricContext, SocialLabContractError, SocialObservation
 from src.research.social_tiles import (
+    CATALOG,
     COMPONENT_IDS,
     TILE_IDS,
     TileState,
@@ -539,13 +540,13 @@ def _v2_verdicts(observations: list[SocialObservation], *, semantic: set[str] = 
         if not record.eligible:
             verdicts.append(synthesize_not_acquired_verdict(record))
         elif tile_id in semantic:
-            verdicts.append(TileVerdict(tile_id, TileState.DEMONSTRATED, (record.relevant_content_ids[0],)))
+            verdicts.append(TileVerdict(tile_id, TileState.DEMONSTRATED, record.relevant_content_ids))
         else:
             verdicts.append(
                 TileVerdict(
                     tile_id,
                     TileState.NOT_ACQUIRED,
-                    reason_code="component_validation",
+                    reason_code="missing_tile",
                     failure_stage="component_validation",
                 )
             )
@@ -659,7 +660,12 @@ def test_social_tiles_v2_replay_rejects_forged_citations_and_failure_metadata() 
     valid_citation = result.to_dict()["verdicts"][0]["citations"][0]
     invalid_payloads: list[dict[str, object]] = []
 
-    for citations in ([str(observations[-1].content_id)], ["sha256:" + "0" * 64], [valid_citation, valid_citation]):
+    for citations in (
+        [valid_citation],
+        [str(observations[-1].content_id)],
+        ["sha256:" + "0" * 64],
+        [valid_citation, valid_citation],
+    ):
         payload = result.to_dict()
         payload["verdicts"][0]["citations"] = citations
         invalid_payloads.append(payload)
@@ -680,6 +686,45 @@ def test_social_tiles_v2_replay_rejects_forged_citations_and_failure_metadata() 
     for payload in invalid_payloads:
         with pytest.raises(SocialCommunityValidationError):
             reconstruct_social_tiles_analysis(payload, observations)
+
+
+def test_social_tiles_v2_replay_preserves_only_live_component_failure_algebra() -> None:
+    observations = _two_official_and_reply()
+    eligibility = {record.tile_id: record for record in evaluate_tile_eligibility(observations)}
+    eligible_ids = {tile_id for tile_id, record in eligibility.items() if record.eligible}
+    call_counts = tuple(
+        int(any(eligibility[tile.tile_id].eligible for tile in component.tiles)) for component in CATALOG.components
+    )
+    verdicts = list(_v2_verdicts(observations, semantic=eligible_ids))
+    verdicts[0] = TileVerdict(
+        "ST-VI-01", TileState.DEMONSTRATED, citations=eligibility["ST-VI-01"].relevant_content_ids
+    )
+    complete = compose_social_tiles_analysis(observations, True, verdicts, call_counts)
+
+    unsorted = complete.to_dict()
+    unsorted["verdicts"][0]["citations"] = list(reversed(unsorted["verdicts"][0]["citations"]))
+    with pytest.raises(SocialCommunityValidationError):
+        reconstruct_social_tiles_analysis(unsorted, observations)
+
+    global_failure = complete.to_dict()
+    global_failure["verdicts"][1] = {
+        "tile_id": "ST-VI-02",
+        "state": "not_acquired",
+        "citations": [],
+        "reason_code": "provider_failure",
+        "failure_stage": "component_invocation",
+    }
+    global_failure["status"] = "partial"
+    with pytest.raises(SocialCommunityValidationError):
+        reconstruct_social_tiles_analysis(global_failure, observations)
+
+    local_verdicts = list(complete.verdicts)
+    local_verdicts[1] = TileVerdict(
+        "ST-VI-02", TileState.NOT_ACQUIRED, reason_code="missing_tile", failure_stage="component_validation"
+    )
+    local = compose_social_tiles_analysis(observations, True, local_verdicts, call_counts)
+    assert local.status == "partial"
+    assert reconstruct_social_tiles_analysis(local.to_dict(), observations) == local
 
 
 def _component_response(component_id: str, observations: list[SocialObservation]) -> dict[str, str]:
