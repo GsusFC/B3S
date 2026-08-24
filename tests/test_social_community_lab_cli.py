@@ -10,6 +10,7 @@ import pytest
 
 from src.research.scrapecreators_spike import SocialTarget, TargetManifest, parse_target_manifest
 from src.research.social_community_lab import SocialTilesAnalyzer
+from src.research.social_lab_contracts import MetricContext
 from src.features import llm_analyzer as llm_analyzer_module
 
 
@@ -720,6 +721,53 @@ def test_social_tiles_v2_replay_rejects_nested_passthrough_sections() -> None:
         identity["run_id"] = cli._sha256_json({key: value for key, value in identity.items() if key != "run_id"})
         with pytest.raises(cli.SocialCommunityLabCLIError):
             cli.reconstruct_social_tiles_lab_artifact(payload)
+
+
+@pytest.mark.parametrize(
+    "metric_name",
+    (
+        "score",
+        "SV9_SCORE",
+        "vault-score",
+        "canonical.score",
+        "tile state",
+        "Activation",
+        "enabled",
+        "confidence",
+        "promotion_score",
+        "assessment_fingerprint",
+    ),
+)
+def test_social_tiles_v2_rejects_forbidden_metric_names_on_compose_and_replay(metric_name: str) -> None:
+    cli = _load_cli()
+    acquisition = _v2_acquisition(cli)
+    context = acquisition["observations"][0]["metric_context"]
+    metrics = {**context["metrics"], metric_name: 1}
+    acquisition["observations"][0]["metric_context"] = MetricContext(
+        metrics=metrics, observed_at=context["observed_at"]
+    ).to_dict()
+    analysis = _social_tiles_analysis(cli, evaluation_requested=False, acquisition=acquisition)
+    with pytest.raises(cli.SocialCommunityLabCLIError):
+        cli.compose_social_tiles_lab_artifact(_manifest(), acquisition, analysis)
+
+    artifact = _v2_artifact(cli)
+    content_id = artifact["observations_by_role"]["official_brand_post"][0]["content_id"]
+    context = artifact["metric_context"][content_id]
+    artifact["metric_context"][content_id] = MetricContext(
+        metrics={**context["metrics"], metric_name: 1}, observed_at=context["observed_at"]
+    ).to_dict()
+    identity = artifact["run_identity"]
+    identity["run_id"] = cli._sha256_json({key: value for key, value in identity.items() if key != "run_id"})
+    with pytest.raises(cli.SocialCommunityLabCLIError):
+        cli.reconstruct_social_tiles_lab_artifact(artifact)
+
+
+def test_social_tiles_v2_preserves_descriptive_metrics_in_canonical_round_trip() -> None:
+    cli = _load_cli()
+    artifact = _v2_artifact(cli)
+    metrics = next(iter(artifact["metric_context"].values()))["metrics"]
+    assert {"likes", "followers"} <= set(metrics)
+    assert cli.reconstruct_social_tiles_lab_artifact(artifact) == artifact
 
 
 def test_social_tiles_v2_rejects_nonmanifest_observation_bindings_and_preserves_v1() -> None:

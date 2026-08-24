@@ -12,6 +12,7 @@ from src.research.social_tiles import (
     CaptureSet,
     ComponentDecodeError,
     ComponentValidationResult,
+    ComponentValidationError,
     TILE_IDS,
     CatalogIntegrityError,
     ComponentDefinition,
@@ -26,6 +27,7 @@ from src.research.social_tiles import (
     decode_component_response,
     synthesize_not_acquired_verdict,
     validate_component_result,
+    validate_tile_citation_proof,
 )
 from src.research.social_lab_contracts import MetricContext, Provenance, SocialObservation, build_social_observation
 
@@ -388,6 +390,40 @@ def test_depth_and_distinct_pair_prerequisites_are_locally_reconstructed() -> No
     assert len(records["ST-RB-02"].relevant_content_ids) == 4
     assert records["ST-RD-02"].eligible
     assert len(records["ST-RD-02"].relevant_content_ids) >= 3
+
+
+def test_unclassified_bridge_is_excluded_from_social_tiles_evidence_and_prompts() -> None:
+    post, _other_post, response, _other_response, reply, _other_reply = _eligibility_fixture()
+    bridge = _interaction_observation(
+        record_kind="unknown",
+        external_id="bridge-1",
+        author_account_id="bridge-account",
+        author_handle="bridge",
+        parent_external_id=response.external_id,
+        thread_external_id=post.external_id,
+    )
+    reply = dataclasses.replace(
+        reply, parent_external_id=bridge.external_id, content_id=None, semantic_fingerprint=None
+    )
+    observations = (post, response, bridge, reply)
+    records = {record.tile_id: record for record in evaluate_tile_eligibility(observations)}
+
+    assert bridge.actor_role == "unclassified"
+    assert build_capture_set(observations).observation_count == 4
+    assert not records["ST-RD-02"].eligible
+    assert all(bridge.content_id not in record.relevant_content_ids for record in records.values())
+    with pytest.raises(ComponentValidationError):
+        validate_tile_citation_proof("ST-RD-02", tuple(item.content_id for item in observations), observations)
+    packet = build_component_prompt("reciprocity_dialogue", observations, records.values())
+    assert bridge.content_id not in {row["content_id"] for row in packet["observations"]}
+
+
+def test_classified_same_scope_chain_remains_valid_for_reciprocity_proof() -> None:
+    post, _other_post, response, _other_response, reply, _other_reply = _eligibility_fixture()
+    observations = (post, response, reply)
+    record = {item.tile_id: item for item in evaluate_tile_eligibility(observations)}["ST-RD-02"]
+    assert record.eligible
+    validate_tile_citation_proof("ST-RD-02", record.relevant_content_ids, observations)
 
 
 def test_not_acquired_synthesis_is_limited_to_ineligible_records() -> None:

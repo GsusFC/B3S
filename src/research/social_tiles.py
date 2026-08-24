@@ -456,10 +456,11 @@ def _eligibility_observations(observations: Iterable[SocialObservation]) -> tupl
         raise ValueError("observations must be iterable") from exc
     if any(not isinstance(observation, SocialObservation) for observation in values):
         raise ValueError("eligibility accepts only validated SocialObservation records")
+    values = tuple(item for item in values if item.actor_role != "unclassified")
     external_ids = [observation.external_id for observation in values]
     if len(set(external_ids)) != len(external_ids):
         raise ValueError("duplicate external_id makes local parent linkage ambiguous")
-    return tuple(sorted(values, key=lambda observation: observation.external_id))
+    return tuple(sorted(values, key=lambda item: item.external_id))
 
 
 ScopedTargetIdentity = tuple[str, str]
