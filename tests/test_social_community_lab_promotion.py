@@ -156,9 +156,9 @@ def _v2_analysis_with_mixed_verdicts() -> tuple[list[SocialObservation], Any]:
         if not record.eligible:
             verdicts.append(synthesize_not_acquired_verdict(record))
         elif tile_id == eligible_ids[0]:
-            verdicts.append(TileVerdict(tile_id, TileState.DEMONSTRATED, (record.relevant_content_ids[0],)))
+            verdicts.append(TileVerdict(tile_id, TileState.DEMONSTRATED, record.relevant_content_ids))
         elif tile_id == eligible_ids[1]:
-            verdicts.append(TileVerdict(tile_id, TileState.CONTRADICTED, (record.relevant_content_ids[0],)))
+            verdicts.append(TileVerdict(tile_id, TileState.CONTRADICTED, record.relevant_content_ids))
         else:
             verdicts.append(TileVerdict(tile_id, TileState.NOT_OBSERVED))
     component_call_counts = tuple(

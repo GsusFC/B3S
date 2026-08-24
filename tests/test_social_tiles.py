@@ -137,11 +137,13 @@ def _capture_observation(
     response_sha256: str = "a" * 64,
     request_fingerprint: str = "request-fingerprint-1",
     metric_context: MetricContext | None = None,
+    target_fingerprint: str = "target-fingerprint-1",
+    target_id: str | None = None,
 ) -> SocialObservation:
     provenance = Provenance(
         provider="scrapecreators",
         endpoint_key="brand_posts",
-        target_fingerprint="target-fingerprint-1",
+        target_fingerprint=target_fingerprint,
         manifest_fingerprint="manifest-fingerprint-1",
         request_fingerprint=request_fingerprint,
         response_sha256=response_sha256,
@@ -150,7 +152,7 @@ def _capture_observation(
         cursor="cursor-1",
         result_ordinal=0,
         target_identity={"account_id": "brand-account-1", "handle": "brandco"},
-        linkage_evidence={},
+        linkage_evidence={} if target_id is None else {"target_id": target_id},
     )
     return build_social_observation(
         platform=platform,
@@ -256,8 +258,12 @@ def _interaction_observation(
     parent_external_id: str,
     thread_external_id: str,
     platform: str = "x",
+    target_fingerprint: str = "target-fingerprint-1",
+    target_id: str | None = None,
 ) -> SocialObservation:
-    provenance = _capture_observation(external_id=f"seed-{external_id}").provenance
+    provenance = _capture_observation(
+        external_id=f"seed-{external_id}", target_fingerprint=target_fingerprint, target_id=target_id
+    ).provenance
     return build_social_observation(
         platform=platform,
         record_kind=record_kind,
@@ -296,6 +302,7 @@ def _eligibility_fixture() -> list[SocialObservation]:
             author_handle="community-2",
             parent_external_id="post-2",
             thread_external_id="post-2",
+            platform="instagram",
         ),
     ]
     replies = [
@@ -314,6 +321,7 @@ def _eligibility_fixture() -> list[SocialObservation]:
             author_handle="brandco",
             parent_external_id="response-2",
             thread_external_id="post-2",
+            platform="instagram",
         ),
     ]
     return [*posts, *responses, *replies]
@@ -431,8 +439,8 @@ def test_component_validator_accepts_each_model_state_without_not_acquired() -> 
     observations = _eligibility_fixture()
     eligibility = evaluate_tile_eligibility(observations)
     for state, citations in (
-        ("demonstrated", [observations[0].content_id]),
-        ("contradicted", [observations[0].content_id]),
+        ("demonstrated", [observations[0].content_id, observations[1].content_id]),
+        ("contradicted", [observations[0].content_id, observations[1].content_id]),
         ("not_observed", []),
     ):
         result = validate_component_result(
@@ -444,6 +452,177 @@ def test_component_validator_accepts_each_model_state_without_not_acquired() -> 
         verdict = result.verdicts[0]
         assert verdict.state.value == state
         assert verdict.state is not TileState.NOT_ACQUIRED
+
+
+@pytest.mark.parametrize("state", ("demonstrated", "contradicted"))
+def test_component_validator_requires_cited_proof_cardinality_and_keeps_citations_canonical(state: str) -> None:
+    observations = _eligibility_fixture()
+    eligibility = evaluate_tile_eligibility(observations)
+    one_citation = validate_component_result(
+        "voice_in_action",
+        _component_response(
+            "voice_in_action", [{"tile_id": "ST-VI-01", "state": state, "citations": [observations[0].content_id]}]
+        ),
+        observations,
+        eligibility,
+    )
+    assert one_citation.verdicts[0].reason_code == "citation_proof_requirements_not_met"
+    citations = [observations[1].content_id, observations[0].content_id]
+    accepted = validate_component_result(
+        "voice_in_action",
+        _component_response("voice_in_action", [{"tile_id": "ST-VI-01", "state": state, "citations": citations}]),
+        observations,
+        eligibility,
+    )
+    assert accepted.verdicts[0].state.value == state
+    assert accepted.verdicts[0].citations == tuple(sorted(citations))
+
+
+def test_component_validator_requires_cross_platform_and_linked_pair_citation_proof() -> None:
+    response = _interaction_observation(
+        record_kind="response",
+        external_id="response-3",
+        author_account_id="community-3",
+        author_handle="community-3",
+        parent_external_id="post-1",
+        thread_external_id="post-1",
+    )
+    reply = _interaction_observation(
+        record_kind="reply",
+        external_id="reply-3",
+        author_account_id="brand-account-1",
+        author_handle="brandco",
+        parent_external_id="response-3",
+        thread_external_id="post-1",
+    )
+    observations = [*_eligibility_fixture(), _capture_observation(external_id="post-3", platform="x"), response, reply]
+    eligibility = evaluate_tile_eligibility(observations)
+    by_external_id = {observation.external_id: observation for observation in observations}
+    same_platform = validate_component_result(
+        "cross_channel_consistency",
+        _component_response(
+            "cross_channel_consistency",
+            [
+                {
+                    "tile_id": "ST-CC-01",
+                    "state": "demonstrated",
+                    "citations": [observations[0].content_id, by_external_id["post-3"].content_id],
+                }
+            ],
+        ),
+        observations,
+        eligibility,
+    )
+    unpaired = validate_component_result(
+        "listening_themes",
+        _component_response(
+            "listening_themes",
+            [
+                {
+                    "tile_id": "ST-LT-02",
+                    "state": "demonstrated",
+                    "citations": [
+                        by_external_id["response-1"].content_id,
+                        by_external_id["response-2"].content_id,
+                        by_external_id["reply-3"].content_id,
+                    ],
+                }
+            ],
+        ),
+        observations,
+        eligibility,
+    )
+    assert same_platform.verdicts[0].reason_code == "citation_proof_requirements_not_met"
+    assert unpaired.verdicts[1].reason_code == "citation_proof_requirements_not_met"
+
+
+@pytest.mark.parametrize("tile_id", TILE_IDS)
+def test_component_validator_accepts_authoritative_citations_for_every_catalog_requirement(tile_id: str) -> None:
+    observations = _eligibility_fixture()
+    eligibility = {record.tile_id: record for record in evaluate_tile_eligibility(observations)}
+    component_id = next(component.component_id for component in CATALOG.components if tile_id in component.tile_ids)
+    result = validate_component_result(
+        component_id,
+        _component_response(
+            component_id,
+            [
+                {
+                    "tile_id": tile_id,
+                    "state": "demonstrated",
+                    "citations": list(eligibility[tile_id].relevant_content_ids),
+                }
+            ],
+        ),
+        observations,
+        eligibility.values(),
+    )
+    assert next(verdict for verdict in result.verdicts if verdict.tile_id == tile_id).state is TileState.DEMONSTRATED
+
+
+@pytest.mark.parametrize(
+    ("post_platform", "response_platform", "post_target", "response_target", "with_target_id", "expected"),
+    [
+        ("instagram", "x", "target-a", "target-a", True, False),
+        ("x", "x", "target-a", "target-b", True, False),
+        ("x", "x", "target-a", "target-b", False, False),
+        ("x", "x", "target-a", "target-a", True, True),
+    ],
+)
+def test_parent_edges_require_matching_platform_and_target_scope(
+    post_platform: str,
+    response_platform: str,
+    post_target: str,
+    response_target: str,
+    with_target_id: bool,
+    expected: bool,
+) -> None:
+    post = _capture_observation(
+        external_id="post-1",
+        platform=post_platform,
+        target_fingerprint=f"fingerprint-{post_target}",
+        target_id=post_target if with_target_id else None,
+    )
+    response = _interaction_observation(
+        record_kind="response",
+        external_id="response-1",
+        author_account_id="community-1",
+        author_handle="community-1",
+        parent_external_id="post-1",
+        thread_external_id="post-1",
+        platform=response_platform,
+        target_fingerprint=f"fingerprint-{response_target}",
+        target_id=response_target if with_target_id else None,
+    )
+    reply = _interaction_observation(
+        record_kind="reply",
+        external_id="reply-1",
+        author_account_id="brand-account-1",
+        author_handle="brandco",
+        parent_external_id="response-1",
+        thread_external_id="post-1",
+        platform=response_platform,
+        target_fingerprint=f"fingerprint-{response_target}",
+        target_id=response_target if with_target_id else None,
+    )
+    records = {record.tile_id: record for record in evaluate_tile_eligibility([post, response, reply])}
+    assert records["ST-VI-02"].eligible is expected
+    if expected:
+        result = validate_component_result(
+            "response_behavior",
+            _component_response(
+                "response_behavior",
+                [
+                    {
+                        "tile_id": "ST-RB-01",
+                        "state": "demonstrated",
+                        "citations": [response.content_id, reply.content_id],
+                    }
+                ],
+            ),
+            [post, response, reply],
+            records.values(),
+        )
+        assert result.verdicts[0].state is TileState.DEMONSTRATED
 
 
 def test_component_validator_enforces_citation_subset_and_rejects_model_not_acquired() -> None:
@@ -475,7 +654,11 @@ def test_invalid_siblings_do_not_destroy_valid_known_eligible_tiles() -> None:
     response = _component_response(
         "voice_in_action",
         [
-            {"tile_id": "ST-VI-01", "state": "demonstrated", "citations": [observations[0].content_id]},
+            {
+                "tile_id": "ST-VI-01",
+                "state": "demonstrated",
+                "citations": [observations[0].content_id, observations[1].content_id],
+            },
             {"tile_id": "ST-XX-99", "state": "demonstrated", "citations": [observations[0].content_id]},
         ],
     )
