@@ -948,10 +948,27 @@ def _social_tiles_mode(mode: str | None, analysis: SocialTilesAnalysis) -> str:
     return mode
 
 
+def _social_tiles_provenance_target_map(
+    manifest: TargetManifest, observations: Sequence[SocialObservation]
+) -> dict[str, str]:
+    target_ids = {target.target_id for target in manifest.targets}
+    result: dict[str, str] = {}
+    for observation in observations:
+        linkage = observation.provenance.linkage_evidence
+        target_id = linkage.get("target_id") if isinstance(linkage, Mapping) else None
+        if isinstance(target_id, str) and target_id in target_ids:
+            result[str(observation.content_id)] = target_id
+    if len(manifest.targets) == 1:
+        only_target = manifest.targets[0].target_id
+        for observation in observations:
+            result.setdefault(str(observation.content_id), only_target)
+    return result
+
+
 def _social_tiles_diagnostics(
     manifest: TargetManifest, observations: Sequence[SocialObservation]
 ) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, dict[str, Any]]]:
-    target_map = _observation_target_map(manifest, {}, observations)
+    target_map = _social_tiles_provenance_target_map(manifest, observations)
     source = {"acquisition_matrix": {target.target_id: {} for target in manifest.targets}}
     matrix = _matrix_from_acquisition(manifest, source, observations, target_map, ())
     return matrix, _role_coverage(matrix, observations, target_map, ())

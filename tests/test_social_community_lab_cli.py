@@ -39,6 +39,18 @@ def _manifest():
     )
 
 
+def _two_target_manifest():
+    return parse_target_manifest(
+        {
+            "schema_version": 1,
+            "targets": [
+                {"target_id": "brand-x", "platform": "twitter", "handle": "brandco"},
+                {"target_id": "brand-y", "platform": "instagram", "handle": "brandco_alt"},
+            ],
+        }
+    )
+
+
 def _observations() -> tuple[dict, dict]:
     root = Path(__file__).parents[1] / "fixtures" / "social_lab"
     official = json.loads((root / "official_post.json").read_text(encoding="utf-8"))
@@ -132,6 +144,14 @@ def _social_tiles_analysis(cli: object, *, evaluation_requested: bool) -> object
         observations,
         evaluation_requested=evaluation_requested,
     )
+
+
+def _observation_with_target(cli: object, source: dict, target_id: str) -> dict:
+    row = json.loads(json.dumps(source))
+    row["provenance"]["linkage_evidence"] = {**row["provenance"]["linkage_evidence"], "target_id": target_id}
+    row.pop("content_id")
+    row.pop("semantic_fingerprint")
+    return cli.SocialObservation.from_dict(row).to_dict()
 
 
 def _eligible_acquisition(cli: object) -> dict:
@@ -449,6 +469,38 @@ def test_social_tiles_v2_artifact_has_recomputed_identity_and_empty_legacy_proje
     assert "social_tiles_unavailable" in first["limitations"]
     assert "bounded_non_exhaustive_capture" in first["limitations"]
     assert "score" not in json.dumps(first["social_tiles"]).casefold()
+
+
+def test_social_tiles_v2_reconstructs_multi_target_diagnostics_from_provenance() -> None:
+    cli = _load_cli()
+    official, community = _observations()
+    acquisition = _acquisition()
+    acquisition["observations"] = [
+        _observation_with_target(cli, official, "brand-x"),
+        _observation_with_target(cli, community, "brand-y"),
+    ]
+    acquisition["acquisition_matrix"] = {"forged": {}}
+    observations = [cli.SocialObservation.from_dict(row) for row in acquisition["observations"]]
+    analysis = SocialTilesAnalyzer(lambda *_args: pytest.fail("acquisition-only analysis must not invoke")).analyze(
+        observations, evaluation_requested=False
+    )
+
+    artifact = cli.compose_social_tiles_lab_artifact(_two_target_manifest(), acquisition, analysis)
+    coverage = artifact["role_coverage"]
+    assert set(artifact["acquisition_matrix"]) == {"brand-x", "brand-y"}
+    assert artifact["acquisition_matrix"]["brand-x"]["official_brand_post"]["status"] == "acquired"
+    assert artifact["acquisition_matrix"]["brand-y"]["community_response"]["status"] == "acquired"
+    assert coverage["official_brand_post"]["by_target"]["brand-x"]["count"] == 1
+    assert coverage["official_brand_post"]["by_target"]["brand-y"]["count"] == 0
+    assert coverage["community_response"]["by_target"]["brand-x"]["count"] == 0
+    assert coverage["community_response"]["by_target"]["brand-y"]["count"] == 1
+    assert coverage["official_brand_post"]["target_count"] == coverage["community_response"]["target_count"] == 1
+    assert cli.reconstruct_social_tiles_lab_artifact(artifact) == artifact
+
+    forged = json.loads(json.dumps(artifact))
+    forged["role_coverage"]["official_brand_post"]["by_target"]["brand-x"]["count"] = 0
+    with pytest.raises(cli.SocialCommunityLabCLIError):
+        cli.reconstruct_social_tiles_lab_artifact(forged)
 
 
 def test_social_tiles_v2_composer_recomputes_analysis_and_rejects_mixed_or_tampered_payloads() -> None:
