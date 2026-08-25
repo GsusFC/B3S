@@ -5827,6 +5827,21 @@ class PostgresHistoryRepository:
             context = _sv9_judgment_context(conn, source_scan_id, workspace_slug, False)
         return _sv9_judgment_public_context(context) if context else None
 
+    def resolve_evidence_vault_sv9_judgment_evidence(
+        self, source_scan_id: str, advisory_evidence_refs: list[str], *, workspace_slug: str = "b3s"
+    ) -> dict[str, Any]:
+        refs = _sv9_judgment_advisory_refs(advisory_evidence_refs)
+        self._ensure_migrated()
+        with self._connect() as conn:
+            _verify_exact_migration_head_under_shared_lock(conn)
+            context = _sv9_judgment_context(conn, source_scan_id, workspace_slug, False)
+            if context is None:
+                raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment source scan is unavailable.")
+            rows = conn.execute(f"SELECT id, evidence_ref, content_hash, content, content_raw FROM {_SCHEMA}.evidence_records WHERE capture_id = %s AND evidence_ref = ANY(%s) ORDER BY evidence_ref, content_hash, id", (context["capture_id"], refs)).fetchall()
+        if len(rows) != len(refs) or [str(row["evidence_ref"]) for row in rows] != refs:
+            raise EvidenceVaultSv9JudgmentCandidateError("SV9 advisory evidence is unavailable in this Vault capture.")
+        return {"capture_origin": {"capture_id": str(context["capture_id"]), "capture_fingerprint": str(context["capture_fingerprint"])}, "operation_origin": {"operation_id": str(context["operation_plan_id"]), "operation_fingerprint": str(context["operation_fingerprint"])}, "evidence": [{"evidence_record_id": str(row["id"]), "evidence_ref": str(row["evidence_ref"]), "evidence_fingerprint": str(row["content_hash"]), "content": bytes(row["content_raw"]).decode("utf-8") if row["content_raw"] is not None else str(row["content"])} for row in rows]}
+
     def get_evidence_vault_sv9_judgment_candidate(
         self, source_scan_id: str, *, canonical_plan_fingerprint: str,
         workspace_slug: str = "b3s",
@@ -11492,6 +11507,11 @@ def _sv9_judgment_context(conn: Any, source_scan_id: Any, workspace_slug: Any, f
     if row is None: return None
     _vault_operation_plan_record(row)
     return {"workspace_id": row["workspace_id"], "brand_id": row["brand_id"], "scan_run_id": row["scan_run_id"], "source_scan_id": scan, "capture_id": row["capture_id"], "capture_fingerprint": _require_sha256_text(row["capture_hash"], field="capture_fingerprint"), "operation_plan_id": row["id"], "operation_fingerprint": _require_sha256_text(row["operation_plan_fingerprint"], field="operation_plan_fingerprint")}
+
+def _sv9_judgment_advisory_refs(value: Any) -> list[str]:
+    if type(value) is not list or not value or any(type(row) is not str or not row or row != row.strip() for row in value) or len(set(value)) != len(value):
+        raise EvidenceVaultSv9JudgmentCandidateError("SV9 advisory evidence refs are invalid.")
+    return sorted(value)
 
 def _sv9_judgment_public_context(context: Mapping[str, Any]) -> dict[str, Any]:
     return {name: str(context[name]) for name in ("workspace_id", "brand_id", "scan_run_id", "source_scan_id", "capture_id", "capture_fingerprint", "operation_plan_id", "operation_fingerprint")}

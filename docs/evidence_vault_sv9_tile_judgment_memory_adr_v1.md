@@ -27,4 +27,6 @@ The executable rubric, registry fingerprint, and scoring-policy constants are au
 
 The typed tile-evidence delta preserves tile/component, disposition, evidence references, origins, and fingerprint for PR2. Incremental planning, evaluation, persistence, Scanner/public integration, LLM/I/O/clock/random state, scoring, Social Tiles, and migrations are deferred and non-authoritative in PR1.
 
-Later persistence will use `b3s_history` brand/capture identities, locking, replay/idempotency, and ACL patterns in a dedicated append-only relation. Evidence Vault packets, the claim-tile ledger, migrations 025–028 full-assessment shadow, SQLite `sv9_scans`, and public `report_store` are rejected as judgment authority.
+PR5 added the dedicated append-only PostgreSQL candidate relation. PR6 may only run after successful immutable report publication, behind `BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED=true`; it resolves Flow's advisory refs back to the exact persisted Vault capture before an injected strict component call.
+
+Candidates remain `pending`, `shadow_only`, and cross-scan-untrusted. Exact same capture/plan replay is provider-free; missing accepted occurrence bindings force a full safe workset. The hook neither changes report bytes nor enters selector, API, Markdown, history, ranking, or UI paths. SQLite `sv9_scans`, public `report_store`, and legacy operational shadows remain rejected as judgment authority.

@@ -25,6 +25,21 @@ def test_normalize_url_accepts_domains_and_rejects_bad_inputs():
         normalize_url("http://127.0.0.1")
 
 
+def test_vault_judgment_shadow_is_default_off_and_post_publication(monkeypatch):
+    import inspect
+    from web import scan_runner
+
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
+    monkeypatch.setenv("BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED", "TRUE")
+    assert scan_runner._vault_sv9_judgment_shadow_enabled() is False
+    report = {"score": 64}; scan_runner._run_vault_sv9_judgment_shadow_after_publication(scan_id="safe", repository=object(), payload={}, report=report); assert report == {"score": 64}
+    monkeypatch.setenv("BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED", "true")
+    assert scan_runner._vault_sv9_judgment_shadow_enabled() is True
+    source = inspect.getsource(scan_runner._run)
+    assert source.index("_publish_completed_report(scan_id, report)") < source.index("_run_vault_sv9_judgment_shadow_after_publication(") and 'current_public_score=report.get("score")' in inspect.getsource(scan_runner._run_vault_sv9_judgment_shadow_after_publication)
+
+
 def test_report_store_saves_loads_and_fails_closed_on_corrupt_json(tmp_path, monkeypatch):
     from web import report_store
 

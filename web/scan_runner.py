@@ -361,6 +361,34 @@ def _vault_operational_pipeline_enabled() -> bool:
     )
 
 
+def _vault_sv9_judgment_shadow_enabled() -> bool:
+    return _vault_operational_pipeline_enabled() and os.environ.get(
+        "BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED"
+    ) == "true"
+
+
+def _run_vault_sv9_judgment_shadow_after_publication(
+    *, scan_id: str, repository: Any, payload: Mapping[str, Any], report: Mapping[str, Any]
+) -> None:
+    if not _vault_sv9_judgment_shadow_enabled():
+        return
+    try:
+        from src.config import SV9_FLOW_MODEL
+        from src.features.llm_analyzer import LLMAnalyzer
+        from src.services.evidence_vault_sv9_judgment_shadow import run_evidence_vault_sv9_judgment_shadow
+        from src.sv9.incremental_flow_adapter import FlowSv9StrictComponentAdapter
+        from src.sv9.judgment_memory import build_judgment_series_contract
+
+        flow = (payload.get("flow") or {}) if isinstance(payload, Mapping) else {}
+        candidate = flow.get("candidate") if isinstance(flow, Mapping) else {}
+        pack = candidate.get("evidence_pack") if isinstance(candidate, Mapping) else {}
+        refs = sorted({str(row.get("ref") or "").strip() for row in (pack.get("evidence") or []) if isinstance(row, Mapping) and str(row.get("ref") or "").strip()}) if isinstance(pack, Mapping) else []
+        result = run_evidence_vault_sv9_judgment_shadow(repository=repository, flow=FlowSv9StrictComponentAdapter(LLMAnalyzer(model=os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL") or SV9_FLOW_MODEL)), source_scan_id=scan_id, current_series_contract=build_judgment_series_contract(evaluator_version="evidence-vault-sv9-judgment-shadow-v1", prompt_version="sv9-strict-component-v1", model_version=os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL") or SV9_FLOW_MODEL, flow_version="sv9-flow-strict-component-v1", normalization_version="vault-capture-v1"), advisory_evidence_refs=refs, current_public_score=report.get("score") if isinstance(report, Mapping) else None)
+        _LOG.info("vault SV9 judgment shadow completed", extra={"scan_id": scan_id, **{key: result.get(key) for key in ("status", "reason_code", "exception_class", "calls_issued", "calls_avoided", "reused_tiles", "reopened_tiles", "evaluated_tiles", "tile_diffs", "current_score", "candidate_score", "candidate_fingerprint", "divergence_reasons")}})
+    except Exception as exc:
+        _LOG.warning("vault SV9 judgment shadow failed", extra={"scan_id": scan_id, "reason_code": "shadow_exception", "exception_class": type(exc).__name__})
+
+
 def _canonical_snapshot_from_persisted_vault_capture(
     *,
     scan_id: str,
@@ -821,6 +849,9 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
         _set_phase(scan_id, "report", "running")
         if not _publish_completed_report(scan_id, report):
             return
+        _run_vault_sv9_judgment_shadow_after_publication(
+            scan_id=scan_id, repository=vault_repository, payload=payload, report=report
+        )
     except Exception as exc:  # surface the failure to the UI, never die silently
         traceback.print_exc()
         persisted_status = None

@@ -47,6 +47,7 @@ HOTFIX_FILES = {
     "src/history/migrations/031_evidence_vault_sv9_judgment_candidates.sql",
     "src/history/report_parser.py",
     "src/history/repository.py",
+    "src/config.py",
     "src/services/evidence_vault_acquisition_outcome.py",
     "src/services/evidence_vault_acquisition_runtime.py",
     "src/services/evidence_vault_field_replay.py",
@@ -57,6 +58,7 @@ HOTFIX_FILES = {
     "src/services/evidence_vault_operational_memory.py",
     "src/services/evidence_vault_scan_orchestration.py",
     "src/services/evidence_vault_semantic_analysis_contract.py",
+    "src/services/evidence_vault_sv9_judgment_shadow.py",
     "src/services/scanner_analysis_contract.py",
     "src/services/scanner_evidence_comparison.py",
     "src/services/scanner_report_assessment.py",
@@ -65,6 +67,7 @@ HOTFIX_FILES = {
     "src/sv9/assessment_kernel.py",
     "src/sv9/evaluator.py",
     "src/sv9/incremental_evaluation.py",
+    "src/sv9/incremental_flow_adapter.py",
     "src/sv9/models.py",
     "src/sv9_flow/evidence_worker.py",
     "src/sv9_flow/interpretation_llm_worker.py",
@@ -78,6 +81,7 @@ HOTFIX_FILES = {
     "tests/test_evidence_vault_composite_group_lifecycle.py",
     "tests/test_evidence_vault_cumulative_upgrade_postgres.py",
     "tests/test_evidence_vault_sv9_judgment_candidates_postgres.py",
+    "tests/test_evidence_vault_sv9_judgment_shadow.py",
     "tests/test_evidence_vault_field_replay.py",
     "tests/test_evidence_vault_incremental_executor.py",
     "tests/test_evidence_vault_incremental_refresh.py",
@@ -301,6 +305,7 @@ def test_release_commands_are_select_only_and_never_migrate_with_runtime_dsn():
             fly_config["env"]["BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED"]
             == "false"
         )
+        assert fly_config["env"]["BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED"] == "false"
 
 
 def test_deploy_workflow_builds_and_verifies_the_exact_commit():
@@ -339,6 +344,7 @@ def test_isolated_pr71_vault_config_is_exact_and_fail_closed():
     assert config["env"]["B3S_EXPECTED_RUNTIME_ROLE"] == "b3s_pr71_app_runtime"
     assert config["env"]["B3S_POSTGRES_REQUIRED"] == "true"
     assert config["env"]["BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED"] == "true"
+    assert config["env"]["BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED"] == "false"
     assert config["env"]["B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED"] == "false"
     assert config["env"]["B3S_GOOGLE_OIDC_ENABLED"] == "true"
     assert "B3S_SITE_BASIC_AUTH_ENABLED" not in config["env"]
@@ -567,7 +573,7 @@ def test_pr71_attestation_rejects_tampered_rest_objects(
         (
             [
                 {"filename": filename, "status": "modified"}
-                for filename in sorted(HOTFIX_FILES | {"src/config.py"})
+                for filename in sorted(HOTFIX_FILES | {"src/not_allowlisted.py"})
             ],
             "changed files are not exact",
         ),
