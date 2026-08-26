@@ -374,16 +374,17 @@ def _run_vault_sv9_judgment_shadow_after_publication(
         return
     try:
         from src.config import SV9_FLOW_MODEL
-        from src.features.llm_analyzer import LLMAnalyzer
         from src.services.evidence_vault_sv9_judgment_shadow import run_evidence_vault_sv9_judgment_shadow
         from src.sv9.incremental_flow_adapter import FlowSv9StrictComponentAdapter
         from src.sv9.judgment_memory import build_judgment_series_contract
+        from src.sv9.shadow_component_provider import FlowSv9ShadowJsonProvider, shadow_provider_environment_snapshot
 
         flow = (payload.get("flow") or {}) if isinstance(payload, Mapping) else {}
         candidate = flow.get("candidate") if isinstance(flow, Mapping) else {}
         pack = candidate.get("evidence_pack") if isinstance(candidate, Mapping) else {}
         refs = sorted({str(row.get("ref") or "").strip() for row in (pack.get("evidence") or []) if isinstance(row, Mapping) and str(row.get("ref") or "").strip()}) if isinstance(pack, Mapping) else []
-        result = run_evidence_vault_sv9_judgment_shadow(repository=repository, flow=FlowSv9StrictComponentAdapter(LLMAnalyzer(model=os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL") or SV9_FLOW_MODEL)), source_scan_id=scan_id, current_series_contract=build_judgment_series_contract(evaluator_version="evidence-vault-sv9-judgment-shadow-v1", prompt_version="sv9-strict-component-v1", model_version=os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL") or SV9_FLOW_MODEL, flow_version="sv9-flow-strict-component-v1", normalization_version="vault-capture-v1"), advisory_evidence_refs=refs, current_public_score=report.get("score") if isinstance(report, Mapping) else None)
+        model = os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL") or SV9_FLOW_MODEL
+        result = run_evidence_vault_sv9_judgment_shadow(repository=repository, flow=FlowSv9StrictComponentAdapter(FlowSv9ShadowJsonProvider(), environ=shadow_provider_environment_snapshot(os.environ), model=model), source_scan_id=scan_id, current_series_contract=build_judgment_series_contract(evaluator_version="evidence-vault-sv9-judgment-shadow-v1", prompt_version="sv9-strict-component-v1", model_version=model, flow_version="sv9-flow-strict-component-v1", normalization_version="vault-capture-v1"), advisory_evidence_refs=refs, current_public_score=report.get("score") if isinstance(report, Mapping) else None)
         _LOG.info("vault SV9 judgment shadow completed", extra={"scan_id": scan_id, **{key: result.get(key) for key in ("status", "reason_code", "exception_class", "calls_issued", "calls_avoided", "reused_tiles", "reopened_tiles", "evaluated_tiles", "tile_diffs", "current_score", "candidate_score", "candidate_fingerprint", "divergence_reasons")}})
     except Exception as exc:
         _LOG.warning("vault SV9 judgment shadow failed", extra={"scan_id": scan_id, "reason_code": "shadow_exception", "exception_class": type(exc).__name__})
