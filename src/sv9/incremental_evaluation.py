@@ -1,7 +1,8 @@
 from __future__ import annotations
+from dataclasses import dataclass
 import json
 import re
-from typing import Mapping, Protocol
+from typing import Literal, Mapping, Protocol
 from src.sv9 import assessment_kernel as kernel
 from src.sv9 import incremental_planner as planner
 from src.sv9 import judgment_memory as memory
@@ -15,9 +16,21 @@ _REQUEST_FINGERPRINT = "sv9-strict-component-request-fingerprint-v1"
 _EVALUATION_FINGERPRINT = "sv9-strict-component-evaluation-fingerprint-v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 class IncrementalEvaluationError(ValueError): pass
-class _ProviderFailure(Exception): pass
+@dataclass(frozen=True, slots=True)
+class ComponentEvaluationOutcome:
+    evaluation: Mapping[str, object] | None = None
+    reason_code: Literal["provider_failure"] | None = None
+
+    @classmethod
+    def success(cls, evaluation: Mapping[str, object]) -> "ComponentEvaluationOutcome":
+        return cls(evaluation=evaluation)
+
+    @classmethod
+    def provider_failure(cls) -> "ComponentEvaluationOutcome":
+        return cls(reason_code="provider_failure")
+
 class Sv9StrictComponentFlowPort(Protocol):
-    def evaluate_component(self, request) -> Mapping: ...
+    def evaluate_component(self, request) -> ComponentEvaluationOutcome: ...
 _registry = kernel.build_sv9_tile_contract_registry()
 _COMPONENTS = tuple(row["component_key"] for row in _registry["components"])
 _TILES = tuple((tile["tile_id"], row["component_key"], tile["tile_key"], tile["definition"]) for row in _registry["components"] for tile in row["tiles"])
@@ -116,6 +129,17 @@ def _evaluation(raw, signed=False):
     return result
 def build_component_evaluation(*, component_key, series_fingerprint, request_fingerprint, status, tile_results):
     return _evaluation({"component_key": component_key, "series_fingerprint": series_fingerprint, "request_fingerprint": request_fingerprint, "status": status, "tile_results": tile_results})
+def _outcome(value) -> ComponentEvaluationOutcome | None:
+    if type(value) is not ComponentEvaluationOutcome:
+        return None
+    if value.evaluation is None:
+        return value if value.reason_code == "provider_failure" else None
+    if value.reason_code is not None:
+        return None
+    try:
+        return ComponentEvaluationOutcome.success(_evaluation(value.evaluation, True))
+    except Exception:
+        return None
 def _plan(value):
     _json(value)
     try: plan = planner.validate_incremental_plan(value)
@@ -195,9 +219,15 @@ def _run(plan, packets, responder):
     for index, packet in enumerate(packets):
         upstream = _upstream(plan, workset, judgments, sentinels) if packet["component_key"] == "coherencia" else []
         request = _request(plan, packet, upstream)
-        raw = responder(_canon(request), index)
-        _accept(plan, request, raw, workset, judgments, sentinels)
-        calls.append({"request": request, "evaluation": _evaluation(raw, True)})
+        try:
+            outcome = _outcome(responder(_canon(request), index))
+            if outcome is None or outcome.evaluation is None:
+                return None
+            raw = outcome.evaluation
+            _accept(plan, request, raw, workset, judgments, sentinels)
+            calls.append({"request": request, "evaluation": _evaluation(raw, True)})
+        except Exception:
+            return None
     assessment = _assessment(plan, workset, judgments, sentinels)
     return {"status": "available", "reason_code": None, "assessment": assessment, "candidate_tile_judgments": [judgments[tile] for tile, _component, _key, _definition in _TILES if tile in judgments], "candidate_component_sentinels": [sentinels[component] for component in _COMPONENTS if component in sentinels], "captured_calls": calls, "call_count": len(calls), "calls_avoided": plan["calls_avoided"], "reused_tile_count": 80 - len(plan["tile_workset"]), "evaluated_tile_count": len(plan["tile_workset"])}
 def execute_incremental_evaluation(plan, evidence_packets, flow):
@@ -206,11 +236,12 @@ def execute_incremental_evaluation(plan, evidence_packets, flow):
         bound = _plan(plan); avoided[0] = bound["calls_avoided"]; reused[0] = 80 - len(bound["tile_workset"]); packets = _packets(bound, evidence_packets)
         def call(request, _index):
             calls[0] += 1
-            try: return flow.evaluate_component(request)
-            except Exception as exc: raise _ProviderFailure from exc
-        return _run(bound, packets, call)
-    except _ProviderFailure:
-        return _pending("provider_failure", calls[0], avoided[0], reused[0])
+            try:
+                return flow.evaluate_component(request)
+            except Exception:
+                return ComponentEvaluationOutcome.provider_failure()
+        result = _run(bound, packets, call)
+        return result or _pending("provider_failure", calls[0], avoided[0], reused[0])
     except Exception:
         return _pending("invalid_input", calls[0], avoided[0], reused[0])
 def replay_incremental_evaluation(plan, evidence_packets, captured_calls):
@@ -222,8 +253,9 @@ def replay_incremental_evaluation(plan, evidence_packets, captured_calls):
             raw = captured_calls[index]
             _fields(raw, frozenset({"request", "evaluation"}), "captured call")
             if raw["request"] != request: _fail("captured request does not match replay")
-            return raw["evaluation"]
-        return _run(bound, packets, call)
+            return ComponentEvaluationOutcome.success(raw["evaluation"])
+        result = _run(bound, packets, call)
+        return result or _pending("invalid_replay")
     except Exception:
         return _pending("invalid_replay")
 def replay_incremental_evaluations(plan, evidence_packets, evaluations):
@@ -232,7 +264,11 @@ def replay_incremental_evaluations(plan, evidence_packets, evaluations):
         bound, packets = _plan(plan), _packets(_plan(plan), evidence_packets)
         _json(evaluations)
         if type(evaluations) is not list or len(evaluations) != len(packets): _fail("evaluations do not match workset")
-        return _run(bound, packets, lambda _request, index: evaluations[index])
+        result = _run(
+            bound, packets,
+            lambda _request, index: ComponentEvaluationOutcome.success(evaluations[index]),
+        )
+        return result or _pending("invalid_replay")
     except Exception:
         return _pending("invalid_replay")
 # fmt: on
