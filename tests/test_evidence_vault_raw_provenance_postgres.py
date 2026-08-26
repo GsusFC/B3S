@@ -483,6 +483,7 @@ def test_postgres_upgrade_from_committed_019_applies_later_migrations() -> None:
             "028_evidence_vault_operational_sv9_shadow_diagnostics.sql",
             "029_evidence_vault_semantic_analysis_claims.sql",
             "030_evidence_vault_receipt_evidence_cardinality.sql",
+            "031_evidence_vault_sv9_judgment_candidates.sql",
         ]
         assert repository.migrate() == []
     finally:
@@ -561,7 +562,7 @@ def test_postgres16_createrole_migrator_migrates_with_preexisting_unadministrabl
     )
     try:
         applied = PostgresHistoryRepository(migrator_dsn).migrate()
-        assert applied[-1] == "030_evidence_vault_receipt_evidence_cardinality.sql"
+        assert applied[-1] == "031_evidence_vault_sv9_judgment_candidates.sql"
         with psycopg.connect(dsn) as admin:
             assert admin.execute(
                 """
@@ -804,7 +805,7 @@ def test_postgres_fixed_owner_fail_closed_and_preprovisioned_migrator() -> None:
         )
     try:
         applied = PostgresHistoryRepository(provisioned_dsn).migrate()
-        assert applied[-1] == "030_evidence_vault_receipt_evidence_cardinality.sql"
+        assert applied[-1] == "031_evidence_vault_sv9_judgment_candidates.sql"
         with psycopg.connect(dsn) as admin:
             journal_owners = admin.execute("""
                 SELECT array_agg(DISTINCT owners.rolname), count(*)
@@ -936,7 +937,7 @@ def test_postgres_verified_raw_journals_reject_truncate_and_expose_no_public_exe
             )
     try:
         applied = PostgresHistoryRepository(dsn).migrate()
-        assert applied[-1] == "030_evidence_vault_receipt_evidence_cardinality.sql"
+        assert applied[-1] == "031_evidence_vault_sv9_judgment_candidates.sql"
         receipt = _signed_owned_receipt()
         dumped = receipt.model_dump(mode="json")
         with psycopg.connect(dsn) as conn:

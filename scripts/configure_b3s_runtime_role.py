@@ -31,7 +31,10 @@ from scripts.pr71_vault_database_target import (  # noqa: E402
 
 SCHEMA = "b3s_history"
 MIGRATION_JOURNAL = "schema_migrations"
-EXPECTED_HEAD_VERSION = "030"
+EXPECTED_HEAD_VERSION = "031"
+JUDGMENT_CANDIDATE_RELATIONS = frozenset(
+    {"evidence_vault_sv9_judgment_candidates", "evidence_vault_sv9_judgment_evidence_bindings"}
+)
 WATERMARK_TABLE = "evidence_vault_capture_watermark_events"
 PRIVATE_SHADOW_LEDGER_RELATIONS = frozenset(
     {"evidence_vault_operational_sv9_shadow_assessments"}
@@ -85,6 +88,7 @@ EXPECTED_APPLICATION_TABLES = frozenset(
         "tile_verdicts",
         "workspaces",
     }
+    | JUDGMENT_CANDIDATE_RELATIONS
 )
 EXPECTED_READ_ONLY_VIEWS = frozenset(
     {
@@ -159,7 +163,9 @@ def _verify_exact_head(
     verifier: Callable[[Iterable[tuple[str, str, str, str]], Iterable[Mapping[str, Any]]], None],
 ) -> str:
     if not manifest or manifest[-1][0] != EXPECTED_HEAD_VERSION:
-        raise RuntimeRoleConfigurationError("this runtime grant tool requires packaged migration head 030")
+        raise RuntimeRoleConfigurationError(
+            f"this runtime grant tool requires packaged migration head {EXPECTED_HEAD_VERSION}"
+        )
     rows = conn.execute(
         sql.SQL(
             """
@@ -415,13 +421,11 @@ def _reset_and_grant(
     conn.execute(
         sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(schema_identifier, role_identifier)
     )
-    if app_table_names:
-        conn.execute(
-            sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {} TO {}").format(
-                _relation_list(app_table_names),
-                role_identifier,
-            )
-        )
+    if app_table_names - JUDGMENT_CANDIDATE_RELATIONS:
+        conn.execute(sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {} TO {}").format(
+            _relation_list(app_table_names - JUDGMENT_CANDIDATE_RELATIONS), role_identifier))
+    conn.execute(sql.SQL("GRANT SELECT, INSERT ON TABLE {} TO {}").format(
+        _relation_list(JUDGMENT_CANDIDATE_RELATIONS), role_identifier))
     if sequence_names:
         conn.execute(
             sql.SQL("GRANT USAGE, SELECT ON SEQUENCE {} TO {}").format(
@@ -562,6 +566,12 @@ def _verify_effective_privileges(
                 raise RuntimeRoleConfigurationError(
                     "runtime role retains effective private-ledger access"
                 )
+            continue
+        if name in JUDGMENT_CANDIDATE_RELATIONS:
+            if not all(bool(row[key]) for key in ("can_select", "can_insert")) or any(
+                bool(row[key]) for key in ("can_update", "can_delete", "can_truncate", "can_reference", "can_trigger", "column_update", "column_reference")
+            ):
+                raise RuntimeRoleConfigurationError("SV9 judgment candidate grant exceeds append-only contract")
             continue
         if name in app_table_names:
             if not all(bool(row[key]) for key in ("can_select", "can_insert", "can_update", "can_delete")):

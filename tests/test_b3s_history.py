@@ -567,6 +567,7 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
         "028_evidence_vault_operational_sv9_shadow_diagnostics.sql",
         "029_evidence_vault_semantic_analysis_claims.sql",
         "030_evidence_vault_receipt_evidence_cardinality.sql",
+        "031_evidence_vault_sv9_judgment_candidates.sql",
     ]
     assert "packet_kind" in operational_memory_sql
     assert "operational_source_v2" in operational_memory_sql
@@ -877,7 +878,7 @@ def test_concurrent_release_migration_is_database_serialized() -> None:
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(lambda _index: migrate_concurrently(), range(2)))
-        assert sorted(len(result) for result in results) == [0, 30]
+        assert sorted(len(result) for result in results) == [0, 31]
         assert sorted({filename for result in results for filename in result}) == [
             f"{index:03d}_" + name
             for index, name in enumerate(
@@ -912,6 +913,7 @@ def test_concurrent_release_migration_is_database_serialized() -> None:
                     "evidence_vault_operational_sv9_shadow_diagnostics.sql",
                     "evidence_vault_semantic_analysis_claims.sql",
                     "evidence_vault_receipt_evidence_cardinality.sql",
+                    "evidence_vault_sv9_judgment_candidates.sql",
                 ],
                 start=1,
             )
@@ -975,6 +977,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "028_evidence_vault_operational_sv9_shadow_diagnostics.sql",
             "029_evidence_vault_semantic_analysis_claims.sql",
             "030_evidence_vault_receipt_evidence_cardinality.sql",
+            "031_evidence_vault_sv9_judgment_candidates.sql",
         ]
         assert repository.migrate() == []
 
@@ -1917,6 +1920,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "028_evidence_vault_operational_sv9_shadow_diagnostics.sql",
             "029_evidence_vault_semantic_analysis_claims.sql",
             "030_evidence_vault_receipt_evidence_cardinality.sql",
+            "031_evidence_vault_sv9_judgment_candidates.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0
@@ -1985,7 +1989,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
         assert stored[8] == (
             "b3s_history.evidence_vault_operational_relation_reviews"
         )
-        assert stored[9] == 30
+        assert stored[9] == 31
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")

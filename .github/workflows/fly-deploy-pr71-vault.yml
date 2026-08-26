@@ -126,6 +126,7 @@ jobs:
               "src/history/evidence_vault_raw_repository.py",
               "src/history/migrations/029_evidence_vault_semantic_analysis_claims.sql",
               "src/history/migrations/030_evidence_vault_receipt_evidence_cardinality.sql",
+              "src/history/migrations/031_evidence_vault_sv9_judgment_candidates.sql",
               "src/history/report_parser.py",
               "src/history/repository.py",
               "src/services/evidence_vault_acquisition_outcome.py",
