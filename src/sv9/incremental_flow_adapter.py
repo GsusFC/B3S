@@ -36,30 +36,35 @@ class FlowSv9StrictComponentAdapter:
     def __init__(self, analyzer: Any) -> None:
         self._analyzer = analyzer
 
-    def evaluate_component(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
-        component, tiles, evidence = _request_binding(request)
-        raw = self._analyzer._call_json(
-            "Evaluate only the requested SV9 tiles. Return no prose or extra fields.",
-            json.dumps(dict(request), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-            max_tokens=6000, json_schema=_SCHEMA, schema_name="sv9_strict_component_evaluation", strict_schema=True, temperature=0.0, sanitized_diagnostics=True,
-        )
-        if not isinstance(raw, Mapping) or set(raw) != {"component_key", "series_fingerprint", "request_fingerprint", "status", "tile_results"}:
-            raise FlowSv9StrictComponentAdapterError("component response schema is invalid")
-        result = ie.build_component_evaluation(**dict(raw))
-        if (result["component_key"], result["series_fingerprint"], result["request_fingerprint"]) != (component, request["current_series_fingerprint"], request["canonical_request_fingerprint"]):
-            raise FlowSv9StrictComponentAdapterError("component response identity mismatches request")
-        rows = result["tile_results"]
-        if result["status"] == "not_detected":
-            if tuple(tiles) != ie._COMPONENT_TILES[component]:
-                raise FlowSv9StrictComponentAdapterError("partial component cannot be not detected")
-        elif [row["tile_id"] for row in rows] != tiles:
-            raise FlowSv9StrictComponentAdapterError("component response tiles mismatch request")
-        if any(item not in evidence[row["tile_id"]] for row in rows for item in row["supporting_evidence"]):
-            raise FlowSv9StrictComponentAdapterError("component response invents evidence provenance")
-        return result
+    def evaluate_component(self, request: Mapping[str, Any]) -> ie.ComponentEvaluationOutcome:
+        try:
+            bound = _request_binding(request)
+            if bound is None:
+                return ie.ComponentEvaluationOutcome.provider_failure()
+            component, tiles, evidence = bound
+            raw = self._analyzer._call_json(
+                "Evaluate only the requested SV9 tiles. Return no prose or extra fields.",
+                json.dumps(dict(request), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                max_tokens=6000, json_schema=_SCHEMA, schema_name="sv9_strict_component_evaluation", strict_schema=True, temperature=0.0, sanitized_diagnostics=True,
+            )
+            if not isinstance(raw, Mapping) or set(raw) != {"component_key", "series_fingerprint", "request_fingerprint", "status", "tile_results"}:
+                return ie.ComponentEvaluationOutcome.provider_failure()
+            result = ie.build_component_evaluation(**dict(raw))
+            if (result["component_key"], result["series_fingerprint"], result["request_fingerprint"]) != (component, request["current_series_fingerprint"], request["canonical_request_fingerprint"]):
+                return ie.ComponentEvaluationOutcome.provider_failure()
+            rows = result["tile_results"]
+            if result["status"] == "not_detected" and tuple(tiles) != ie._COMPONENT_TILES[component]:
+                return ie.ComponentEvaluationOutcome.provider_failure()
+            if result["status"] != "not_detected" and [row["tile_id"] for row in rows] != tiles:
+                return ie.ComponentEvaluationOutcome.provider_failure()
+            if any(item not in evidence[row["tile_id"]] for row in rows for item in row["supporting_evidence"]):
+                return ie.ComponentEvaluationOutcome.provider_failure()
+            return ie.ComponentEvaluationOutcome.success(result)
+        except Exception:
+            return ie.ComponentEvaluationOutcome.provider_failure()
 
 
-def _request_binding(request: Mapping[str, Any]) -> tuple[str, list[str], dict[str, list[dict[str, str]]]]:
+def _request_binding(request: Mapping[str, Any]) -> tuple[str, list[str], dict[str, list[dict[str, str]]]] | None:
     try:
         if type(request) is not dict or set(request) != ie._REQUEST_FIELDS:
             raise ValueError
@@ -82,6 +87,6 @@ def _request_binding(request: Mapping[str, Any]) -> tuple[str, list[str], dict[s
         if not tiles or tiles != sorted(tiles, key=ie._ORDER.__getitem__):
             raise ValueError
         return component, tiles, evidence
-    except (AttributeError, KeyError, TypeError, ValueError, ie.IncrementalEvaluationError) as exc:
-        raise FlowSv9StrictComponentAdapterError("component request is invalid") from exc
+    except Exception:
+        return None
 # fmt: on

@@ -1,4 +1,5 @@
 from copy import deepcopy
+import json
 
 import pytest
 
@@ -24,14 +25,18 @@ class _Flow:
     def __init__(self, mode="ok"): self.mode, self.calls = mode, []
     def evaluate_component(self, request):
         self.calls.append(request)
-        if self.mode == "exception": raise RuntimeError("provider")
+        if self.mode == "exception": raise RuntimeError("SECRET_REQUEST SECRET_EVIDENCE SECRET_PROVIDER_RESPONSE")
+        if self.mode == "failure" or (self.mode == "second_failure" and len(self.calls) == 2): return ie.ComponentEvaluationOutcome.provider_failure()
+        if self.mode == "mixed": return ie.ComponentEvaluationOutcome({}, "provider_failure")
+        if self.mode == "empty": return ie.ComponentEvaluationOutcome()
         rows = [{"tile_id": row["tile_id"], "assessment_state": "ok", "supporting_evidence": [{key: evidence[key] for key in ("evidence_ref", "evidence_fingerprint")} for evidence in row["evidence"]]} for row in request["requested_tiles"]]
         rows, status = ([], "not_detected") if self.mode == "not_detected" and request["component_key"] == "mission" else (rows, "evaluated")
         if self.mode == "missing": rows = rows[:-1]
         if self.mode == "duplicate": rows.append(deepcopy(rows[0]))
         if self.mode == "extra": rows.append({**deepcopy(rows[0]), "tile_id": next(tile for tile in ie._COMPONENT_TILES[request["component_key"]] if tile not in {row["tile_id"] for row in rows})})
         if self.mode == "evidence": rows[0]["supporting_evidence"][0]["evidence_fingerprint"] = _hash(99)
-        return [] if self.mode == "malformed" else ie.build_component_evaluation(component_key=request["component_key"], series_fingerprint=request["candidate_series_fingerprint"] if self.mode == "series" else request["current_series_fingerprint"], request_fingerprint=_hash(97) if self.mode == "request" else request["canonical_request_fingerprint"], status=status, tile_results=rows)
+        raw = [] if self.mode == "malformed" else ie.build_component_evaluation(component_key=request["component_key"], series_fingerprint=request["candidate_series_fingerprint"] if self.mode == "series" else request["current_series_fingerprint"], request_fingerprint=_hash(97) if self.mode == "request" else request["canonical_request_fingerprint"], status=status, tile_results=rows)
+        return raw if self.mode == "legacy" else ie.ComponentEvaluationOutcome.success(raw)
 def _prior(): return [_judgment(tile_id=tile, component_key=component) for tile, component in ip._REGISTRY]
 def test_first_execution_binds_evidence_calls_coherencia_last_and_replays():
     plan, flow = ip.build_incremental_plan([], [], _series()), _Flow(); packets = _packets(plan)
@@ -65,8 +70,12 @@ def test_full_sentinel_and_review_or_partial_registry_fail_closed_before_calls()
     assert ie.execute_incremental_evaluation(review, [], blocked)["status"] == "pending" and not blocked.calls
     incomplete = ip.build_incremental_plan([], [], _series(), registry_tile_ids=["M1"]); blocked = _Flow()
     assert ie.execute_incremental_evaluation(incomplete, [], blocked)["status"] == "pending" and not blocked.calls
-@pytest.mark.parametrize("mode", "exception malformed missing duplicate extra series request evidence".split())
+@pytest.mark.parametrize("mode", "exception failure empty mixed legacy malformed missing duplicate extra series request evidence".split())
 def test_provider_and_signed_result_failures_are_atomic_pending(mode):
     plan = ip.build_incremental_plan(_prior(), [_delta()], _series()) if mode == "extra" else ip.build_incremental_plan([], [], _series()); flow = _Flow(mode); result = ie.execute_incremental_evaluation(plan, _packets(plan), flow)
-    assert result["status"] == "pending" and result["assessment"] is None and not result["candidate_tile_judgments"] and not result["captured_calls"] and result["call_count"] == 1 and result["evaluated_tile_count"] == 0
+    assert result["status"] == "pending" and result["reason_code"] == "provider_failure" and result["assessment"] is None and not result["candidate_tile_judgments"] and not result["captured_calls"] and result["call_count"] == 1 and result["evaluated_tile_count"] == 0 and "SECRET_" not in json.dumps(result)
+def test_second_component_failure_discards_prior_outcome_atomically():
+    plan, frozen, flow = ip.build_incremental_plan(_prior(), [_delta()], _series()), None, _Flow("second_failure")
+    frozen = deepcopy(plan); result = ie.execute_incremental_evaluation(plan, _packets(plan), flow)
+    assert plan == frozen and (result["status"], result["reason_code"], result["call_count"], result["assessment"], result["candidate_tile_judgments"], result["captured_calls"]) == ("pending", "provider_failure", 2, None, [], [])
 # fmt: on

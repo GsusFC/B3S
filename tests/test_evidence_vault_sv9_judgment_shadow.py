@@ -49,7 +49,9 @@ class _Analyzer:
         request = json.loads(user)
         self.calls.append({"request": request, "schema": kwargs["json_schema"], "sanitized_diagnostics": kwargs.get("sanitized_diagnostics")})
         if self.mode == "raise":
-            raise RuntimeError("secret provider body")
+            raise RuntimeError("SECRET_PROVIDER_BODY")
+        if self.mode == "malformed":
+            return {"SECRET_PROVIDER_RESPONSE": "SECRET_PROVIDER_BODY"}
         rows = [{
             "tile_id": row["tile_id"], "assessment_state": "ok",
             "supporting_evidence": [{key: row["evidence"][0][key] for key in ("evidence_ref", "evidence_fingerprint")}],
@@ -58,7 +60,7 @@ class _Analyzer:
             rows[0]["supporting_evidence"][0]["evidence_fingerprint"] = _hash(99)
         if self.mode == "missing":
             rows.pop()
-        return {"component_key": request["component_key"], "series_fingerprint": request["current_series_fingerprint"], "request_fingerprint": request["canonical_request_fingerprint"], "status": "evaluated", "tile_results": rows}
+        return {"component_key": request["component_key"], "series_fingerprint": _hash(99) if self.mode == "identity" else request["current_series_fingerprint"], "request_fingerprint": request["canonical_request_fingerprint"], "status": "evaluated", "tile_results": rows}
 
 
 def _run(repository, analyzer, current_public_score=73):
@@ -86,10 +88,22 @@ def test_shadow_evaluates_exact_workset_then_replays_without_provider_calls():
 
 
 def test_shadow_keeps_provider_and_repository_failures_pending_and_sanitized():
-    for repository, analyzer, reason in ((_Repository(), _Analyzer("invented"), "provider_failure"), (_Repository(), _Analyzer("missing"), "provider_failure"), (_Repository(fail_append=True), _Analyzer(), "repository_failure")):
+    for repository, analyzer, reason in ((_Repository(), _Analyzer("raise"), "provider_failure"), (_Repository(), _Analyzer("malformed"), "provider_failure"), (_Repository(), _Analyzer("invented"), "provider_failure"), (_Repository(), _Analyzer("missing"), "provider_failure"), (_Repository(fail_append=True), _Analyzer(), "repository_failure")):
         result = _run(repository, analyzer)
         assert result["status"] == "pending" and result["reason_code"] == reason and len(result["tile_diffs"]) == 80
-        assert "candidate_score" not in result and "secret" not in json.dumps(result)
+        assert "candidate_score" not in result and "secret" not in json.dumps(result) and "SECRET_" not in json.dumps(result)
+
+def test_adapter_returns_closed_failure_for_secret_request_and_provider_errors():
+    from src.sv9 import incremental_evaluation as ie
+    from src.sv9.incremental_flow_adapter import FlowSv9StrictComponentAdapter
+
+    source = _Analyzer(); _run(_Repository(), source); request = source.calls[0]["request"]
+    for mode in ("raise", "malformed", "identity", "invented", "missing"):
+        outcome = FlowSv9StrictComponentAdapter(_Analyzer(mode)).evaluate_component(request)
+        assert type(outcome) is ie.ComponentEvaluationOutcome and outcome.evaluation is None and outcome.reason_code == "provider_failure" and "SECRET_" not in repr(outcome)
+    invalid = deepcopy(request); invalid["requested_tiles"][0]["evidence"][0]["content"] = {"secret": "SECRET_EVIDENCE"}; analyzer = _Analyzer()
+    outcome = FlowSv9StrictComponentAdapter(analyzer).evaluate_component(invalid)
+    assert type(outcome) is ie.ComponentEvaluationOutcome and outcome.evaluation is None and not analyzer.calls and "SECRET_" not in repr(outcome)
 
 
 def test_shadow_never_promotes_cross_scan_memory_or_persists_semantic_content():
