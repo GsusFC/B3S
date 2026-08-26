@@ -226,4 +226,13 @@ def replay_incremental_evaluation(plan, evidence_packets, captured_calls):
         return _run(bound, packets, call)
     except Exception:
         return _pending("invalid_replay")
+def replay_incremental_evaluations(plan, evidence_packets, evaluations):
+    """Replay stored signed evaluations after deterministically rebuilding requests."""
+    try:
+        bound, packets = _plan(plan), _packets(_plan(plan), evidence_packets)
+        _json(evaluations)
+        if type(evaluations) is not list or len(evaluations) != len(packets): _fail("evaluations do not match workset")
+        return _run(bound, packets, lambda _request, index: evaluations[index])
+    except Exception:
+        return _pending("invalid_replay")
 # fmt: on
