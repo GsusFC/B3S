@@ -27,15 +27,23 @@ def test_normalize_url_accepts_domains_and_rejects_bad_inputs():
 
 def test_vault_judgment_shadow_is_default_off_and_post_publication(monkeypatch):
     import inspect
+    import src.services.evidence_vault_sv9_judgment_shadow as shadow
+    import src.sv9.shadow_component_provider as provider
     from web import scan_runner
 
+    constructed, invoked = [], {}
+    monkeypatch.setattr(provider, "FlowSv9ShadowJsonProvider", lambda: constructed.append(True) or object())
+    monkeypatch.setattr(shadow, "run_evidence_vault_sv9_judgment_shadow", lambda **kwargs: invoked.update(kwargs) or {"status": "pending"})
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
     monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
     monkeypatch.setenv("BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED", "TRUE")
     assert scan_runner._vault_sv9_judgment_shadow_enabled() is False
     report = {"score": 64}; scan_runner._run_vault_sv9_judgment_shadow_after_publication(scan_id="safe", repository=object(), payload={}, report=report); assert report == {"score": 64}
+    assert not constructed and not invoked
     monkeypatch.setenv("BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED", "true")
     assert scan_runner._vault_sv9_judgment_shadow_enabled() is True
+    scan_runner._run_vault_sv9_judgment_shadow_after_publication(scan_id="safe", repository=object(), payload={}, report=report)
+    assert constructed == [True] and invoked["current_public_score"] == 64 and type(invoked["flow"]).__name__ == "FlowSv9StrictComponentAdapter"
     source = inspect.getsource(scan_runner._run)
     assert source.index("_publish_completed_report(scan_id, report)") < source.index("_run_vault_sv9_judgment_shadow_after_publication(") and 'current_public_score=report.get("score")' in inspect.getsource(scan_runner._run_vault_sv9_judgment_shadow_after_publication)
 
