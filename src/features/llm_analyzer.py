@@ -183,6 +183,7 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
         strict_schema: bool = True,
         timeout_seconds: int | None = None,
         temperature: float | None = None,
+        sanitized_diagnostics: bool = False,
     ) -> dict:
         """Make an LLM call expecting strict JSON response.
 
@@ -192,6 +193,7 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
         """
         if not self.api_key:
             return {}
+        if sanitized_diagnostics: self.last_raw_response = ""
 
         normalized_schema_name = schema_name if json_schema else None
         effective_temperature = 0.1 if temperature is None else float(temperature)
@@ -309,6 +311,7 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
                 reason = "provider_http_error"
             else:
                 reason = "llm_error"
+            if sanitized_diagnostics: content = ""
             self._record_failure(reason, content)
             self.last_raw_response = content
             _LOG.warning("llm json call failed", extra={"reason": reason, "error": _safe_excerpt(content)})
@@ -326,7 +329,7 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
 
         # Belt-and-suspenders: strip markdown fencing if the model still added it.
         content = content.strip()
-        self.last_raw_response = content
+        self.last_raw_response = "" if sanitized_diagnostics else content
         if content.startswith("```"):
             content = content.split("\n", 1)[1]
             if content.endswith("```"):
@@ -338,6 +341,7 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
             if json_schema is not None and strict_schema:
                 schema_error = _validate_json_schema(parsed, json_schema)
                 if schema_error:
+                    if sanitized_diagnostics: schema_error = "schema_validation_error"
                     self._record_failure(
                         "schema_validation_error",
                         schema_error,
@@ -350,11 +354,11 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
         except json.JSONDecodeError as e:
             _LOG.warning(
                 "llm json parse failed",
-                extra={"error": str(e), "snippet": _safe_excerpt(content, max_chars=220)},
+                extra={"error": "" if sanitized_diagnostics else str(e), "snippet": "" if sanitized_diagnostics else _safe_excerpt(content, max_chars=220)},
             )
             self._record_failure(
                 "llm_error",
-                str(e),
+                "json_parse_error" if sanitized_diagnostics else str(e),
                 error_type="json_parse_error",
                 json_parse_error=True,
             )

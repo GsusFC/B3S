@@ -267,6 +267,9 @@ BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED = os.environ.get(
     "BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED",
     "false",
 ).strip().lower() == "true"
+BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED = (
+    os.environ.get("BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED", "false") == "true"
+)
 
 # Verified raw acquisition remains a Vault-only shadow path.  The web process
 # receives only this public Unix-socket location; worker private-key and ingest
