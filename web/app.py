@@ -40,7 +40,7 @@ from web.report_store import (
     domain_key,
     evidence_claim_tile_ledger_for_domain,
     evidence_scoring_memory_preview_for_domain,
-    list_reports,
+    list_report_payloads_for_index,
     list_reports_for_domain,
     load_report,
     verify_postgres_runtime_ready,
@@ -1058,7 +1058,7 @@ def _report_rows_for_index() -> list[dict[str, Any]]:
 
     grouped: dict[str, list[dict[str, Any]]] = {}
     domain_order: list[str] = []
-    for row in list_reports():
+    for row in list_report_payloads_for_index():
         domain = domain_key(str(row.get("url") or ""))
         if not domain:
             continue
@@ -1068,18 +1068,7 @@ def _report_rows_for_index() -> list[dict[str, Any]]:
         grouped[domain].append(row)
     rows: list[dict[str, Any]] = []
     for domain in domain_order:
-        listed_ids = {
-            str(item.get("id") or "")
-            for item in grouped[domain]
-            if item.get("id")
-        }
-        loaded = [
-            item
-            for item in list_reports_for_domain(domain)
-            if str(item.get("id") or "") in listed_ids
-        ]
-        history = loaded or grouped[domain]
-        selected, classified, _state = selected_report_for_display(history)
+        selected, classified, _state = selected_report_for_display(grouped[domain])
         source = selected or (classified[0] if classified else None)
         if source is None:
             continue
