@@ -237,6 +237,7 @@ _LOG = logging.getLogger(__name__)
 _SCHEMA_POLICIES = frozenset({"migrate", "verify_head"})
 EVIDENCE_VAULT_OPERATIONAL_SV9_SHADOW_WORK_ITEM_MAX_LIMIT = 100
 EVIDENCE_VAULT_OPERATIONAL_SV9_SHADOW_DIAGNOSTIC_MAX_LIMIT = 20
+_REPORT_SNAPSHOT_RAW_CONFLICT_MESSAGE = "report snapshot raw payload failed integrity validation"
 
 
 class SchemaHeadMismatchError(RuntimeError):
@@ -302,6 +303,58 @@ def _build_vault_semantic_report_selector(
         "authority_coverage": shadow["authority_coverage"],
         "verification_requirements": shadow["verification_requirements"],
     }
+
+
+def _decode_report_snapshot_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Decode and verify the exact raw bytes stored for a report snapshot."""
+
+    try:
+        raw = row.get("payload_raw")
+        payload_sha256 = row.get("payload_sha256")
+        source_report_id = str(row.get("source_report_id") or "").strip()
+        if not source_report_id:
+            raise ValueError
+        if raw is None or not isinstance(payload_sha256, str):
+            raise ValueError
+        if re.fullmatch(r"[0-9a-f]{64}", payload_sha256) is None:
+            raise ValueError
+        if isinstance(raw, memoryview):
+            raw_bytes = raw.tobytes()
+        elif isinstance(raw, (bytes, bytearray)):
+            raw_bytes = bytes(raw)
+        else:
+            raise ValueError
+        if hashlib.sha256(raw_bytes).hexdigest() != payload_sha256:
+            raise ValueError
+
+        text = raw_bytes.decode("utf-8", errors="strict")
+
+        def reject_json_constant(_value: str) -> None:
+            raise ValueError
+
+        def parse_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            parsed: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in parsed:
+                    raise ValueError
+                parsed[key] = value
+            return parsed
+
+        payload = json.loads(
+            text,
+            object_pairs_hook=parse_json_object,
+            parse_constant=reject_json_constant,
+            strict=True,
+        )
+        if not isinstance(payload, dict):
+            raise ValueError
+        if "id" in payload:
+            payload_report_id = str(payload["id"] or "").strip()
+            if not payload_report_id or payload_report_id != source_report_id:
+                raise ValueError
+        return payload
+    except Exception:
+        raise ReportConflictError(_REPORT_SNAPSHOT_RAW_CONFLICT_MESSAGE) from None
 
 
 class PostgresHistoryRepository:
@@ -1622,7 +1675,9 @@ class PostgresHistoryRepository:
         with self._connect() as conn:
             row = conn.execute(
                 f"""
-                SELECT report_snapshots.payload
+                SELECT report_snapshots.source_report_id,
+                       report_snapshots.payload_sha256,
+                       report_snapshots.payload_raw
                 FROM {_SCHEMA}.brand_current_state
                 JOIN {_SCHEMA}.report_snapshots
                     ON report_snapshots.evaluation_run_id = brand_current_state.evaluation_run_id
@@ -1631,7 +1686,7 @@ class PostgresHistoryRepository:
                 """,
                 (workspace_slug, domain),
             ).fetchone()
-        return dict(row["payload"]) if row and isinstance(row["payload"], dict) else None
+        return _decode_report_snapshot_row(row) if row is not None else None
 
     def get_report_payload(
         self,
@@ -1645,7 +1700,9 @@ class PostgresHistoryRepository:
         with self._connect() as conn:
             row = conn.execute(
                 f"""
-                SELECT report_snapshots.payload
+                SELECT report_snapshots.source_report_id,
+                       report_snapshots.payload_sha256,
+                       report_snapshots.payload_raw
                 FROM {_SCHEMA}.report_snapshots
                 JOIN {_SCHEMA}.workspaces
                   ON workspaces.id = report_snapshots.workspace_id
@@ -1654,7 +1711,7 @@ class PostgresHistoryRepository:
                 """,
                 (workspace_slug, str(source_report_id)),
             ).fetchone()
-        return dict(row["payload"]) if row and isinstance(row["payload"], dict) else None
+        return _decode_report_snapshot_row(row) if row is not None else None
 
     def list_report_summaries(
         self,
@@ -1712,7 +1769,9 @@ class PostgresHistoryRepository:
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT report_snapshots.payload
+                SELECT report_snapshots.source_report_id,
+                       report_snapshots.payload_sha256,
+                       report_snapshots.payload_raw
                 FROM {_SCHEMA}.report_snapshots
                 JOIN {_SCHEMA}.workspaces
                   ON workspaces.id = report_snapshots.workspace_id
@@ -1729,7 +1788,7 @@ class PostgresHistoryRepository:
                 """,
                 (workspace_slug, domain, limit, offset),
             ).fetchall()
-        return [dict(row["payload"]) for row in rows if isinstance(row["payload"], dict)]
+        return [_decode_report_snapshot_row(row) for row in rows]
 
     def list_report_payloads(
         self,
@@ -1743,7 +1802,9 @@ class PostgresHistoryRepository:
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT report_snapshots.payload
+                SELECT report_snapshots.source_report_id,
+                       report_snapshots.payload_sha256,
+                       report_snapshots.payload_raw
                 FROM {_SCHEMA}.report_snapshots
                 JOIN {_SCHEMA}.workspaces
                   ON workspaces.id = report_snapshots.workspace_id
@@ -1753,7 +1814,7 @@ class PostgresHistoryRepository:
                 """,
                 (workspace_slug, limit),
             ).fetchall()
-        return [dict(row["payload"]) for row in rows if isinstance(row["payload"], dict)]
+        return [_decode_report_snapshot_row(row) for row in rows]
 
     def get_evidence_ledger_shadow(
         self,
