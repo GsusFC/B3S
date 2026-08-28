@@ -22,7 +22,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--target-profile",
-        choices=("pr71-vault",),
+        choices=("pr71-vault", "b3s-vault"),
         help=(
             "Require the immutable isolated target profile. The profile only "
             "accepts B3S_MIGRATION_DATABASE_URL; a URL argument is forbidden."
@@ -78,6 +78,21 @@ def main(argv: list[str] | None = None) -> int:
                 applied = repository.migrate(
                     connection_preflight=lambda connection: (
                         require_pr71_vault_connection(connection, target=target)
+                    )
+                )
+        elif args.target_profile == "b3s-vault":
+            from scripts.b3s_vault_database_target import (
+                b3s_vault_migration_target,
+                require_b3s_vault_connection,
+                validate_b3s_vault_dsn,
+            )
+
+            target = b3s_vault_migration_target()
+            validate_b3s_vault_dsn(database_url, target=target)
+            with without_libpq_environment():
+                applied = repository.migrate(
+                    connection_preflight=lambda connection: (
+                        require_b3s_vault_connection(connection, target=target)
                     )
                 )
         else:

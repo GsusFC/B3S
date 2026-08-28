@@ -1,6 +1,6 @@
 # ADR v2 — Memoria operativa incremental del Evidence Vault
 
-- **Estado:** Núcleo v2 implementado; capability operacional activa solo en PR71 aislado y `b3s-vault` dormant. C7 usa el ciclo normal de baldosa.
+- **Estado:** Núcleo v2 implementado; activación revisada head-031 en `b3s-vault`: captura operacional y memoria de juicio SV9 post-publicación, con verified-raw, worker y diagnostics desactivados. C7 usa el ciclo normal de baldosa.
 - **Fecha:** 2026-08-06
 - **Ámbito inicial:** Vault; validación runtime en `b3s-pr71-vault`
 - **Sustituye:** `evidence_vault_canonical_memory_adr_v1.md`
@@ -298,8 +298,7 @@ No se permiten condicionales por dominio, marca o URL.
 El despliegue es Vault-only y gradual. La configuración aislada PR71 declara
 `BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true`: esa capability conecta el
 scanner web con preparación, ejecución, activación y proyección operacional. No
-activa C7 ni autoriza producción. `b3s-vault` conserva explícitamente la misma
-capability en `false`, por lo que su pipeline incremental permanece dormant.
+activa C7 ni autoriza producción. La activación revisada head-031 de `b3s-vault` declara `BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true`, `BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED=true` solo post-publicación, `BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED=false`, `B3S_VAULT_WORKER_ENABLED=false` y `B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED=false`.
 Desactivar la capability en PR71 conserva capturas, eventos y evaluaciones y
 devuelve ese entorno al diagnóstico explícito.
 
@@ -342,10 +341,7 @@ permanecen pendientes y esta ruta no calcula score por efecto lateral.
 El scanner web invoca estas rutas únicamente cuando concurren
 `BRAND3_ENVIRONMENT=vault` y la capability exacta
 `BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true`. Esa condición se cumple en
-`fly.pr71-vault.toml`; no se cumple en `fly.vault.toml`, donde la capability
-permanece en `false`. Por tanto PR71 ejerce el pipeline operacional mientras
-`b3s-vault` sigue dormant y el score diagnóstico live de ese entorno permanece
-intacto. Cualquier despliegue del pipeline genérico en otro entorno requiere una revisión
+`fly.pr71-vault.toml` y en el `fly.vault.toml` revisado head-031. `b3s-vault` ejecuta captura operacional y juicio SV9 post-publicación; verified-raw, worker y diagnostics siguen desactivados y el score diagnóstico live permanece intacto. Cualquier despliegue del pipeline genérico en otro entorno requiere una revisión
 y autorización separadas. C7 no añade una bandera, allowlist, readiness ni
 ventana de activación propias.
 

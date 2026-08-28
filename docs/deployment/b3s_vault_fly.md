@@ -38,61 +38,37 @@ routes are disabled unless `BRAND3_ENVIRONMENT=vault`. The general evidence
 review journals remain append-only and non-authoritative; operational Vault
 adoption has its own explicit, versioned authority contract.
 
-## Current state: dormant Vault pipeline
+## Current state: operational Vault beta
 
-`fly.vault.toml` keeps `BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=false`. It also
-disables verified-raw acquisition shadow and leaves its worker socket blank.
-`BRAND3_ENVIRONMENT=vault` alone is not an activation capability. This
-deployment launches no acquisition worker or operational planning/execution
-pipeline. C7 has no separate activation state: whenever the generic tile
-pipeline runs, it follows the same capture, review, scoring, report, API, and
-history lifecycle as the other tiles. Verified-raw shadow readiness is an
-optional diagnostic and cannot block product or deployment behavior.
+`fly.vault.toml` requires PostgreSQL and enables persisted Vault capture; SV9 judgment memory runs only after Flow/SV9 publication and cannot change it.
+Verified-raw remains false with an empty socket; no worker, diagnostics, role, secret, or provisioning is enabled.
 
-The release command verifies immutable build identity and then runs only the
-SELECT-only exact packaged head-`023` verifier through the runtime
-`B3S_DATABASE_URL`. It does **not** apply migrations. Migrations `019`–`023` have
-role prerequisites documented in
-[`evidence_vault_provenance_role_runbook_v1.md`](../evidence_vault_provenance_role_runbook_v1.md);
-the Fly config does not provision those roles, logins, keys, or worker secrets.
-Production `fly.toml` has the same SELECT-only release posture. Both deployments
-remain fail closed until a separately authorized, target-attested external
-migration has completed; never grant DDL to `B3S_DATABASE_URL` to bypass it.
+The release fails closed: build identity; migration URL environment; target-profile migration; then exact head-`031` verification.
+The profile reads endpoint, database, user, project, branch, and server port on the DDL connection before its lock; production stays SELECT-only.
 
 ## Provisioning order
 
-1. Create a Neon branch or database isolated from production.
-2. Satisfy the migration-role prerequisites and run the packaged migrations in
-   a separately authorized external job with a target-pinned privileged
-   credential. Do not place that credential in Fly.
-3. Configure Vault's `B3S_DATABASE_URL` as the isolated least-privilege runtime
-   connection, then run the SELECT-only head-`023` verifier.
-4. Copy required provider secrets without printing them.
-5. Set a dedicated `B3S_EVIDENCE_ADJUDICATION_TOKEN` and stable
-   `B3S_EVIDENCE_REVIEWER_ID`; do not reuse `B3S_SCANNER_API_TOKEN`.
-6. Create the `b3s_vault_data` volume in `cdg`.
-7. Validate and deploy with the explicit Vault config:
+1. Confirm the approved `b3s-vault` Neon target; never use production or a `--database-url` override.
+2. Provision Vault `B3S_DATABASE_URL` through Fly secret management; the release passes it only as `B3S_MIGRATION_DATABASE_URL`.
+3. The separately authorized exact-SHA release applies immutable migrations `001`–`031`, verifies head `031`, and provisions neither roles nor workers.
+4. Copy provider secrets without printing; set dedicated `B3S_EVIDENCE_ADJUDICATION_TOKEN` and `B3S_EVIDENCE_REVIEWER_ID`, never reusing `B3S_SCANNER_API_TOKEN`.
+5. Create the `b3s_vault_data` volume in `cdg`.
+6. After authorization, validate and deploy only the clean detached full SHA:
 
    ```bash
-   fly config validate -a b3s-vault -c fly.vault.toml
-   fly deploy --remote-only -a b3s-vault -c fly.vault.toml
+   DEPLOY_SHA="<authorized-full-40-char-SHA>" && git checkout --detach "$DEPLOY_SHA" && observed_head="$(git rev-parse HEAD)" && test "$observed_head" = "$DEPLOY_SHA" && worktree_status="$(git status --porcelain)" && test -z "$worktree_status" && fly config validate -a b3s-vault -c fly.vault.toml && fly deploy --remote-only -a b3s-vault -c fly.vault.toml --build-arg B3S_BUILD_SHA="$DEPLOY_SHA"
    ```
 
-8. Verify `/health`, deployed commit, storage mounts, migration head, and
-   database isolation before field scans.
+7. Verify `/health`, deployed commit, storage mounts, migration head, and database isolation before field scans.
 
 Do not run a Vault deployment with the default `fly.toml`: that file targets
 production.
 
 ## Deployment and rollback NO-GO
 
-A deploy is **NO-GO** while the external migration is unauthorized, the runtime
-SELECT-only verifier cannot prove exact head `023`, database isolation is
-unproven, or the generic operational controls drift. A release-command failure
-must leave the existing Machine in place; it is not permission to run migration
-DDL with the runtime role.
+A deploy is **NO-GO** while the target cannot be attested, head `031` cannot be verified, or Vault-only flags drift. A release failure leaves the existing Machine in place.
 
-No older image is assumed compatible with head `023`; this runbook authorizes
+No older image is assumed compatible with head `031`; this runbook authorizes
 no image-only rollback. Prefer a reviewed forward fix. Any coordinated
 image-plus-database restore requires separate authorization and proof against a
 preserved restore anchor. Never down-migrate in place and never point
