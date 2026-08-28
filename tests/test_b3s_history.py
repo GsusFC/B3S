@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -19,7 +20,12 @@ from scripts.import_b3s_reports_postgres import (
     dry_run_summary,
 )
 from src.history.models import ReportConflictError, ReportImportError
-from src.history.report_parser import canonical_json_hash, normalize_domain, parse_report
+from src.history.report_parser import (
+    canonical_json_bytes,
+    canonical_json_hash,
+    normalize_domain,
+    parse_report,
+)
 from src.services.evidence_claim_reconciliation import (
     EvidenceClaimReconciliationCommand,
     EvidenceClaimReconciliationConflictError,
@@ -117,6 +123,143 @@ def test_repository_connections_use_a_bounded_timeout() -> None:
 
     assert captured["connect_timeout"] == 5
     assert captured["dsn"] == "postgresql://example.test/b3s"
+
+
+def test_full_report_reads_decode_the_exact_raw_snapshot() -> None:
+    from src.history.repository import PostgresHistoryRepository
+
+    payload = {"id": "raw-read", "body": "before\x00after"}
+    raw = canonical_json_bytes(payload)
+    row = {
+        "source_report_id": payload["id"],
+        "payload_sha256": canonical_json_hash(payload),
+        "payload_raw": memoryview(raw),
+    }
+
+    class Result:
+        def fetchone(self):
+            return row
+
+        def fetchall(self):
+            return [row]
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, _params):
+            assert "payload_raw" in sql
+            assert "payload_sha256" in sql
+            assert "source_report_id" in sql
+            assert "report_snapshots.payload\n" not in sql
+            return Result()
+
+    repository = PostgresHistoryRepository(
+        "postgresql://example.test/b3s",
+        connect=lambda *_args, **_kwargs: Connection(),
+    )
+    repository._migrated = True
+
+    assert repository.get_current_report("example.com") == payload
+    assert repository.get_report_payload("raw-read") == payload
+    assert repository.list_report_payloads_for_domain("example.com") == [payload]
+    assert repository.list_report_payloads() == [payload]
+
+
+def test_raw_snapshot_decoder_normalizes_imported_numeric_ids() -> None:
+    from src.history.repository import _decode_report_snapshot_row
+
+    payload = {"id": 42, "body": "before\x00after"}
+    raw = canonical_json_bytes(payload)
+
+    assert _decode_report_snapshot_row(
+        {
+            "source_report_id": " 42 ",
+            "payload_sha256": hashlib.sha256(raw).hexdigest(),
+            "payload_raw": raw,
+        }
+    ) == payload
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("missing raw", "missing_raw"),
+        ("missing hash", "missing_hash"),
+        ("missing source id", "missing_source_id"),
+        ("empty source id", "empty_source_id"),
+        ("malformed hash", "malformed_hash"),
+        ("mismatched hash", "mismatched_hash"),
+        ("invalid utf8", "invalid_utf8"),
+        ("invalid json", "invalid_json"),
+        ("duplicate keys", "duplicate_keys"),
+        ("NaN constant", "nan_constant"),
+        ("Infinity constant", "infinity_constant"),
+        ("non-object", "non_object"),
+        ("zero payload id", "zero_payload_id"),
+        ("id mismatch", "id_mismatch"),
+    ],
+)
+def test_raw_snapshot_integrity_failures_raise_one_safe_conflict(case) -> None:
+    from src.history.repository import _decode_report_snapshot_row
+
+    payload = {"id": "raw-read", "body": "before\x00after"}
+    raw = canonical_json_bytes(payload)
+    row = {
+        "source_report_id": payload["id"],
+        "payload_sha256": canonical_json_hash(payload),
+        "payload_raw": raw,
+    }
+    _label, mutation = case
+    if mutation == "missing_raw":
+        row.pop("payload_raw")
+    elif mutation == "missing_hash":
+        row.pop("payload_sha256")
+    elif mutation == "missing_source_id":
+        row.pop("source_report_id")
+        row["payload_raw"] = canonical_json_bytes({"body": "payload"})
+        row["payload_sha256"] = hashlib.sha256(row["payload_raw"]).hexdigest()
+    elif mutation == "empty_source_id":
+        row["source_report_id"] = "  "
+        row["payload_raw"] = canonical_json_bytes({"body": "payload"})
+        row["payload_sha256"] = hashlib.sha256(row["payload_raw"]).hexdigest()
+    elif mutation == "malformed_hash":
+        row["payload_sha256"] = "A" * 64
+    elif mutation == "mismatched_hash":
+        row["payload_sha256"] = "0" * 64
+    elif mutation == "invalid_utf8":
+        row["payload_raw"] = b"\xff"
+        row["payload_sha256"] = hashlib.sha256(row["payload_raw"]).hexdigest()
+    elif mutation == "invalid_json":
+        row["payload_raw"] = b"{not-json"
+        row["payload_sha256"] = hashlib.sha256(row["payload_raw"]).hexdigest()
+    elif mutation == "duplicate_keys":
+        row["payload_raw"] = b'{"id":"raw-read","id":"other"}'
+        row["payload_sha256"] = hashlib.sha256(row["payload_raw"]).hexdigest()
+    elif mutation == "nan_constant":
+        row["payload_raw"] = b'{"id":"raw-read","value":NaN}'
+        row["payload_sha256"] = hashlib.sha256(row["payload_raw"]).hexdigest()
+    elif mutation == "infinity_constant":
+        row["payload_raw"] = b'{"id":"raw-read","value":Infinity}'
+        row["payload_sha256"] = hashlib.sha256(row["payload_raw"]).hexdigest()
+    elif mutation == "non_object":
+        row["payload_raw"] = b"[]"
+        row["payload_sha256"] = hashlib.sha256(row["payload_raw"]).hexdigest()
+    elif mutation == "zero_payload_id":
+        row["payload_raw"] = canonical_json_bytes({"id": 0})
+        row["payload_sha256"] = hashlib.sha256(row["payload_raw"]).hexdigest()
+    elif mutation == "id_mismatch":
+        row["payload_raw"] = canonical_json_bytes({"id": "other"})
+        row["payload_sha256"] = hashlib.sha256(row["payload_raw"]).hexdigest()
+
+    with pytest.raises(
+        ReportConflictError,
+        match="^report snapshot raw payload failed integrity validation$",
+    ):
+        _decode_report_snapshot_row(row)
 
 
 def test_evidence_ledger_backfill_is_a_noop_when_shadow_is_disabled(monkeypatch) -> None:

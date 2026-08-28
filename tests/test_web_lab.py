@@ -209,6 +209,7 @@ def test_report_store_accepts_identical_postgres_and_file_payloads(
         "url": "https://same.test",
         "created_at": "2026-07-10T10:00:00+00:00",
         "score": 70,
+        "raw": {"font_data": "before\x00after"},
     }
     repository = SimpleNamespace(
         get_report_payload=lambda report_id: report if report_id == "same-id" else None,
@@ -229,6 +230,38 @@ def test_report_store_accepts_identical_postgres_and_file_payloads(
     assert report_store.load_report("same-id") == report
     assert report_store.list_reports() == [report_store._summary_row(report)]
     assert report_store.list_reports_for_domain("same.test") == [report]
+
+
+def test_report_store_does_not_fallback_after_repository_raw_integrity_conflict(
+    tmp_path,
+    monkeypatch,
+):
+    from web import report_store
+
+    file_report = {
+        "id": "raw-integrity-conflict",
+        "brand_name": "File",
+        "url": "https://same.test",
+    }
+
+    class Repository:
+        def get_report_payload(self, _report_id):
+            raise ReportConflictError(
+                "report snapshot raw payload failed integrity validation"
+            )
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    report_store.report_path(file_report["id"]).write_text(
+        json.dumps(file_report),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: Repository())
+
+    with pytest.raises(
+        ReportConflictError,
+        match="^report snapshot raw payload failed integrity validation$",
+    ):
+        report_store.load_report(file_report["id"])
 
 
 def test_report_store_load_fails_closed_for_malformed_same_id_file_after_postgres_load(
