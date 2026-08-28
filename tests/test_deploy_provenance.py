@@ -18,6 +18,10 @@ RELEASE_COMMAND = (
     "sh -lc 'python scripts/verify_release_build.py && "
     "python scripts/verify_b3s_history_postgres.py'"
 )
+VAULT_RELEASE_COMMAND = (
+    "sh -lc 'python scripts/verify_release_build.py && B3S_MIGRATION_DATABASE_URL=\"$B3S_DATABASE_URL\" "
+    "python scripts/migrate_b3s_history_postgres.py --target-profile b3s-vault && python scripts/verify_b3s_history_postgres.py'"
+)
 ISOLATED_RELEASE_COMMAND = (
     "sh -lc 'python scripts/verify_release_build.py && "
     "python scripts/verify_b3s_history_postgres.py && "
@@ -295,17 +299,25 @@ def test_container_persists_immutable_build_identity():
     assert 'org.opencontainers.image.revision="${B3S_BUILD_SHA}"' in dockerfile
 
 
-def test_release_commands_are_select_only_and_never_migrate_with_runtime_dsn():
-    for relative_path in ("fly.toml", "fly.vault.toml"):
-        fly_config = tomllib.loads(_read(relative_path))
-
-        assert fly_config["deploy"]["release_command"] == RELEASE_COMMAND
-        assert "--migrate-only" not in fly_config["deploy"]["release_command"]
-        assert (
-            fly_config["env"]["BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED"]
-            == "false"
-        )
-        assert fly_config["env"]["BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED"] == "false"
+def test_production_stays_select_only_and_vault_release_is_target_attested(tmp_path: Path):
+    production, vault = (tomllib.loads(_read(path)) for path in ("fly.toml", "fly.vault.toml"))
+    assert production["deploy"]["release_command"] == RELEASE_COMMAND
+    assert production["env"]["BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED"] == "false"
+    assert vault["deploy"]["release_command"] == VAULT_RELEASE_COMMAND
+    assert "--database-url" not in vault["deploy"]["release_command"]
+    assert all(vault["env"].get(key, "false") == value for key, value in {"B3S_POSTGRES_REQUIRED": "true", "BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED": "true", "BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED": "true", "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED": "false", "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH": "", "B3S_VAULT_WORKER_ENABLED": "false", "B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED": "false"}.items())
+    runbook = _read("docs/deployment/b3s_vault_fly.md")
+    deployment_chain = ('DEPLOY_SHA="<authorized-full-40-char-SHA>" && git checkout --detach "$DEPLOY_SHA" && observed_head="$(git rev-parse HEAD)" && test "$observed_head" = "$DEPLOY_SHA" && worktree_status="$(git status --porcelain)" && test -z "$worktree_status" && ' "fly config validate -a b3s-vault -c fly.vault.toml && " 'fly deploy --remote-only -a b3s-vault -c fly.vault.toml --build-arg B3S_BUILD_SHA="$DEPLOY_SHA"')
+    assert deployment_chain in runbook
+    segments = deployment_chain.split(" && ")
+    guarded = " && ".join((segments[0], "guard_checkout", 'observed_head="$(guard_head)"', segments[3], 'worktree_status="$(guard_clean)"', segments[5], "guard_config", "guard_deploy"))
+    assert "git " not in guarded and "fly " not in guarded
+    script = "; ".join(("guard_checkout() { return \"$CHECKOUT_STATUS\"; }", 'guard_head() { printf "%s" "$DEPLOY_SHA"; }', "guard_clean() { return \"$CLEAN_STATUS\"; }", "guard_config() { return 0; }", 'guard_deploy() { : > "$DEPLOY_SENTINEL"; }', guarded))
+    for failure in ("checkout", "clean"):
+        sentinel = tmp_path / f"deploy-sentinel-{failure}"
+        result = subprocess.run(["sh", "-c", script], check=False, capture_output=True, text=True, env={**os.environ, "CHECKOUT_STATUS": "17" if failure == "checkout" else "0", "CLEAN_STATUS": "17" if failure == "clean" else "0", "DEPLOY_SENTINEL": str(sentinel)})
+        assert result.returncode != 0
+        assert not sentinel.exists()
 
 
 def test_deploy_workflow_builds_and_verifies_the_exact_commit():
@@ -716,11 +728,8 @@ def test_pr71_runbook_marks_workflow_post_merge_and_separately_authorized():
 
 
 
-def test_vault_adr_distinguishes_pr71_capability_from_dormant_b3s_vault():
+def test_vault_adr_records_reviewed_b3s_vault_activation():
     adr = _read("docs/evidence_vault_canonical_memory_adr_v2.md")
 
-    assert "`BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true`" in adr
-    assert "`b3s-vault` conserva explícitamente" in adr
-    assert "capability en `false`" in adr
-    assert "PR71 ejerce el pipeline operacional" in adr
-    assert "`b3s-vault` sigue dormant" in adr
+    assert all(expected in adr for expected in ("head-031", "`BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true`", "`BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED=true`", "post-publicación", "`BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED=false`", "`B3S_VAULT_WORKER_ENABLED=false`", "`B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED=false`"))
+    assert "dormant" not in adr
