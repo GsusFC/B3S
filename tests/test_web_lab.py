@@ -1124,11 +1124,208 @@ def test_report_store_paginates_all_postgres_summaries(tmp_path, monkeypatch):
     assert len(report_store.list_reports()) == 501
 
 
+def test_report_store_index_payloads_bulk_hydrate_once_and_merge_file_store(
+    tmp_path,
+    monkeypatch,
+):
+    from web import report_store
+
+    duplicate = {
+        "id": "same-id",
+        "brand_name": "Same",
+        "url": "https://same.test",
+        "created_at": "2026-07-10T12:00:00+00:00",
+        "score": 70,
+    }
+    postgres_only = {
+        "id": "postgres-only",
+        "brand_name": "Postgres",
+        "url": "https://postgres.test",
+        "created_at": "2026-07-10T11:00:00+00:00",
+        "score": 71,
+    }
+    file_only = {
+        "id": "file-only",
+        "brand_name": "File",
+        "url": "https://file.test",
+        "created_at": "2026-07-10T13:00:00+00:00",
+        "score": 72,
+    }
+    calls = {"bulk": 0, "get": []}
+
+    class Repository:
+        def list_report_payloads(self, *, limit):
+            calls["bulk"] += 1
+            assert limit == 1000
+            return [duplicate, postgres_only]
+
+        def list_report_summaries(self, *, limit, offset):
+            summaries = [report_store._summary_row(item) for item in (duplicate, postgres_only)]
+            return summaries[offset : offset + limit]
+
+        def get_report_payload(self, report_id):
+            calls["get"].append(report_id)
+            raise AssertionError("bulk-covered report must not be hydrated individually")
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    report_store.report_path(file_only["id"]).write_text(
+        json.dumps(file_only),
+        encoding="utf-8",
+    )
+    report_store.report_path(duplicate["id"]).write_text(
+        json.dumps(duplicate),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: Repository())
+
+    payloads = report_store.list_report_payloads_for_index()
+
+    assert [item["id"] for item in payloads] == [
+        "file-only",
+        "same-id",
+        "postgres-only",
+    ]
+    assert calls == {"bulk": 1, "get": []}
+
+    report_store.report_path(duplicate["id"]).write_text(
+        json.dumps({**duplicate, "score": 69}),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ReportConflictError,
+        match="postgres and file stores with different content",
+    ):
+        report_store.list_report_payloads_for_index()
+
+
+def test_report_store_index_payloads_recovers_ids_beyond_bulk_cap(tmp_path, monkeypatch):
+    from web import report_store
+
+    reports = [
+        {
+            "id": f"report-{index:04d}",
+            "brand_name": "Bulk",
+            "url": "https://bulk.test",
+            "created_at": f"{index:04d}",
+            "score": index,
+        }
+        for index in range(1001)
+    ]
+    by_id = {item["id"]: item for item in reports}
+    calls = {"bulk": 0, "get": []}
+
+    class Repository:
+        def list_report_payloads(self, *, limit):
+            calls["bulk"] += 1
+            assert limit == 1000
+            return reports[:limit]
+
+        def list_report_summaries(self, *, limit, offset):
+            summaries = [report_store._summary_row(item) for item in reports]
+            return summaries[offset : offset + limit]
+
+        def get_report_payload(self, report_id):
+            calls["get"].append(report_id)
+            return by_id.get(report_id)
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: Repository())
+
+    payloads = report_store.list_report_payloads_for_index()
+
+    assert len(payloads) == 1001
+    assert payloads[-1]["id"] == "report-0000"
+    assert calls == {"bulk": 1, "get": ["report-1000"]}
+
+
+def test_report_store_index_discards_staged_postgres_rows_after_summary_failure(
+    tmp_path,
+    monkeypatch,
+):
+    from web import report_store
+
+    file_report = {
+        "id": "file-fallback",
+        "brand_name": "File",
+        "url": "https://file.test",
+        "created_at": "2026-07-10T13:00:00+00:00",
+        "score": 72,
+    }
+    postgres_report = {
+        "id": "staged-postgres",
+        "brand_name": "Postgres",
+        "url": "https://postgres.test",
+        "created_at": "2026-07-10T12:00:00+00:00",
+        "score": 71,
+    }
+
+    class Repository:
+        def list_report_payloads(self, *, limit):
+            return [postgres_report]
+
+        def list_report_summaries(self, *, limit, offset):
+            if offset:
+                raise OSError("summary pagination failed")
+            return [
+                report_store._summary_row(
+                    {
+                        "id": f"summary-{index:03d}",
+                        "brand_name": "Postgres",
+                        "url": "https://postgres.test",
+                        "created_at": f"2026-07-10T12:{index:02d}:00+00:00",
+                        "score": index,
+                    }
+                )
+                for index in range(200)
+            ]
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    report_store.report_path(file_report["id"]).write_text(
+        json.dumps(file_report),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: Repository())
+
+    payloads = report_store.list_report_payloads_for_index()
+
+    assert [item["id"] for item in payloads] == ["file-fallback"]
+
+
+def test_report_store_index_rejects_cap_without_summary_reader(tmp_path, monkeypatch):
+    from src.services.scanner_report_assessment import ScannerReportAssessmentError
+    from web import report_store
+
+    reports = [
+        {
+            "id": f"report-{index:04d}",
+            "brand_name": "Bulk",
+            "url": "https://bulk.test",
+            "created_at": f"{index:04d}",
+            "score": index,
+        }
+        for index in range(1000)
+    ]
+
+    class Repository:
+        def list_report_payloads(self, *, limit):
+            assert limit == 1000
+            return reports
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: Repository())
+
+    with pytest.raises(
+        ScannerReportAssessmentError,
+        match="postgres_report_payloads_incomplete",
+    ):
+        report_store.list_report_payloads_for_index()
+
+
 def test_home_renders_report_list(monkeypatch):
     from web.app import app
 
     monkeypatch.setattr(
-        "web.app.list_reports",
+        "web.app.list_report_payloads_for_index",
         lambda: [
             {
                 "id": "abc123",
@@ -1156,6 +1353,67 @@ def test_home_renders_report_list(monkeypatch):
     assert "Vercel" in response.text
     assert "88" in response.text
     assert "status-tag status-tag--ok status-tag--filled" in response.text
+
+
+def test_home_groups_one_bulk_payload_collection_without_domain_loaders(monkeypatch):
+    from web.app import _report_rows_for_index
+    from web.app import selected_report_for_display as select_reports
+
+    reports = [
+        {
+            "id": "alpha-new",
+            "brand_name": "Alpha",
+            "url": "https://alpha.test",
+            "created_at": "2026-08-03T00:00:00+00:00",
+            "score": 30,
+            "components": [],
+            "raw": {},
+        },
+        {
+            "id": "alpha-old",
+            "brand_name": "Alpha",
+            "url": "https://alpha.test",
+            "created_at": "2026-08-02T00:00:00+00:00",
+            "score": 40,
+            "components": [],
+            "raw": {},
+        },
+        {
+            "id": "beta-only",
+            "brand_name": "Beta",
+            "url": "https://www.beta.test",
+            "created_at": "2026-08-01T00:00:00+00:00",
+            "score": 50,
+            "components": [],
+            "raw": {},
+        },
+    ]
+    collection_calls = []
+    selected_calls = []
+
+    def collect_index_payloads():
+        collection_calls.append(True)
+        return reports
+
+    def select_once(items, **kwargs):
+        selected_calls.append([item["id"] for item in items])
+        return select_reports(items, **kwargs)
+
+    monkeypatch.setattr("web.app.list_report_payloads_for_index", collect_index_payloads)
+    monkeypatch.setattr(
+        "web.app.list_reports_for_domain",
+        lambda _domain: pytest.fail("index must not load reports per domain"),
+    )
+    monkeypatch.setattr("web.app.selected_report_for_display", select_once)
+
+    rows = _report_rows_for_index()
+
+    assert len(collection_calls) == 1
+    assert selected_calls == [["alpha-new", "alpha-old"], ["beta-only"]]
+    assert [(row["brand_domain"], row["id"]) for row in rows] == [
+        ("alpha.test", "alpha-new"),
+        ("beta.test", "beta-only"),
+    ]
 
 
 def test_vault_recapture_keeps_selected_sv9_report_id(monkeypatch):
@@ -1232,7 +1490,7 @@ def test_home_lists_one_selected_analysis_per_brand(monkeypatch):
     }
 
     monkeypatch.setenv("B3S_CANONICAL_ENFORCEMENT_MODE", "repeated")
-    monkeypatch.setattr("web.app.list_reports", lambda: [newer, older])
+    monkeypatch.setattr("web.app.list_report_payloads_for_index", lambda: [newer, older])
     monkeypatch.setattr(
         "web.app.list_reports_for_domain",
         lambda _domain: [newer, older],
@@ -1289,7 +1547,7 @@ def test_home_publishes_gemini_sv9_over_semantic_v3_baseline(monkeypatch):
     }
 
     monkeypatch.setenv("B3S_CANONICAL_ENFORCEMENT_MODE", "repeated")
-    monkeypatch.setattr("web.app.list_reports", lambda: [sv9, semantic])
+    monkeypatch.setattr("web.app.list_report_payloads_for_index", lambda: [sv9, semantic])
     monkeypatch.setattr(
         "web.app.list_reports_for_domain",
         lambda _domain: [sv9, semantic],
@@ -1334,7 +1592,7 @@ def test_home_hides_a_later_drifted_scan_behind_selected_score(monkeypatch):
     }
 
     monkeypatch.setenv("B3S_CANONICAL_ENFORCEMENT_MODE", "repeated")
-    monkeypatch.setattr("web.app.list_reports", lambda: [drifted, baseline])
+    monkeypatch.setattr("web.app.list_report_payloads_for_index", lambda: [drifted, baseline])
     monkeypatch.setattr(
         "web.app.list_reports_for_domain",
         lambda _domain: [drifted, baseline],

@@ -71,6 +71,7 @@ from src.services.scanner_report_assessment import (
 
 _LOG = logging.getLogger(__name__)
 _POSTGRES_PAGE_SIZE = 200
+_POSTGRES_INDEX_PAYLOAD_LIMIT = 1000
 
 
 def reports_dir() -> Path:
@@ -251,6 +252,81 @@ def load_report(scan_id: str) -> dict[str, Any] | None:
             report_id=str(scan_id),
         )
     return postgres_report or file_report
+
+
+def list_report_payloads_for_index() -> list[dict[str, Any]]:
+    """Return every validated report payload for one home-page request."""
+
+    reports_by_id: dict[str, dict[str, Any]] = {}
+    repository = _postgres_repository()
+    if repository is not None:
+        postgres_reports_by_id: dict[str, dict[str, Any]] = {}
+        try:
+            bulk_reader = getattr(repository, "list_report_payloads", None)
+            summary_ids: list[str] = []
+            bulk_count: int | None = None
+            if callable(bulk_reader):
+                bulk_rows = list(bulk_reader(limit=_POSTGRES_INDEX_PAYLOAD_LIMIT))
+                bulk_count = len(bulk_rows)
+                for report in bulk_rows:
+                    if not isinstance(report, dict):
+                        raise ScannerReportAssessmentError("postgres_report_payload_invalid")
+                    report_id = str(report.get("id") or "")
+                    if not report_id:
+                        continue
+                    if _is_report_summary(report):
+                        summary_ids.append(report_id)
+                        continue
+                    assessment_projection_from_report(report)
+                    postgres_reports_by_id[report_id] = report
+
+            summary_reader = getattr(repository, "list_report_summaries", None)
+            if callable(summary_reader):
+                summaries = _all_postgres_pages(summary_reader)
+                summary_ids.extend(str(row.get("id") or "") for row in summaries if str(row.get("id") or ""))
+            elif bulk_count is not None and bulk_count >= _POSTGRES_INDEX_PAYLOAD_LIMIT:
+                raise ScannerReportAssessmentError("postgres_report_payloads_incomplete")
+
+            for report_id in dict.fromkeys(summary_ids):
+                if report_id in postgres_reports_by_id:
+                    continue
+                payload = _postgres_report_payload_for_identity(
+                    repository,
+                    report_id,
+                )
+                if payload is None:
+                    raise ScannerReportAssessmentError("postgres_report_payload_missing")
+                postgres_reports_by_id[report_id] = payload
+            reports_by_id.update(postgres_reports_by_id)
+        except (ReportConflictError, ScannerReportAssessmentError):
+            raise
+        except Exception:
+            _LOG.exception("failed to list report payloads for index from postgres")
+
+    directory = reports_dir()
+    if directory.is_dir():
+        for path in directory.glob("*.json"):
+            report = _read_report_file(path, expected_id=path.stem)
+            report_id = str(report.get("id") or path.stem)
+            existing = reports_by_id.get(report_id)
+            if existing is not None:
+                _assert_duplicate_report_identity(
+                    existing,
+                    report,
+                    report_id=report_id,
+                )
+                continue
+            reports_by_id[report_id] = report
+
+    reports = list(reports_by_id.values())
+    reports.sort(
+        key=lambda report: (
+            str(report.get("created_at") or ""),
+            str(report.get("id") or ""),
+        ),
+        reverse=True,
+    )
+    return reports
 
 
 def list_reports() -> list[dict[str, Any]]:
