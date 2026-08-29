@@ -5892,6 +5892,38 @@ class PostgresHistoryRepository:
             context = _sv9_judgment_context(conn, source_scan_id, workspace_slug, False)
         return _sv9_judgment_public_context(context) if context else None
 
+    def load_evidence_vault_sv9_authoritative_relation_facts(
+        self, source_scan_id: str, *, workspace_slug: str = "b3s"
+    ) -> dict[str, Any] | None:
+        """Read one locked, replayed Vault-only relation projection input."""
+
+        self._ensure_migrated()
+        with self._connect() as conn:
+            _verify_exact_migration_head_under_shared_lock(conn)
+            context = _sv9_judgment_context(conn, source_scan_id, workspace_slug, True)
+            if context is None:
+                return None
+            operation = _vault_operation_plan_record(
+                _vault_operation_row(conn, workspace_slug=workspace_slug, source_scan_id=str(context["source_scan_id"]), for_update=False)
+            )
+            if operation["status"] not in {"completed", "not_required"}:
+                return None
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_advisory_lock_key(context["brand_id"], "evidence-vault-canonical-promotion"),))
+            rows = conn.execute(
+                f"SELECT id, evidence_ref, content_hash, source, source_class, evidence_type, url, content, content_raw, confidence, metadata FROM {_SCHEMA}.evidence_records WHERE capture_id = %s ORDER BY evidence_ref, content_hash, id",
+                (context["capture_id"],),
+            ).fetchall()
+            evidence = []
+            for row, value in zip(rows, _capture_evidence_rows(rows), strict=True):
+                identity = project_evidence_memory_row_identity(value, brand_domain=str(context["canonical_domain"]))
+                evidence.append({"workspace_id": str(context["workspace_id"]), "brand_id": str(context["brand_id"]), "source_scan_id": str(context["source_scan_id"]), "canonical_domain": str(context["canonical_domain"]), "capture_id": str(context["capture_id"]), "evidence_record_id": str(row["id"]), "evidence_ref": value["ref"], "evidence_fingerprint": str(row["content_hash"]), "evidence_id": identity and identity["evidence_id"], "source_identity_id": identity and identity["document_id"]})
+            chain = _project_vault_operational_memory_authority_chain(conn, context["brand_id"])
+            authority = None
+            if chain:
+                memory, event = chain[-1]
+                authority = {"witness": {"canonical_memory_version": memory["canonical_memory_version"], "adoption_event_id": event["event_id"], "adoption_sequence": event["sequence"], "candidate_packet_fingerprint": event["candidate_packet_fingerprint"], "request_fingerprint": event["request_fingerprint"]}, "accepted": _sv9_authoritative_relation_accepted(conn, context, memory)}
+            return {"source": _sv9_judgment_public_context(context) | {"workspace_slug": str(workspace_slug).strip(), "operation_status": operation["status"]}, "evidence": evidence, "authority": authority}
+
     def resolve_evidence_vault_sv9_judgment_evidence(
         self, source_scan_id: str, advisory_evidence_refs: list[str], *, workspace_slug: str = "b3s"
     ) -> dict[str, Any]:
@@ -11629,6 +11661,56 @@ def _sv9_judgment_advisory_refs(value: Any) -> list[str]:
 
 def _sv9_judgment_public_context(context: Mapping[str, Any]) -> dict[str, Any]:
     return {name: str(context[name]) for name in ("workspace_id", "brand_id", "scan_run_id", "source_scan_id", "canonical_domain", "capture_id", "capture_fingerprint", "operation_plan_id", "operation_fingerprint")}
+
+def _sv9_authoritative_relation_source_operation(conn: Any, brand_id: Any, source: Mapping[str, Any]) -> None:
+    resolution, packet = source["reference_resolution"], source["packet"]
+    expected = {"schema_version", "operation_plan_fingerprint", "observation_hash", "result_fingerprint", "source_candidate_packet_fingerprint"}
+    if set(resolution) != expected or resolution["schema_version"] != "evidence-vault-operational-source-resolution-v1" or resolution["source_candidate_packet_fingerprint"] != packet["candidate_packet_fingerprint"]: raise EvidenceVaultOperationalAuthorityError("Operational source provenance is invalid.")
+    rows = conn.execute(f"SELECT * FROM {_SCHEMA}.evidence_vault_operation_plans WHERE brand_id = %s AND operation_plan_fingerprint = %s AND observation_hash = %s AND result_fingerprint = %s", (brand_id, resolution["operation_plan_fingerprint"], resolution["observation_hash"], resolution["result_fingerprint"])).fetchall()
+    if len(rows) != 1: raise EvidenceVaultOperationalAuthorityError("Operational source has no unique durable operation.")
+    operation = _vault_operation_plan_record(rows[0])
+    if operation["status"] != "completed" or (operation["result_payload"] or {}).get("source_candidate_packet") != packet: raise EvidenceVaultOperationalAuthorityError("Operational source is not bound to its completed result.")
+
+def _sv9_authoritative_relation_accepted(conn: Any, context: Mapping[str, Any], memory: Mapping[str, Any]) -> list[dict[str, Any]]:
+    if memory.get("brand_identity") != context["canonical_domain"] or memory.get("lifecycle_state") != "active" or memory.get("authority") is not True: raise EvidenceVaultOperationalAuthorityError("Operational memory is not active Vault authority.")
+    registry = {str(row["tile_id"]): str(row["component_key"]) for row in build_tile_contract_registry()["tiles"]}; order = {tile: index for index, tile in enumerate(registry)}
+    accepted, rows = memory.get("content", {}).get("accepted_tiles"), []
+    if not isinstance(accepted, list): raise EvidenceVaultOperationalAuthorityError("Operational accepted tiles are unavailable.")
+    for value in accepted:
+        if not isinstance(value, Mapping): raise EvidenceVaultOperationalAuthorityError("Operational accepted tile is invalid.")
+        tile, component, source_fingerprint = str(value.get("tile_id") or ""), str(value.get("component_key") or ""), str(value.get("source_candidate_packet_fingerprint") or "")
+        if registry.get(tile) != component or not _is_sha256(source_fingerprint): raise EvidenceVaultOperationalAuthorityError("Operational accepted tile identity is invalid.")
+        source_rows = conn.execute(f"SELECT * FROM {_SCHEMA}.evidence_vault_canonical_memory_packets WHERE brand_id = %s AND packet_fingerprint = %s AND packet_kind IN ('operational_source_v2', 'operational_reviewed_v2')", (context["brand_id"], source_fingerprint)).fetchall()
+        if len(source_rows) != 1: raise EvidenceVaultOperationalAuthorityError("Operational accepted tile source is ambiguous.")
+        source_row, source = source_rows[0], _vault_operational_source_packet_record(source_rows[0])
+        if source["packet"]["manifest"].get("brand_identity") != context["canonical_domain"]: raise EvidenceVaultOperationalAuthorityError("Operational accepted tile crosses brands.")
+        source_tiles = [dict(row) for row in source["packet"].get("candidate_tiles") or [] if isinstance(row, Mapping) and row.get("tile_id") == tile]
+        if len(source_tiles) != 1 or any(value.get(name) != source_tiles[0].get(other) for name, other in {"semantic_state": "candidate_state", "basis": "basis", "coverage_refs": "coverage_refs", "unresolved_refs": "unresolved_refs", "source_delta_kind": "delta_kind"}.items()): raise EvidenceVaultOperationalAuthorityError("Operational accepted tile does not match its source.")
+        profile, actor = value.get("authority_profile_id"), value.get("authority_source")
+        if actor == "policy":
+            if profile != SCANNER_SEMANTIC_PROFILE_ID or source_row["packet_kind"] != "operational_source_v2": raise EvidenceVaultOperationalAuthorityError("Operational policy profile is not scanner-authoritative.")
+            _sv9_authoritative_relation_source_operation(conn, context["brand_id"], source)
+            decision = evaluate_scanner_semantic_authority(candidate_tile=source_tiles[0], authority_matrix=build_initial_authority_profile_matrix())
+            validate_authority_decision(decision, candidate_tile=source_tiles[0])
+            if value.get("decision_event_id") is not None or any(value.get(name) != decision.get(name) for name in ("authority_profile_id", "authority_matrix_fingerprint", "authority_decision_fingerprint")): raise EvidenceVaultOperationalAuthorityError("Operational scanner policy provenance is invalid.")
+        elif actor == "human":
+            if profile != "human-reviewed-relation-v1" or source_row["packet_kind"] != "operational_reviewed_v2" or source["reference_resolution"].get("schema_version") != "evidence-vault-operational-reviewed-resolution-v1": raise EvidenceVaultOperationalAuthorityError("Operational human profile is invalid.")
+            _validate_operational_reviewed_source_events(conn, brand_id=context["brand_id"], source_row=source_row, source_packet=source["packet"])
+            origins = conn.execute(f"SELECT * FROM {_SCHEMA}.evidence_vault_canonical_memory_packets WHERE brand_id = %s AND packet_fingerprint = %s AND packet_kind = 'operational_source_v2'", (context["brand_id"], source["reference_resolution"].get("source_candidate_packet_fingerprint"))).fetchall()
+            if len(origins) != 1: raise EvidenceVaultOperationalAuthorityError("Operational human source is ambiguous.")
+            origin = _vault_operational_source_packet_record(origins[0]); origin_resolution = origin["reference_resolution"]
+            if origin_resolution.get("schema_version") == "evidence-vault-operational-source-resolution-v1": _sv9_authoritative_relation_source_operation(conn, context["brand_id"], origin)
+            elif origin_resolution.get("schema_version") == "evidence-vault-exact-relation-source-resolution-v1" and origin_resolution.get("source_kind") == "exact_relation_supplement":
+                validate_exact_relation_supplement_structure(origin_resolution["artifact"])
+                if build_exact_relation_source_resolution(origin_resolution["artifact"], source_candidate_packet=origin["packet"]) != origin_resolution: raise EvidenceVaultOperationalAuthorityError("Operational exact human source is invalid.")
+            else: raise EvidenceVaultOperationalAuthorityError("Operational human source provenance is invalid.")
+            if value.get("decision_event_id") not in {row.get("decision_event_id") for row in source_tiles[0].get("basis") or [] if isinstance(row, Mapping) and row.get("review_status") == "accepted"}: raise EvidenceVaultOperationalAuthorityError("Operational human decision provenance is invalid.")
+        else: raise EvidenceVaultOperationalAuthorityError("Operational accepted tile has no supported authority source.")
+        basis = [dict(row) for row in source_tiles[0].get("basis") or [] if isinstance(row, Mapping)]
+        if not basis or any(row.get("polarity") not in {"supports", "contradicts", "demonstrates_absence"} for row in basis): raise EvidenceVaultOperationalAuthorityError("Operational accepted basis is not projectable.")
+        rows.append({"tile_id": tile, "component_key": component, "authority_state": "accepted", "review_state": "resolved", "lifecycle_state": "active", "basis": basis})
+    if len({row["tile_id"] for row in rows}) != len(rows): raise EvidenceVaultOperationalAuthorityError("Operational accepted tile ids are duplicated.")
+    return sorted(rows, key=lambda row: order[row["tile_id"]])
 
 def _sv9_judgment_binding_rows(candidate: Mapping[str, Any]) -> dict[str, str]:
     rows: dict[str, str] = {}
