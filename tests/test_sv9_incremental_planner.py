@@ -238,6 +238,17 @@ def test_review_blocks_coherencia_dependency_and_provider_calls(disposition):
     assert result["expected_calls"] == 0 and result["calls_avoided"] == 2
 
 
+def test_reviewed_tile_does_not_freeze_an_independent_delta_component():
+    result = plan(
+        [judgment("M1"), judgment("A1"), judgment("C1")],
+        [delta("M1", "human_review_required", 8), delta("A1", "relevant", 9)],
+        ids=("M1", "A1", "C1"),
+    )
+    assert result["items"][0]["action"] == "human_review_required"
+    assert result["component_workset"] == ["attributes", "coherencia"]
+    assert result["expected_calls"] == 2
+
+
 def test_same_series_component_sentinel_reuses_all_tiles_without_calls():
     ids = component_ids("mission")
     prior = sentinel()

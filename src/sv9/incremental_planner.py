@@ -150,10 +150,6 @@ def _apply_sentinels(items, sentinels, delta, current_fp):
 
 
 def _invalidate_coherencia(items):
-    if any(row["action"] in _REVIEW_ACTIONS for row in items):
-        for row in items:
-            row["expected_call_contribution"] = False
-        return
     upstream = [row for row in items if row["component_key"] != "coherencia" and row["expected_call_contribution"]]
     if not upstream:
         return
