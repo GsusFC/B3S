@@ -58,7 +58,7 @@ def test_b3s_profile_attests_same_connection(monkeypatch, capsys):
             observed["pgoptions"] = os.environ.get("PGOPTIONS")
             connection_preflight(connection)
             observed["preflight_connection"] = connection
-            return ["031_evidence_vault_sv9_judgment_candidates.sql"]
+            return ["032_evidence_vault_sv9_judgment_authority.sql"]
 
     monkeypatch.setenv("B3S_MIGRATION_DATABASE_URL", _TARGET_DSN)
     monkeypatch.setenv("PGOPTIONS", "-c neon.branch_id=br-wrong")
@@ -66,7 +66,7 @@ def test_b3s_profile_attests_same_connection(monkeypatch, capsys):
     monkeypatch.setattr(
         repository_module,
         "_migration_manifest",
-        lambda: [("031", "031_evidence_vault_sv9_judgment_candidates.sql", "a" * 64, "SELECT 1")],
+        lambda: [("032", "032_evidence_vault_sv9_judgment_authority.sql", "a" * 64, "SELECT 1")],
     )
 
     assert migration_cli.main(["--target-profile", "b3s-vault"]) == 0
