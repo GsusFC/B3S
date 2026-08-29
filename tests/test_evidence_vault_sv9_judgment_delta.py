@@ -1,4 +1,6 @@
 from copy import deepcopy
+import json
+from pathlib import Path
 
 import pytest
 
@@ -23,10 +25,28 @@ def _relation(tile, disposition, number):
     )
 
 
-def _build(*, evidence=(3,), prior=(), relations=(), series=None):
+def _sentinel(component="mission", **changes):
+    reference = next(row for row in _accepted_memory() if row["component_key"] == component)
+    return ip.build_component_not_detected_sentinel(
+        component_key=component,
+        status="not_detected",
+        supporting_evidence=[],
+        capture_origin=reference["capture_origin"],
+        operation_origin=reference["operation_origin"],
+        series_contract=reference["series_contract"],
+        authority_state="accepted",
+        review_state="none",
+        lifecycle_state="active",
+        lifecycle_reason="",
+        **changes,
+    )
+
+
+def _build(*, evidence=(3,), prior=(), sentinels=(), relations=(), series=None):
     return delta.build_evidence_vault_sv9_judgment_delta(
         current_evidence=delta.build_evidence_identity_set(_evidence(*evidence)),
         prior_judgments=list(prior),
+        prior_component_sentinels=list(sentinels),
         authoritative_relations=list(relations),
         current_series_contract=_series() if series is None else series,
     )
@@ -39,6 +59,25 @@ def test_same_evidence_replays_to_exact_reuse():
     assert first["delta_projections"] == [] and first["plan"]["expected_calls"] == 0
     assert {row["action"] for row in first["plan"]["items"]} == {"reuse_canonical"}
     assert delta.validate_evidence_vault_sv9_judgment_delta(first) == first
+
+
+def test_current_v2_binds_sentinels_and_base_v1_fixture_replays_unchanged():
+    sentinel = _sentinel()
+    current = _build(
+        prior=[row for row in _accepted_memory() if row["component_key"] != "mission"], sentinels=[sentinel]
+    )
+    assert current["schema_version"] == delta.JUDGMENT_DELTA_VERSION
+    assert current["plan"]["schema_version"] == ip.PLAN_VERSION
+    assert current["prior_component_sentinels"] == current["plan"]["prior_component_sentinels"] == [sentinel]
+    assert current == _build(
+        prior=[row for row in _accepted_memory() if row["component_key"] != "mission"], sentinels=[sentinel]
+    )
+    assert delta.validate_evidence_vault_sv9_judgment_delta(current) == current
+    fixture = json.loads(Path("tests/fixtures/evidence_vault_sv9_judgment_delta_v1_rollover_review.json").read_text())
+    legacy = delta.validate_evidence_vault_sv9_judgment_delta(fixture)
+    assert legacy == fixture and legacy["schema_version"] == delta.LEGACY_JUDGMENT_DELTA_VERSION
+    assert legacy["plan"]["schema_version"] == ip.LEGACY_PLAN_VERSION
+    assert legacy["plan"]["review_set"] == ["M1", "A1"] and len(legacy["plan"]["tile_workset"]) == 78
 
 
 def test_one_evidence_identity_can_target_multiple_tiles_and_coherencia():

@@ -144,8 +144,9 @@ def _plan(value):
     _json(value)
     try: plan = planner.validate_incremental_plan(value)
     except Exception as exc: raise IncrementalEvaluationError("invalid incremental plan") from exc
-    if plan["registry_tile_ids"] != [row[0] for row in _TILES] or plan["review_set"]: _fail("plan is not a complete executable nonreview registry")
+    if plan["registry_tile_ids"] != [row[0] for row in _TILES]: _fail("plan is not a complete executable registry")
     if plan["component_workset"] != [component for component in _COMPONENTS if component in plan["component_workset"]]: _fail("plan components are not canonical")
+    _frozen(plan, set(plan["tile_workset"]))
     return plan
 def _packets(plan, values):
     _json(values)
@@ -167,8 +168,20 @@ def _request(plan, packet, upstream):
     raw["canonical_request_fingerprint"] = memory.canonical_fingerprint(_REQUEST_FINGERPRINT, raw)
     return raw
 def _frozen(plan, workset):
-    judgments = {row["tile_id"]: row for row in plan["prior_judgments"] if row["tile_id"] not in workset}
-    sentinels = {row["component_key"]: row for row in plan["prior_component_sentinels"] if not any(tile in workset for tile in _COMPONENT_TILES[row["component_key"]])}
+    current, judgments, sentinels = plan["current_series_fingerprint"], {}, {}
+    for raw in plan["prior_judgments"]:
+        try: row = memory.validate_tile_judgment(raw)
+        except Exception as exc: raise IncrementalEvaluationError("frozen tile judgment is invalid") from exc
+        if row["tile_id"] in workset: continue
+        if row["tile_id"] in judgments or row["component_key"] != _BY_TILE[row["tile_id"]][1] or row["authority_state"] != "accepted" or row["lifecycle_state"] != "active" or row["series_fingerprint"] != current: _fail("frozen tile judgment is not current accepted authority")
+        judgments[row["tile_id"]] = row
+    for raw in plan["prior_component_sentinels"]:
+        try: row = planner.validate_component_not_detected_sentinel(raw)
+        except Exception as exc: raise IncrementalEvaluationError("frozen component sentinel is invalid") from exc
+        component = row["component_key"]
+        if any(tile in workset for tile in _COMPONENT_TILES[component]): continue
+        if component in sentinels or row["authority_state"] != "accepted" or row["lifecycle_state"] != "active" or row["series_fingerprint"] != current: _fail("frozen component sentinel is not current accepted authority")
+        sentinels[component] = row
     return judgments, sentinels
 def _upstream(plan, workset, judgments, sentinels):
     frozen_judgments, frozen_sentinels, rows = *_frozen(plan, workset), []
@@ -197,20 +210,26 @@ def _accept(plan, request, raw, workset, judgments, sentinels):
         judgments[row["tile_id"]] = memory.build_tile_judgment(tile_id=row["tile_id"], component_key=result["component_key"], assessment_state=row["assessment_state"], supporting_evidence=row["supporting_evidence"], capture_origin=request["capture_origin"], operation_origin=request["operation_origin"], series_contract=request["current_series_contract"], authority_state="pending", review_state="none", lifecycle_state="active", lifecycle_reason="")
 def _assessment(plan, workset, judgments, sentinels):
     frozen_judgments, frozen_sentinels, tiles, kernel_sentinels = *_frozen(plan, workset), [], []
+    if set(judgments) & set(frozen_judgments) or set(sentinels) & set(frozen_sentinels) or not (set(judgments) | set(frozen_judgments)) <= set(_BY_TILE) or not (set(sentinels) | set(frozen_sentinels)) <= set(_COMPONENTS): _fail("candidate partition is invalid")
+    candidate_judgments, candidate_sentinels = [], []
     for component in _COMPONENTS:
         sentinel = sentinels.get(component) or frozen_sentinels.get(component)
         if sentinel:
             if any(tile in judgments or tile in frozen_judgments for tile in _COMPONENT_TILES[component]): _fail("component sentinel mixes with tile judgments")
+            candidate_sentinels.append(sentinel)
             kernel_sentinels.append({"component_key": component, "status": "not_detected", "score": 0, "raw_score": 0, "effective_score": 0, "points": 0, "tile_profile": [], "scale": _SCALE[component]})
             continue
         for tile in _COMPONENT_TILES[component]:
             judgment = judgments.get(tile) or frozen_judgments.get(tile)
             if not judgment: _fail("candidate partition is incomplete")
+            candidate_judgments.append(judgment)
             tile_id, component_key, tile_key, _definition = _BY_TILE[tile]
             tiles.append({"component_key": component_key, "tile_id": tile_id, "tile_key": tile_key, "assessment_state": judgment["assessment_state"]})
+    if len(candidate_judgments) + sum(len(_COMPONENT_TILES[row["component_key"]]) for row in candidate_sentinels) != len(_TILES): _fail("candidate partition has invalid capacity")
+    if {row["series_fingerprint"] for row in [*candidate_judgments, *candidate_sentinels]} != {plan["current_series_fingerprint"]}: _fail("candidate partition spans judgment series")
     result = kernel.build_sv9_assessment(tiles, kernel_sentinels or None)
     kernel.validate_sv9_assessment_output(result)
-    return result
+    return result, candidate_judgments, candidate_sentinels
 def _pending(reason, calls=0, avoided=0, reused=0):
     return {"status": "pending", "reason_code": reason, "assessment": None, "candidate_tile_judgments": [], "candidate_component_sentinels": [], "captured_calls": [], "call_count": calls, "calls_avoided": avoided, "reused_tile_count": reused, "evaluated_tile_count": 0}
 def _run(plan, packets, responder):
@@ -228,8 +247,8 @@ def _run(plan, packets, responder):
             calls.append({"request": request, "evaluation": _evaluation(raw, True)})
         except Exception:
             return None
-    assessment = _assessment(plan, workset, judgments, sentinels)
-    return {"status": "available", "reason_code": None, "assessment": assessment, "candidate_tile_judgments": [judgments[tile] for tile, _component, _key, _definition in _TILES if tile in judgments], "candidate_component_sentinels": [sentinels[component] for component in _COMPONENTS if component in sentinels], "captured_calls": calls, "call_count": len(calls), "calls_avoided": plan["calls_avoided"], "reused_tile_count": 80 - len(plan["tile_workset"]), "evaluated_tile_count": len(plan["tile_workset"])}
+    assessment, candidate_judgments, candidate_sentinels = _assessment(plan, workset, judgments, sentinels)
+    return {"status": "available", "reason_code": None, "assessment": assessment, "candidate_tile_judgments": candidate_judgments, "candidate_component_sentinels": candidate_sentinels, "captured_calls": calls, "call_count": len(calls), "calls_avoided": plan["calls_avoided"], "reused_tile_count": 80 - len(plan["tile_workset"]), "evaluated_tile_count": len(plan["tile_workset"])}
 def execute_incremental_evaluation(plan, evidence_packets, flow):
     calls, avoided, reused = [0], [0], [0]
     try:
