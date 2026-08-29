@@ -68,7 +68,7 @@ def test_authority_journal_replays_only_valid_active_state() -> None:
         PostgresHistoryRepository(dsn).migrate()
         with psycopg.connect(dsn, autocommit=True, row_factory=dict_row) as conn:
             _seed_candidate_parent(conn, workspace, brand, scan, capture, plan)
-            _insert_candidate(conn, candidate_one, workspace, brand, scan, capture, plan, Jsonb({"candidate_component_sentinels": [{"status": "not_detected"}], "candidate_tile_judgments": []}))
+            candidate_one_payload = _insert_candidate(conn, candidate_one, workspace, brand, scan, capture, plan, Jsonb({"candidate_component_sentinels": [{"status": "not_detected"}], "candidate_tile_judgments": []}))
             _insert_candidate(conn, candidate_two, workspace, brand, scan, capture, plan, Jsonb({"candidate_component_sentinels": [{"status": "not_detected", "review": "new"}], "candidate_tile_judgments": []}))
             event_one, event_two, event_three = (
                 "00000000-0000-0000-0000-000000000108",
@@ -80,7 +80,7 @@ def test_authority_journal_replays_only_valid_active_state() -> None:
             _insert_event(conn, event_one, "adopt", 1, workspace, brand, None, None, candidate_one)
             _insert_event(conn, event_two, "reopen", 2, workspace, brand, event_one, event_one, None, candidate_one["current"])
             reopened = conn.execute("SELECT authority_event_id, latest_event_id, accepted_candidate_payload, reopen_review_overlay FROM b3s_history.evidence_vault_sv9_judgment_active_partition_v1").fetchone()
-            assert reopened == {"authority_event_id": UUID(event_one), "latest_event_id": UUID(event_two), "accepted_candidate_payload": {"candidate_component_sentinels": [{"status": "not_detected"}], "candidate_tile_judgments": []}, "reopen_review_overlay": {"review_state": "pending", "signed_delta": {"kind": "review"}}}
+            assert reopened == {"authority_event_id": UUID(event_one), "latest_event_id": UUID(event_two), "accepted_candidate_payload": candidate_one_payload, "reopen_review_overlay": {"review_state": "pending", "signed_delta": {"kind": "review"}}}
             with pytest.raises(psycopg.errors.RaiseException, match="stale, forked, or gapped"):
                 _insert_event(conn, "00000000-0000-0000-0000-000000000112", "supersede", 3, workspace, brand, event_one, event_one, candidate_two)
             _insert_event(conn, event_three, "supersede", 3, workspace, brand, event_two, event_one, candidate_two)
@@ -189,8 +189,9 @@ def _seed_candidate_parent(conn, workspace, brand, scan, capture, plan) -> None:
     conn.execute("INSERT INTO b3s_history.evidence_vault_operation_plans (id, workspace_id, brand_id, scan_run_id, observation_hash, operation_plan_fingerprint, mode, status, plan_payload) VALUES (%s, %s, %s, %s, %s, %s, 'baseline', 'pending', '{}'::jsonb)", (plan, workspace, brand, scan, _hash("b"), _hash("c")))
 
 
-def _insert_candidate(conn, value, workspace, brand, scan, capture, plan, payload) -> None:
-    conn.execute("INSERT INTO b3s_history.evidence_vault_sv9_judgment_candidates (id, workspace_id, brand_id, scan_run_id, source_scan_id, capture_id, operation_plan_id, schema_version, canonical_plan_fingerprint, current_series_fingerprint, candidate_series_fingerprint, evaluation_bundle_fingerprint, assessment_fingerprint, score_fingerprint, complete_record_fingerprint, candidate_payload, authority, review_state, lifecycle_state, runtime_effect) VALUES (%s, %s, %s, %s, 'authority-scan', %s, %s, 'evidence-vault-sv9-judgment-candidate-v1', %s, %s, %s, %s, %s, %s, %s, %s, 'pending', 'none', 'active', 'shadow_only')", (value["id"], workspace, brand, scan, capture, plan, value["plan"], value["current"], value["series"], value["bundle"], value["assessment"], value["score"], _hash(value["id"][-1]), payload))
+def _insert_candidate(conn, value, workspace, brand, scan, capture, plan, payload) -> dict:
+    fingerprint = _hash(value["id"][-1]); payload = Jsonb({"schema_version": "evidence-vault-sv9-judgment-candidate-v1", "plan": {}, "canonical_plan_fingerprint": value["plan"], "current_series_fingerprint": value["current"], "candidate_series_fingerprint": value["series"], "component_evaluations": [], "evidence_bindings": [], "candidate_tile_judgments": [], "candidate_component_sentinels": [], "assessment": {}, "telemetry": {}, "evaluation_bundle_fingerprint": value["bundle"], "assessment_fingerprint": value["assessment"], "score_fingerprint": value["score"], "complete_record_fingerprint": fingerprint} | payload.obj)
+    conn.execute("INSERT INTO b3s_history.evidence_vault_sv9_judgment_candidates (id, workspace_id, brand_id, scan_run_id, source_scan_id, capture_id, operation_plan_id, schema_version, canonical_plan_fingerprint, current_series_fingerprint, candidate_series_fingerprint, evaluation_bundle_fingerprint, assessment_fingerprint, score_fingerprint, complete_record_fingerprint, candidate_payload, authority, review_state, lifecycle_state, runtime_effect) VALUES (%s, %s, %s, %s, 'authority-scan', %s, %s, 'evidence-vault-sv9-judgment-candidate-v1', %s, %s, %s, %s, %s, %s, %s, %s, 'pending', 'none', 'active', 'shadow_only')", (value["id"], workspace, brand, scan, capture, plan, value["plan"], value["current"], value["series"], value["bundle"], value["assessment"], value["score"], fingerprint, payload)); return payload.obj
 
 
 def _insert_event(conn, identifier, event_type, sequence, workspace, brand, predecessor, parent, candidate, current=None) -> None:
@@ -209,8 +210,9 @@ def test_authority_service_appends_replays_without_mutating_active_authority() -
     from src.services import evidence_vault_sv9_authority_application as application
     from src.services import evidence_vault_sv9_authority_evaluation as service
     from src.services import evidence_vault_sv9_judgment_delta as delta
+    from src.services.evidence_vault_incremental_executor import execute_vault_operation_plan
     from src.sv9 import incremental_evaluation as evaluation, incremental_planner as planner, judgment_memory as memory
-    from tests.test_evidence_vault_operation_execution_postgres import _persist_baseline, _row
+    from tests.test_evidence_vault_operation_execution_postgres import ExecutorLLM, _persist_baseline, _row
     from tests.test_evidence_vault_sv9_judgment_candidates_postgres import _candidate
     from tests.test_sv9_incremental_evaluation import _Flow
     from tests.test_sv9_judgment_memory import _series
@@ -274,7 +276,28 @@ def test_authority_service_appends_replays_without_mutating_active_authority() -
             expected_predecessor_event_fingerprint=None,
             idempotency_key_hash="a" * 64,
         )
-        current = seed("authority-service-current", "We help teams ship safer products.")
+        current = seed("authority-service-current", "Safer now. We help teams ship better products.")
+        execute_vault_operation_plan(
+            repository=repository,
+            source_scan_id="authority-service-current",
+            worker_id="authority-service-worker",
+            llm=ExecutorLLM(),
+        )
+        result_payload = repository.get_capture_operation_plan("authority-service-current")["result_payload"]
+        repository.review_and_adopt_evidence_vault_operational_source(
+            "example.com",
+            source_candidate_packet_fingerprint=result_payload["source_candidate_packet_fingerprint"],
+            decisions=[
+                {
+                    "relation_id": result_payload["basis_relations"][0]["relation_id"],
+                    "decision": "accept",
+                    "rationale": "Direct literal support.",
+                }
+            ],
+            reviewer_id="authority-service-reviewer",
+            reviewed_at="2026-08-07T13:00:00+02:00",
+            created_at="2026-08-07T11:00:00Z",
+        )
         source = repository.resolve_evidence_vault_sv9_judgment_evidence(
             "authority-service-current", ["raw_inputs.0.chunk.0"]
         )
