@@ -197,3 +197,142 @@ def _insert_event(conn, identifier, event_type, sequence, workspace, brand, pred
     candidate = candidate or {}
     conn.execute("INSERT INTO b3s_history.evidence_vault_sv9_judgment_authority_events (id, workspace_id, brand_id, event_type, sequence, predecessor_event_id, active_parent_event_id, candidate_id, candidate_scan_run_id, candidate_capture_id, candidate_operation_plan_id, request_fingerprint, event_fingerprint, evaluation_bundle_fingerprint, canonical_plan_fingerprint, current_series_fingerprint, candidate_series_fingerprint, assessment_fingerprint, score_fingerprint, delta_fingerprint, idempotency_key_hash, event_payload) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", (identifier, workspace, brand, event_type, sequence, predecessor, parent, candidate.get("id"), "00000000-0000-0000-0000-000000000103" if candidate else None, "00000000-0000-0000-0000-000000000104" if candidate else None, "00000000-0000-0000-0000-000000000105" if candidate else None, _hash("5"), _hash(identifier[-1]), candidate.get("bundle"), candidate.get("plan"), candidate.get("current", current), candidate.get("series"), candidate.get("assessment"), candidate.get("score"), None if candidate else _hash("6"), _hash(identifier[-1]), Jsonb({"review_state": "pending", "signed_delta": {"kind": "review"}}) if not candidate else Jsonb({"candidate": candidate["id"]})))
 # fmt: on
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1",
+    reason="requires disposable PostgreSQL",
+)
+def test_authority_service_appends_replays_without_mutating_active_authority() -> None:
+    import psycopg
+    from src.history.repository import PostgresHistoryRepository
+    from src.services import evidence_vault_sv9_authority_evaluation as service
+    from src.services import evidence_vault_sv9_judgment_delta as delta
+    from src.sv9 import incremental_evaluation as evaluation, incremental_planner as planner, judgment_memory as memory
+    from tests.test_evidence_vault_operation_execution_postgres import _persist_baseline, _row
+    from tests.test_evidence_vault_sv9_judgment_candidates_postgres import _candidate
+    from tests.test_sv9_incremental_evaluation import _Flow
+    from tests.test_sv9_judgment_memory import _series
+
+    dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        existed = bool(
+            conn.execute("SELECT 1 FROM pg_roles WHERE rolname = 'b3s_history_vault_provenance_owner'").fetchone()
+        )
+        if not existed:
+            conn.execute("CREATE ROLE b3s_history_vault_provenance_owner NOLOGIN")
+        conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+    try:
+        repository = PostgresHistoryRepository(dsn)
+        repository.migrate()
+
+        def seed(scan, content):
+            row = _row() | {"content": content}
+            _persist_baseline(repository, scan, rows=[row])
+            source = repository.resolve_evidence_vault_sv9_judgment_evidence(scan, ["raw_inputs.0.chunk.0"])
+            evidence = source["evidence"]
+            plan = planner.build_incremental_plan([], [], _series())
+            packets = [
+                evaluation.build_evidence_packet(
+                    component_key=component,
+                    tiles=[
+                        {
+                            "tile_id": tile,
+                            "evidence": [
+                                {key: evidence[0][key] for key in ("evidence_ref", "evidence_fingerprint", "content")}
+                            ],
+                        }
+                        for tile in plan["tile_workset"]
+                        if dict(planner._REGISTRY)[tile] == component
+                    ],
+                    capture_origin=source["capture_origin"],
+                    operation_origin=source["operation_origin"],
+                    series_fingerprint=plan["current_series_fingerprint"],
+                )
+                for component in plan["component_workset"]
+            ]
+            candidate = _candidate(plan, evaluation.execute_incremental_evaluation(plan, packets, _Flow()))
+            candidate["evidence_bindings"] = [
+                {
+                    "tile_id": tile,
+                    "evidence_record_id": evidence[0]["evidence_record_id"],
+                    **{key: evidence[0][key] for key in ("evidence_ref", "evidence_fingerprint")},
+                }
+                for tile in plan["tile_workset"]
+            ]
+            candidate["complete_record_fingerprint"] = memory.canonical_fingerprint(
+                "evidence-vault-sv9-judgment-candidate-record-v1",
+                {key: value for key, value in candidate.items() if key != "complete_record_fingerprint"},
+            )
+            return repository.append_evidence_vault_sv9_judgment_candidate(scan, candidate)[0]
+
+        accepted = seed("authority-service-accepted", "We help teams ship better products.")
+        repository.adopt_evidence_vault_sv9_judgment_candidate(
+            "authority-service-accepted",
+            accepted["id"],
+            expected_predecessor_event_fingerprint=None,
+            idempotency_key_hash="a" * 64,
+        )
+        current = seed("authority-service-current", "We help teams ship safer products.")
+        source = repository.resolve_evidence_vault_sv9_judgment_evidence(
+            "authority-service-current", ["raw_inputs.0.chunk.0"]
+        )
+        identity = [{key: source["evidence"][0][key] for key in ("evidence_ref", "evidence_fingerprint")}]
+        relation = delta.build_authoritative_evidence_tile_relation(
+            tile_id="M1",
+            component_key="mission",
+            disposition="relevant",
+            **identity[0],
+            capture_origin=source["capture_origin"],
+            operation_origin=source["operation_origin"],
+        )
+
+        class Flow:
+            def evaluate_component(self, request):
+                rows = [
+                    {
+                        "tile_id": row["tile_id"],
+                        "assessment_state": "ok" if row["evidence"] else "sin_evidencia",
+                        "supporting_evidence": [
+                            {key: evidence[key] for key in ("evidence_ref", "evidence_fingerprint")}
+                            for evidence in row["evidence"]
+                        ],
+                    }
+                    for row in request["requested_tiles"]
+                ]
+                return evaluation.ComponentEvaluationOutcome.success(
+                    evaluation.build_component_evaluation(
+                        component_key=request["component_key"],
+                        series_fingerprint=request["current_series_fingerprint"],
+                        request_fingerprint=request["canonical_request_fingerprint"],
+                        status="evaluated",
+                        tile_results=rows,
+                    )
+                )
+
+        before = repository.get_evidence_vault_sv9_judgment_authority("example.com")
+        result = service.run_evidence_vault_sv9_authority_evaluation(
+            repository=repository,
+            flow=Flow(),
+            domain_or_url="example.com",
+            source_scan_id="authority-service-current",
+            current_evidence=identity,
+            authoritative_relations=[relation],
+            current_series_contract=_series(),
+        )
+        stored = repository.get_evidence_vault_sv9_judgment_candidate(
+            "authority-service-current", canonical_plan_fingerprint=result["candidate"]["canonical_plan_fingerprint"]
+        )
+        assert (
+            result["status"] == "review_required"
+            and "coverage_loss" in result["reason_codes"]
+            and stored
+            and stored["id"] == result["candidate"]["id"]
+            and repository.get_evidence_vault_sv9_judgment_authority("example.com") == before
+            and current["id"] != stored["id"]
+        )
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+            if not existed:
+                conn.execute("DROP ROLE b3s_history_vault_provenance_owner")
