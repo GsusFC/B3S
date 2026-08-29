@@ -32,6 +32,8 @@ def test_authority_migration_declares_append_only_lineage_and_acl_contract() -> 
     assert sql.count("BEFORE UPDATE OR DELETE OR TRUNCATE") == 1
     assert "REFERENCES b3s_history.evidence_vault_sv9_judgment_candidates" in sql
     assert "accepted_candidate_payload" in sql
+    assert "NEW.current_series_fingerprint IS DISTINCT FROM parent.current_series_fingerprint" in sql
+    assert "NEW.current_series_fingerprint IS DISTINCT FROM parent.candidate_series_fingerprint" not in sql
 
 
 # fmt: off
@@ -54,7 +56,7 @@ def test_authority_journal_replays_only_valid_active_state() -> None:
         "00000000-0000-0000-0000-000000000105",
     )
     candidate_one = _candidate("00000000-0000-0000-0000-000000000106", "a", "b", "c", "d", "e", "f")
-    candidate_two = _candidate("00000000-0000-0000-0000-000000000107", "0", "c", "1", "2", "3", "4")
+    candidate_two = _candidate("00000000-0000-0000-0000-000000000107", "0", "b", "1", "2", "3", "4")
     owner_preexisting = False
     with psycopg.connect(dsn, autocommit=True) as conn:
         owner_preexisting = bool(conn.execute("SELECT 1 FROM pg_roles WHERE rolname = 'b3s_history_vault_provenance_owner'").fetchone())
@@ -73,16 +75,16 @@ def test_authority_journal_replays_only_valid_active_state() -> None:
                 "00000000-0000-0000-0000-000000000110",
             )
             with pytest.raises(psycopg.errors.RaiseException, match="first event"):
-                _insert_event(conn, "00000000-0000-0000-0000-000000000111", "reopen", 1, workspace, brand, None, None, None, candidate_one["series"])
+                _insert_event(conn, "00000000-0000-0000-0000-000000000111", "reopen", 1, workspace, brand, None, None, None, candidate_one["current"])
             _insert_event(conn, event_one, "adopt", 1, workspace, brand, None, None, candidate_one)
-            _insert_event(conn, event_two, "reopen", 2, workspace, brand, event_one, event_one, None, candidate_one["series"])
+            _insert_event(conn, event_two, "reopen", 2, workspace, brand, event_one, event_one, None, candidate_one["current"])
             reopened = conn.execute("SELECT authority_event_id, latest_event_id, accepted_candidate_payload, reopen_review_overlay FROM b3s_history.evidence_vault_sv9_judgment_active_partition_v1").fetchone()
             assert reopened == {"authority_event_id": UUID(event_one), "latest_event_id": UUID(event_two), "accepted_candidate_payload": {"candidate_component_sentinels": [{"status": "not_detected"}], "candidate_tile_judgments": []}, "reopen_review_overlay": {"review_state": "pending", "signed_delta": {"kind": "review"}}}
             with pytest.raises(psycopg.errors.RaiseException, match="stale, forked, or gapped"):
                 _insert_event(conn, "00000000-0000-0000-0000-000000000112", "supersede", 3, workspace, brand, event_one, event_one, candidate_two)
             _insert_event(conn, event_three, "supersede", 3, workspace, brand, event_two, event_one, candidate_two)
             with pytest.raises(psycopg.errors.RaiseException, match="active parent"):
-                _insert_event(conn, "00000000-0000-0000-0000-000000000113", "reopen", 4, workspace, brand, event_three, event_one, None, candidate_two["series"])
+                _insert_event(conn, "00000000-0000-0000-0000-000000000113", "reopen", 4, workspace, brand, event_three, event_one, None, candidate_two["current"])
             with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
                 conn.execute("UPDATE b3s_history.evidence_vault_sv9_judgment_authority_events SET sequence = 9")
             assert conn.execute("SELECT authority_event_id, latest_event_id FROM b3s_history.evidence_vault_sv9_judgment_active_series_v1").fetchone() == {"authority_event_id": UUID(event_three), "latest_event_id": UUID(event_three)}

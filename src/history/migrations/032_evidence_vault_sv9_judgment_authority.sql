@@ -88,10 +88,10 @@ BEGIN
         IF parent.id IS NULL OR parent.event_type NOT IN ('adopt', 'supersede') OR parent.candidate_id IS NULL THEN
             RAISE EXCEPTION 'SV9 judgment authority active parent is invalid';
         END IF;
-        IF NEW.event_type = 'reopen' AND NEW.current_series_fingerprint IS DISTINCT FROM parent.candidate_series_fingerprint THEN
+        IF NEW.event_type = 'reopen' AND NEW.current_series_fingerprint IS DISTINCT FROM parent.current_series_fingerprint THEN
             RAISE EXCEPTION 'SV9 judgment authority reopen must preserve the accepted series';
         END IF;
-        IF NEW.event_type = 'supersede' AND NEW.current_series_fingerprint IS DISTINCT FROM parent.candidate_series_fingerprint THEN
+        IF NEW.event_type = 'supersede' AND NEW.current_series_fingerprint IS DISTINCT FROM parent.current_series_fingerprint THEN
             RAISE EXCEPTION 'SV9 judgment authority supersede is based on a stale series';
         END IF;
         IF NEW.event_type = 'supersede' AND NEW.candidate_id IS NOT DISTINCT FROM parent.candidate_id THEN
