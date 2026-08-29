@@ -161,7 +161,7 @@ def test_repository_authority_adopts_replays_competes_and_reopens() -> None:
         with pytest.raises(EvidenceVaultSv9JudgmentCandidateConflictError): repository.reopen_evidence_vault_sv9_judgment_authority(winner_scan, valid, expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash="5" * 64)
         assert head() == before
         loaded = repository.get_evidence_vault_sv9_judgment_authority("example.com")
-        assert loaded and loaded["current_head"]["event_type"] == "reopen" and loaded["active_authority_event"]["event_type"] == "supersede" and loaded["reopen_review_overlay"]["delta_fingerprint"] == valid["canonical_delta_fingerprint"]
+        assert loaded and loaded["current_head"]["event_type"] == "reopen" and loaded["active_authority_event"]["event_type"] == "supersede" and loaded["accepted_candidate"]["source_scan_id"] == winner_scan and loaded["reopen_review_overlay"]["delta_fingerprint"] == valid["canonical_delta_fingerprint"]
         _persist_baseline(repository, "authority-s"); sentinel, sentinel_source = store("authority-s", True)
         active, _ = repository.adopt_evidence_vault_sv9_judgment_candidate("authority-s", sentinel["id"], expected_predecessor_event_fingerprint=reopened["current_head"]["event_fingerprint"], idempotency_key_hash="6" * 64)
         assert active["event"]["event_type"] == "supersede" and active["reopen_review_overlay"] is None
@@ -206,6 +206,7 @@ def _insert_event(conn, identifier, event_type, sequence, workspace, brand, pred
 def test_authority_service_appends_replays_without_mutating_active_authority() -> None:
     import psycopg
     from src.history.repository import PostgresHistoryRepository
+    from src.services import evidence_vault_sv9_authority_application as application
     from src.services import evidence_vault_sv9_authority_evaluation as service
     from src.services import evidence_vault_sv9_judgment_delta as delta
     from src.sv9 import incremental_evaluation as evaluation, incremental_planner as planner, judgment_memory as memory
@@ -320,6 +321,24 @@ def test_authority_service_appends_replays_without_mutating_active_authority() -
             authoritative_relations=[relation],
             current_series_contract=_series(),
         )
+        applied = application.run_evidence_vault_sv9_authority_application(
+            repository=repository,
+            flow=Flow(),
+            domain_or_url="example.com",
+            source_scan_id="authority-service-current",
+            current_evidence=identity,
+            authoritative_relations=[relation],
+            current_series_contract=_series(),
+        )
+        repeated = application.run_evidence_vault_sv9_authority_application(
+            repository=repository,
+            flow=Flow(),
+            domain_or_url="example.com",
+            source_scan_id="authority-service-current",
+            current_evidence=identity,
+            authoritative_relations=[relation],
+            current_series_contract=_series(),
+        )
         stored = repository.get_evidence_vault_sv9_judgment_candidate(
             "authority-service-current", canonical_plan_fingerprint=result["candidate"]["canonical_plan_fingerprint"]
         )
@@ -328,7 +347,14 @@ def test_authority_service_appends_replays_without_mutating_active_authority() -
             and "coverage_loss" in result["reason_codes"]
             and stored
             and stored["id"] == result["candidate"]["id"]
-            and repository.get_evidence_vault_sv9_judgment_authority("example.com") == before
+            and stored["source_scan_id"] == "authority-service-current"
+            and applied["status"] == repeated["status"] == "review_required"
+            and repository.get_evidence_vault_sv9_judgment_authority("example.com")["reopen_review_overlay"][
+                "delta_fingerprint"
+            ]
+            == result["signed_delta"]["canonical_delta_fingerprint"]
+            and repository.get_evidence_vault_sv9_judgment_authority("example.com")["accepted_candidate"]
+            == before["accepted_candidate"]
             and current["id"] != stored["id"]
         )
     finally:
