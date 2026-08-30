@@ -1,82 +1,102 @@
-<claude-mem-context>
-# Memory Context
+# B3S Agent Instructions
 
-# [brand3] recent context, 2026-05-30 9:45am GMT+2
+## Scope guard
 
-Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
-Format: ID TIME TYPE TITLE
-Fetch details: get_observations([IDs]) | Search: mem-search skill
+Complete the current task with the minimum sufficient change.
 
-Stats: 50 obs (19,315t read) | 212,283t work | 91% savings
+## Before editing
 
-### May 20, 2026
-S335 Create TL;DR brand block interpreter specs documentation for Brand3 methodology (May 20 at 8:22 PM)
-### May 22, 2026
-S337 Investigación de consistencia de datos entre Magnetism Scanner y Brand Audit — ¿usan todos la misma información? (May 22 at 4:25 PM)
-S341 Feed proof pages into brand3 strategic evidence packet — expand proof_points evidence extraction from owned web subpages, testimonials, and customer content (May 22 at 4:41 PM)
-### May 25, 2026
-S342 Remove scanner limitation — fix bug where `attributes` dimension was incorrectly returning `absent` despite available evidence (May 25 at 9:55 PM)
-### May 26, 2026
-S346 Brand3 Block Interpreter Architecture — design discussion + /review on current changes (May 26 at 10:29 AM)
-### May 27, 2026
-S347 Fly.io deploy failing due to placeholder token — fix FLY_API_TOKEN authentication (May 27 at 6:20 PM)
-S348 Create a detailed operational report documenting everything the Brand3 app does, including questions it answers and example expected outputs (May 27 at 8:43 PM)
-### May 28, 2026
-S349 Brand3 Lab deprecation decision — which components to absorb into Brand Audit and Magnetism Scanner vs. delete (May 28 at 7:06 AM)
-S350 Continue (sigamos) — mapping new architecture after major brand3 cleanup to ensure strategist pass compiles and tests pass (May 28 at 7:47 AM)
-### May 29, 2026
-S351 Implement Analyst Pass: LLM-driven TLDR Brand3 generation from Research Pack, including post-LLM guardrails, normalizer, extractor integration, and full test suite (May 29 at 9:17 AM)
-### May 30, 2026
-5425 8:40a 🟣 BRAND3_MAGNETISM_RESEARCH_PACK_TLDR Analyst Pass Validated in Local A/B Test
-5428 " 🔵 Analyst Pass Failing Due to Gemini Returning JSON Array Instead of Object
-5429 " 🔴 _coerce_analyst_raw_json Added to Handle Gemini List-Wrapped JSON Response
-5430 8:41a 🟣 test_single_item_array_response_is_accepted Added to Cover Gemini JSON Array Drift
-5431 " 🔵 Full Research Pack + Analyst Pass Pipeline Validated End-to-End on LangChain (run #154)
-5432 " 🔵 run_web_dev_macos.sh Requires OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES for LLM Timeout Enforcement
-5433 8:42a 🔵 Magnetism Scan #48 (LangChain) Accessible via Web UI at /magnetism-scanner/scan/48
-5434 8:43a 🔵 Scan #48 Web UI Shows Analyst Pass TLDR Content; Mode Label Not Exposed to End Users
-5435 " 🔵 runs Table Has No raw_inputs Column; Use SQLiteStore.get_run_snapshot() Instead
-5436 " 🔵 LangChain Entity Discovery: 3 Product Surfaces, 17 Owned Surfaces, No Parent Brand
-5437 " ✅ Research Pack + Analyst Pass Feature Branch: 542 Insertions Across 15 Files, Not Yet Committed
-5438 9:01a 🔵 Brand3 Research Pipeline: Entity Scope and Offer Extraction Architecture
-5439 9:02a 🔵 EvidenceGraph → BrandResearchPack Bridge: Full Implementation Detail
-5440 " 🔵 Test Snapshot Fixtures for Evidence Graph Pipeline
-5441 " 🟣 Company-Brand Offer Extraction: Entity-Aware Scoring and Candidate Filtering
-5442 " 🟣 LangChain-Like Multi-Product Test Fixture Added to Evidence Graph Test Suite
-5443 9:03a 🔵 product_summary Falls Back to Company-Level Offer Due to Product Claims Being Typed as "audience"
-5444 " 🔴 Fixed: _product_summary_text() Now Finds Product-Scoped "audience" and "hero_claim" Claims
-5445 " ✅ Full Test Suite Green: 89 Tests Pass After Company-Brand Offer Extraction Improvements
-5446 " 🔵 Live LangChain Scan (ID 154) Validates Company-Brand Offer Extraction on Real Data
-5447 9:04a 🔵 LangChain Live Scan: /about Page Generates Multiple Claim Types from Same Source URL
-5448 " 🔴 Penalize Heading-Prefixed and Truncated Summary Claims in Offer Scoring
-5449 " 🔴 LangChain Scan 154: Offer Now Extracts Clean Distilled Sentence Instead of Heading-Prefixed Page Title
-5450 9:06a ✅ Full End-to-End LangChain Rescan Triggered via run_magnetism_from_audit_run(154) with LLM
-5451 " 🟣 End-to-End LangChain Rescan (Scan 50) Confirms Graph Pack Pipeline Produces Clean LLM TLDR Output
-5452 " 🟣 Scan 50 Verified in Browser: LangChain Company Offer Displays Correctly in Magnetism Scanner UI
-5453 9:07a 🔵 Working Tree State: New EvidenceGraph Research Pipeline Entirely Untracked, Plus 11 Modified Files
-5454 9:25a ⚖️ Magnetism Scanner: Three-Page Structure Planned
-5455 9:28a 🟣 Magnetism Scanner Three-Page Implementation Plan Active
-5456 " 🔵 Magnetism Scanner Codebase Structure Mapped
-5457 9:29a 🔵 Magnetism Detail Template: Current Single-Page Structure with Collapsible Methodology
-5458 " 🔵 No Existing Tab CSS Pattern; Existing Tests Assert Page-Level Text Presence
-5459 " 🔵 Reusable .vs-nav / .vs-nav-link CSS Pattern Available for Scanner Tabs
-5460 9:30a 🟣 Magnetism Scanner Routes Refactored for Three-Tab Architecture
-5461 " 🟣 Research Evidence Model: Fallback Surface Detection from Source Map
-5462 " 🟣 Shared Tab Navigation Partial: magnetism_scan_nav.html.j2
-5463 9:31a 🟣 magnetism_detail.html.j2: Nav Replaced with Partial, Methodology Section Removed
-5464 9:32a 🟣 New Template: magnetism_research.html.j2 — Research Evidence Tab
-5465 9:33a 🟣 New Template: magnetism_methodology.html.j2 — Methodology Details Tab
-5466 " 🟣 Three-Tab Magnetism Scanner: All 33 Tests Pass
-5467 " 🔵 pyenv Python 3.11.8: Missing blake2b/blake2s Hash Support
-5468 " 🟣 Three-Tab Scanner Verified Live Against Scan ID 50
-5469 " 🟣 New Test: test_scan_has_separate_research_and_methodology_pages
-5470 9:34a 🔴 Test Patch Retry: Anchor Mismatch Fixed for test_scan_has_separate_research_and_methodology_pages
-5471 " 🟣 Three-Tab Magnetism Scanner: Final Test Suite — 34/34 Passing
-5472 " 🟣 Full Magnetism + Research Pipeline Test Suite: 90/90 Passing
-5473 " ✅ Dev Server Restarted with New Three-Tab Routes Loaded
-5474 9:35a 🟣 Three-Tab Magnetism Scanner: Browser Verification Passed on Scan ID 50
-5475 " 🟣 Three-Tab Magnetism Scanner Feature: All Steps Complete
-5476 " 🔵 Full Uncommitted Changeset: Three-Tab Scanner Plus Broader Research Pipeline Work
+- Read the relevant code, tests, configuration, and owning documentation directly. Do not work from search snippets or guesses.
+- Inspect the worktree. Preserve unrelated user changes and do not revert, overwrite, or reformat them.
+- If the requirement is ambiguous or the premise is unverified, resolve that before building on it.
+- State a minimal plan:
+  - **Outcome** — the exact behavior requested
+  - **Non-goals** — what this task will not do
+  - **Files** — the smallest set expected to change
+  - **Proof** — the check that will prove the change works
+- Start with one implementation path. Split work only when the task has genuinely independent parts.
 
-Access 212k tokens of past work via get_observations([IDs]) or mem-search skill.
-</claude-mem-context>
+## While editing
+
+- Reuse existing code, helpers, patterns, contracts, and test setup before adding anything new.
+- Fix bugs at the root cause. Do not stack patches around a wrong premise.
+- Add an abstraction, adapter, or configuration layer only for a second real caller, an existing architectural boundary, or an explicit requirement in this task.
+- Preserve behavior outside the requested change.
+- Do not design for rare or future cases nobody asked about.
+- Do not refactor adjacent code unless it blocks the requested change. Report worthwhile cleanup separately.
+- Remove code you replace. Keep an old path only when compatibility is an explicit requirement.
+
+## B3S invariants
+
+- B3S is an evidence lab, not a scorer with a crawler. Preserve the evidence-first flow described in `README.md`.
+- A block may be `detected` only with content and evidence references. Ungrounded detections must not reach scoring as grounded evidence.
+- `verified_absent` is derived deterministically from acquisition evidence. An LLM cannot self-certify absence.
+- Keep immutable captures separate from versioned evaluations. Re-analysis must reuse frozen raw input when the contract requires it.
+- Preserve traceability across evidence, claims, tiles, evaluations, scores, and publication decisions.
+- Systems explicitly marked `shadow`, `lab`, `preview`, diagnostic, or non-authoritative must not affect public scoring, canonical selection, or publication unless the task explicitly changes that authority.
+- Preserve the contracts and authority boundaries of Phase Zero, Phase One, and Phase Two. If the owning contract is unclear, identify it before editing.
+- Scoring authority, canonical report selection, evidence acceptance, and publication behavior must fail closed when required evidence or review is missing.
+- Policies and thresholds belong in their existing versioned contract or policy-data mechanism. Do not hide policy changes inside unrelated implementation code.
+- Prefer frozen fixtures and deterministic replay over live crawling or provider calls. Do not spend provider credits or refresh external evidence unless the task requires live acquisition.
+
+## Pause and confirm
+
+Read-only discovery is always allowed. If the task has not already authorized it, get approval before:
+
+- Materially expanding the scope or touching unrelated files
+- Adding a dependency, framework, service, pipeline, or new test infrastructure
+- Changing a public API, schema, migration, storage format, wire format, or persisted contract
+- Changing scoring authority, canonical selection, publication gates, or a shadow/non-authoritative boundary
+- Deleting or overwriting user data, discarding uncommitted work, rewriting history, or dropping data
+- Keeping two implementations of the same behavior alive
+- Running a live crawl, external acquisition, deployment, or operation that consumes provider credits
+
+## Testing
+
+- Run the narrowest existing tests that exercise the changed behavior.
+- Extend the most relevant existing test before creating a new test file.
+- For a bug fix, add the narrowest regression test when feasible unless existing coverage already reproduces the failure.
+- Add a test for changed user-observable behavior when existing coverage does not protect it.
+- Each new test must protect a clear acceptance criterion, invariant, or regression risk.
+- Do not backfill unrelated coverage or introduce test infrastructure for this task alone.
+- Do not use passing tests as justification for extra abstractions or scope.
+- For evidence-flow changes, prefer the relevant frozen envelope or fixture before any live scan.
+- The strategic benchmark in CI is informative until its fixture/checker contract is recalibrated. Do not expand an unrelated task to repair it.
+
+Canonical repository checks:
+
+```bash
+python -m ruff check .
+python -m pytest -q
+```
+
+Use the repository environment when available, for example:
+
+```bash
+PYTHONPATH=. .venv/bin/python -m pytest tests/path_to_relevant_test.py -q
+```
+
+Run the full suite for broad or cross-cutting changes. A narrow change may finish with narrower checks when they prove the acceptance criteria; report what was and was not run.
+
+## Project sources of truth
+
+- `README.md` — product thesis, evidence-first architecture, setup, and runtime overview
+- The relevant file under `docs/` — contract-specific behavior and authority
+- `.github/workflows/ci.yml` — canonical CI checks
+- `DESIGN.md` — active UI and visual-system rules
+
+Read the source that owns the behavior instead of copying its details into new documentation or code comments.
+
+## If the plan grows
+
+Stop when the work starts adding future-use layers, workaround stacks, unrelated cleanup, or tests for unstated behavior.
+
+Explain why the original scope is insufficient, propose the smallest revised plan, and confirm any expanded scope before continuing.
+
+## Done means
+
+- The requested behavior works and the acceptance criteria are met
+- Relevant checks pass, with the exact commands and results reported
+- Every touched file is necessary and the diff contains nothing unrelated
+- No debug code, backup copies, dead paths, or scratch files remain
+- Assumptions, limitations, and unverified runtime behavior are stated plainly
