@@ -183,6 +183,7 @@ from src.services.evidence_vault_sv9_authority_application import (
     EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError,
 )
 from src.services import evidence_vault_sv9_authority_event as authority_event
+from src.services import evidence_vault_sv9_authority_projection as authority_projection
 from src.services.evidence_vault_lineage_replay import (
     EvidenceVaultLineageReplayError,
     validate_lineage_seed_export_v2,
@@ -12003,8 +12004,16 @@ def _sv9_authority_event_public(event: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _project_sv9_judgment_authority(state: Mapping[str, Any], event: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    candidate, assessment, event = state["candidate"], state["candidate"]["assessment"], event or state["head"]
-    return {"authority": True, "authority_scope": "b3s-vault", "production_runtime_effect": False, "scanner_runtime_effect": False, "accepted_candidate": candidate, "accepted_partition": {"candidate_tile_judgments": candidate["candidate_tile_judgments"], "candidate_component_sentinels": candidate["candidate_component_sentinels"]}, "assessment": assessment, "score": assessment["sv9_score"], "current_head": _sv9_authority_event_public(state["head"]), "active_authority_event": _sv9_authority_event_public(state["active"]), "event": _sv9_authority_event_public(event), "reopen_review_overlay": state["overlay"]}
+    try:
+        return authority_projection.build_evidence_vault_sv9_authority_projection(
+            accepted_candidate=state["candidate"],
+            current_head=_sv9_authority_event_public(state["head"]),
+            active_authority_event=_sv9_authority_event_public(state["active"]),
+            event=_sv9_authority_event_public(event or state["head"]),
+            reopen_review_overlay=state["overlay"],
+        )
+    except authority_projection.EvidenceVaultSv9AuthorityProjectionError as exc:
+        raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment authority projection is invalid.") from exc
 
 # fmt: on
 
