@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -105,6 +106,7 @@ def test_authority_journal_replays_only_valid_active_state() -> None:
 def test_repository_authority_adopts_replays_competes_and_reopens(monkeypatch) -> None:
     import psycopg
     from src.history.repository import EvidenceVaultSv9JudgmentCandidateConflictError, EvidenceVaultSv9JudgmentCandidateError, EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError, PostgresHistoryRepository
+    from src.services import evidence_vault_sv9_authority_event as authority_event
     from src.services import evidence_vault_sv9_judgment_delta as delta
     from src.services.evidence_vault_sv9_authoritative_relations import EvidenceVaultSv9AuthoritativeRelationStaleWitnessError, EvidenceVaultSv9AuthoritativeRelationWitnessError
     from src.sv9 import judgment_memory as memory
@@ -112,6 +114,9 @@ def test_repository_authority_adopts_replays_competes_and_reopens(monkeypatch) -
     from tests.test_sv9_judgment_memory import _series
 
     dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    def key(action, scan, candidate=None, fingerprint=None, predecessor=None):
+        request = authority_event.build_evidence_vault_sv9_authority_request(action=action, candidate_id=candidate, expected_predecessor_event_fingerprint=predecessor, delta_fingerprint=fingerprint, source_scan_id=scan)
+        return authority_event.authority_application_idempotency_fingerprint(request)
     with psycopg.connect(dsn, autocommit=True) as conn:
         existed = bool(conn.execute("SELECT 1 FROM pg_roles WHERE rolname = 'b3s_history_vault_provenance_owner'").fetchone())
         if not existed: conn.execute("CREATE ROLE b3s_history_vault_provenance_owner NOLOGIN")
@@ -126,24 +131,25 @@ def test_repository_authority_adopts_replays_competes_and_reopens(monkeypatch) -
         source = repository.resolve_evidence_vault_sv9_judgment_evidence("authority-a", ["raw_inputs.0.chunk.0"])
         def head():
             with psycopg.connect(dsn) as conn: return conn.execute("SELECT count(*), (SELECT event_fingerprint FROM b3s_history.evidence_vault_sv9_judgment_authority_events ORDER BY sequence DESC LIMIT 1) FROM b3s_history.evidence_vault_sv9_judgment_authority_events").fetchone()
-        def advance(key):
-            try: return key, repository.adopt_evidence_vault_sv9_judgment_candidate("authority-a", stored["id"], expected_predecessor_event_fingerprint=None, idempotency_key_hash=key * 64)
-            except EvidenceVaultSv9JudgmentCandidateConflictError: return key, None
-        with ThreadPoolExecutor(max_workers=2) as pool: outcomes = list(pool.map(advance, ("b", "c")))
-        winner_key, winner = next((key, result[0]) for key, result in outcomes if result is not None)
-        assert sum(result is not None for _key, result in outcomes) == 1 and winner["event"]["event_type"] == "adopt"
+        winner_key = key("adopt_candidate", "authority-a", stored["id"])
+        def advance(_):
+            try: return repository.adopt_evidence_vault_sv9_judgment_candidate("authority-a", stored["id"], expected_predecessor_event_fingerprint=None, idempotency_key_hash=winner_key)
+            except EvidenceVaultSv9JudgmentCandidateConflictError: return None
+        with ThreadPoolExecutor(max_workers=2) as pool: outcomes = list(pool.map(advance, range(2)))
+        winner = next(result[0] for result in outcomes if result is not None)
+        assert all(result is not None for result in outcomes) and winner["event"]["event_type"] == "adopt"
         assert repository.get_evidence_vault_sv9_judgment_candidate("authority-a", canonical_plan_fingerprint=legacy["canonical_plan_fingerprint"]) == legacy
         before = head()
-        with pytest.raises(EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError): repository.adopt_evidence_vault_sv9_judgment_candidate("authority-a", legacy["id"], expected_predecessor_event_fingerprint=winner["current_head"]["event_fingerprint"], idempotency_key_hash="d" * 64)
+        with pytest.raises(EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError): repository.adopt_evidence_vault_sv9_judgment_candidate("authority-a", legacy["id"], expected_predecessor_event_fingerprint=winner["current_head"]["event_fingerprint"], idempotency_key_hash=key("adopt_candidate", "authority-a", legacy["id"], predecessor=winner["current_head"]["event_fingerprint"]))
         assert head() == before
         invalid = deepcopy(invalid); invalid["authoritative_relation_witness"]["witness_fingerprint"] = "0" * 64; invalid["complete_record_fingerprint"] = memory.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v2", {key: value for key, value in invalid.items() if key != "complete_record_fingerprint"}); _insert(repository, "authority-a", invalid)
         with psycopg.connect(dsn) as conn: invalid_id = str(conn.execute("SELECT id FROM b3s_history.evidence_vault_sv9_judgment_candidates WHERE canonical_plan_fingerprint = %s", (invalid["canonical_plan_fingerprint"],)).fetchone()[0])
         _operational(repository, "authority-next", current)
-        same, replayed = repository.adopt_evidence_vault_sv9_judgment_candidate("authority-a", stored["id"], expected_predecessor_event_fingerprint=None, idempotency_key_hash=winner_key * 64)
+        same, replayed = repository.adopt_evidence_vault_sv9_judgment_candidate("authority-a", stored["id"], expected_predecessor_event_fingerprint=None, idempotency_key_hash=winner_key)
         assert replayed and same["event"] == winner["event"]
-        for error, candidate_id, key in ((EvidenceVaultSv9AuthoritativeRelationStaleWitnessError, stale["id"], "e"), (EvidenceVaultSv9AuthoritativeRelationWitnessError, invalid_id, "f")):
+        for error, candidate_id in ((EvidenceVaultSv9AuthoritativeRelationStaleWitnessError, stale["id"]), (EvidenceVaultSv9AuthoritativeRelationWitnessError, invalid_id)):
             before = head()
-            with pytest.raises(error): repository.adopt_evidence_vault_sv9_judgment_candidate("authority-a", candidate_id, expected_predecessor_event_fingerprint=winner["current_head"]["event_fingerprint"], idempotency_key_hash=key * 64)
+            with pytest.raises(error): repository.adopt_evidence_vault_sv9_judgment_candidate("authority-a", candidate_id, expected_predecessor_event_fingerprint=winner["current_head"]["event_fingerprint"], idempotency_key_hash=key("adopt_candidate", "authority-a", candidate_id, predecessor=winner["current_head"]["event_fingerprint"]))
             assert head() == before
         def signed(prior, source, *, evidence=None, capture=None, operation=None):
             evidence = evidence or [{key: row[key] for key in ("evidence_ref", "evidence_fingerprint")} for row in source["evidence"]]; capture, operation = capture or source["capture_origin"], operation or source["operation_origin"]
@@ -151,27 +157,44 @@ def test_repository_authority_adopts_replays_competes_and_reopens(monkeypatch) -
             return delta.build_evidence_vault_sv9_judgment_delta(current_evidence=delta.build_evidence_identity_set(evidence), prior_judgments=prior, authoritative_relations=[relation], current_series_contract=_series())
         prior = [memory.build_tile_judgment(**({key: value for key, value in row.items() if key not in {"schema_version", "series_fingerprint", "canonical_judgment_fingerprint", "authority_state"}} | {"authority_state": "accepted"})) for row in winner["accepted_candidate"]["candidate_tile_judgments"]]
         valid = signed(prior, source)
-        def reject(value, scan, predecessor, key):
+        def reject(value, scan, predecessor):
             before = head()
-            with pytest.raises(EvidenceVaultSv9JudgmentCandidateError): repository.reopen_evidence_vault_sv9_judgment_authority(scan, value, expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash=key * 64)
+            with pytest.raises(EvidenceVaultSv9JudgmentCandidateError): repository.reopen_evidence_vault_sv9_judgment_authority(scan, value, expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash=key("reopen_authority", scan, fingerprint=value["canonical_delta_fingerprint"], predecessor=predecessor))
             assert head() == before
         raw = prior[0]; bad_prior = list(prior); bad_prior[0] = memory.build_tile_judgment(**({key: value for key, value in raw.items() if key not in {"schema_version", "series_fingerprint", "canonical_judgment_fingerprint"}} | {"assessment_state": "no"}))
         predecessor = winner["current_head"]["event_fingerprint"]
-        for key, value in (("0", signed(bad_prior, source)), ("1", signed(prior, source, evidence=[{"evidence_ref": "foreign", "evidence_fingerprint": "f" * 64}])), ("2", signed(prior, source, capture={"capture_id": "foreign", "capture_fingerprint": "e" * 64})), ("3", signed(prior, source, operation={"operation_id": "foreign", "operation_fingerprint": "d" * 64}))): reject(value, "authority-a", predecessor, key)
-        reopened, replayed = repository.reopen_evidence_vault_sv9_judgment_authority("authority-a", valid, expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash="4" * 64)
+        for value in (signed(bad_prior, source), signed(prior, source, evidence=[{"evidence_ref": "foreign", "evidence_fingerprint": "f" * 64}]), signed(prior, source, capture={"capture_id": "foreign", "capture_fingerprint": "e" * 64}), signed(prior, source, operation={"operation_id": "foreign", "operation_fingerprint": "d" * 64})): reject(value, "authority-a", predecessor)
+        reopen_key = key("reopen_authority", "authority-a", fingerprint=valid["canonical_delta_fingerprint"], predecessor=predecessor)
+        reopened, replayed = repository.reopen_evidence_vault_sv9_judgment_authority("authority-a", valid, expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash=reopen_key)
         assert not replayed and reopened["event"]["event_type"] == "reopen" and reopened["assessment"] == winner["assessment"] and reopened["score"] == winner["score"] and reopened["reopen_review_overlay"]["review_state"] == "pending"
-        same_reopen, replayed = repository.reopen_evidence_vault_sv9_judgment_authority("authority-a", valid, expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash="4" * 64)
+        same_reopen, replayed = repository.reopen_evidence_vault_sv9_judgment_authority("authority-a", valid, expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash=reopen_key)
         assert replayed and same_reopen["event"] == reopened["event"]
         before = head()
-        with pytest.raises(EvidenceVaultSv9JudgmentCandidateConflictError): repository.reopen_evidence_vault_sv9_judgment_authority("authority-a", valid, expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash="5" * 64)
+        with pytest.raises(EvidenceVaultSv9JudgmentCandidateConflictError): repository.reopen_evidence_vault_sv9_judgment_authority("authority-next", valid, expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash=key("reopen_authority", "authority-next", fingerprint=valid["canonical_delta_fingerprint"], predecessor=predecessor))
         assert head() == before
         loaded = repository.get_evidence_vault_sv9_judgment_authority("example.com")
         assert loaded and loaded["current_head"]["event_type"] == "reopen" and loaded["active_authority_event"]["event_type"] == "adopt" and loaded["accepted_candidate"]["source_scan_id"] == "authority-a" and loaded["reopen_review_overlay"]["delta_fingerprint"] == valid["canonical_delta_fingerprint"]
-        with psycopg.connect(dsn, autocommit=True) as conn:
-            conn.execute("ALTER TABLE b3s_history.evidence_vault_sv9_judgment_authority_events DISABLE TRIGGER ALL")
-            conn.execute("UPDATE b3s_history.evidence_vault_sv9_judgment_authority_events SET event_fingerprint = %s WHERE id = %s", (_hash("0"), reopened["event"]["event_id"]))
-            conn.execute("ALTER TABLE b3s_history.evidence_vault_sv9_judgment_authority_events ENABLE TRIGGER ALL")
+        for projection in (winner, reopened, loaded):
+            for name in ("active_authority_event", "current_head", "event"):
+                assert authority_event.validate_evidence_vault_sv9_authority_event(projection[name]) == json.loads(json.dumps(projection[name]))
+        assert winner["event"]["idempotency_key_hash"] == winner_key and reopened["event"]["idempotency_key_hash"] == reopen_key
+        with psycopg.connect(dsn) as conn: assert conn.execute("SELECT event_fingerprint FROM b3s_history.evidence_vault_sv9_judgment_authority_events WHERE id = %s", (reopened["event"]["event_id"],)).fetchone()[0] == loaded["current_head"]["event_fingerprint"]
+        def update(sql, values):
+            with psycopg.connect(dsn, autocommit=True) as conn:
+                conn.execute("ALTER TABLE b3s_history.evidence_vault_sv9_judgment_authority_events DISABLE TRIGGER ALL")
+                try: conn.execute(sql, values)
+                finally: conn.execute("ALTER TABLE b3s_history.evidence_vault_sv9_judgment_authority_events ENABLE TRIGGER ALL")
+        identifier = reopened["event"]["event_id"]
+        for column, bad, original, target in (("event_fingerprint", _hash("0"), reopened["event"]["event_fingerprint"], identifier), ("idempotency_key_hash", _hash("1"), reopen_key, identifier), ("assessment_fingerprint", _hash("2"), winner["event"]["assessment_fingerprint"], winner["event"]["event_id"])):
+            sql = f"UPDATE b3s_history.evidence_vault_sv9_judgment_authority_events SET {column} = %s WHERE id = %s"
+            update(sql, (bad, target))
+            with pytest.raises(EvidenceVaultSv9JudgmentCandidateError): repository.get_evidence_vault_sv9_judgment_authority("example.com")
+            update(sql, (original, target))
+        sql = "UPDATE b3s_history.evidence_vault_sv9_judgment_authority_events SET event_payload = jsonb_set(event_payload, '{request,source_scan_id}', to_jsonb(%s::text)) WHERE id = %s"
+        update(sql, ("tampered", identifier))
         with pytest.raises(EvidenceVaultSv9JudgmentCandidateError): repository.get_evidence_vault_sv9_judgment_authority("example.com")
+        update(sql, ("authority-a", identifier))
+        assert repository.get_evidence_vault_sv9_judgment_authority("example.com")["current_head"] == loaded["current_head"]
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")

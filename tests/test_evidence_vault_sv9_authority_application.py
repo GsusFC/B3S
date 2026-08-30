@@ -1,9 +1,11 @@
 # fmt: off
 from copy import deepcopy
+import json
 import pytest
 
 from src.history import repository as history
 from src.services import evidence_vault_sv9_authority_application as application
+from src.services import evidence_vault_sv9_authority_event as authority_event
 from src.services import evidence_vault_sv9_authority_evaluation as evaluation_service
 from src.services import evidence_vault_sv9_judgment_delta as delta
 from tests.test_evidence_vault_sv9_authority_evaluation import _Flow, _Repository, _hash, _identity, _relation, _series
@@ -28,32 +30,39 @@ class _ApplicationRepository(_Repository):
         self.authority_calls += 1
         if self.authority_failure: raise RuntimeError("authority unavailable")
         if self.interleave == self.authority_calls and self.appear: self.authority = deepcopy(self.appear)
-        elif self.authority and self.interleave == self.authority_calls: self.event += 1; self.authority["current_head"] = {"event_fingerprint": _hash(self.event)}
+        elif self.authority and self.interleave == self.authority_calls: self.event += 1; self.authority["current_head"]["event_fingerprint"] = _hash(self.event)
         value = deepcopy(self.authority)
         if value and self._corrupt: value["accepted_candidate"]["score_fingerprint"] = _hash(999)
         return value
     def append_evidence_vault_sv9_judgment_candidate(self, scan, candidate, **kwargs):
         stored, inserted = super().append_evidence_vault_sv9_judgment_candidate(scan, candidate, **kwargs)
         if inserted:
-            self.candidate += 1; self.candidates[stored["canonical_plan_fingerprint"]]["id"] = _uuid(self.candidate)
+            self.candidate += 1; self.candidates[stored["canonical_plan_fingerprint"]].update({"id": _uuid(self.candidate), "source_scan_id": scan, "created_at": f"2026-01-01T00:00:{self.candidate % 60:02d}+00:00"})
             stored = deepcopy(self.candidates[stored["canonical_plan_fingerprint"]])
         return stored, inserted
-    def _accept(self, candidate_id, scan, kind):
-        candidate = next(deepcopy(row) for row in self.candidates.values() if row["id"] == candidate_id) | {"source_scan_id": scan}
+    def _accept(self, candidate_id, scan, kind, key):
+        candidate = next(deepcopy(row) for row in self.candidates.values() if row["id"] == candidate_id)
         partition = {key: candidate[key] for key in ("candidate_tile_judgments", "candidate_component_sentinels")}
-        self.event += 1
-        self.authority = {"authority": True, "accepted_candidate": candidate, "accepted_partition": partition, "assessment": candidate["assessment"], "score": candidate["assessment"]["sv9_score"], "active_authority_event": {"event_id": _uuid(self.event), "event_type": kind}, "current_head": {"event_fingerprint": _hash(self.event)}, "reopen_review_overlay": None}
-    def adopt_evidence_vault_sv9_judgment_candidate(self, scan, candidate_id, *, expected_predecessor_event_fingerprint, **_kwargs):
+        previous, active = (self.authority["current_head"], self.authority["active_authority_event"]) if self.authority else (None, None); self.event += 1
+        identity = {name: candidate[name] for name in "id complete_record_fingerprint evaluation_bundle_fingerprint canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint assessment_fingerprint score_fingerprint source_scan_id".split()}
+        request = authority_event.build_evidence_vault_sv9_authority_request(action="adopt_candidate", candidate_id=candidate_id, expected_predecessor_event_fingerprint=None if previous is None else previous["event_fingerprint"], delta_fingerprint=None, source_scan_id=scan)
+        event = authority_event.build_evidence_vault_sv9_authority_event(event_id=_uuid(self.event), event_type=kind, sequence=1 if previous is None else previous["sequence"] + 1, predecessor_event_fingerprint=None if previous is None else previous["event_fingerprint"], active_parent_event_fingerprint=None if active is None else active["event_fingerprint"], candidate_identity=identity, current_series_fingerprint=candidate["current_series_fingerprint"], delta_fingerprint=None, request=request, idempotency_key_hash=key, predecessor_event_id=None if previous is None else previous["event_id"], active_parent_event_id=None if active is None else active["event_id"], created_at=f"2026-01-01T00:00:{self.event % 60:02d}+00:00")
+        self.authority = {"authority": True, "accepted_candidate": candidate, "accepted_partition": partition, "assessment": candidate["assessment"], "score": candidate["assessment"]["sv9_score"], "active_authority_event": event, "current_head": event, "event": event, "reopen_review_overlay": None}
+    def adopt_evidence_vault_sv9_judgment_candidate(self, scan, candidate_id, *, expected_predecessor_event_fingerprint, idempotency_key_hash, **_kwargs):
         if self.adopt_error: raise self.adopt_error
         self.mutations.append("adopt")
         if self.authority and expected_predecessor_event_fingerprint != self.authority["current_head"]["event_fingerprint"]: raise RuntimeError("stale")
         if self.adopt_failure: raise RuntimeError("stale")
-        self._accept(candidate_id, scan, "supersede" if self.authority else "adopt"); self._corrupt = self.corrupt_after_adopt
+        self._accept(candidate_id, scan, "supersede" if self.authority else "adopt", idempotency_key_hash); self._corrupt = self.corrupt_after_adopt
         return deepcopy(self.authority), False
-    def reopen_evidence_vault_sv9_judgment_authority(self, scan, signed_delta, *, expected_predecessor_event_fingerprint, **_kwargs):
+    def reopen_evidence_vault_sv9_judgment_authority(self, scan, signed_delta, *, expected_predecessor_event_fingerprint, idempotency_key_hash, **_kwargs):
         self.mutations.append("reopen")
         if expected_predecessor_event_fingerprint != self.authority["current_head"]["event_fingerprint"]: raise RuntimeError("stale")
-        self.event += 1; self.authority["current_head"] = {"event_fingerprint": _hash(self.event)}
+        previous, active = self.authority["current_head"], self.authority["active_authority_event"]; self.event += 1
+        fingerprint = signed_delta["canonical_delta_fingerprint"]
+        request = authority_event.build_evidence_vault_sv9_authority_request(action="reopen_authority", candidate_id=None, expected_predecessor_event_fingerprint=previous["event_fingerprint"], delta_fingerprint=fingerprint, source_scan_id=scan)
+        event = authority_event.build_evidence_vault_sv9_authority_event(event_id=_uuid(self.event), event_type="reopen", sequence=previous["sequence"] + 1, predecessor_event_fingerprint=previous["event_fingerprint"], active_parent_event_fingerprint=active["event_fingerprint"], candidate_identity=None, current_series_fingerprint=active["current_series_fingerprint"], delta_fingerprint=fingerprint, request=request, idempotency_key_hash=idempotency_key_hash, predecessor_event_id=previous["event_id"], active_parent_event_id=active["event_id"], created_at=f"2026-01-01T00:00:{self.event % 60:02d}+00:00")
+        self.authority["current_head"] = self.authority["event"] = event
         self.authority["reopen_review_overlay"] = {"review_state": "pending", "signed_delta": deepcopy(signed_delta), "delta_fingerprint": signed_delta["canonical_delta_fingerprint"]}
         return deepcopy(self.authority), False
 
@@ -139,4 +148,30 @@ def test_stale_predecessor_and_bad_readback_do_not_overwrite_authority():
     repo.adopt_failure = False; repo.corrupt_after_adopt = True
     mismatch = _run(repo, _Flow(), current=(3, 9), relations=[_relation(repo, "M1", number=3), _relation(repo, "M1", number=9)], source="scan-2")
     assert mismatch["status"] == "authority_conflict" and repo.mutations == ["adopt", "adopt", "adopt"]
+
+def test_authority_event_readback_is_canonical_and_fails_closed_for_tampering():
+    repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"
+    value, event = deepcopy(repo.authority), repo.authority["event"]
+    assert authority_event.validate_evidence_vault_sv9_authority_event(event) == json.loads(json.dumps(event)) and event["created_at"] and event["idempotency_key_hash"] == application._idempotency("adopt_candidate", "scan", value["accepted_candidate"]["id"], None, None)
+    def invalid(change):
+        broken = deepcopy(value); change(broken)
+        with pytest.raises(ValueError): application._authority(broken)
+    invalid(lambda row: row["event"].pop("created_at"))
+    invalid(lambda row: row["event"].__setitem__("unknown", "field"))
+    invalid(lambda row: row["active_authority_event"]["request"].__setitem__("source_scan_id", "tampered"))
+    def stale_candidate(row):
+        candidate = row["accepted_candidate"]; candidate["assessment_fingerprint"] = _hash(777); candidate["assessment"]["assessment_fingerprint"] = candidate["assessment_fingerprint"]; row["assessment"]["assessment_fingerprint"] = candidate["assessment_fingerprint"]; candidate.pop("complete_record_fingerprint"); candidate["complete_record_fingerprint"] = authority_event.candidate_complete_record_fingerprint(candidate)
+    invalid(stale_candidate)
+    def mismatched_head(row):
+        candidate, active = row["accepted_candidate"], row["active_authority_event"]
+        identity = {name: candidate[name] for name in "id complete_record_fingerprint evaluation_bundle_fingerprint canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint assessment_fingerprint score_fingerprint source_scan_id".split()}
+        request = authority_event.build_evidence_vault_sv9_authority_request(action="adopt_candidate", candidate_id=candidate["id"], expected_predecessor_event_fingerprint=active["event_fingerprint"], delta_fingerprint=None, source_scan_id=candidate["source_scan_id"])
+        row["current_head"] = row["event"] = authority_event.build_evidence_vault_sv9_authority_event(event_id=_uuid(999), event_type="supersede", sequence=2, predecessor_event_fingerprint=active["event_fingerprint"], active_parent_event_fingerprint=active["event_fingerprint"], candidate_identity=identity, current_series_fingerprint=candidate["current_series_fingerprint"], delta_fingerprint=None, request=request, idempotency_key_hash=authority_event.authority_application_idempotency_fingerprint(request), predecessor_event_id=active["event_id"], active_parent_event_id=active["event_id"], created_at=active["created_at"])
+    invalid(mismatched_head)
+    repo.records = (3, 9); assert _run(repo, _Flow(), current=(3, 9), relations=[_relation(repo, "M1", number=3), _relation(repo, "M1", number=9)], source="scan-2")["status"] == "authority_advanced"
+    repo.records = (9,); assert _run(repo, _Flow(), current=(9,), relations=[_relation(repo, "M1", number=9)], source="scan-3")["status"] == "review_required"
+    reopen = deepcopy(repo.authority)
+    for change in (lambda row: row["reopen_review_overlay"].__setitem__("delta_fingerprint", _hash(888)), lambda row: row["current_head"].__setitem__("active_parent_event_id", _uuid(998))):
+        with pytest.raises(ValueError):
+            broken = deepcopy(reopen); change(broken); application._authority(broken)
 # fmt: on
