@@ -16,7 +16,14 @@ from src.services.evidence_vault_sv9_judgment_delta import (
 # fmt: off
 
 _VERSION = "evidence-vault-sv9-authoritative-relation-projection-v1"
+_WITNESS_VERSION = "evidence-vault-sv9-authoritative-relation-witness-v1"
 _POLARITIES = frozenset({"supports", "contradicts", "demonstrates_absence"})
+_WITNESS_FIELDS = frozenset("schema_version source_scan_id operational_witness authoritative_relations projection_fingerprint witness_fingerprint".split())
+_OPERATIONAL_WITNESS_FIELDS = frozenset("canonical_memory_version adoption_event_id adoption_sequence candidate_packet_fingerprint request_fingerprint".split())
+
+
+class EvidenceVaultSv9AuthoritativeRelationWitnessError(ValueError): pass
+class EvidenceVaultSv9AuthoritativeRelationStaleWitnessError(EvidenceVaultSv9AuthoritativeRelationWitnessError): pass
 
 
 def project_evidence_vault_sv9_authoritative_relations(
@@ -95,8 +102,51 @@ def _project(source: Mapping[str, Any], evidence: Any, authority: Mapping[str, A
     return {"status": "available", "reason_codes": [], "authoritative_relations": relations, "operational_witness": witness, "projection_fingerprint": fingerprint}
 
 
+def build_evidence_vault_sv9_authoritative_relation_witness(*, source_scan_id: str, projection: Mapping[str, Any]) -> dict[str, Any]:
+    """Bind exact VA1 relations to the operational adoption that authorized them."""
+    try:
+        result = _witness_payload(source_scan_id, projection)
+        result["witness_fingerprint"] = canonical_fingerprint(_WITNESS_VERSION, result)
+        return result
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise EvidenceVaultSv9AuthoritativeRelationWitnessError("authoritative relation witness is invalid") from exc
+
+
+def validate_evidence_vault_sv9_authoritative_relation_witness(value: Any) -> dict[str, Any]:
+    try:
+        if type(value) is not dict or set(value) != _WITNESS_FIELDS or value.get("schema_version") != _WITNESS_VERSION: raise ValueError("witness fields")
+        operational = value["operational_witness"]
+        projection = {"status": "available", "reason_codes": [], "authoritative_relations": value["authoritative_relations"], "operational_witness": operational, "projection_fingerprint": value["projection_fingerprint"]}
+        expected = _witness_payload(value["source_scan_id"], projection)
+        expected["witness_fingerprint"] = canonical_fingerprint(_WITNESS_VERSION, expected)
+        if value != expected: raise ValueError("witness replay")
+        return expected
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise EvidenceVaultSv9AuthoritativeRelationWitnessError("authoritative relation witness is invalid") from exc
+
+
+def _witness_payload(source_scan_id: Any, projection: Any) -> dict[str, Any]:
+    source = _text(source_scan_id)
+    if type(projection) is not dict or set(projection) != {"status", "reason_codes", "authoritative_relations", "operational_witness", "projection_fingerprint"} or projection["status"] != "available" or projection["reason_codes"] != []: raise ValueError("projection")
+    operational = projection["operational_witness"]
+    if type(operational) is not dict or set(operational) != _OPERATIONAL_WITNESS_FIELDS: raise ValueError("operational witness")
+    operational = {"canonical_memory_version": _sha(operational["canonical_memory_version"]), "adoption_event_id": _uuid(operational["adoption_event_id"]), "adoption_sequence": operational["adoption_sequence"], "candidate_packet_fingerprint": _sha(operational["candidate_packet_fingerprint"]), "request_fingerprint": _sha(operational["request_fingerprint"])}
+    if type(operational["adoption_sequence"]) is not int or operational["adoption_sequence"] < 1: raise ValueError("adoption sequence")
+    if type(projection["authoritative_relations"]) is not list or not projection["authoritative_relations"]: raise ValueError("relations")
+    rows = [build_authoritative_evidence_tile_relation(_raw=row, _signed=True) for row in projection["authoritative_relations"]]
+    if any(row["disposition"] != "relevant" for row in rows): raise ValueError("operational relation disposition")
+    capture, operation = rows[0]["capture_origin"], rows[0]["operation_origin"]
+    if any(row["capture_origin"] != capture or row["operation_origin"] != operation for row in rows): raise ValueError("relation origins")
+    order = {str(row["tile_id"]): index for index, row in enumerate(build_tile_contract_registry()["tiles"])}
+    keys = [(order[row["tile_id"]], row["evidence_ref"], row["evidence_fingerprint"]) for row in rows]
+    if keys != sorted(keys) or len(keys) != len(set(keys)): raise ValueError("relation order")
+    fingerprint = canonical_fingerprint(_VERSION, {"source_scan_id": source, "capture_origin": capture, "operation_origin": operation, "operational_witness": operational, "authoritative_relations": rows})
+    if projection["projection_fingerprint"] != fingerprint: raise ValueError("projection fingerprint")
+    return {"schema_version": _WITNESS_VERSION, "source_scan_id": source, "operational_witness": operational, "authoritative_relations": rows, "projection_fingerprint": fingerprint}
+
+
 def _text(value: Any) -> str:
-    if not isinstance(value, str) or not value or value != value.strip():
+    if type(value) is not str or not value or value != value.strip():
         raise ValueError("text identity")
     return value
 
@@ -110,7 +160,8 @@ def _sha(value: Any) -> str:
 
 def _uuid(value: Any) -> str:
     try:
-        return str(UUID(str(value)))
+        if type(value) is not str: raise ValueError
+        return str(UUID(value))
     except (TypeError, ValueError, AttributeError) as exc:
         raise ValueError("uuid identity") from exc
 # fmt: on

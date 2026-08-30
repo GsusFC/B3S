@@ -172,6 +172,13 @@ from src.services.evidence_vault_sv9_judgment_delta import (
     EvidenceVaultSV9JudgmentDeltaError,
     validate_evidence_vault_sv9_judgment_delta,
 )
+from src.services.evidence_vault_sv9_authoritative_relations import (
+    EvidenceVaultSv9AuthoritativeRelationStaleWitnessError,
+    EvidenceVaultSv9AuthoritativeRelationWitnessError,
+    _project as _project_sv9_authoritative_relations,
+    build_evidence_vault_sv9_authoritative_relation_witness,
+    validate_evidence_vault_sv9_authoritative_relation_witness,
+)
 from src.services.evidence_vault_lineage_replay import (
     EvidenceVaultLineageReplayError,
     validate_lineage_seed_export_v2,
@@ -5966,10 +5973,12 @@ class PostgresHistoryRepository:
             context = _sv9_judgment_context(conn, source_scan_id, workspace_slug, True)
             if context is None:
                 raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment source scan is unavailable.")
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_advisory_lock_key(context["brand_id"], "evidence-vault-canonical-promotion"),))
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (_advisory_lock_key(context["brand_id"], "evidence-vault-sv9-judgment-candidate"),))
             candidate = _sv9_judgment_candidate_replay(
                 candidate, _sv9_judgment_packets(conn, candidate, context)
             )
+            _sv9_judgment_current_authoritative_relation_witness(conn, candidate, context, workspace_slug)
             candidate_id = _stable_uuid(context["operation_plan_id"], "evidence-vault-sv9-judgment-candidate", candidate["complete_record_fingerprint"])
             row = conn.execute(
                 f"""
@@ -11603,13 +11612,18 @@ def _vault_operation_plan_record(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 # fmt: off
-_SV9_JUDGMENT_CANDIDATE_FIELDS = frozenset("schema_version plan canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint component_evaluations evidence_bindings candidate_tile_judgments candidate_component_sentinels assessment telemetry evaluation_bundle_fingerprint assessment_fingerprint score_fingerprint complete_record_fingerprint".split())
+_SV9_JUDGMENT_CANDIDATE_V1_FIELDS = frozenset("schema_version plan canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint component_evaluations evidence_bindings candidate_tile_judgments candidate_component_sentinels assessment telemetry evaluation_bundle_fingerprint assessment_fingerprint score_fingerprint complete_record_fingerprint".split())
+_SV9_JUDGMENT_CANDIDATE_V2_FIELDS = _SV9_JUDGMENT_CANDIDATE_V1_FIELDS | {"authoritative_relation_witness"}
+_SV9_JUDGMENT_CANDIDATE_FIELDS = _SV9_JUDGMENT_CANDIDATE_V1_FIELDS
 _SV9_JUDGMENT_FORBIDDEN_FIELDS = frozenset("body content output prompt request source_url text url raw_payload request_payload provider_output".split())
 
 def _sv9_judgment_candidate_envelope(value: Any) -> dict[str, Any]:
     try:
         _sv9_judgment_forbidden(value)
-        if type(value) is not dict or set(value) != _SV9_JUDGMENT_CANDIDATE_FIELDS or value["schema_version"] != "evidence-vault-sv9-judgment-candidate-v1": raise ValueError("candidate fields do not match schema")
+        schema = value.get("schema_version") if type(value) is dict else None
+        fields = _SV9_JUDGMENT_CANDIDATE_V2_FIELDS if schema == "evidence-vault-sv9-judgment-candidate-v2" else _SV9_JUDGMENT_CANDIDATE_V1_FIELDS
+        if type(value) is not dict or set(value) != fields or schema not in {"evidence-vault-sv9-judgment-candidate-v1", "evidence-vault-sv9-judgment-candidate-v2"}: raise ValueError("candidate fields do not match schema")
+        if schema.endswith("v2"): validate_evidence_vault_sv9_authoritative_relation_witness(value["authoritative_relation_witness"])
         plan = sv9_incremental_planner.validate_incremental_plan(value["plan"])
         if any(value[name] != plan[name] for name in ("canonical_plan_fingerprint", "current_series_fingerprint", "candidate_series_fingerprint")): raise ValueError("candidate plan identities do not match")
         rows, order = value["evidence_bindings"], {tile: index for index, tile in enumerate(plan["registry_tile_ids"])}
@@ -11626,6 +11640,8 @@ def _sv9_judgment_candidate_envelope(value: Any) -> dict[str, Any]:
         bundle = sv9_judgment_memory.canonical_fingerprint("sv9-judgment-evaluation-bundle-v1", {"canonical_plan_fingerprint": plan["canonical_plan_fingerprint"], "evaluations": value["component_evaluations"]})
         if value["evaluation_bundle_fingerprint"] != bundle or not all(_is_sha256(value[name]) for name in ("assessment_fingerprint", "score_fingerprint", "complete_record_fingerprint")): raise ValueError("candidate fingerprints are invalid")
         return dict(value)
+    except EvidenceVaultSv9AuthoritativeRelationWitnessError:
+        raise
     except (AttributeError, KeyError, TypeError, ValueError, RecursionError) as exc:
         raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment candidate is invalid.") from exc
 
@@ -11642,9 +11658,20 @@ def _sv9_judgment_candidate_replay(candidate: dict[str, Any], packets: list[dict
     expected_telemetry = {name: replay[name] for name in ("call_count", "calls_avoided", "reused_tile_count", "evaluated_tile_count")}
     if replay["status"] != "available" or any(candidate[name] != replay[name] for name in ("candidate_tile_judgments", "candidate_component_sentinels", "assessment")) or candidate["telemetry"] != expected_telemetry: raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment candidate replay does not match its stored evaluation.")
     assessment = replay["assessment"]
-    complete = sv9_judgment_memory.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v1", {name: candidate[name] for name in candidate if name != "complete_record_fingerprint"})
+    complete = sv9_judgment_memory.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v2" if candidate["schema_version"].endswith("v2") else "evidence-vault-sv9-judgment-candidate-record-v1", {name: candidate[name] for name in candidate if name != "complete_record_fingerprint"})
     if candidate["assessment_fingerprint"] != assessment["assessment_fingerprint"] or candidate["score_fingerprint"] != assessment["score_fingerprint"] or candidate["complete_record_fingerprint"] != complete: raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment candidate output fingerprints do not match.")
     return candidate
+
+def _sv9_judgment_candidate_witness(candidate: Mapping[str, Any], context: Mapping[str, Any]) -> None:
+    try:
+        if candidate["schema_version"].endswith("v1"): return
+        witness = validate_evidence_vault_sv9_authoritative_relation_witness(candidate["authoritative_relation_witness"])
+        relation = witness["authoritative_relations"][0]
+        if witness["source_scan_id"] != str(context["source_scan_id"]) or relation["capture_origin"] != {"capture_id": str(context["capture_id"]), "capture_fingerprint": str(context["capture_fingerprint"])} or relation["operation_origin"] != {"operation_id": str(context["operation_plan_id"]), "operation_fingerprint": str(context["operation_fingerprint"])}: raise ValueError("source provenance")
+    except EvidenceVaultSv9AuthoritativeRelationWitnessError:
+        raise
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise EvidenceVaultSv9AuthoritativeRelationWitnessError("SV9 judgment candidate witness does not match source provenance.") from exc
 
 def _sv9_judgment_context(conn: Any, source_scan_id: Any, workspace_slug: Any, for_update: bool) -> dict[str, Any] | None:
     scan, workspace = str(source_scan_id or "").strip(), str(workspace_slug or "").strip()
@@ -11661,6 +11688,32 @@ def _sv9_judgment_advisory_refs(value: Any) -> list[str]:
 
 def _sv9_judgment_public_context(context: Mapping[str, Any]) -> dict[str, Any]:
     return {name: str(context[name]) for name in ("workspace_id", "brand_id", "scan_run_id", "source_scan_id", "canonical_domain", "capture_id", "capture_fingerprint", "operation_plan_id", "operation_fingerprint")}
+
+
+def _sv9_judgment_authoritative_relation_facts(conn: Any, context: Mapping[str, Any], workspace_slug: str) -> dict[str, Any] | None:
+    operation = _vault_operation_plan_record(_vault_operation_row(conn, workspace_slug=workspace_slug, source_scan_id=str(context["source_scan_id"]), for_update=False))
+    if operation["status"] not in {"completed", "not_required"}: return None
+    rows = conn.execute(f"SELECT id, evidence_ref, content_hash, source, source_class, evidence_type, url, content, content_raw, confidence, metadata FROM {_SCHEMA}.evidence_records WHERE capture_id = %s ORDER BY evidence_ref, content_hash, id", (context["capture_id"],)).fetchall()
+    evidence = []
+    for row, value in zip(rows, _capture_evidence_rows(rows), strict=True):
+        identity = project_evidence_memory_row_identity(value, brand_domain=str(context["canonical_domain"])); evidence.append({"workspace_id": str(context["workspace_id"]), "brand_id": str(context["brand_id"]), "source_scan_id": str(context["source_scan_id"]), "canonical_domain": str(context["canonical_domain"]), "capture_id": str(context["capture_id"]), "evidence_record_id": str(row["id"]), "evidence_ref": value["ref"], "evidence_fingerprint": str(row["content_hash"]), "evidence_id": identity and identity["evidence_id"], "source_identity_id": identity and identity["document_id"]})
+    chain = _project_vault_operational_memory_authority_chain(conn, context["brand_id"]); authority = None
+    if chain:
+        memory, event = chain[-1]; authority = {"witness": {"canonical_memory_version": memory["canonical_memory_version"], "adoption_event_id": event["event_id"], "adoption_sequence": event["sequence"], "candidate_packet_fingerprint": event["candidate_packet_fingerprint"], "request_fingerprint": event["request_fingerprint"]}, "accepted": _sv9_authoritative_relation_accepted(conn, context, memory)}
+    return {"source": _sv9_judgment_public_context(context) | {"workspace_slug": str(workspace_slug).strip(), "operation_status": operation["status"]}, "evidence": evidence, "authority": authority}
+
+
+def _sv9_judgment_current_authoritative_relation_witness(conn: Any, candidate: Mapping[str, Any], context: Mapping[str, Any], workspace_slug: str) -> None:
+    if candidate["schema_version"].endswith("v1"): return
+    _sv9_judgment_candidate_witness(candidate, context)
+    try:
+        facts = _sv9_judgment_authoritative_relation_facts(conn, context, workspace_slug)
+        projection = _project_sv9_authoritative_relations(facts["source"], facts["evidence"], facts["authority"])
+        expected = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id=str(context["source_scan_id"]), projection=projection)
+    except Exception as exc:
+        raise EvidenceVaultSv9AuthoritativeRelationStaleWitnessError("SV9 judgment candidate witness is no longer current.") from exc
+    if candidate["authoritative_relation_witness"] != expected:
+        raise EvidenceVaultSv9AuthoritativeRelationStaleWitnessError("SV9 judgment candidate witness is no longer current.")
 
 def _sv9_authoritative_relation_source_operation(conn: Any, brand_id: Any, source: Mapping[str, Any]) -> None:
     resolution, packet = source["reference_resolution"], source["packet"]
@@ -11747,6 +11800,7 @@ def _sv9_judgment_stored_record(conn: Any, row: Mapping[str, Any] | None, contex
     if row is None: raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment candidate is unavailable.")
     candidate = dict(row["candidate_payload"] or {})
     candidate = _sv9_judgment_candidate_replay(candidate, _sv9_judgment_packets(conn, candidate, context))
+    _sv9_judgment_candidate_witness(candidate, context)
     expected = _sv9_judgment_binding_rows(candidate)
     actual = {str(binding["evidence_record_id"]): str(binding["evidence_fingerprint"]) for binding in conn.execute(f"SELECT evidence_record_id, evidence_fingerprint FROM {_SCHEMA}.evidence_vault_sv9_judgment_evidence_bindings WHERE candidate_id = %s", (row["id"],)).fetchall()}
     columns = ("schema_version", "canonical_plan_fingerprint", "current_series_fingerprint", "candidate_series_fingerprint", "evaluation_bundle_fingerprint", "assessment_fingerprint", "score_fingerprint", "complete_record_fingerprint")

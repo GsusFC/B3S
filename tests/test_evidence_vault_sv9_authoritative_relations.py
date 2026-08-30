@@ -7,7 +7,10 @@ import pytest
 
 from src.services.evidence_vault_canonical_core import build_tile_contract_registry
 from src.services.evidence_vault_sv9_authoritative_relations import (
+    EvidenceVaultSv9AuthoritativeRelationWitnessError,
+    build_evidence_vault_sv9_authoritative_relation_witness,
     project_evidence_vault_sv9_authoritative_relations,
+    validate_evidence_vault_sv9_authoritative_relation_witness,
 )
 from src.services.evidence_vault_sv9_judgment_delta import (
     EvidenceVaultSV9JudgmentDeltaError,
@@ -101,4 +104,16 @@ def test_projection_is_deterministic_head_bound_and_signed_relations_replay():
     facts["authority"]["witness"]["adoption_event_id"] = _id("new-event")
     changed, _ = _project(facts)
     assert changed["projection_fingerprint"] != first["projection_fingerprint"]
+
+
+def test_witness_has_exact_v1_shape_and_rejects_relation_or_origin_tampering():
+    projection, _ = _project(_facts(count=2))
+    witness = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id="scan-1", projection=projection)
+    assert validate_evidence_vault_sv9_authoritative_relation_witness(witness) == witness
+    assert set(witness) == {"schema_version", "source_scan_id", "operational_witness", "authoritative_relations", "projection_fingerprint", "witness_fingerprint"}
+    for path in (("authoritative_relations", 0, "evidence_ref"), ("operational_witness", "canonical_memory_version")):
+        tampered = deepcopy(witness); target = tampered
+        for key in path[:-1]: target = target[key]
+        target[path[-1]] = "other"
+        with pytest.raises(EvidenceVaultSv9AuthoritativeRelationWitnessError): validate_evidence_vault_sv9_authoritative_relation_witness(tampered)
 # fmt: on
