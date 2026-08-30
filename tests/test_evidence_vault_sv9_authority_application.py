@@ -7,15 +7,16 @@ from src.history import repository as history
 from src.services import evidence_vault_sv9_authority_application as application
 from src.services import evidence_vault_sv9_authority_event as authority_event
 from src.services import evidence_vault_sv9_authority_evaluation as evaluation_service
+from src.services import evidence_vault_sv9_authority_projection as authority_projection
 from src.services import evidence_vault_sv9_judgment_delta as delta
-from tests.test_evidence_vault_sv9_authority_evaluation import _Flow, _Repository, _hash, _identity, _relation, _series
+from tests.test_evidence_vault_sv9_authority_evaluation import _Flow, _Repository, _authority, _hash, _identity, _relation, _series
 from tests.test_sv9_judgment_memory import _judgment
 
 def _uuid(number): return f"00000000-0000-0000-0000-{number:012d}"
 
 class _ApplicationRepository(_Repository):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs); self.context = {"capture_origin": {"capture_id": _uuid(9), "capture_fingerprint": _hash(9)}, "operation_origin": {"operation_id": _uuid(10), "operation_fingerprint": _hash(10)}}; self.event, self.candidate, self.authority_calls, self.interleave, self.appear = 500, 400, 0, 0, None; self.adopt_failure = self.corrupt_after_adopt = self.authority_failure = self._corrupt = False; self.witness_seed = 300; self.adopt_error = None
+        super().__init__(*args, **kwargs); self.context = {"capture_origin": {"capture_id": _uuid(9), "capture_fingerprint": _hash(9)}, "operation_origin": {"operation_id": _uuid(10), "operation_fingerprint": _hash(10)}}; self.event, self.candidate, self.authority_calls, self.interleave, self.appear = 500, 400, 0, 0, None; self.adopt_failure = self.corrupt_after_adopt = self.authority_failure = self._corrupt = False; self.witness_seed = 300; self.adopt_error = None; self.authority_responses = []
     def load_evidence_vault_sv9_authoritative_relation_facts(self, scan, *, workspace_slug="b3s"):
         source = {"workspace_id": _uuid(1), "brand_id": _uuid(2), "scan_run_id": _uuid(3), "source_scan_id": scan, "workspace_slug": workspace_slug, "canonical_domain": "example.test", "capture_id": self.context["capture_origin"]["capture_id"], "capture_fingerprint": self.context["capture_origin"]["capture_fingerprint"], "operation_plan_id": self.context["operation_origin"]["operation_id"], "operation_fingerprint": self.context["operation_origin"]["operation_fingerprint"], "operation_status": "completed"}
         evidence, basis = [], []
@@ -29,6 +30,7 @@ class _ApplicationRepository(_Repository):
     def get_evidence_vault_sv9_judgment_authority(self, _domain, **_kwargs):
         self.authority_calls += 1
         if self.authority_failure: raise RuntimeError("authority unavailable")
+        if self.authority_responses: return deepcopy(self.authority_responses.pop(0))
         if self.interleave == self.authority_calls and self.appear: self.authority = deepcopy(self.appear)
         elif self.authority and self.interleave == self.authority_calls: self.event += 1; self.authority["current_head"]["event_fingerprint"] = _hash(self.event)
         value = deepcopy(self.authority)
@@ -47,7 +49,7 @@ class _ApplicationRepository(_Repository):
         identity = {name: candidate[name] for name in "id complete_record_fingerprint evaluation_bundle_fingerprint canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint assessment_fingerprint score_fingerprint source_scan_id".split()}
         request = authority_event.build_evidence_vault_sv9_authority_request(action="adopt_candidate", candidate_id=candidate_id, expected_predecessor_event_fingerprint=None if previous is None else previous["event_fingerprint"], delta_fingerprint=None, source_scan_id=scan)
         event = authority_event.build_evidence_vault_sv9_authority_event(event_id=_uuid(self.event), event_type=kind, sequence=1 if previous is None else previous["sequence"] + 1, predecessor_event_fingerprint=None if previous is None else previous["event_fingerprint"], active_parent_event_fingerprint=None if active is None else active["event_fingerprint"], candidate_identity=identity, current_series_fingerprint=candidate["current_series_fingerprint"], delta_fingerprint=None, request=request, idempotency_key_hash=key, predecessor_event_id=None if previous is None else previous["event_id"], active_parent_event_id=None if active is None else active["event_id"], created_at=f"2026-01-01T00:00:{self.event % 60:02d}+00:00")
-        self.authority = {"authority": True, "accepted_candidate": candidate, "accepted_partition": partition, "assessment": candidate["assessment"], "score": candidate["assessment"]["sv9_score"], "active_authority_event": event, "current_head": event, "event": event, "reopen_review_overlay": None}
+        self.authority = authority_projection.build_evidence_vault_sv9_authority_projection(accepted_candidate=candidate, current_head=event, active_authority_event=event, event=event, reopen_review_overlay=None)
     def adopt_evidence_vault_sv9_judgment_candidate(self, scan, candidate_id, *, expected_predecessor_event_fingerprint, idempotency_key_hash, **_kwargs):
         if self.adopt_error: raise self.adopt_error
         self.mutations.append("adopt")
@@ -122,7 +124,16 @@ def test_source_identity_and_interleavings_reject_without_new_event():
         result = _run(repo, _Flow(), current=current, relations=relations, source=f"scan-{review}")
         assert result["evaluation_status"] == ("review_required" if review else "candidate_available") and result["status"] == "authority_conflict" and repo.mutations == ["adopt"]
 
-def test_supersede_and_same_reopen_are_single_append_state_transitions():
+@pytest.mark.parametrize("missing", (False, True), ids=("null_timestamp", "missing_timestamp"))
+@pytest.mark.parametrize("next_authority", (lambda: _authority(), lambda: None), ids=("valid", "absent"))
+def test_invalid_persisted_wrapper_stops_before_a_second_authority_read(missing, next_authority):
+    invalid = _authority(); invalid["event"].pop("created_at") if missing else invalid["event"].__setitem__("created_at", None)
+    repo, flow = _ApplicationRepository(records=(9,)), _Flow(); repo.authority_responses = [invalid, next_authority()]
+    result = _run(repo, flow)
+    assert result == {"status": "authority_conflict", "reason_codes": ["invalid_input"], "evaluation_status": "no_new_score", "candidate": None, "signed_delta": None, "authority": None}
+    assert (repo.authority_calls, repo.projection_calls, repo.context_calls, repo.evidence_calls, repo.get_calls, repo.append_calls, repo.mutations, flow.calls, len(repo.authority_responses)) == (1, 0, 0, 0, 0, 0, [], [], 1)
+
+def test_supersede_and_consecutive_reopens_are_single_append_state_transitions():
     repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"; repo.records = (3, 9); prior = repo.authority["accepted_candidate"]["id"]
     advanced = _run(repo, _Flow(), current=(3, 9), relations=[_relation(repo, "M1", number=3), _relation(repo, "M1", number=9)], source="scan-2")
     assert advanced["status"] == "authority_advanced" and repo.authority["accepted_candidate"]["id"] != prior and repo.authority["accepted_candidate"]["source_scan_id"] == "scan-2"
@@ -130,6 +141,26 @@ def test_supersede_and_same_reopen_are_single_append_state_transitions():
     assert review["status"] == "review_required" and repo.mutations[-1] == "reopen" and repo.authority["accepted_candidate"]["id"] != prior
     again = _run(repo, _Flow(), current=(9,), relations=[_relation(repo, "M1", number=9)], source="scan-3")
     assert again["status"] == "review_required" and len(repo.mutations) == events
+    repo.records = (3,); next_reopen = _run(repo, _Flow(), current=(3,), relations=[_relation(repo, "M1", number=3)], source="scan-4")
+    assert next_reopen["status"] == "review_required" and repo.mutations[-2:] == ["reopen", "reopen"] and repo.authority["current_head"]["active_parent_event_id"] == repo.authority["active_authority_event"]["event_id"]
+
+def test_selected_older_event_uses_current_head_for_stable_authority():
+    repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"; older = deepcopy(repo.authority["event"])
+    repo.records = (3, 9); relations = [_relation(repo, "M1", number=3), _relation(repo, "M1", number=9)]
+    assert _run(repo, _Flow(), current=(3, 9), relations=relations, source="scan-2")["status"] == "authority_advanced"
+    repo.authority["event"] = older
+    assert application._authority(repo.authority)["head"] == evaluation_service._authority(repo.authority)[2]["current_head_event_fingerprint"] == repo.authority["current_head"]["event_fingerprint"]
+
+def test_pending_overlay_blocks_adoption_stable_success_and_retention(monkeypatch):
+    repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"; repo.records = (3, 9)
+    relations = [_relation(repo, "M1", number=3), _relation(repo, "M1", number=9)]; assert _run(repo, _Flow(), current=(3, 9), relations=relations, source="scan-2")["status"] == "authority_advanced"
+    repo.records = (9,); assert _run(repo, _Flow(), current=(9,), relations=[_relation(repo, "M1", number=9)], source="scan-3")["status"] == "review_required"; accepted = deepcopy(repo.authority["accepted_candidate"]); older = next(deepcopy(row) for row in repo.candidates.values() if row["id"] != accepted["id"]); before = list(repo.mutations)
+    def candidate_outcome(candidate): return {"status": "candidate_available", "reason_codes": [], "candidate": candidate, "accepted_authority": {"current_head_event_fingerprint": repo.authority["current_head"]["event_fingerprint"]}}
+    for candidate in (older, accepted):
+        monkeypatch.setattr(evaluation_service, "run_evidence_vault_sv9_authority_evaluation", lambda **_kwargs: candidate_outcome(candidate))
+        assert _run(repo, _Flow(), source=candidate["source_scan_id"])["status"] == "authority_conflict" and repo.mutations == before
+    monkeypatch.setattr(evaluation_service, "run_evidence_vault_sv9_authority_evaluation", lambda **_kwargs: {"status": "no_new_score", "reason_codes": ["exact_reuse"]})
+    assert _run(repo, _Flow())["status"] == "authority_conflict" and repo.mutations == before
 
 def test_first_run_review_and_no_score_or_repository_failures_fail_closed():
     first = _ApplicationRepository(records=()); unresolved = _run(first, _Flow())

@@ -11,6 +11,9 @@ from src.services.evidence_vault_sv9_authoritative_relations import (
     project_evidence_vault_sv9_authoritative_relations,
     validate_evidence_vault_sv9_authoritative_relation_witness,
 )
+from src.services.evidence_vault_sv9_authority_projection import (
+    validate_persisted_evidence_vault_sv9_authority_projection,
+)
 from src.services import evidence_vault_sv9_judgment_delta as delta
 from src.sv9 import incremental_evaluation as evaluation
 from src.sv9 import incremental_planner as planner
@@ -99,11 +102,11 @@ def _capacity(tiles: Sequence[Mapping[str, Any]], sentinels: Sequence[Mapping[st
 def _authority(value: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str] | None, bool]:
     if value is None: return [], [], None, False
     try:
-        if type(value) is not dict or value["authority"] is not True or set(value["accepted_partition"]) != {"candidate_tile_judgments", "candidate_component_sentinels"}: raise ValueError
+        value = validate_persisted_evidence_vault_sv9_authority_projection(value)
         part, candidate = value["accepted_partition"], value["accepted_candidate"]
         tiles, sentinels = [_accepted(row) for row in part["candidate_tile_judgments"]], [_accepted(row, True) for row in part["candidate_component_sentinels"]]
         if _capacity(tiles, sentinels) != len(planner._REGISTRY): raise ValueError
-        return tiles, sentinels, {"accepted_candidate_id": str(UUID(candidate["id"])), "active_event_id": str(UUID(value["active_authority_event"]["event_id"])), "current_head_event_fingerprint": evaluation._sha(value["current_head"]["event_fingerprint"])}, value.get("reopen_review_overlay") is not None
+        return tiles, sentinels, {"accepted_candidate_id": str(UUID(candidate["id"])), "active_event_id": str(UUID(value["active_authority_event"]["event_id"])), "current_head_event_fingerprint": value["current_head"]["event_fingerprint"]}, value["reopen_review_overlay"] is not None
     except (AttributeError, KeyError, TypeError, ValueError, memory.JudgmentMemoryContractError, planner.IncrementalPlannerError) as exc: raise EvidenceVaultSv9AuthorityEvaluationError("authority is invalid") from exc
 def _trusted(value: Sequence[Mapping[str, Any]], current: Mapping[str, Any]) -> set[tuple[str, str]]:
     if type(value) not in {list, tuple}: raise EvidenceVaultSv9AuthorityEvaluationError("trusted irrelevant evidence is invalid")
