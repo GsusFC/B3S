@@ -149,6 +149,16 @@ def validate_evidence_vault_sv9_authority_projection(value: Mapping[str, Any]) -
     return result
 
 
+def validate_persisted_evidence_vault_sv9_authority_projection(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate a repository-loaded authority wrapper with persisted audit metadata."""
+    result = validate_evidence_vault_sv9_authority_projection(value)
+    if any(result[name]["created_at"] is None for name in ("active_authority_event", "current_head", "event")):
+        _fail("persisted event audit metadata")
+    return result
+
+
 def build_evidence_vault_sv9_authority_projection(
     *,
     accepted_candidate: Mapping[str, Any],
