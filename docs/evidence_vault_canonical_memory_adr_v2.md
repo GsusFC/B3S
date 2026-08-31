@@ -1,6 +1,6 @@
 # ADR v2 — Memoria operativa incremental del Evidence Vault
 
-- **Estado:** Núcleo v2 implementado; activación revisada head-031 en `b3s-vault`: captura operacional y memoria de juicio SV9 post-publicación, con verified-raw, worker y diagnostics desactivados. C7 usa el ciclo normal de baldosa.
+- **Estado:** Núcleo v2 implementado; el perfil revisado head-031 para `b3s-vault` configura captura operacional y publicación autoritativa SV9 con memoria, pendiente de aceptación VA5 separada y despliegue explícito. El shadow de juicio SV9 post-publicación legado, verified-raw, worker y diagnostics están desactivados; no se ha realizado mutación live. C7 usa el ciclo normal de baldosa.
 - **Fecha:** 2026-08-06
 - **Ámbito inicial:** Vault; validación runtime en `b3s-pr71-vault`
 - **Sustituye:** `evidence_vault_canonical_memory_adr_v1.md`
@@ -295,12 +295,24 @@ resolución → N+1 → evaluation_identity nueva
 SoccerSolver es el primer caso y Causa Prima la falsificación con otra marca.
 No se permiten condicionales por dominio, marca o URL.
 
-El despliegue es Vault-only y gradual. La configuración aislada PR71 declara
+El despliegue previsto es Vault-only y gradual. La configuración aislada PR71 declara
 `BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true`: esa capability conecta el
 scanner web con preparación, ejecución, activación y proyección operacional. No
-activa C7 ni autoriza producción. La activación revisada head-031 de `b3s-vault` declara `BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true`, `BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED=true` solo post-publicación, `BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED=false`, `B3S_VAULT_WORKER_ENABLED=false` y `B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED=false`.
+activa C7 ni autoriza producción. El perfil revisado head-031 de `b3s-vault`
+queda configurado con `BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true`,
+`BRAND3_VAULT_SV9_AUTHORITY_SCANNER_ENABLED=true`,
+`BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED=false`,
+`BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED=false`,
+`B3S_VAULT_WORKER_ENABLED=false` y
+`B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED=false`.
 Desactivar la capability en PR71 conserva capturas, eventos y evaluaciones y
 devuelve ese entorno al diagnóstico explícito.
+
+The VA4D code/profile cutover remains separate from VA5 acceptance and any
+explicit deployment. Final integration acceptance and explicit deployment are
+independent release decisions; this ADR records no live mutation.
+The profile is configured, not live: authority remains contingent on separate
+VA5 acceptance and explicit deployment; no live mutation has occurred.
 
 ## 12. Estado real de implementación y límites de activación
 
@@ -340,10 +352,17 @@ permanecen pendientes y esta ruta no calcula score por efecto lateral.
 
 El scanner web invoca estas rutas únicamente cuando concurren
 `BRAND3_ENVIRONMENT=vault` y la capability exacta
-`BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true`. Esa condición se cumple en
-`fly.pr71-vault.toml` y en el `fly.vault.toml` revisado head-031. `b3s-vault` ejecuta captura operacional y juicio SV9 post-publicación; verified-raw, worker y diagnostics siguen desactivados y el score diagnóstico live permanece intacto. Cualquier despliegue del pipeline genérico en otro entorno requiere una revisión
-y autorización separadas. C7 no añade una bandera, allowlist, readiness ni
-ventana de activación propias.
+`BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true`. La publicación autoritativa
+requiere además `BRAND3_VAULT_SV9_AUTHORITY_SCANNER_ENABLED=true`; esa bandera
+solo está configurada en el `fly.vault.toml` revisado head-031. El perfil de
+`b3s-vault` queda configurado para captura operacional y publicación SV9 con
+memoria, sujeta a aceptación VA5 separada y despliegue explícito; el shadow de
+juicio post-publicación legado permanece desactivado, al igual que verified-raw,
+worker y diagnostics, y el score diagnóstico live permanece intacto. Core
+(`fly.toml`) y PR71 (`fly.pr71-vault.toml`) no activan la autoridad. No se ha
+realizado mutación live. Cualquier despliegue del pipeline genérico en otro
+entorno requiere una revisión y autorización separadas. C7 no añade una
+bandera, allowlist, readiness ni ventana de activación propias.
 
 
 ## 13. Validación de campo v1

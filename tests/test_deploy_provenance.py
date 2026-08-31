@@ -129,6 +129,10 @@ def _read(relative_path: str) -> str:
     return (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
 
 
+def _compact(text: str) -> str:
+    return " ".join(text.split())
+
+
 def _attestation_source() -> str:
     workflow = _read(".github/workflows/fly-deploy-pr71-vault.yml")
     marker = "          python - <<'PY'\n"
@@ -305,7 +309,7 @@ def test_production_stays_select_only_and_vault_release_is_target_attested(tmp_p
     assert production["env"]["BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED"] == "false"
     assert vault["deploy"]["release_command"] == VAULT_RELEASE_COMMAND
     assert "--database-url" not in vault["deploy"]["release_command"]
-    assert all(vault["env"].get(key, "false") == value for key, value in {"B3S_POSTGRES_REQUIRED": "true", "BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED": "true", "BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED": "true", "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED": "false", "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH": "", "B3S_VAULT_WORKER_ENABLED": "false", "B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED": "false"}.items())
+    assert all(vault["env"].get(key, "false") == value for key, value in {"B3S_POSTGRES_REQUIRED": "true", "BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED": "true", "BRAND3_VAULT_SV9_AUTHORITY_SCANNER_ENABLED": "true", "BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED": "false", "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED": "false", "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH": "", "B3S_VAULT_WORKER_ENABLED": "false", "B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED": "false"}.items())
     runbook = _read("docs/deployment/b3s_vault_fly.md")
     deployment_chain = ('DEPLOY_SHA="<authorized-full-40-char-SHA>" && git checkout --detach "$DEPLOY_SHA" && observed_head="$(git rev-parse HEAD)" && test "$observed_head" = "$DEPLOY_SHA" && worktree_status="$(git status --porcelain)" && test -z "$worktree_status" && ' "fly config validate -a b3s-vault -c fly.vault.toml && " 'fly deploy --remote-only -a b3s-vault -c fly.vault.toml --build-arg B3S_BUILD_SHA="$DEPLOY_SHA"')
     assert deployment_chain in runbook
@@ -318,6 +322,34 @@ def test_production_stays_select_only_and_vault_release_is_target_attested(tmp_p
         result = subprocess.run(["sh", "-c", script], check=False, capture_output=True, text=True, env={**os.environ, "CHECKOUT_STATUS": "17" if failure == "checkout" else "0", "CLEAN_STATUS": "17" if failure == "clean" else "0", "DEPLOY_SENTINEL": str(sentinel)})
         assert result.returncode != 0
         assert not sentinel.exists()
+
+
+def test_vault_authority_profile_preserves_core_and_pr71_invariance():
+    production, vault, pr71 = (
+        tomllib.loads(_read(path))
+        for path in ("fly.toml", "fly.vault.toml", "fly.pr71-vault.toml")
+    )
+    authority_flag = "BRAND3_VAULT_SV9_AUTHORITY_SCANNER_ENABLED"
+
+    assert vault["env"][authority_flag] == "true"
+    assert production["env"].get(authority_flag, "false") == "false"
+    assert pr71["env"].get(authority_flag, "false") == "false"
+    assert vault["env"]["BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED"] == "false"
+    assert production["env"]["BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED"] == "false"
+    assert pr71["env"]["BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED"] == "false"
+
+
+def test_vault_docs_bind_configured_profile_to_va5_release_boundary():
+    runbook = _compact(_read("docs/deployment/b3s_vault_fly.md"))
+    adr = _compact(_read("docs/evidence_vault_canonical_memory_adr_v2.md"))
+    configured_not_live = (
+        "The profile is configured, not live: authority remains contingent on separate "
+        "VA5 acceptance and explicit deployment; no live mutation has occurred."
+    )
+
+    assert "VA4D changes the reviewed product profile only." in runbook
+    assert configured_not_live in runbook
+    assert configured_not_live in adr
 
 
 def test_deploy_workflow_builds_and_verifies_the_exact_commit():
@@ -731,5 +763,6 @@ def test_pr71_runbook_marks_workflow_post_merge_and_separately_authorized():
 def test_vault_adr_records_reviewed_b3s_vault_activation():
     adr = _read("docs/evidence_vault_canonical_memory_adr_v2.md")
 
-    assert all(expected in adr for expected in ("head-031", "`BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true`", "`BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED=true`", "post-publicación", "`BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED=false`", "`B3S_VAULT_WORKER_ENABLED=false`", "`B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED=false`"))
+    assert all(expected in adr for expected in ("head-031", "`BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true`", "`BRAND3_VAULT_SV9_AUTHORITY_SCANNER_ENABLED=true`", "`BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED=false`", "`BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED=false`", "`B3S_VAULT_WORKER_ENABLED=false`", "`B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED=false`", "VA5", "explicit deployment"))
+    assert "`BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED=true`" not in adr
     assert "dormant" not in adr
