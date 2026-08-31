@@ -12,16 +12,19 @@ or a PostgreSQL connection with `b3s.fly.dev`.
 - PostgreSQL: a dedicated Neon branch or database
 - Persistence authority: reviewed Vault journals may record accepted authority
   for their exact versioned subjects
-- Authority profile: the reviewed Vault profile selects SV9-with-memory
-  publication after separate acceptance and deployment; Core remains unchanged
+- Authority profile: the reviewed Vault profile is configured for SV9-with-memory
+  publication after completed VA5 source/CI acceptance and explicit deployment;
+  Core remains unchanged
 - Reviewer credential: dedicated to Vault and different from the scanner token
 - Production app: never targeted by Vault commands
 
 The Vault and production deployments share the same application image and
 codebase. Their deployment profiles select different runtime behavior: only the
-reviewed Vault profile selects the authority scanner. Once separately accepted
-and explicitly deployed, accepted Vault authority is published through the
-existing Vault UI and API contracts; it is not a C7 runtime cutover.
+reviewed Vault profile selects the authority scanner. VA5 source/CI integration
+acceptance is complete; once explicitly deployed, accepted Vault authority will
+be published through the existing Vault UI and API contracts. The configured
+profile is not a claim that the current Machine runs authority; it is not a C7
+runtime cutover.
 
 The Vault permits a 90-second visual capture budget for field diagnostics;
 production remains at 60 seconds. Both use the same bounded capture path and
@@ -44,9 +47,10 @@ adoption has its own explicit, versioned authority contract.
 
 `fly.vault.toml` requires PostgreSQL, configures persisted Vault capture and the
 validated SV9 authority scanner, and configures the legacy post-publication SV9
-judgment shadow off. Authority is selected only when the Vault operational and
-authority capabilities are both enabled; Core and the isolated PR71 profile do
-not enable the authority capability.
+judgment shadow off. This is a configured, not live, profile; the current Machine
+is not claimed to run authority. Authority is selected only when the Vault
+operational and authority capabilities are both enabled; Core and the isolated
+PR71 profile do not enable the authority capability.
 Verified-raw remains false with an empty socket; no worker, diagnostics, role, secret, or provisioning is enabled.
 
 The release fails closed: build identity; migration URL environment; target-profile migration; then exact head-`031` verification.
@@ -73,14 +77,17 @@ production.
 ## VA4D / VA5 release boundary
 
 VA4D changes the reviewed product profile only. It is configuration and
-deployment-provenance contract coverage; it is separate from VA5 acceptance and
-does not authorize an explicit deployment. Final integration acceptance and any
-explicit deployment require a separate VA5/release decision. `fly.toml` (Core)
-and `fly.pr71-vault.toml` remain byte-unchanged and do not enable
+deployment-provenance contract coverage; VA5 source/CI integration acceptance is
+complete and does not authorize an explicit deployment. Explicit Vault
+deployment and live smoke testing remain pending, separate, and require
+independent authorization. `fly.toml` (Core) and `fly.pr71-vault.toml` remain
+byte-unchanged and do not enable
 `BRAND3_VAULT_SV9_AUTHORITY_SCANNER_ENABLED`.
 
-The profile is configured, not live: authority remains contingent on separate
-VA5 acceptance and explicit deployment; no live mutation has occurred.
+VA5 source/CI integration acceptance is complete. Explicit Vault deployment and
+live smoke testing remain pending, separate, and require independent
+authorization. No live mutation has occurred. The profile is configured, not
+live: the current Machine is not claimed to run authority.
 
 ## Deployment and rollback NO-GO
 

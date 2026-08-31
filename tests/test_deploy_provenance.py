@@ -342,14 +342,19 @@ def test_vault_authority_profile_preserves_core_and_pr71_invariance():
 def test_vault_docs_bind_configured_profile_to_va5_release_boundary():
     runbook = _compact(_read("docs/deployment/b3s_vault_fly.md"))
     adr = _compact(_read("docs/evidence_vault_canonical_memory_adr_v2.md"))
-    configured_not_live = (
-        "The profile is configured, not live: authority remains contingent on separate "
-        "VA5 acceptance and explicit deployment; no live mutation has occurred."
+    current_status = (
+        "VA5 source/CI integration acceptance is complete. Explicit Vault deployment and "
+        "live smoke testing remain pending, separate, and require independent authorization. "
+        "No live mutation has occurred."
     )
+    machine_status = (
+        "The profile is configured, not live: the current Machine is not claimed to run authority."
+    )
+    stale_status = "authority remains contingent on separate VA5 acceptance and explicit deployment"
 
     assert "VA4D changes the reviewed product profile only." in runbook
-    assert configured_not_live in runbook
-    assert configured_not_live in adr
+    assert all(statement in document for document in (runbook, adr) for statement in (current_status, machine_status))
+    assert all(stale_status not in document for document in (runbook, adr))
 
 
 def test_deploy_workflow_builds_and_verifies_the_exact_commit():
