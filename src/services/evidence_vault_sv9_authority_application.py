@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Protocol, Sequence
 from uuid import UUID
 
+from src.services import evidence_vault_sv9_authority_event as authority_event
 from src.services import evidence_vault_sv9_authority_evaluation as evaluation_service
 from src.services import evidence_vault_sv9_judgment_delta as delta
 from src.services.evidence_vault_sv9_authoritative_relations import (
@@ -12,12 +13,9 @@ from src.services.evidence_vault_sv9_authoritative_relations import (
     EvidenceVaultSv9AuthoritativeRelationWitnessError,
 )
 from src.sv9 import incremental_evaluation as evaluation
-from src.sv9 import judgment_memory as memory
+
 
 # fmt: off
-_IDEMPOTENCY_VERSION = "evidence-vault-sv9-authority-application-idempotency-v1"
-
-
 class EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError(Exception):
     pass
 
@@ -129,17 +127,26 @@ def _authority(value: Any) -> dict[str, Any]:
     evaluation_service._authority(value)
     candidate = _candidate(value["accepted_candidate"])
     assessment = value["accepted_candidate"]["assessment"]
-    if candidate is None or value["assessment"] != assessment or value["score"] != assessment["sv9_score"]:
+    required = "id source_scan_id complete_record_fingerprint evaluation_bundle_fingerprint canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint assessment_fingerprint score_fingerprint".split()
+    if candidate is None or any(name not in candidate for name in required) or value["assessment"] != assessment or value["score"] != assessment["sv9_score"]:
         raise ValueError("authority projection is inconsistent")
     if assessment.get("assessment_fingerprint") != candidate["assessment_fingerprint"] or assessment.get("score_fingerprint") != candidate["score_fingerprint"]:
         raise ValueError("authority assessment is inconsistent")
-    active, head = value["active_authority_event"], value["current_head"]
-    if active.get("event_type") not in {"adopt", "supersede"}:
+    try:
+        active, head, event = (authority_event.validate_evidence_vault_sv9_authority_event(value[key]) for key in ("active_authority_event", "current_head", "event"))
+    except (authority_event.EvidenceVaultSv9AuthorityEventError, KeyError, TypeError) as exc:
+        raise ValueError("authority event is invalid") from exc
+    if any(row["created_at"] is None or row != value[key] for row, key in zip((active, head, event), ("active_authority_event", "current_head", "event"))) or event != head or active["event_type"] not in {"adopt", "supersede"}:
         raise ValueError("authority event is invalid")
+    bindings = {"candidate_id": "id", "candidate_complete_record_fingerprint": "complete_record_fingerprint", "evaluation_bundle_fingerprint": "evaluation_bundle_fingerprint", "canonical_plan_fingerprint": "canonical_plan_fingerprint", "current_series_fingerprint": "current_series_fingerprint", "candidate_series_fingerprint": "candidate_series_fingerprint", "assessment_fingerprint": "assessment_fingerprint", "score_fingerprint": "score_fingerprint"}
+    if any(active[name] != candidate[field] for name, field in bindings.items()) or active["request"]["source_scan_id"] != candidate["source_scan_id"] or head["current_series_fingerprint"] != candidate["current_series_fingerprint"]:
+        raise ValueError("authority event is not bound to the accepted candidate")
     overlay = value.get("reopen_review_overlay")
-    if overlay is not None:
+    if overlay is None:
+        if head != active: raise ValueError("authority head is inconsistent")
+    else:
         signed = _signed_delta(overlay.get("signed_delta"))
-        if signed is None or overlay.get("delta_fingerprint") != signed["canonical_delta_fingerprint"]:
+        if signed is None or overlay.get("delta_fingerprint") != signed["canonical_delta_fingerprint"] or head["event_type"] != "reopen" or head["delta_fingerprint"] != signed["canonical_delta_fingerprint"] or head["active_parent_event_id"] != active["event_id"] or head["active_parent_event_fingerprint"] != active["event_fingerprint"]:
             raise ValueError("authority review overlay is inconsistent")
     return {"candidate": candidate, "head": evaluation._sha(head["event_fingerprint"]), "kind": active["event_type"], "overlay": None if overlay is None else overlay["delta_fingerprint"]}
 
@@ -147,11 +154,16 @@ def _candidate(value: Any) -> dict[str, str] | None:
     try:
         if type(value) is not dict:
             raise ValueError
-        result = {key: str(value[key]) for key in ("id", "source_scan_id", "canonical_plan_fingerprint", "complete_record_fingerprint", "assessment_fingerprint", "score_fingerprint")}
-        if str(UUID(result["id"])) != result["id"] or not result["source_scan_id"].strip() or any(evaluation._sha(result[key]) != result[key] for key in result if key.endswith("fingerprint")):
+        keys = "id source_scan_id canonical_plan_fingerprint complete_record_fingerprint assessment_fingerprint score_fingerprint".split()
+        result = {key: value[key] for key in keys}
+        if type(result["source_scan_id"]) is not str or str(UUID(result["id"])) != result["id"] or any(type(result[key]) is not str or evaluation._sha(result[key]) != result[key] for key in result if key.endswith("fingerprint")):
             raise ValueError
+        full = "evaluation_bundle_fingerprint current_series_fingerprint candidate_series_fingerprint".split()
+        if any(key in value for key in full):
+            if any(key not in value or type(value[key]) is not str or evaluation._sha(value[key]) != value[key] for key in full) or authority_event.candidate_complete_record_fingerprint(value) != result["complete_record_fingerprint"]: raise ValueError
+            result |= {key: value[key] for key in full}
         return result
-    except (AttributeError, KeyError, TypeError, ValueError):
+    except (authority_event.EvidenceVaultSv9AuthorityEventError, AttributeError, KeyError, TypeError, ValueError):
         return None
 
 def _signed_delta(value: Any) -> dict[str, Any] | None:
@@ -161,7 +173,7 @@ def _signed_delta(value: Any) -> dict[str, Any] | None:
         return None
 
 def _matches(details: Mapping[str, Any], candidate: Mapping[str, str]) -> bool:
-    return details["candidate"] == candidate
+    return all(details["candidate"].get(key) == value for key, value in candidate.items())
 
 def _snapshot(outcome: Mapping[str, Any]) -> tuple[bool, str | None]:
     value = outcome.get("accepted_authority")
@@ -176,7 +188,8 @@ def _success(outcome: Mapping[str, Any], authority: Mapping[str, Any], details: 
     return _result(status, outcome, authority, candidate)
 
 def _idempotency(action: str, source: str, candidate: str | None, fingerprint: str | None, predecessor: str | None) -> str:
-    return memory.canonical_fingerprint(_IDEMPOTENCY_VERSION, {"action": action, "source_scan_id": source, "candidate_id": candidate, "canonical_delta_fingerprint": fingerprint, "expected_predecessor_event_fingerprint": predecessor})
+    request = authority_event.build_evidence_vault_sv9_authority_request(action=action, candidate_id=candidate, expected_predecessor_event_fingerprint=predecessor, delta_fingerprint=fingerprint, source_scan_id=source)
+    return authority_event.authority_application_idempotency_fingerprint(request)
 
 def _result(status: str, outcome: Mapping[str, Any], authority: Mapping[str, Any] | None = None, candidate: Mapping[str, str] | None = None, signed_delta: Mapping[str, Any] | None = None) -> dict[str, Any]:
     reasons = outcome.get("reason_codes", [])

@@ -182,6 +182,7 @@ from src.services.evidence_vault_sv9_authoritative_relations import (
 from src.services.evidence_vault_sv9_authority_application import (
     EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError,
 )
+from src.services import evidence_vault_sv9_authority_event as authority_event
 from src.services.evidence_vault_lineage_replay import (
     EvidenceVaultLineageReplayError,
     validate_lineage_seed_export_v2,
@@ -11665,7 +11666,8 @@ def _sv9_judgment_candidate_replay(candidate: dict[str, Any], packets: list[dict
     expected_telemetry = {name: replay[name] for name in ("call_count", "calls_avoided", "reused_tile_count", "evaluated_tile_count")}
     if replay["status"] != "available" or any(candidate[name] != replay[name] for name in ("candidate_tile_judgments", "candidate_component_sentinels", "assessment")) or candidate["telemetry"] != expected_telemetry: raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment candidate replay does not match its stored evaluation.")
     assessment = replay["assessment"]
-    complete = sv9_judgment_memory.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v2" if candidate["schema_version"].endswith("v2") else "evidence-vault-sv9-judgment-candidate-record-v1", {name: candidate[name] for name in candidate if name != "complete_record_fingerprint"})
+    try: complete = authority_event.candidate_complete_record_fingerprint(candidate)
+    except authority_event.EvidenceVaultSv9AuthorityEventError as exc: raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment candidate output fingerprints do not match.") from exc
     if candidate["assessment_fingerprint"] != assessment["assessment_fingerprint"] or candidate["score_fingerprint"] != assessment["score_fingerprint"] or candidate["complete_record_fingerprint"] != complete: raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment candidate output fingerprints do not match.")
     return candidate
 
@@ -11836,25 +11838,8 @@ def _sv9_authority_uuid(value: Any, field: str) -> str:
 def _sv9_authority_request(
     action: str, candidate_id: str | None, predecessor: str | None, delta: str | None, source_scan_id: Any
 ) -> dict[str, Any]:
-    candidate = _sv9_authority_uuid(candidate_id, "candidate_id") if candidate_id else None
-    predecessor = _sv9_authority_fingerprint(predecessor, "expected_predecessor_event_fingerprint", optional=True)
-    delta = _sv9_authority_fingerprint(delta, "delta_fingerprint", optional=True)
-    source = str(source_scan_id or "").strip()
-    if (
-        action not in {"adopt_candidate", "reopen_authority"}
-        or (action == "adopt_candidate") != bool(candidate)
-        or (action == "reopen_authority") != bool(delta)
-        or not source
-    ):
-        raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment authority request is invalid.")
-    return {
-        "schema_version": _SV9_AUTHORITY_REQUEST,
-        "action": action,
-        "candidate_id": candidate,
-        "source_scan_id": source,
-        "expected_predecessor_event_fingerprint": predecessor,
-        "delta_fingerprint": delta,
-    }
+    try: return authority_event.build_evidence_vault_sv9_authority_request(action=action, candidate_id=candidate_id, expected_predecessor_event_fingerprint=predecessor, delta_fingerprint=delta, source_scan_id=source_scan_id)
+    except authority_event.EvidenceVaultSv9AuthorityEventError as exc: raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment authority request is invalid.") from exc
 
 
 def _sv9_authority_delta(value: Any) -> dict[str, Any]:
@@ -11905,6 +11890,7 @@ def _sv9_authority_event(
     candidate: Mapping[str, Any] | None,
     candidate_row: Mapping[str, Any] | None,
     delta: Mapping[str, Any] | None,
+    created_at: str | None = None,
 ) -> dict[str, Any]:
     if bool(candidate) == bool(delta):
         raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment authority event is invalid.")
@@ -11926,42 +11912,28 @@ def _sv9_authority_event(
         )
     current = delta["plan"]["current_series_fingerprint"] if delta else candidate["current_series_fingerprint"]
     event_id = str(_stable_uuid(context["brand_id"], "evidence-vault-sv9-judgment-authority", idempotency))
-    request_fingerprint = sv9_judgment_memory.canonical_fingerprint(_SV9_AUTHORITY_REQUEST, request)
     payload = {"schema_version": _SV9_AUTHORITY_EVENT, "request": dict(request)} | (
         {"review_state": "pending", "signed_delta": dict(delta)} if delta else {}
     )
-    identity = {
-        "event_id": event_id,
-        "event_type": kind,
-        "sequence": int(head["sequence"]) + 1 if head else 1,
-        "predecessor_event_fingerprint": head["event_fingerprint"] if head else None,
-        "active_parent_event_fingerprint": active["event_fingerprint"] if active else None,
-        "candidate_id": candidate["id"] if candidate else None,
-        "candidate_complete_record_fingerprint": candidate["complete_record_fingerprint"] if candidate else None,
-        "evaluation_bundle_fingerprint": candidate["evaluation_bundle_fingerprint"] if candidate else None,
-        "canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"] if candidate else None,
-        "current_series_fingerprint": current,
-        "candidate_series_fingerprint": candidate["candidate_series_fingerprint"] if candidate else None,
-        "assessment_fingerprint": candidate["assessment_fingerprint"] if candidate else None,
-        "score_fingerprint": candidate["score_fingerprint"] if candidate else None,
-        "delta_fingerprint": delta["canonical_delta_fingerprint"] if delta else None,
-        "request_fingerprint": request_fingerprint,
-        "idempotency_key_hash": idempotency,
-    }
+    identity = None if candidate is None else {key: candidate[key] for key in ("id", "complete_record_fingerprint", "evaluation_bundle_fingerprint", "canonical_plan_fingerprint", "current_series_fingerprint", "candidate_series_fingerprint", "assessment_fingerprint", "score_fingerprint", "source_scan_id")}
+    try:
+        canonical = authority_event.build_evidence_vault_sv9_authority_event(event_id=event_id, event_type=kind, sequence=int(head["sequence"]) + 1 if head else 1, predecessor_event_fingerprint=head["event_fingerprint"] if head else None, active_parent_event_fingerprint=active["event_fingerprint"] if active else None, candidate_identity=identity, current_series_fingerprint=current, delta_fingerprint=delta["canonical_delta_fingerprint"] if delta else None, request=request, idempotency_key_hash=idempotency, predecessor_event_id=head["id"] if head else None, active_parent_event_id=active["id"] if active else None, created_at=created_at)
+    except authority_event.EvidenceVaultSv9AuthorityEventError as exc:
+        raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment authority event is invalid.") from exc
     return {
         "id": event_id,
         "workspace_id": context["workspace_id"],
         "brand_id": context["brand_id"],
         "event_type": kind,
-        "sequence": identity["sequence"],
+        "sequence": canonical["sequence"],
         "predecessor_event_id": head["id"] if head else None,
         "active_parent_event_id": active["id"] if active else None,
         "candidate_id": candidate["id"] if candidate else None,
         "candidate_scan_run_id": candidate_row["scan_run_id"] if candidate_row else None,
         "candidate_capture_id": candidate_row["capture_id"] if candidate_row else None,
         "candidate_operation_plan_id": candidate_row["operation_plan_id"] if candidate_row else None,
-        "request_fingerprint": request_fingerprint,
-        "event_fingerprint": sv9_judgment_memory.canonical_fingerprint(_SV9_AUTHORITY_EVENT, identity),
+        "request_fingerprint": canonical["request_fingerprint"],
+        "event_fingerprint": canonical["event_fingerprint"],
         "evaluation_bundle_fingerprint": candidate["evaluation_bundle_fingerprint"] if candidate else None,
         "canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"] if candidate else None,
         "current_series_fingerprint": current,
@@ -11969,12 +11941,13 @@ def _sv9_authority_event(
         "assessment_fingerprint": candidate["assessment_fingerprint"] if candidate else None,
         "score_fingerprint": candidate["score_fingerprint"] if candidate else None,
         "delta_fingerprint": delta["canonical_delta_fingerprint"] if delta else None,
-        "idempotency_key_hash": idempotency,
+        "idempotency_key_hash": canonical["idempotency_key_hash"],
         "event_payload": payload,
         "candidate": candidate,
         "delta": delta,
-        "request": dict(request),
-        "created_at": None,
+        "request": canonical["request"],
+        "created_at": canonical["created_at"],
+        "canonical_event": canonical,
     }
 
 
@@ -12008,10 +11981,10 @@ def _replay_sv9_judgment_authority(conn: Any, workspace_slug: str, workspace_id:
             source_context = _sv9_judgment_context(conn, source, workspace_slug, False)
             if source_context is None or source_context["workspace_id"] != workspace_id or source_context["brand_id"] != brand_id: raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment reopen source context is unavailable.")
             _sv9_authority_reopen_binding(conn, state, source_context, delta)
-        event = _sv9_authority_event(context, state, request, _sv9_authority_fingerprint(row["idempotency_key_hash"], "idempotency_key_hash"), candidate, candidate_row, delta)
+        created_at = row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"])
+        event = _sv9_authority_event(context, state, request, _sv9_authority_fingerprint(row["idempotency_key_hash"], "idempotency_key_hash"), candidate, candidate_row, delta, created_at)
         if any((row[key] is None) != (event[key] is None) or (row[key] is not None and (row[key] != event[key] if key == "event_payload" else str(row[key]) != str(event[key]))) for key in _SV9_AUTHORITY_COLUMNS):
             raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment authority replay is invalid.")
-        event["created_at"] = row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"])
         events[event["id"]] = event
         if candidate:
             state, overlay = {"head": event, "active": event, "candidate": candidate, "events": events, "overlay": None}, None
@@ -12021,8 +11994,12 @@ def _replay_sv9_judgment_authority(conn: Any, workspace_slug: str, workspace_id:
 
 
 def _sv9_authority_event_public(event: Mapping[str, Any]) -> dict[str, Any]:
-    fields = "event_type sequence predecessor_event_id active_parent_event_id candidate_id current_series_fingerprint candidate_series_fingerprint delta_fingerprint request_fingerprint event_fingerprint created_at".split()
-    return {"event_id": event["id"]} | {field: event[field] for field in fields}
+    try:
+        public = authority_event.validate_evidence_vault_sv9_authority_event(event["canonical_event"])
+        if public["created_at"] is None or public["event_id"] != event["id"] or public["event_fingerprint"] != event["event_fingerprint"]: raise ValueError("event projection")
+        return public
+    except (authority_event.EvidenceVaultSv9AuthorityEventError, KeyError, TypeError, ValueError) as exc:
+        raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment authority public event is invalid.") from exc
 
 
 def _project_sv9_judgment_authority(state: Mapping[str, Any], event: Mapping[str, Any] | None = None) -> dict[str, Any]:
