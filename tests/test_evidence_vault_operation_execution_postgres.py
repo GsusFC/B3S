@@ -123,6 +123,30 @@ def _row():
     }
 
 
+def _large_baseline_rows():
+    rows = [
+        {
+            **_row(),
+            "ref": f"raw_inputs.{index}.chunk.0",
+            "url": f"https://example.com/{index}",
+            "content": f"We help teams ship better products. Evidence {index}.",
+        }
+        for index in range(280)
+    ]
+    rows.extend(
+        {
+            **_row(),
+            "ref": f"acquisition.{index}",
+            "url": f"https://example.com/acquisition/{index}",
+            "content": f"Provider metadata {index}.",
+            "evidence_type": "acquisition.provider_status",
+            "metadata": {"source_class": "acquisition_metadata"},
+        }
+        for index in range(20)
+    )
+    return rows
+
+
 def _persist_baseline(repository, scan_id, rows=None, plan=None):
     rows = rows or [_row()]
     plan = plan or build_vault_scan_plan(
@@ -584,6 +608,48 @@ def test_result_survives_crash_and_retry_performs_zero_second_llm_calls() -> Non
                         """,
                         (packet_kind,),
                     )
+
+
+def test_large_frozen_baseline_persists_and_recovers_without_llm_calls() -> None:
+    repository = _reset_repository()
+    rows = _large_baseline_rows()
+    plan = _persist_baseline(repository, "large-baseline-scan", rows=rows)
+    assert len(plan["semantic_context"]["evidence_fingerprints"]) == 300
+    assert len(plan["operations"]["classify_evidence_fingerprints"]) == 280
+
+    llm = ExecutorLLM()
+    completed = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="large-baseline-scan",
+        worker_id="worker-a",
+        llm=llm,
+    )
+
+    assert completed["execution_status"] == "completed"
+    stored = repository.get_capture_operation_plan("large-baseline-scan")
+    result = stored["result_payload"]
+    assert stored["status"] == "completed"
+    assert len(result["selected_evidence_fingerprints"]) == 280
+    assert set(result["evidence_work_dispositions"]) == set(
+        result["selected_evidence_fingerprints"]
+    )
+    assert stored["result_fingerprint"] == canonical_fingerprint(
+        "evidence-vault-operation-result-v1", result
+    )
+    calls_before_recovery = list(llm.calls)
+
+    recovered = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="large-baseline-scan",
+        worker_id="worker-b",
+        llm=NoCallLLM(),
+    )
+
+    assert recovered["execution_status"] == "completed"
+    assert llm.calls == calls_before_recovery
+    assert repository.get_capture_operation_plan("large-baseline-scan")[
+        "result_payload"
+    ] == result
 
 
 def test_parent_advance_after_result_persistence_terminalizes_as_superseded() -> None:

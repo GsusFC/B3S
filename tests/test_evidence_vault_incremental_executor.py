@@ -23,6 +23,7 @@ class ExecutorLLM:
 
     def __init__(self):
         self.calls = []
+        self.relation_payloads = []
 
     def _call_json(self, system, user, **kwargs):
         self.calls.append(kwargs["schema_name"])
@@ -41,6 +42,7 @@ class ExecutorLLM:
                 ]
             }
         assert kwargs["schema_name"] == "evidence_tile_relation_proposals"
+        self.relation_payloads.append(json.loads(user.split(":\n", 1)[1]))
         marker = '"evidence_fingerprint": "'
         fingerprint = user.split(marker, 1)[1].split('"', 1)[0]
         return {
@@ -62,6 +64,21 @@ class NoCallLLM:
 
     def _call_json(self, *args, **kwargs):
         raise AssertionError("LLM must not be called")
+
+
+class FailingRelationLLM(ExecutorLLM):
+    def __init__(self, *, fail_on_relation_call: int):
+        super().__init__()
+        self.fail_on_relation_call = fail_on_relation_call
+        self.relation_calls = 0
+
+    def _call_json(self, system, user, **kwargs):
+        if kwargs["schema_name"] == "evidence_tile_relation_proposals":
+            self.relation_calls += 1
+            if self.relation_calls == self.fail_on_relation_call:
+                self.calls.append(kwargs["schema_name"])
+                raise RuntimeError("synthetic provider failure")
+        return super()._call_json(system, user, **kwargs)
 
 
 class MemoryRepository:
@@ -174,6 +191,28 @@ def _row(content="We help teams ship better products."):
             "identity_match": "domain",
         },
     }
+
+
+def _large_baseline_rows(*, labelable: int = 280, total: int = 300):
+    rows = [
+        {
+            **_row(f"We help teams ship better products. Evidence {index}."),
+            "ref": f"web.{index:03d}",
+            "url": f"https://example.com/{index:03d}",
+        }
+        for index in range(labelable)
+    ]
+    for index in range(total - labelable):
+        rows.append(
+            {
+                **_row(f"Provider metadata {index}."),
+                "ref": f"acquisition.{index:03d}",
+                "url": f"https://example.com/acquisition/{index:03d}",
+                "evidence_type": "acquisition.provider_status",
+                "metadata": {"source_class": "acquisition_metadata"},
+            }
+        )
+    return rows
 
 
 def _baseline_plan(rows):
@@ -575,6 +614,131 @@ def test_incremental_relation_work_is_chunked_instead_of_rejected() -> None:
     assert "incremental relation workset exceeds its single-call bound" not in persist_source
 
 
+def test_large_frozen_baseline_executes_complete_and_is_order_stable() -> None:
+    rows = _large_baseline_rows()
+    ordered_plan = _baseline_plan(rows)
+    reversed_plan = _baseline_plan(list(reversed(rows)))
+
+    assert len(ordered_plan["semantic_context"]["evidence_fingerprints"]) == 300
+    assert len(ordered_plan["operations"]["classify_evidence_fingerprints"]) == 280
+    assert ordered_plan["operation_plan_fingerprint"] == reversed_plan[
+        "operation_plan_fingerprint"
+    ]
+
+    ordered_repository = MemoryRepository(plan=ordered_plan, rows=rows)
+    reversed_repository = MemoryRepository(
+        plan=reversed_plan,
+        rows=list(reversed(rows)),
+    )
+    ordered_execution = execute_vault_operation_plan(
+        repository=ordered_repository,
+        source_scan_id="scan-1",
+        worker_id="worker-a",
+        llm=ExecutorLLM(),
+    )
+    reversed_execution = execute_vault_operation_plan(
+        repository=reversed_repository,
+        source_scan_id="scan-1",
+        worker_id="worker-b",
+        llm=ExecutorLLM(),
+    )
+
+    assert ordered_execution["execution_status"] == "completed"
+    assert reversed_execution["execution_status"] == "completed"
+    ordered_result = ordered_repository.operation["result_payload"]
+    reversed_result = reversed_repository.operation["result_payload"]
+    assert ordered_repository.operation["result_fingerprint"] == (
+        reversed_repository.operation["result_fingerprint"]
+    )
+    assert ordered_result == reversed_result
+    assert len(ordered_result["selected_evidence_fingerprints"]) == 280
+    assert set(ordered_result["evidence_work_dispositions"]) == set(
+        ordered_result["selected_evidence_fingerprints"]
+    )
+    assert set(ordered_result["semantic_labels"]) == set(
+        ordered_result["selected_evidence_fingerprints"]
+    )
+    assert set(ordered_result["tile_shortlists"]) == set(
+        ordered_result["selected_evidence_fingerprints"]
+    )
+    validate_vault_operation_result(ordered_result)
+
+
+def test_broad_baseline_relation_workset_uses_bounded_provider_chunks() -> None:
+    rows = _large_baseline_rows(labelable=101, total=101)
+    repository = MemoryRepository(plan=_baseline_plan(rows), rows=rows)
+    llm = BroadLabelExecutorLLM()
+
+    execution = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="scan-1",
+        worker_id="worker-a",
+        llm=llm,
+    )
+
+    assert execution["execution_status"] == "completed"
+    result = repository.operation["result_payload"]
+    assert len(result["selected_evidence_fingerprints"]) == 101
+    assert len(result["tile_shortlists"]) == 101
+    assert sum(len(rows) for rows in result["tile_shortlists"].values()) == 101 * 24
+    assert result["relation_proposal_call_count"] == 21
+    assert llm.calls.count("evidence_tile_relation_proposals") == 21
+    sent_evidence = [
+        row["evidence_fingerprint"]
+        for batch in llm.relation_payloads
+        for row in batch
+    ]
+    assert len(sent_evidence) == len(set(sent_evidence)) == 101
+    assert set(sent_evidence) == set(result["selected_evidence_fingerprints"])
+    assert all(
+        sum(len(row["allowed_tiles"]) for row in batch) <= 120
+        for batch in llm.relation_payloads
+    )
+    assert sum(
+        len(row["allowed_tiles"])
+        for batch in llm.relation_payloads
+        for row in batch
+    ) == 101 * 24
+    assert set(result["evidence_work_dispositions"]) == set(
+        result["selected_evidence_fingerprints"]
+    )
+    validate_vault_operation_result(result)
+
+
+def test_late_provider_failure_leaves_retryable_operation_and_retry_is_deterministic() -> None:
+    rows = _large_baseline_rows()
+    plan = _baseline_plan(rows)
+    repository = MemoryRepository(plan=plan, rows=rows)
+    with pytest.raises(RuntimeError, match="synthetic provider failure"):
+        execute_vault_operation_plan(
+            repository=repository,
+            source_scan_id="scan-1",
+            worker_id="worker-a",
+            llm=FailingRelationLLM(fail_on_relation_call=2),
+        )
+
+    assert repository.operation["status"] == "failed_retryable"
+    assert repository.operation["result_payload"] is None
+    assert repository.operation["result_fingerprint"] is None
+
+    retry = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="scan-1",
+        worker_id="worker-b",
+        llm=ExecutorLLM(),
+    )
+
+    assert retry["execution_status"] == "completed"
+    result = repository.operation["result_payload"]
+    assert result["operation_plan_fingerprint"] == plan[
+        "operation_plan_fingerprint"
+    ]
+    assert repository.operation["result_fingerprint"] == canonical_fingerprint(
+        "evidence-vault-operation-result-v1", result
+    )
+    validate_vault_operation_result(result)
+
+
 class BroadLabelExecutorLLM(ExecutorLLM):
     def _call_json(self, system, user, **kwargs):
         if kwargs["schema_name"] == "sv9_flow_evidence_labeling":
@@ -604,6 +768,7 @@ class BroadLabelExecutorLLM(ExecutorLLM):
                 ]
             }
         self.calls.append(kwargs["schema_name"])
+        self.relation_payloads.append(json.loads(user.split(":\n", 1)[1]))
         return {"relations": []}
 
 

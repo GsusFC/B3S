@@ -62,8 +62,6 @@ EVIDENCE_VAULT_OPERATION_RESULT_VERSION = (
 )
 _MAX_TILES_PER_EVIDENCE = 24
 _MAX_TOTAL_RELATION_PAIRS = 120
-_MAX_BASELINE_RELATION_PAIRS = 2400
-_MAX_BASELINE_SEMANTIC_EVIDENCE = 200
 _SUPPORTED_RELATION_PROPOSAL_VERSIONS = {
     "evidence-tile-relation-proposal-v2",
     "evidence-tile-relation-proposal-v3",
@@ -474,7 +472,6 @@ def validate_vault_operation_result(result: Mapping[str, Any]) -> None:
             "tile shortlist evidence workset is invalid"
         )
     shortlist_union: set[str] = set()
-    pair_count = 0
     for fingerprint, rows in tile_shortlists.items():
         _sha256(fingerprint, field="tile shortlist evidence fingerprint")
         if not isinstance(rows, list) or rows != sorted(set(rows)):
@@ -482,7 +479,6 @@ def validate_vault_operation_result(result: Mapping[str, Any]) -> None:
         if len(rows) > _MAX_TILES_PER_EVIDENCE or not set(rows).issubset(registry_ids):
             raise EvidenceVaultIncrementalExecutorError("tile shortlist exceeds bounds")
         shortlist_union.update(rows)
-        pair_count += len(rows)
     truncations = result.get("shortlist_truncations")
     if not isinstance(truncations, Mapping) or not set(truncations).issubset(
         semantic_fingerprints
@@ -523,9 +519,7 @@ def validate_vault_operation_result(result: Mapping[str, Any]) -> None:
         == EVIDENCE_TILE_RELATION_LEGACY_PROPOSAL_VERSION
     )
     if (
-        pair_count > _MAX_BASELINE_RELATION_PAIRS
-        or len(semantic_fingerprints) > _MAX_BASELINE_SEMANTIC_EVIDENCE
-        or sorted(shortlist_union) != tile_ids
+        sorted(shortlist_union) != tile_ids
         or not isinstance(relation_call_count, int)
         or isinstance(relation_call_count, bool)
         or relation_call_count < minimum_call_count
@@ -984,10 +978,6 @@ def _propose_relations_bounded(
             "relations": [],
             "discarded_relations": [],
         }, 0
-    if total_pairs > _MAX_BASELINE_RELATION_PAIRS:
-        raise EvidenceVaultIncrementalExecutorError(
-            "baseline relation workset exceeds the safety ceiling"
-        )
     proposal = propose_evidence_tile_relations(
         evidence_rows=evidence_rows, tile_shortlists=tile_shortlists, llm=llm
     )
@@ -1035,10 +1025,6 @@ def derive_vault_tile_shortlists(
     dict[str, list[dict[str, Any]]],
     dict[str, dict[str, Any]],
 ]:
-    if len(evidence_rows) > _MAX_BASELINE_SEMANTIC_EVIDENCE:
-        raise EvidenceVaultIncrementalExecutorError(
-            "semantic evidence workset exceeds the baseline safety ceiling"
-        )
     registry = build_tile_contract_registry()["tiles"]
     by_component: dict[str, list[dict[str, Any]]] = {}
     by_id = {str(row["tile_id"]): row for row in registry}
@@ -1054,7 +1040,6 @@ def derive_vault_tile_shortlists(
         raise EvidenceVaultIncrementalExecutorError("plan has an unknown forced tile")
     result: dict[str, list[dict[str, Any]]] = {}
     truncations: dict[str, dict[str, Any]] = {}
-    total_pairs = 0
     for evidence in evidence_rows:
         fingerprint = str(evidence["evidence_fingerprint"])
         labels = dict(evidence.get("labels") or {})
@@ -1081,12 +1066,7 @@ def derive_vault_tile_shortlists(
                 "selected_count": len(selected),
                 "omitted_tile_ids": omitted,
             }
-        total_pairs += len(selected)
         result[fingerprint] = [by_id[tile_id] for tile_id in selected]
-    if total_pairs > _MAX_BASELINE_RELATION_PAIRS:
-        raise EvidenceVaultIncrementalExecutorError(
-            "relation workset exceeds the baseline safety ceiling"
-        )
     return result, dict(sorted(truncations.items()))
 
 
