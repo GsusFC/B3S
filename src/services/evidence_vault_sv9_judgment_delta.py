@@ -8,19 +8,23 @@ from src.sv9 import judgment_memory as jm
 
 EVIDENCE_IDENTITY_SET_VERSION = "evidence-vault-sv9-evidence-identity-set-v1"
 AUTHORITATIVE_RELATION_VERSION = "evidence-vault-sv9-authoritative-tile-relation-v1"
-JUDGMENT_DELTA_VERSION = "evidence-vault-sv9-judgment-delta-v1"
+JUDGMENT_DELTA_VERSION = "evidence-vault-sv9-judgment-delta-v2"
+LEGACY_JUDGMENT_DELTA_VERSION = "evidence-vault-sv9-judgment-delta-v1"
 _IDENTITY_FIELDS = frozenset("schema_version evidence evidence_set_fingerprint".split())
 _RELATION_FIELDS = frozenset(
     "schema_version tile_id component_key disposition evidence_ref evidence_fingerprint capture_origin operation_origin relation_fingerprint".split()
 )
 _DELTA_FIELDS = frozenset(
-    "schema_version current_evidence prior_judgments authoritative_relations current_series_contract delta_projections coverage_loss unmapped_evidence plan canonical_delta_fingerprint".split()
+    "schema_version current_evidence prior_judgments prior_component_sentinels authoritative_relations current_series_contract delta_projections coverage_loss unmapped_evidence plan canonical_delta_fingerprint".split()
 )
+_LEGACY_DELTA_FIELDS = _DELTA_FIELDS - {"prior_component_sentinels"}
 _RELATION_INPUT = _RELATION_FIELDS - {"schema_version", "relation_fingerprint"}
 _DELTA_INPUT = _DELTA_FIELDS - frozenset(
     "schema_version delta_projections coverage_loss unmapped_evidence plan canonical_delta_fingerprint".split()
 )
 _RELATION_DISPOSITIONS = frozenset({"relevant", "contradiction", "human_review_required"})
+_DELTA_FINGERPRINT = "evidence-vault-sv9-judgment-delta-fingerprint-v2"
+_LEGACY_DELTA_FINGERPRINT = "evidence-vault-sv9-judgment-delta-fingerprint-v1"
 
 
 class EvidenceVaultSV9JudgmentDeltaError(jm.JudgmentMemoryContractError):
@@ -113,6 +117,20 @@ def _prior(values):
     return sorted(rows, key=lambda row: ip._ORDER[row["tile_id"]])
 
 
+def _prior_sentinels(values):
+    if type(values) is not list:
+        _fail("prior component sentinels must be a JSON array")
+    try:
+        rows = [ip.validate_component_not_detected_sentinel(value) for value in values]
+    except jm.JudgmentMemoryContractError as exc:
+        _fail(str(exc))
+    if any(row["authority_state"] != "accepted" or row["lifecycle_state"] != "active" for row in rows):
+        _fail("prior component sentinel is not an active accepted value")
+    if len({row["component_key"] for row in rows}) != len(rows):
+        _fail("prior component sentinels contain duplicate components")
+    return sorted(rows, key=lambda row: list(ip._COMPONENT_TILES).index(row["component_key"]))
+
+
 def _relations(values, current):
     if type(values) is not list:
         _fail("authoritative relations must be a JSON array")
@@ -185,21 +203,31 @@ def _coverage_loss(prior, current):
     return result
 
 
-def build_evidence_vault_sv9_judgment_delta(*, _raw=None, _signed=False, **value):
-    raw = _raw if _raw is not None else value
-    expected = _DELTA_FIELDS if _signed else _DELTA_INPUT
+def build_evidence_vault_sv9_judgment_delta(*, _raw=None, _signed=False, prior_component_sentinels=None, **value):
+    raw = (
+        _raw
+        if _raw is not None
+        else value
+        | {"prior_component_sentinels": [] if prior_component_sentinels is None else prior_component_sentinels}
+    )
+    version = raw.get("schema_version") if _signed and type(raw) is dict else JUDGMENT_DELTA_VERSION
+    legacy = version == LEGACY_JUDGMENT_DELTA_VERSION
+    expected = (_LEGACY_DELTA_FIELDS if legacy else _DELTA_FIELDS) if _signed else _DELTA_INPUT
     if type(raw) is not dict or set(raw) != expected:
         _fail("judgment delta fields do not match schema")
-    if _signed and raw["schema_version"] != JUDGMENT_DELTA_VERSION:
+    if _signed and version not in (LEGACY_JUDGMENT_DELTA_VERSION, JUDGMENT_DELTA_VERSION):
         _fail("unsupported judgment delta")
     if _signed:
         _builtin_json(raw)
     current = build_evidence_identity_set(_raw=raw["current_evidence"], _signed=True)
     prior = _prior(raw["prior_judgments"])
+    sentinels = [] if legacy else _prior_sentinels(raw["prior_component_sentinels"])
     relations = _relations(raw["authoritative_relations"], current)
     try:
         series = jm.validate_judgment_series_contract(raw["current_series_contract"])
-        plan = ip.build_incremental_plan(prior, _projections(relations, prior), series)
+        plan = (ip.build_incremental_plan_v2 if legacy else ip.build_incremental_plan)(
+            prior, _projections(relations, prior), series, prior_component_sentinels=sentinels
+        )
     except jm.JudgmentMemoryContractError as exc:
         _fail(str(exc))
     known = {
@@ -212,9 +240,10 @@ def build_evidence_vault_sv9_judgment_delta(*, _raw=None, _signed=False, **value
         if (row["evidence_ref"], row["evidence_fingerprint"]) not in known | mapped
     ]
     result = {
-        "schema_version": JUDGMENT_DELTA_VERSION,
+        "schema_version": version,
         "current_evidence": current,
         "prior_judgments": prior,
+        **({"prior_component_sentinels": sentinels} if not legacy else {}),
         "authoritative_relations": relations,
         "current_series_contract": series,
         "delta_projections": plan["delta_projections"],
@@ -223,7 +252,7 @@ def build_evidence_vault_sv9_judgment_delta(*, _raw=None, _signed=False, **value
         "plan": plan,
     }
     result["canonical_delta_fingerprint"] = jm.canonical_fingerprint(
-        "evidence-vault-sv9-judgment-delta-fingerprint-v1", result
+        _LEGACY_DELTA_FINGERPRINT if legacy else _DELTA_FINGERPRINT, result
     )
     if _signed and raw != result:
         _fail("judgment delta replay mismatch")

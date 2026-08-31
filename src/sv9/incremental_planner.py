@@ -3,8 +3,10 @@ from __future__ import annotations
 from src.sv9 import assessment_kernel as _kernel
 from src.sv9 import judgment_memory as jm
 
-PLAN_VERSION = "sv9-incremental-plan-v2"
-PLAN_FINGERPRINT_NAMESPACE = "sv9-incremental-plan-fingerprint-v2"
+PLAN_VERSION = "sv9-incremental-plan-v3"
+PLAN_FINGERPRINT_NAMESPACE = "sv9-incremental-plan-fingerprint-v3"
+LEGACY_PLAN_VERSION = "sv9-incremental-plan-v2"
+LEGACY_PLAN_FINGERPRINT_NAMESPACE = "sv9-incremental-plan-fingerprint-v2"
 CANDIDATE_NAMESPACE = "sv9-candidate-series-fingerprint-v1"
 COMPONENT_SENTINEL_VERSION = "sv9-component-not-detected-sentinel-v1"
 COMPONENT_SENTINEL_FINGERPRINT_NAMESPACE = "sv9-component-not-detected-sentinel-fingerprint-v1"
@@ -117,12 +119,11 @@ def _validate_sentinels(values, selected, prior):
 
 
 def _eligible(judgment):
-    return (
-        bool(judgment)
-        and judgment["authority_state"] == "accepted"
-        and judgment["lifecycle_state"] == "active"
-        and judgment["review_state"] in _ELIGIBLE_REVIEW
-    )
+    return _accepted_active(judgment) and judgment["review_state"] in _ELIGIBLE_REVIEW
+
+
+def _accepted_active(judgment):
+    return bool(judgment) and judgment["authority_state"] == "accepted" and judgment["lifecycle_state"] == "active"
 
 
 def _sentinel_action(sentinel, dispositions, current_fp):
@@ -163,7 +164,7 @@ def _invalidate_coherencia(items):
             row["action"], row["reason"], row["expected_call_contribution"], row["reused_judgment_fingerprint"] = action, reason, True, None  # fmt: skip
 
 
-def _item(tile, prior, delta, current_fp):
+def _item(tile, prior, delta, current_fp, rollover=False):
     prior_fp = prior["canonical_judgment_fingerprint"] if prior else None
     delta_fp = delta["projection_fingerprint"] if delta else None
     evidence = delta["evidence"] if delta else (prior["supporting_evidence"] if prior else [])
@@ -171,7 +172,15 @@ def _item(tile, prior, delta, current_fp):
     eligible = _eligible(prior)
     disposition = delta["disposition"] if delta else None
     action, reason, reused, expected = None, None, None, False
-    if disposition == "human_review_required":
+    if rollover:
+        action, reason, expected = (
+            "reopen_contract_change",
+            "upstream_contract_change_dependency"
+            if same_series and _COMPONENT_BY_TILE[tile] == "coherencia"
+            else "series_contract_changed",
+            True,
+        )
+    elif disposition == "human_review_required":
         action, reason = "human_review_required", "explicit_human_review_disposition"
     elif disposition == "contradiction":
         if _eligible(prior):
@@ -222,11 +231,12 @@ def _candidate(current_fp, predecessors):
     )
 
 
-def build_incremental_plan(
+def _build_incremental_plan(
     prior_judgments,
     delta_projections,
     current_series_contract,
     *,
+    version,
     registry_tile_ids=None,
     prior_component_sentinels=None,
 ):
@@ -246,8 +256,13 @@ def build_incremental_plan(
     )
     current_fp = jm.canonical_fingerprint("sv9-judgment-series-fingerprint-v1", current)
     predecessors = sorted({row["series_fingerprint"] for row in [*prior.values(), *sentinels.values()]})
-    items = [_item(tile, prior.get(tile), delta.get(tile), current_fp) for tile in registry_ids]
-    _apply_sentinels(items, sentinels, delta, current_fp)
+    rollover = version == PLAN_VERSION and any(
+        _accepted_active(row) and row["series_fingerprint"] != current_fp
+        for row in [*prior.values(), *sentinels.values()]
+    )
+    items = [_item(tile, prior.get(tile), delta.get(tile), current_fp, rollover) for tile in registry_ids]
+    if not rollover:
+        _apply_sentinels(items, sentinels, delta, current_fp)
     _invalidate_coherencia(items)
     workset = [row["tile_id"] for row in items if row["expected_call_contribution"]]
     components = []
@@ -258,7 +273,7 @@ def build_incremental_plan(
     unaffected = [row["tile_id"] for row in items if row["action"] == "unaffected"]
     review = [row["tile_id"] for row in items if row["action"] in _REVIEW_ACTIONS]
     plan = {
-        "schema_version": PLAN_VERSION,
+        "schema_version": version,
         "current_series_contract": current,
         "current_series_fingerprint": current_fp,
         "candidate_series_fingerprint": _candidate(current_fp, predecessors),
@@ -277,8 +292,46 @@ def build_incremental_plan(
         "expected_calls": len(components),
         "calls_avoided": len({_COMPONENT_BY_TILE[tile] for tile in registry_ids}) - len(components),
     }
-    plan["canonical_plan_fingerprint"] = jm.canonical_fingerprint(PLAN_FINGERPRINT_NAMESPACE, plan)
+    plan["canonical_plan_fingerprint"] = jm.canonical_fingerprint(
+        PLAN_FINGERPRINT_NAMESPACE if version == PLAN_VERSION else LEGACY_PLAN_FINGERPRINT_NAMESPACE, plan
+    )
     return plan
+
+
+def build_incremental_plan(
+    prior_judgments,
+    delta_projections,
+    current_series_contract,
+    *,
+    registry_tile_ids=None,
+    prior_component_sentinels=None,
+):
+    return _build_incremental_plan(
+        prior_judgments,
+        delta_projections,
+        current_series_contract,
+        version=PLAN_VERSION,
+        registry_tile_ids=registry_tile_ids,
+        prior_component_sentinels=prior_component_sentinels,
+    )
+
+
+def build_incremental_plan_v2(
+    prior_judgments,
+    delta_projections,
+    current_series_contract,
+    *,
+    registry_tile_ids=None,
+    prior_component_sentinels=None,
+):
+    return _build_incremental_plan(
+        prior_judgments,
+        delta_projections,
+        current_series_contract,
+        version=LEGACY_PLAN_VERSION,
+        registry_tile_ids=registry_tile_ids,
+        prior_component_sentinels=prior_component_sentinels,
+    )
 
 
 def _json_types(value, active=None):
@@ -302,10 +355,12 @@ def validate_incremental_plan(value):
         _json_types(value)
         if set(value) != _PLAN_FIELDS:
             _fail("plan fields do not match schema")
-        if value["schema_version"] != PLAN_VERSION:
+        builders = {LEGACY_PLAN_VERSION: build_incremental_plan_v2, PLAN_VERSION: build_incremental_plan}
+        builder = builders.get(value["schema_version"])
+        if builder is None:
             _fail("unsupported incremental plan")
         registry_ids = _ordered_ids(value["registry_tile_ids"], "registry_tile_ids")
-        rebuilt = build_incremental_plan(
+        rebuilt = builder(
             value["prior_judgments"],
             value["delta_projections"],
             value["current_series_contract"],

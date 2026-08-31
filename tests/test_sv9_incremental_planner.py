@@ -75,7 +75,12 @@ def sentinel(component="mission", **changes):
 def resign(value):
     unsigned = dict(value)
     del unsigned["canonical_plan_fingerprint"]
-    value["canonical_plan_fingerprint"] = jm.canonical_fingerprint(ip.PLAN_FINGERPRINT_NAMESPACE, unsigned)
+    namespace = (
+        ip.LEGACY_PLAN_FINGERPRINT_NAMESPACE
+        if value["schema_version"] == ip.LEGACY_PLAN_VERSION
+        else ip.PLAN_FINGERPRINT_NAMESPACE
+    )
+    value["canonical_plan_fingerprint"] = jm.canonical_fingerprint(namespace, unsigned)
     return value
 
 
@@ -121,6 +126,24 @@ def test_contract_change_is_a_new_candidate_series():
     item = result["items"][0]
     assert item["action"] == "reopen_contract_change" and result["expected_calls"] == 1
     assert result["predecessor_series_fingerprints"] == [judgment()["series_fingerprint"]]
+
+
+def test_v2_replays_per_tile_rollover_while_v3_reopens_the_complete_registry():
+    current = _series(prompt_version="prompt-2")
+    prior = [judgment(tile) for tile, _component in ip._REGISTRY]
+    deltas = [delta("M1", "human_review_required", 9), delta("A1", "contradiction", 10)]
+    legacy = ip.build_incremental_plan_v2(prior, deltas, current)
+    latest = ip.build_incremental_plan(prior, deltas, current)
+    assert legacy["schema_version"] == ip.LEGACY_PLAN_VERSION and ip.validate_incremental_plan(legacy) == legacy
+    assert legacy["review_set"] == ["M1", "A1"] and len(legacy["tile_workset"]) == 78
+    tampered = resign(deepcopy(legacy))
+    tampered["items"][0]["action"] = "evaluate_new"
+    resign(tampered)
+    with pytest.raises(ip.IncrementalPlannerError):
+        ip.validate_incremental_plan(tampered)
+    assert latest["schema_version"] == ip.PLAN_VERSION and ip.validate_incremental_plan(latest) == latest
+    assert latest["tile_workset"] == [tile for tile, _component in ip._REGISTRY]
+    assert {row["action"] for row in latest["items"]} == {"reopen_contract_change"}
 
 
 def test_first_execution_uses_all_tiles_and_unique_component_calls():
