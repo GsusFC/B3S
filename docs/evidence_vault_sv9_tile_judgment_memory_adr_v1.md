@@ -25,7 +25,7 @@ The executable rubric, registry fingerprint, and scoring-policy constants are au
 
 ## Deferred work
 
-The typed tile-evidence delta preserves tile/component, disposition, evidence references, origins, and fingerprint for PR2. Incremental planning, evaluation, persistence, Scanner/public integration, LLM/I/O/clock/random state, scoring, Social Tiles, and migrations are deferred and non-authoritative in PR1.
+The typed tile-evidence delta preserves tile/component, disposition, evidence references, origins, and fingerprint. VA1 adds only a pure, caller-supplied evidence-to-tile projection and deterministic planner handoff; evaluation, persistence, Scanner/public integration, LLM/I/O/clock/random state, scoring, Social Tiles, and migrations remain deferred and non-authoritative.
 
 PR5 added the dedicated append-only PostgreSQL candidate relation. PR6 may only run after successful immutable report publication, behind `BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED=true`; it resolves Flow's advisory refs back to the exact persisted Vault capture before an injected strict component call.
 
