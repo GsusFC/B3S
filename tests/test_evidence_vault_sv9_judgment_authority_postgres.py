@@ -107,6 +107,7 @@ def test_repository_authority_adopts_replays_competes_and_reopens(monkeypatch) -
     import psycopg
     from src.history.repository import EvidenceVaultSv9JudgmentCandidateConflictError, EvidenceVaultSv9JudgmentCandidateError, EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError, PostgresHistoryRepository
     from src.services import evidence_vault_sv9_authority_event as authority_event
+    from src.services import evidence_vault_sv9_authority_projection as authority_projection
     from src.services import evidence_vault_sv9_judgment_delta as delta
     from src.services.evidence_vault_sv9_authoritative_relations import EvidenceVaultSv9AuthoritativeRelationStaleWitnessError, EvidenceVaultSv9AuthoritativeRelationWitnessError
     from src.sv9 import judgment_memory as memory
@@ -144,7 +145,7 @@ def test_repository_authority_adopts_replays_competes_and_reopens(monkeypatch) -
         assert head() == before
         invalid = deepcopy(invalid); invalid["authoritative_relation_witness"]["witness_fingerprint"] = "0" * 64; invalid["complete_record_fingerprint"] = memory.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v2", {key: value for key, value in invalid.items() if key != "complete_record_fingerprint"}); _insert(repository, "authority-a", invalid)
         with psycopg.connect(dsn) as conn: invalid_id = str(conn.execute("SELECT id FROM b3s_history.evidence_vault_sv9_judgment_candidates WHERE canonical_plan_fingerprint = %s", (invalid["canonical_plan_fingerprint"],)).fetchone()[0])
-        _operational(repository, "authority-next", current)
+        next_current = _operational(repository, "authority-next", current)
         same, replayed = repository.adopt_evidence_vault_sv9_judgment_candidate("authority-a", stored["id"], expected_predecessor_event_fingerprint=None, idempotency_key_hash=winner_key)
         assert replayed and same["event"] == winner["event"]
         for error, candidate_id in ((EvidenceVaultSv9AuthoritativeRelationStaleWitnessError, stale["id"]), (EvidenceVaultSv9AuthoritativeRelationWitnessError, invalid_id)):
@@ -157,6 +158,7 @@ def test_repository_authority_adopts_replays_competes_and_reopens(monkeypatch) -
             return delta.build_evidence_vault_sv9_judgment_delta(current_evidence=delta.build_evidence_identity_set(evidence), prior_judgments=prior, authoritative_relations=[relation], current_series_contract=_series())
         prior = [memory.build_tile_judgment(**({key: value for key, value in row.items() if key not in {"schema_version", "series_fingerprint", "canonical_judgment_fingerprint", "authority_state"}} | {"authority_state": "accepted"})) for row in winner["accepted_candidate"]["candidate_tile_judgments"]]
         valid = signed(prior, source)
+        next_source = repository.resolve_evidence_vault_sv9_judgment_evidence("authority-next", [row["ref"] for row in next_current])
         def reject(value, scan, predecessor):
             before = head()
             with pytest.raises(EvidenceVaultSv9JudgmentCandidateError): repository.reopen_evidence_vault_sv9_judgment_authority(scan, value, expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash=key("reopen_authority", scan, fingerprint=value["canonical_delta_fingerprint"], predecessor=predecessor))
@@ -172,13 +174,18 @@ def test_repository_authority_adopts_replays_competes_and_reopens(monkeypatch) -
         before = head()
         with pytest.raises(EvidenceVaultSv9JudgmentCandidateConflictError): repository.reopen_evidence_vault_sv9_judgment_authority("authority-next", valid, expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash=key("reopen_authority", "authority-next", fingerprint=valid["canonical_delta_fingerprint"], predecessor=predecessor))
         assert head() == before
+        next_delta = signed(prior, next_source); next_predecessor = reopened["current_head"]["event_fingerprint"]
+        newest_key = key("reopen_authority", "authority-next", fingerprint=next_delta["canonical_delta_fingerprint"], predecessor=next_predecessor)
+        newest, replayed = repository.reopen_evidence_vault_sv9_judgment_authority("authority-next", next_delta, expected_predecessor_event_fingerprint=next_predecessor, idempotency_key_hash=newest_key)
+        assert not replayed and newest["current_head"]["predecessor_event_id"] == reopened["current_head"]["event_id"] and newest["current_head"]["predecessor_event_fingerprint"] == reopened["current_head"]["event_fingerprint"] and newest["current_head"]["request"]["expected_predecessor_event_fingerprint"] == reopened["current_head"]["event_fingerprint"] and newest["current_head"]["active_parent_event_id"] == newest["active_authority_event"]["event_id"] and newest["current_head"]["active_parent_event_fingerprint"] == newest["active_authority_event"]["event_fingerprint"] and newest["current_head"]["request"]["source_scan_id"] == "authority-next" and newest["reopen_review_overlay"]["delta_fingerprint"] == next_delta["canonical_delta_fingerprint"]
         loaded = repository.get_evidence_vault_sv9_judgment_authority("example.com")
-        assert loaded and loaded["current_head"]["event_type"] == "reopen" and loaded["active_authority_event"]["event_type"] == "adopt" and loaded["accepted_candidate"]["source_scan_id"] == "authority-a" and loaded["reopen_review_overlay"]["delta_fingerprint"] == valid["canonical_delta_fingerprint"]
-        for projection in (winner, reopened, loaded):
+        assert loaded and loaded["current_head"]["event_type"] == "reopen" and loaded["active_authority_event"]["event_type"] == "adopt" and loaded["accepted_candidate"]["source_scan_id"] == "authority-a" and loaded["current_head"]["request"]["source_scan_id"] == "authority-next" and loaded["reopen_review_overlay"]["delta_fingerprint"] == next_delta["canonical_delta_fingerprint"]
+        for projection in (winner, reopened, newest, loaded):
+            assert authority_projection.validate_evidence_vault_sv9_authority_projection(projection) == json.loads(json.dumps(projection))
             for name in ("active_authority_event", "current_head", "event"):
                 assert authority_event.validate_evidence_vault_sv9_authority_event(projection[name]) == json.loads(json.dumps(projection[name]))
-        assert winner["event"]["idempotency_key_hash"] == winner_key and reopened["event"]["idempotency_key_hash"] == reopen_key
-        with psycopg.connect(dsn) as conn: assert conn.execute("SELECT event_fingerprint FROM b3s_history.evidence_vault_sv9_judgment_authority_events WHERE id = %s", (reopened["event"]["event_id"],)).fetchone()[0] == loaded["current_head"]["event_fingerprint"]
+        assert winner["event"]["idempotency_key_hash"] == winner_key and reopened["event"]["idempotency_key_hash"] == reopen_key and newest["event"]["idempotency_key_hash"] == newest_key
+        with psycopg.connect(dsn) as conn: assert conn.execute("SELECT event_fingerprint FROM b3s_history.evidence_vault_sv9_judgment_authority_events WHERE id = %s", (newest["event"]["event_id"],)).fetchone()[0] == loaded["current_head"]["event_fingerprint"]
         def update(sql, values):
             with psycopg.connect(dsn, autocommit=True) as conn:
                 conn.execute("ALTER TABLE b3s_history.evidence_vault_sv9_judgment_authority_events DISABLE TRIGGER ALL")
