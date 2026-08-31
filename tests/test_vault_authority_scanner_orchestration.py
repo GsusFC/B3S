@@ -1,4 +1,7 @@
 from __future__ import annotations
+
+import pytest
+
 from web import scan_runner
 from web.api_v1 import presenters, service
 
@@ -92,3 +95,99 @@ def test_authority_branch_skips_legacy_and_isolates_preparation_failure(monkeypa
         scan_runner._run(scan_id, "https://example.test", "Example", False)
         assert called == ["authority"] and scan_runner._SCANS[scan_id]["error"] == "RuntimeError: vault_authority_preparation_unavailable" and all("sensitive-preparation-detail" not in str(value) for value in persisted)
     finally: scan_runner._SCANS.pop(scan_id, None)
+
+
+def test_preparation_stage_error_exposes_whitelisted_code_and_preserves_private_cause() -> None:
+    from src.services.evidence_vault_scan_orchestration import (
+        EvidenceVaultScanOrchestrationStageError,
+        _run_preparation_stage,
+    )
+
+    cause = RuntimeError("postgresql://scanner:secret@internal/provider-payload")
+
+    def fail():
+        raise cause
+
+    with pytest.raises(EvidenceVaultScanOrchestrationStageError) as caught:
+        _run_preparation_stage("capture_persistence", fail)
+    error = caught.value
+
+    assert error.reason_code == "vault_authority_capture_persist_failed"
+    assert str(error) == "vault_authority_capture_persist_failed"
+    assert "secret" not in str(error)
+    assert error.__cause__ is cause
+
+
+@pytest.mark.parametrize(
+    ("stage", "reason_code"),
+    (
+        ("operational_memory_read", "vault_authority_operational_memory_read_failed"),
+        ("capture_observation_construction", "vault_authority_capture_observation_failed"),
+        ("exact_operation_lookup", "vault_authority_operation_lookup_failed"),
+        ("capture_history_read", "vault_authority_capture_history_read_failed"),
+        ("operation_plan_construction", "vault_authority_operation_plan_failed"),
+        ("capture_persistence", "vault_authority_capture_persist_failed"),
+    ),
+)
+def test_each_preparation_stage_has_only_a_stable_public_reason(
+    stage: str, reason_code: str
+) -> None:
+    from src.services.evidence_vault_scan_orchestration import (
+        EvidenceVaultScanOrchestrationStageError,
+        public_vault_authority_reason_code,
+    )
+
+    error = EvidenceVaultScanOrchestrationStageError(
+        stage,
+        cause=RuntimeError("private prompt payload"),
+    )
+    assert public_vault_authority_reason_code(error) == reason_code
+    assert "private prompt payload" not in str(error)
+    error.reason_code = "private prompt payload"
+    assert public_vault_authority_reason_code(error) is None
+    assert public_vault_authority_reason_code(RuntimeError("private")) is None
+
+
+def test_authority_persists_stage_code_without_original_failure_details(monkeypatch) -> None:
+    from src.services import evidence_vault_scan_orchestration as orchestration
+    from web import report_store
+
+    scan_id = "authority-stage-error"
+    snapshot = {"run": {"id": 1}, "acquisition_steps": {}, "raw_inputs": []}
+    persisted: list[dict] = []
+    scan_runner._SCANS[scan_id] = _status(scan_id)
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
+    monkeypatch.setenv("BRAND3_VAULT_SV9_AUTHORITY_SCANNER_ENABLED", "true")
+    monkeypatch.setattr(scan_runner, "_persist_scan_status", persisted.append)
+    monkeypatch.setattr(scan_runner, "_capture_snapshot", lambda *_a: snapshot)
+    monkeypatch.setattr(
+        scan_runner,
+        "_build_acquisition_gate",
+        lambda *_a, **_k: {"state": "pass"},
+    )
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: object())
+
+    def fail(**_kwargs):
+        raise orchestration.EvidenceVaultScanOrchestrationStageError(
+            "capture_persistence",
+            cause=RuntimeError("provider payload secret and postgresql://private"),
+        )
+
+    monkeypatch.setattr(orchestration, "prepare_vault_scan_after_capture", fail)
+    monkeypatch.setattr(scan_runner.traceback, "print_exc", lambda: None)
+    try:
+        scan_runner._run(scan_id, "https://example.test", "Example", False)
+        status = scan_runner._SCANS[scan_id]
+        assert status["error"] == (
+            "RuntimeError: vault_authority_capture_persist_failed"
+        )
+        assert status["error_code"] == "scan_execution_failed"
+        assert all(
+            "provider payload" not in str(item)
+            and "postgresql://" not in str(item)
+            and "secret" not in str(item)
+            for item in persisted
+        )
+    finally:
+        scan_runner._SCANS.pop(scan_id, None)

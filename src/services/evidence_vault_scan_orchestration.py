@@ -33,6 +33,55 @@ class EvidenceVaultScanOrchestrationError(ValueError):
     """A persisted Vault scan cannot be planned or resumed safely."""
 
 
+_VAULT_AUTHORITY_STAGE_REASON_CODES = {
+    "operational_memory_read": "vault_authority_operational_memory_read_failed",
+    "capture_observation_construction": "vault_authority_capture_observation_failed",
+    "exact_operation_lookup": "vault_authority_operation_lookup_failed",
+    "capture_history_read": "vault_authority_capture_history_read_failed",
+    "operation_plan_construction": "vault_authority_operation_plan_failed",
+    "capture_persistence": "vault_authority_capture_persist_failed",
+}
+_VAULT_AUTHORITY_PUBLIC_REASON_CODES = frozenset(
+    _VAULT_AUTHORITY_STAGE_REASON_CODES.values()
+)
+
+
+class EvidenceVaultScanOrchestrationStageError(EvidenceVaultScanOrchestrationError):
+    """A preparation stage failed with a safe, stable public reason code."""
+
+    def __init__(self, stage: str, *, cause: BaseException | None = None) -> None:
+        self.stage = stage if stage in _VAULT_AUTHORITY_STAGE_REASON_CODES else "unknown"
+        self.reason_code = _VAULT_AUTHORITY_STAGE_REASON_CODES.get(
+            self.stage,
+            "vault_authority_preparation_unavailable",
+        )
+        super().__init__(self.reason_code)
+        if cause is not None:
+            self.__cause__ = cause
+
+
+def public_vault_authority_reason_code(error: BaseException) -> str | None:
+    """Return a whitelisted stage reason, never the original exception text."""
+
+    if not isinstance(error, EvidenceVaultScanOrchestrationStageError):
+        return None
+    reason_code = error.reason_code
+    return (
+        reason_code
+        if reason_code in _VAULT_AUTHORITY_PUBLIC_REASON_CODES
+        else None
+    )
+
+
+def _run_preparation_stage(stage: str, operation: Any) -> Any:
+    try:
+        return operation()
+    except EvidenceVaultScanOrchestrationStageError:
+        raise
+    except Exception as exc:
+        raise EvidenceVaultScanOrchestrationStageError(stage) from exc
+
+
 class VaultCaptureRepository(Protocol):
     def get_evidence_vault_operational_memory(
         self,
@@ -108,9 +157,12 @@ def prepare_vault_scan_after_capture(
         for row in accepted_evidence_tile_relations
         if isinstance(row, Mapping)
     ]
-    current_memory = repository.get_evidence_vault_operational_memory(
-        url,
-        workspace_slug=workspace_slug,
+    current_memory = _run_preparation_stage(
+        "operational_memory_read",
+        lambda: repository.get_evidence_vault_operational_memory(
+            url,
+            workspace_slug=workspace_slug,
+        ),
     )
     resolved = resolve_vault_scan_mode(
         environment=environment,
@@ -118,20 +170,26 @@ def prepare_vault_scan_after_capture(
         has_canonical_memory=current_memory is not None,
         requested_mode=requested_mode,
     )
-    observation = build_capture_observation_from_snapshot(
-        snapshot=snapshot,
-        scan_id=scan_id,
-        url=url,
-        brand_name=brand_name,
-        mode=str(resolved["mode"]),
-        artifacts=artifacts,
-        observed_at=observed_at,
+    observation = _run_preparation_stage(
+        "capture_observation_construction",
+        lambda: build_capture_observation_from_snapshot(
+            snapshot=snapshot,
+            scan_id=scan_id,
+            url=url,
+            brand_name=brand_name,
+            mode=str(resolved["mode"]),
+            artifacts=artifacts,
+            observed_at=observed_at,
+        ),
     )
     operation_getter = getattr(repository, "get_capture_operation_plan", None)
-    persisted_operation = (
-        operation_getter(scan_id, workspace_slug=workspace_slug)
-        if callable(operation_getter)
-        else None
+    persisted_operation = _run_preparation_stage(
+        "exact_operation_lookup",
+        lambda: (
+            operation_getter(scan_id, workspace_slug=workspace_slug)
+            if callable(operation_getter)
+            else None
+        ),
     )
     if persisted_operation is not None:
         return _resume_first_class_operation(
@@ -142,10 +200,13 @@ def prepare_vault_scan_after_capture(
             current_memory=current_memory,
             workspace_slug=workspace_slug,
         )
-    history = repository.list_capture_observations_for_domain(
-        url,
-        workspace_slug=workspace_slug,
-        limit=500,
+    history = _run_preparation_stage(
+        "capture_history_read",
+        lambda: repository.list_capture_observations_for_domain(
+            url,
+            workspace_slug=workspace_slug,
+            limit=500,
+        ),
     )
     existing = next(
         (
@@ -189,9 +250,12 @@ def prepare_vault_scan_after_capture(
             raise EvidenceVaultScanOrchestrationError(
                 "persisted scan has no resumable operation plan"
             )
-        outcome = repository.persist_capture_observation(
-            raw_observation,
-            workspace_slug=workspace_slug,
+        outcome = _run_preparation_stage(
+            "capture_persistence",
+            lambda: repository.persist_capture_observation(
+                raw_observation,
+                workspace_slug=workspace_slug,
+            ),
         )
         observation = dict(raw_observation)
         analysis_status = str(stored_metadata.get("analysis_status") or "")
@@ -246,42 +310,45 @@ def prepare_vault_scan_after_capture(
             }
         plan = dict(stored_plan)
     else:
-        previous_rows = history[0]["evidence_records"] if history else []
-        known_rows = [
-            row
-            for capture in history
-            if _capture_analysis_completed(capture)
-            for row in capture.get("evidence_records") or []
-            if isinstance(row, dict)
-        ]
-        semantic_claims = _semantic_analysis_claimed_fingerprints(history)
-        plan = build_vault_scan_plan(
-            brand_identity=(
-                str(current_memory["brand_identity"])
-                if current_memory is not None
-                else normalize_domain(str(observation["url"]))
-            ),
-            subject_url=str(observation["url"]),
-            mode=str(resolved["mode"]),
-            current_evidence_records=observation["evidence_records"],
-            previous_capture_evidence_records=previous_rows,
-            known_evidence_records=known_rows,
-            semantic_analysis_claimed_fingerprints=semantic_claims,
-            accepted_evidence_tile_relations=relation_rows,
-            accepted_tiles=(
-                list(
-                    (current_memory.get("content") or {}).get("accepted_tiles")
-                    or []
-                )
-                if current_memory is not None
-                else []
-            ),
-            canonical_memory_version=(
-                str(current_memory["canonical_memory_version"])
-                if current_memory is not None
-                else None
-            ),
-        )
+        def build_plan() -> dict[str, Any]:
+            previous_rows = history[0]["evidence_records"] if history else []
+            known_rows = [
+                row
+                for capture in history
+                if _capture_analysis_completed(capture)
+                for row in capture.get("evidence_records") or []
+                if isinstance(row, dict)
+            ]
+            semantic_claims = _semantic_analysis_claimed_fingerprints(history)
+            return build_vault_scan_plan(
+                brand_identity=(
+                    str(current_memory["brand_identity"])
+                    if current_memory is not None
+                    else normalize_domain(str(observation["url"]))
+                ),
+                subject_url=str(observation["url"]),
+                mode=str(resolved["mode"]),
+                current_evidence_records=observation["evidence_records"],
+                previous_capture_evidence_records=previous_rows,
+                known_evidence_records=known_rows,
+                semantic_analysis_claimed_fingerprints=semantic_claims,
+                accepted_evidence_tile_relations=relation_rows,
+                accepted_tiles=(
+                    list(
+                        (current_memory.get("content") or {}).get("accepted_tiles")
+                        or []
+                    )
+                    if current_memory is not None
+                    else []
+                ),
+                canonical_memory_version=(
+                    str(current_memory["canonical_memory_version"])
+                    if current_memory is not None
+                    else None
+                ),
+            )
+
+        plan = _run_preparation_stage("operation_plan_construction", build_plan)
         work_required = bool(
             plan["operations"]["llm_required"]
             or plan["operations"]["create_candidate_packet"]
@@ -298,9 +365,12 @@ def prepare_vault_scan_after_capture(
                 "analysis_status": "pending" if work_required else "not_required",
             },
         }
-        outcome = repository.persist_capture_observation(
-            observation,
-            workspace_slug=workspace_slug,
+        outcome = _run_preparation_stage(
+            "capture_persistence",
+            lambda: repository.persist_capture_observation(
+                observation,
+                workspace_slug=workspace_slug,
+            ),
         )
     return {
         **resolved,
@@ -416,9 +486,12 @@ def _resume_first_class_operation(
         raise EvidenceVaultScanOrchestrationError(
             "persisted operation plan has a superseded canonical parent"
         )
-    outcome = repository.persist_capture_observation(
-        dict(raw),
-        workspace_slug=workspace_slug,
+    outcome = _run_preparation_stage(
+        "capture_persistence",
+        lambda: repository.persist_capture_observation(
+            dict(raw),
+            workspace_slug=workspace_slug,
+        ),
     )
     lease_reclaimable = bool(
         status in {"claimed", "running"}
@@ -683,8 +756,10 @@ def _timestamp(value: str | None) -> str:
 
 __all__ = [
     "EvidenceVaultScanOrchestrationError",
+    "EvidenceVaultScanOrchestrationStageError",
     "VAULT_INCREMENTAL_CAPTURE_PIPELINE_VERSION",
     "bind_vault_report_to_capture_observation",
     "build_capture_observation_from_snapshot",
     "prepare_vault_scan_after_capture",
+    "public_vault_authority_reason_code",
 ]
