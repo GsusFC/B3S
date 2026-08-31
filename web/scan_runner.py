@@ -34,7 +34,7 @@ from src.services.scanner_evidence_comparison import (
     selected_report_for_display,
 )
 from src.url_validator import validate_url
-from web.report_store import list_reports_for_domain, new_scan_id, save_report
+from web.report_store import list_reports_for_domain, load_report, new_scan_id, save_report
 
 _SCANS: dict[str, dict[str, Any]] = {}
 _SCAN_EVENTS: dict[str, threading.Event] = {}
@@ -361,6 +361,12 @@ def _vault_operational_pipeline_enabled() -> bool:
     )
 
 
+def _vault_sv9_authority_scanner_enabled() -> bool:
+    return _vault_operational_pipeline_enabled() and os.environ.get(
+        "BRAND3_VAULT_SV9_AUTHORITY_SCANNER_ENABLED"
+    ) == "true"
+
+
 def _vault_sv9_judgment_shadow_enabled() -> bool:
     return _vault_operational_pipeline_enabled() and os.environ.get(
         "BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED"
@@ -528,6 +534,60 @@ def _record_vault_sidecar_status(scan_id: str, detail: dict[str, Any]) -> None:
         )
 
 
+def _execute_vault_operational_preparation(
+    *,
+    scan_id: str,
+    repository: Any,
+    preparation: Mapping[str, Any],
+) -> str:
+    """Execute or resume one operational plan and return its activation binding."""
+
+    operation_plan = preparation.get("operation_plan")
+    resume = (
+        dict(preparation.get("resume") or {})
+        if isinstance(preparation.get("resume"), Mapping)
+        else {}
+    )
+    if isinstance(operation_plan, Mapping):
+        from src.services.evidence_vault_incremental_executor import (
+            execute_vault_operation_plan,
+        )
+
+        operation_requires_llm = bool(
+            (operation_plan.get("operations") or {}).get("llm_required")
+            and resume.get("materialization_required") is not True
+        )
+        operation_llm = None
+        if operation_requires_llm:
+            from src.config import SV9_FLOW_MODEL
+            from src.features.llm_analyzer import LLMAnalyzer
+
+            operation_llm = LLMAnalyzer(
+                model=os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL")
+                or SV9_FLOW_MODEL
+            )
+        execution = execute_vault_operation_plan(
+            repository=repository,
+            source_scan_id=scan_id,
+            worker_id=f"vault-scan-{scan_id}",
+            llm=operation_llm,
+            workspace_slug="b3s",
+        )
+        execution_status = str(execution.get("execution_status") or "unknown")
+        if execution_status != "completed":
+            raise RuntimeError("vault_operation_not_completed:" + execution_status)
+        fingerprint = str(operation_plan.get("operation_plan_fingerprint") or "")
+        if not fingerprint:
+            raise RuntimeError("vault_operation_plan_fingerprint_unavailable")
+        return fingerprint
+    if resume.get("analysis_status") == "completed":
+        fingerprint = str(resume.get("operation_plan_fingerprint") or "")
+        if not fingerprint:
+            raise RuntimeError("vault_completed_operation_missing_plan_fingerprint")
+        return fingerprint
+    raise RuntimeError("vault_operation_resume_incomplete")
+
+
 def _run_vault_operational_sidecar(
     *,
     scan_id: str,
@@ -652,6 +712,188 @@ def _run_vault_operational_sidecar(
     return True
 
 
+def _enter_vault_authority_boundary(scan_id: str) -> bool:
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        if status is None or status.get("state") in {"cancelled", "error", "done"}:
+            return False
+        _VAULT_ACTIVATIONS.add(scan_id)
+        return True
+
+
+def _authority_evidence_from_relations(relations: Any) -> list[dict[str, str]]:
+    if not isinstance(relations, list):
+        raise RuntimeError("vault_authoritative_relations_invalid")
+    evidence: dict[tuple[str, str], dict[str, str]] = {}
+    for relation in relations:
+        if not isinstance(relation, Mapping):
+            raise RuntimeError("vault_authoritative_relations_invalid")
+        ref = relation.get("evidence_ref")
+        fingerprint = relation.get("evidence_fingerprint")
+        if not isinstance(ref, str) or not ref or not isinstance(fingerprint, str) or not fingerprint:
+            raise RuntimeError("vault_authoritative_relations_invalid")
+        evidence[(ref, fingerprint)] = {
+            "evidence_ref": ref,
+            "evidence_fingerprint": fingerprint,
+        }
+    return [evidence[key] for key in sorted(evidence)]
+
+
+def _accepted_authority_source_report(application_result: Mapping[str, Any], scan_id: str) -> dict[str, Any] | None:
+    authority = application_result.get("authority")
+    candidate = authority.get("accepted_candidate") if isinstance(authority, Mapping) else None
+    source_scan_id = candidate.get("source_scan_id") if isinstance(candidate, Mapping) else None
+    if not isinstance(source_scan_id, str) or not source_scan_id or source_scan_id == scan_id:
+        return None
+    return load_report(source_scan_id)
+
+
+def _authority_scanner_payload(
+    *,
+    publication: Mapping[str, Any],
+    canonical_snapshot: Mapping[str, Any],
+    canonical_source_capture: Mapping[str, str] | None,
+    gate: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = copy.deepcopy(publication.get("scanner_payload"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("vault_authority_payload_invalid")
+    source_capture = canonical_source_capture or canonical_snapshot.get("source_capture")
+    if isinstance(source_capture, Mapping):
+        payload["source_capture"] = dict(source_capture)
+    payload["acquisition_gate"] = dict(canonical_snapshot.get("acquisition_gate") or gate)
+    payload["acquisition_artifacts"] = _acquisition_artifacts_from_snapshot(
+        dict(canonical_snapshot)
+    )
+    return payload
+
+
+def _run_vault_sv9_authority_scanner(
+    *,
+    scan_id: str,
+    url: str,
+    brand_name: str,
+    repository: Any,
+    preparation: Mapping[str, Any],
+    canonical_snapshot: Mapping[str, Any],
+    canonical_source_capture: Mapping[str, str] | None,
+    gate: Mapping[str, Any],
+) -> bool:
+    """Run the authoritative path without evaluating the legacy Flow/SV9 lane."""
+
+    if _scan_cancelled(scan_id):
+        return False
+    authority_boundary_entered = False
+    release_guard = True
+    try:
+        fingerprint = _execute_vault_operational_preparation(
+            scan_id=scan_id,
+            repository=repository,
+            preparation=preparation,
+        )
+        if _scan_cancelled(scan_id):
+            return False
+        authority_boundary_entered = _enter_vault_authority_boundary(scan_id)
+        if not authority_boundary_entered:
+            return False
+        if _activate_vault_result_unless_cancelled(
+            scan_id,
+            repository,
+            url,
+            operation_plan_fingerprint=fingerprint,
+        ) is None:
+            return False
+        from src.config import SV9_FLOW_MODEL
+        from src.services.evidence_vault_sv9_authority_application import (
+            run_evidence_vault_sv9_authority_application,
+        )
+        from src.services.evidence_vault_sv9_authority_report import (
+            project_vault_authority_publication,
+        )
+        from src.services.evidence_vault_sv9_authoritative_relations import (
+            project_evidence_vault_sv9_authoritative_relations,
+        )
+        from src.sv9.incremental_flow_adapter import FlowSv9StrictComponentAdapter
+        from src.sv9.judgment_memory import build_judgment_series_contract
+        from src.sv9.shadow_component_provider import (
+            FlowSv9ShadowJsonProvider,
+            shadow_provider_environment_snapshot,
+        )
+
+        relation_projection = project_evidence_vault_sv9_authoritative_relations(
+            repository=repository,
+            source_scan_id=scan_id,
+            workspace_slug="b3s",
+        )
+        relations = (
+            relation_projection.get("authoritative_relations")
+            if isinstance(relation_projection, Mapping)
+            and relation_projection.get("status") == "available"
+            else []
+        )
+        current_evidence = _authority_evidence_from_relations(relations)
+        model = os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL") or SV9_FLOW_MODEL
+        application_result = run_evidence_vault_sv9_authority_application(
+            repository=repository,
+            flow=FlowSv9StrictComponentAdapter(
+                FlowSv9ShadowJsonProvider(),
+                environ=shadow_provider_environment_snapshot(os.environ),
+                model=model,
+            ),
+            domain_or_url=url,
+            source_scan_id=scan_id,
+            current_evidence=current_evidence,
+            authoritative_relations=list(relations),
+            current_series_contract=build_judgment_series_contract(
+                evaluator_version="evidence-vault-sv9-judgment-authority-v1",
+                prompt_version="sv9-strict-component-v1",
+                model_version=model,
+                flow_version="sv9-flow-strict-component-v1",
+                normalization_version="vault-capture-v1",
+            ),
+            workspace_slug="b3s",
+            trusted_irrelevant_evidence=[],
+        )
+        publication = project_vault_authority_publication(
+            application_result,
+            scan_id,
+            _accepted_authority_source_report(application_result, scan_id),
+        )
+        action = publication.get("action") if isinstance(publication, Mapping) else None
+        _set_phase(scan_id, "interpret", "done")
+        _set_phase(scan_id, "score", "done")
+        _set_phase(scan_id, "report", "running")
+        if action == "retain_source":
+            source_report_id = publication.get("source_report_id")
+            if not isinstance(source_report_id, str) or not source_report_id:
+                raise RuntimeError("vault_authority_source_report_unavailable")
+            return _finish_scan_without_new_score(scan_id, source_report_id)
+        if action not in {"publish_current", "record_no_score"}:
+            raise RuntimeError("vault_authority_publication_invalid")
+        report = _compose_report(
+            scan_id,
+            url,
+            brand_name,
+            _authority_scanner_payload(
+                publication=publication,
+                canonical_snapshot=canonical_snapshot,
+                canonical_source_capture=canonical_source_capture,
+                gate=gate,
+            ),
+        )
+        _validate_report_sv9_assessment(report, required=True)
+        return _publish_completed_report(scan_id, report)
+    except Exception:
+        # The outer runner marks the error terminal and releases this guard
+        # under the same lock; releasing here opens a cancellation window.
+        release_guard = not authority_boundary_entered
+        raise RuntimeError("vault_authority_preparation_failed") from None
+    finally:
+        if release_guard:
+            with _LOCK:
+                _VAULT_ACTIVATIONS.discard(scan_id)
+
+
 def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool) -> None:
     try:
         vault_repository = None
@@ -701,6 +943,7 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
             return
 
         vault_enabled = _vault_operational_pipeline_enabled()
+        authority_scanner_enabled = _vault_sv9_authority_scanner_enabled()
         canonical_snapshot = snapshot
         canonical_source_capture: dict[str, str] | None = None
         if vault_enabled:
@@ -711,7 +954,11 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
 
             vault_repository = _postgres_repository()
             if vault_repository is None:
-                raise RuntimeError("vault_persistence_repository_unavailable")
+                raise RuntimeError(
+                    "vault_authority_preparation_unavailable"
+                    if authority_scanner_enabled
+                    else "vault_persistence_repository_unavailable"
+                )
             try:
                 vault_preparation = prepare_vault_scan_after_capture(
                     repository=vault_repository,
@@ -733,6 +980,8 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                     url=url,
                 )
             except Exception as exc:
+                if authority_scanner_enabled:
+                    raise RuntimeError("vault_authority_preparation_unavailable") from None
                 # The operation planner is a sidecar.  If its work failed only
                 # after the capture committed, an exact repository readback is
                 # still enough to publish the canonical Flow/SV9 report.
@@ -766,16 +1015,35 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 )
                 vault_preparation = None
             else:
-                canonical_snapshot, canonical_source_capture = (
-                    _canonical_snapshot_from_persisted_vault_capture(
-                        scan_id=scan_id,
-                        url=url,
-                        expected_snapshot=snapshot,
-                        report_observation=persisted_observation,
+                try:
+                    canonical_snapshot, canonical_source_capture = (
+                        _canonical_snapshot_from_persisted_vault_capture(
+                            scan_id=scan_id,
+                            url=url,
+                            expected_snapshot=snapshot,
+                            report_observation=persisted_observation,
+                        )
                     )
-                )
+                except Exception:
+                    if authority_scanner_enabled:
+                        raise RuntimeError("vault_authority_preparation_unavailable") from None
+                    raise
 
         _set_phase(scan_id, "interpret", "running")
+        if authority_scanner_enabled:
+            if vault_repository is None or not isinstance(vault_preparation, Mapping):
+                raise RuntimeError("vault_authority_preparation_unavailable")
+            _run_vault_sv9_authority_scanner(
+                scan_id=scan_id,
+                url=url,
+                brand_name=brand_name,
+                repository=vault_repository,
+                preparation=vault_preparation,
+                canonical_snapshot=canonical_snapshot,
+                canonical_source_capture=canonical_source_capture,
+                gate=gate,
+            )
+            return
         from scripts.sv9_flow_sv9_shadow_eval import build_flow_sv9_shadow_eval
 
         canonical_run = (

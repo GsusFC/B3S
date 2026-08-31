@@ -53,7 +53,13 @@ from web.report_store import (
     new_scan_id,
     register_evidence_claim_tile_review_packet_for_domain,
 )
-from web.scan_runner import default_brand_name, normalize_url, scan_status, start_scan
+from web.scan_runner import (
+    _load_persisted_scan_status,
+    default_brand_name,
+    normalize_url,
+    scan_status,
+    start_scan,
+)
 
 from .errors import ApiError
 from .presenters import completed_status_from_report
@@ -182,6 +188,17 @@ def get_completed_report(scan_id: str) -> dict[str, Any]:
     status = get_scan(scan_id)
     if status is None:
         raise ApiError(404, "scan_not_found", f"Scan {scan_id} was not found.")
+    try:
+        persisted_status = _load_persisted_scan_status(str(scan_id))
+    except Exception:
+        persisted_status = None
+    source_report_id = (
+        persisted_status.get("report_id") if isinstance(persisted_status, dict) else None
+    )
+    if persisted_status and persisted_status.get("state") == "done" and isinstance(source_report_id, str):
+        source_report = load_report(source_report_id)
+        if source_report is not None:
+            return source_report
     raise ApiError(
         409,
         "scan_result_not_ready",
