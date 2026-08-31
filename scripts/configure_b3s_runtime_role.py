@@ -31,9 +31,13 @@ from scripts.pr71_vault_database_target import (  # noqa: E402
 
 SCHEMA = "b3s_history"
 MIGRATION_JOURNAL = "schema_migrations"
-EXPECTED_HEAD_VERSION = "031"
-JUDGMENT_CANDIDATE_RELATIONS = frozenset(
-    {"evidence_vault_sv9_judgment_candidates", "evidence_vault_sv9_judgment_evidence_bindings"}
+EXPECTED_HEAD_VERSION = "032"
+APPEND_ONLY_JUDGMENT_RELATIONS = frozenset(
+    {
+        "evidence_vault_sv9_judgment_authority_events",
+        "evidence_vault_sv9_judgment_candidates",
+        "evidence_vault_sv9_judgment_evidence_bindings",
+    }
 )
 WATERMARK_TABLE = "evidence_vault_capture_watermark_events"
 PRIVATE_SHADOW_LEDGER_RELATIONS = frozenset(
@@ -88,12 +92,14 @@ EXPECTED_APPLICATION_TABLES = frozenset(
         "tile_verdicts",
         "workspaces",
     }
-    | JUDGMENT_CANDIDATE_RELATIONS
+    | APPEND_ONLY_JUDGMENT_RELATIONS
 )
 EXPECTED_READ_ONLY_VIEWS = frozenset(
     {
         "brand_current_state",
         "brand_history",
+        "evidence_vault_sv9_judgment_active_partition_v1",
+        "evidence_vault_sv9_judgment_active_series_v1",
         "evidence_vault_operational_sv9_shadow_diagnostics_v1",
     }
 )
@@ -421,11 +427,11 @@ def _reset_and_grant(
     conn.execute(
         sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(schema_identifier, role_identifier)
     )
-    if app_table_names - JUDGMENT_CANDIDATE_RELATIONS:
+    if app_table_names - APPEND_ONLY_JUDGMENT_RELATIONS:
         conn.execute(sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {} TO {}").format(
-            _relation_list(app_table_names - JUDGMENT_CANDIDATE_RELATIONS), role_identifier))
+            _relation_list(app_table_names - APPEND_ONLY_JUDGMENT_RELATIONS), role_identifier))
     conn.execute(sql.SQL("GRANT SELECT, INSERT ON TABLE {} TO {}").format(
-        _relation_list(JUDGMENT_CANDIDATE_RELATIONS), role_identifier))
+        _relation_list(APPEND_ONLY_JUDGMENT_RELATIONS), role_identifier))
     if sequence_names:
         conn.execute(
             sql.SQL("GRANT USAGE, SELECT ON SEQUENCE {} TO {}").format(
@@ -567,11 +573,11 @@ def _verify_effective_privileges(
                     "runtime role retains effective private-ledger access"
                 )
             continue
-        if name in JUDGMENT_CANDIDATE_RELATIONS:
+        if name in APPEND_ONLY_JUDGMENT_RELATIONS:
             if not all(bool(row[key]) for key in ("can_select", "can_insert")) or any(
                 bool(row[key]) for key in ("can_update", "can_delete", "can_truncate", "can_reference", "can_trigger", "column_update", "column_reference")
             ):
-                raise RuntimeRoleConfigurationError("SV9 judgment candidate grant exceeds append-only contract")
+                raise RuntimeRoleConfigurationError("SV9 judgment append-only grant exceeds contract")
             continue
         if name in app_table_names:
             if not all(bool(row[key]) for key in ("can_select", "can_insert", "can_update", "can_delete")):
