@@ -13,7 +13,7 @@ def _uuid(number): return f"00000000-0000-0000-0000-{number:012d}"
 
 class _ApplicationRepository(_Repository):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs); self.context = {"capture_origin": {"capture_id": _uuid(9), "capture_fingerprint": _hash(9)}, "operation_origin": {"operation_id": _uuid(10), "operation_fingerprint": _hash(10)}}; self.event, self.candidate, self.authority_calls, self.interleave, self.appear = 500, 400, 0, 0, None; self.adopt_failure = self.corrupt_after_adopt = self.authority_failure = self._corrupt = False; self.witness_seed = 300
+        super().__init__(*args, **kwargs); self.context = {"capture_origin": {"capture_id": _uuid(9), "capture_fingerprint": _hash(9)}, "operation_origin": {"operation_id": _uuid(10), "operation_fingerprint": _hash(10)}}; self.event, self.candidate, self.authority_calls, self.interleave, self.appear = 500, 400, 0, 0, None; self.adopt_failure = self.corrupt_after_adopt = self.authority_failure = self._corrupt = False; self.witness_seed = 300; self.adopt_error = None
     def load_evidence_vault_sv9_authoritative_relation_facts(self, scan, *, workspace_slug="b3s"):
         source = {"workspace_id": _uuid(1), "brand_id": _uuid(2), "scan_run_id": _uuid(3), "source_scan_id": scan, "workspace_slug": workspace_slug, "canonical_domain": "example.test", "capture_id": self.context["capture_origin"]["capture_id"], "capture_fingerprint": self.context["capture_origin"]["capture_fingerprint"], "operation_plan_id": self.context["operation_origin"]["operation_id"], "operation_fingerprint": self.context["operation_origin"]["operation_fingerprint"], "operation_status": "completed"}
         evidence, basis = [], []
@@ -44,6 +44,7 @@ class _ApplicationRepository(_Repository):
         self.event += 1
         self.authority = {"authority": True, "accepted_candidate": candidate, "accepted_partition": partition, "assessment": candidate["assessment"], "score": candidate["assessment"]["sv9_score"], "active_authority_event": {"event_id": _uuid(self.event), "event_type": kind}, "current_head": {"event_fingerprint": _hash(self.event)}, "reopen_review_overlay": None}
     def adopt_evidence_vault_sv9_judgment_candidate(self, scan, candidate_id, *, expected_predecessor_event_fingerprint, **_kwargs):
+        if self.adopt_error: raise self.adopt_error
         self.mutations.append("adopt")
         if self.authority and expected_predecessor_event_fingerprint != self.authority["current_head"]["event_fingerprint"]: raise RuntimeError("stale")
         if self.adopt_failure: raise RuntimeError("stale")
@@ -90,15 +91,27 @@ def test_first_adopt_crash_recovery_and_idempotent_retry_are_append_safe():
     assert staged["status"] == recovered["evaluation_status"] == "candidate_available" and recovered["status"] == "authority_established" and not flow.calls and repo.append_calls == 1 and repo.mutations == ["adopt"]
     repeated = _run(repo, _Flow()); assert repeated["status"] == "authority_retained" and repo.mutations == ["adopt"]
 
+@pytest.mark.parametrize(("error", "reason"), [
+    (history.EvidenceVaultSv9AuthoritativeRelationStaleWitnessError("stale"), "stale_authoritative_relation_witness"),
+    (history.EvidenceVaultSv9AuthoritativeRelationWitnessError("invalid"), "invalid_authoritative_relation_witness"),
+    (history.EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError("legacy"), "unwitnessed_legacy_candidate"),
+])
+def test_typed_adoption_witness_errors_require_review_without_authority_write(error, reason):
+    assert history.EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError is application.EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError
+    repo = _ApplicationRepository(records=(9,)); repo.adopt_error = error
+    result = _run(repo, _Flow())
+    assert result["status"] == "review_required" and result["reason_codes"] == [reason] and result["evaluation_status"] == "candidate_available" and not repo.mutations and repo.authority is None
+
 def test_source_identity_and_interleavings_reject_without_new_event():
     repo, flow = _ApplicationRepository(records=(9,)), _Flow(); mismatch = _run(repo, flow, domain="other.test")
     assert mismatch["status"] == "authority_conflict" and mismatch["reason_codes"] == ["invalid_source_identity"] and not flow.calls and not repo.get_calls and not repo.append_calls and not repo.mutations
     appeared, other = _ApplicationRepository(records=(9,)), _ApplicationRepository(records=(3,)); assert _run(other, _Flow(), current=(3,), source="other")["status"] == "authority_established"; appeared.appear, appeared.interleave = deepcopy(other.authority), 2
     conflict = _run(appeared, _Flow()); assert conflict["status"] == "authority_conflict" and not appeared.mutations
-    for disposition in ("relevant", "contradiction"):
-        repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"; repo.records, repo.authority_calls, repo.interleave = (3, 9), 0, 2
-        result = _run(repo, _Flow(), current=(3, 9), relations=[_relation(repo, "M1", number=3), _relation(repo, "M1", disposition, 9)], source=f"scan-{disposition}")
-        assert result["evaluation_status"] == ("candidate_available" if disposition == "relevant" else "review_required") and result["status"] == "authority_conflict" and repo.mutations == ["adopt"]
+    for review in (False, True):
+        repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"; current = (3,) if review else (3, 9); repo.records, repo.authority_calls, repo.interleave = current, 0, 2
+        relations = [_relation(repo, "M1", number=value) for value in current]
+        result = _run(repo, _Flow(), current=current, relations=relations, source=f"scan-{review}")
+        assert result["evaluation_status"] == ("review_required" if review else "candidate_available") and result["status"] == "authority_conflict" and repo.mutations == ["adopt"]
 
 def test_supersede_and_same_reopen_are_single_append_state_transitions():
     repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"; repo.records = (3, 9); prior = repo.authority["accepted_candidate"]["id"]
@@ -110,7 +123,7 @@ def test_supersede_and_same_reopen_are_single_append_state_transitions():
     assert again["status"] == "review_required" and len(repo.mutations) == events
 
 def test_first_run_review_and_no_score_or_repository_failures_fail_closed():
-    first = _ApplicationRepository(records=(9,)); unresolved = _run(first, _Flow(), relations=[_relation(first, "M1", "contradiction", 9)], trusted=())
+    first = _ApplicationRepository(records=()); unresolved = _run(first, _Flow())
     assert unresolved["status"] == "first_run_unresolved" and not first.mutations
     failed = _ApplicationRepository(records=(9,)); assert _run(failed, _Flow(fail=1), relations=[_relation(failed, "M1", number=9)], trusted=())["status"] == "first_run_unresolved"
     repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"

@@ -179,6 +179,9 @@ from src.services.evidence_vault_sv9_authoritative_relations import (
     build_evidence_vault_sv9_authoritative_relation_witness,
     validate_evidence_vault_sv9_authoritative_relation_witness,
 )
+from src.services.evidence_vault_sv9_authority_application import (
+    EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError,
+)
 from src.services.evidence_vault_lineage_replay import (
     EvidenceVaultLineageReplayError,
     validate_lineage_seed_export_v2,
@@ -260,6 +263,7 @@ class EvidenceVaultSv9JudgmentCandidateError(CaptureConflictError):
 
 class EvidenceVaultSv9JudgmentCandidateConflictError(EvidenceVaultSv9JudgmentCandidateError):
     pass
+
 
 def _build_vault_semantic_report_selector(
     *,
@@ -6040,6 +6044,7 @@ class PostgresHistoryRepository:
             _verify_exact_migration_head_under_shared_lock(conn)
             context = _sv9_judgment_context(conn, source_scan_id, workspace_slug, True)
             if context is None: raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment source scan is unavailable.")
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_advisory_lock_key(context["brand_id"], "evidence-vault-canonical-promotion"),))
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (_advisory_lock_key(context["brand_id"], "evidence-vault-sv9-judgment-authority"),))
             state = _replay_sv9_judgment_authority(conn, workspace_slug, context["workspace_id"], context["brand_id"])
             row = conn.execute(f"SELECT id FROM {_SCHEMA}.evidence_vault_sv9_judgment_authority_events WHERE workspace_id = %s AND brand_id = %s AND idempotency_key_hash = %s", (context["workspace_id"], context["brand_id"], idempotency_key_hash)).fetchone()
@@ -6052,6 +6057,8 @@ class PostgresHistoryRepository:
             if candidate_id:
                 candidate, candidate_row = _sv9_authority_candidate(conn, candidate_id, workspace_slug, context["workspace_id"], context["brand_id"])
                 if str(candidate_row["source_scan_id"]) != context["source_scan_id"] or any(candidate_row[field] != context[field] for field in ("scan_run_id", "capture_id", "operation_plan_id")): raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment candidate does not match the source scan context.")
+                if candidate["schema_version"].endswith("v1"): raise EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError("SV9 judgment candidate v1 cannot establish new authority.")
+                _sv9_judgment_current_authoritative_relation_witness(conn, candidate, context, workspace_slug)
                 if conn.execute(f"SELECT 1 FROM {_SCHEMA}.evidence_vault_sv9_judgment_authority_events WHERE workspace_id = %s AND brand_id = %s AND candidate_id = %s", (context["workspace_id"], context["brand_id"], candidate_id)).fetchone(): raise EvidenceVaultSv9JudgmentCandidateConflictError("SV9 judgment candidate is already adopted.")
             elif state is None: raise EvidenceVaultSv9JudgmentCandidateConflictError("SV9 judgment authority is unavailable for reopen.")
             else: _sv9_authority_reopen_binding(conn, state, context, delta)

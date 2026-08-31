@@ -7,11 +7,20 @@ from uuid import UUID
 
 from src.services import evidence_vault_sv9_authority_evaluation as evaluation_service
 from src.services import evidence_vault_sv9_judgment_delta as delta
+from src.services.evidence_vault_sv9_authoritative_relations import (
+    EvidenceVaultSv9AuthoritativeRelationStaleWitnessError,
+    EvidenceVaultSv9AuthoritativeRelationWitnessError,
+)
 from src.sv9 import incremental_evaluation as evaluation
 from src.sv9 import judgment_memory as memory
 
 # fmt: off
 _IDEMPOTENCY_VERSION = "evidence-vault-sv9-authority-application-idempotency-v1"
+
+
+class EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError(Exception):
+    pass
+
 
 class EvidenceVaultSv9AuthorityApplicationRepository(evaluation_service.EvidenceVaultSv9AuthorityEvaluationRepository, Protocol):
     def adopt_evidence_vault_sv9_judgment_candidate(self, source_scan_id: str, candidate_id: str, **kwargs: Any) -> tuple[dict[str, Any], bool]: ...
@@ -57,9 +66,18 @@ def _apply_candidate(repository, domain: str, source: str, workspace: str, outco
             source, candidate["id"], expected_predecessor_event_fingerprint=predecessor,
             idempotency_key_hash=key, workspace_slug=workspace,
         )
+    except EvidenceVaultSv9AuthoritativeRelationStaleWitnessError:
+        return _candidate_review(outcome, candidate, authority, "stale_authoritative_relation_witness")
+    except EvidenceVaultSv9AuthoritativeRelationWitnessError:
+        return _candidate_review(outcome, candidate, authority, "invalid_authoritative_relation_witness")
+    except EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError:
+        return _candidate_review(outcome, candidate, authority, "unwitnessed_legacy_candidate")
     except Exception:
         pass
     return _candidate_readback(repository, domain, workspace, outcome, candidate)
+
+def _candidate_review(outcome: Mapping[str, Any], candidate: Mapping[str, str], authority: Mapping[str, Any] | None, reason: str) -> dict[str, Any]:
+    return _result("review_required", dict(outcome) | {"reason_codes": [reason]}, authority, candidate)
 
 def _candidate_readback(repository, domain: str, workspace: str, outcome: Mapping[str, Any], candidate: Mapping[str, str]) -> dict[str, Any]:
     state, authority, details = _read(repository, domain, workspace)
