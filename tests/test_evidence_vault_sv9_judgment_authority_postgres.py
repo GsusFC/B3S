@@ -178,10 +178,12 @@ def test_repository_authority_adopts_replays_competes_and_reopens(monkeypatch) -
         newest_key = key("reopen_authority", "authority-next", fingerprint=next_delta["canonical_delta_fingerprint"], predecessor=next_predecessor)
         newest, replayed = repository.reopen_evidence_vault_sv9_judgment_authority("authority-next", next_delta, expected_predecessor_event_fingerprint=next_predecessor, idempotency_key_hash=newest_key)
         assert not replayed and newest["current_head"]["predecessor_event_id"] == reopened["current_head"]["event_id"] and newest["current_head"]["predecessor_event_fingerprint"] == reopened["current_head"]["event_fingerprint"] and newest["current_head"]["request"]["expected_predecessor_event_fingerprint"] == reopened["current_head"]["event_fingerprint"] and newest["current_head"]["active_parent_event_id"] == newest["active_authority_event"]["event_id"] and newest["current_head"]["active_parent_event_fingerprint"] == newest["active_authority_event"]["event_fingerprint"] and newest["current_head"]["request"]["source_scan_id"] == "authority-next" and newest["reopen_review_overlay"]["delta_fingerprint"] == next_delta["canonical_delta_fingerprint"]
+        older_replay, replayed = repository.reopen_evidence_vault_sv9_judgment_authority("authority-a", valid, expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash=reopen_key)
+        assert replayed and older_replay["event"] == reopened["event"] and older_replay["event"] != older_replay["current_head"]
         loaded = repository.get_evidence_vault_sv9_judgment_authority("example.com")
         assert loaded and loaded["current_head"]["event_type"] == "reopen" and loaded["active_authority_event"]["event_type"] == "adopt" and loaded["accepted_candidate"]["source_scan_id"] == "authority-a" and loaded["current_head"]["request"]["source_scan_id"] == "authority-next" and loaded["reopen_review_overlay"]["delta_fingerprint"] == next_delta["canonical_delta_fingerprint"]
-        for projection in (winner, reopened, newest, loaded):
-            assert authority_projection.validate_evidence_vault_sv9_authority_projection(projection) == json.loads(json.dumps(projection))
+        for projection in (winner, reopened, newest, older_replay, loaded):
+            assert authority_projection.validate_persisted_evidence_vault_sv9_authority_projection(projection) == json.loads(json.dumps(projection))
             for name in ("active_authority_event", "current_head", "event"):
                 assert authority_event.validate_evidence_vault_sv9_authority_event(projection[name]) == json.loads(json.dumps(projection[name]))
         assert winner["event"]["idempotency_key_hash"] == winner_key and reopened["event"]["idempotency_key_hash"] == reopen_key and newest["event"]["idempotency_key_hash"] == newest_key

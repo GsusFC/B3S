@@ -126,3 +126,25 @@ def test_pending_reopen_bindings_fail_closed(change):
 def test_stable_wrapper_rejects_a_valid_nonactive_head():
     result = _projection(older=True); result["current_head"] = result["event"]
     with pytest.raises(authority_projection.EvidenceVaultSv9AuthorityProjectionError): authority_projection.validate_evidence_vault_sv9_authority_projection(result)
+
+@pytest.mark.parametrize("kwargs", ({}, {"pending": True}))
+def test_generic_validator_allows_null_event_timestamps_before_persistence(kwargs):
+    result = _projection(**kwargs)
+    for name in ("active_authority_event", "current_head", "event"): result[name]["created_at"] = None
+    assert authority_projection.validate_evidence_vault_sv9_authority_projection(result) == result
+
+@pytest.mark.parametrize("kwargs", ({}, {"pending": True, "consecutive": True}, {"older": True}))
+def test_persisted_validator_accepts_stable_pending_and_older_selected_occurrences(kwargs):
+    result = _projection(**kwargs)
+    if kwargs.get("older"): assert result["event"] != result["current_head"]
+    assert authority_projection.validate_persisted_evidence_vault_sv9_authority_projection(result) == json.loads(json.dumps(result))
+
+@pytest.mark.parametrize("name", ("active_authority_event", "current_head", "event"))
+def test_persisted_validator_rejects_each_null_event_timestamp_independently(name):
+    result = _projection(pending=True); result[name]["created_at"] = None
+    assert authority_projection.validate_evidence_vault_sv9_authority_projection(result) == result
+    with pytest.raises(authority_projection.EvidenceVaultSv9AuthorityProjectionError): authority_projection.validate_persisted_evidence_vault_sv9_authority_projection(result)
+
+def test_generic_validator_rejects_missing_event_timestamp_field():
+    result = _projection(pending=True); result["event"].pop("created_at")
+    with pytest.raises(authority_projection.EvidenceVaultSv9AuthorityProjectionError): authority_projection.validate_evidence_vault_sv9_authority_projection(result)
