@@ -1,6 +1,6 @@
 # ADR v2 — Memoria operativa incremental del Evidence Vault
 
-- **Estado:** Núcleo v2 implementado; el perfil revisado head-031 para `b3s-vault` configura captura operacional y publicación autoritativa SV9 con memoria, pendiente de aceptación VA5 separada y despliegue explícito. El shadow de juicio SV9 post-publicación legado, verified-raw, worker y diagnostics están desactivados; no se ha realizado mutación live. C7 usa el ciclo normal de baldosa.
+- **Estado:** Núcleo v2 implementado; el perfil revisado head-031 para `b3s-vault` contiene la configuración de captura operacional y publicación autoritativa SV9 con memoria, y la aceptación de integración VA5 basada en source/CI está completa. El despliegue explícito de Vault y el smoke testing live siguen pendientes, separados y requieren autorización independiente; esta configuración no implica que una máquina Vault esté ejecutando la autoridad. El shadow de juicio SV9 post-publicación legado, verified-raw, worker y diagnostics están desactivados; no se ha realizado mutación live. C7 usa el ciclo normal de baldosa.
 - **Fecha:** 2026-08-06
 - **Ámbito inicial:** Vault; validación runtime en `b3s-pr71-vault`
 - **Sustituye:** `evidence_vault_canonical_memory_adr_v1.md`
@@ -308,11 +308,14 @@ queda configurado con `BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED=true`,
 Desactivar la capability en PR71 conserva capturas, eventos y evaluaciones y
 devuelve ese entorno al diagnóstico explícito.
 
-The VA4D code/profile cutover remains separate from VA5 acceptance and any
-explicit deployment. Final integration acceptance and explicit deployment are
-independent release decisions; this ADR records no live mutation.
-The profile is configured, not live: authority remains contingent on separate
-VA5 acceptance and explicit deployment; no live mutation has occurred.
+El corte de código/perfil VA4D permanece separado de cualquier despliegue
+explícito. VA5 source/CI integration acceptance is complete. Explicit Vault
+deployment and live smoke testing remain pending, separate, and require
+independent authorization. No live mutation has occurred.
+The profile is configured, not live: the current Machine is not claimed to run
+authority.
+The explicit deployment of Vault remains a separate, independently authorized
+release action.
 
 ## 12. Estado real de implementación y límites de activación
 
@@ -356,13 +359,16 @@ El scanner web invoca estas rutas únicamente cuando concurren
 requiere además `BRAND3_VAULT_SV9_AUTHORITY_SCANNER_ENABLED=true`; esa bandera
 solo está configurada en el `fly.vault.toml` revisado head-031. El perfil de
 `b3s-vault` queda configurado para captura operacional y publicación SV9 con
-memoria, sujeta a aceptación VA5 separada y despliegue explícito; el shadow de
-juicio post-publicación legado permanece desactivado, al igual que verified-raw,
-worker y diagnostics, y el score diagnóstico live permanece intacto. Core
-(`fly.toml`) y PR71 (`fly.pr71-vault.toml`) no activan la autoridad. No se ha
-realizado mutación live. Cualquier despliegue del pipeline genérico en otro
-entorno requiere una revisión y autorización separadas. C7 no añade una
-bandera, allowlist, readiness ni ventana de activación propias.
+memoria, y la aceptación de integración VA5 basada en source/CI está completa;
+la configuración no afirma ejecución live. El despliegue explícito de Vault y el
+smoke testing live siguen pendientes, son trabajo de release separado y
+requieren autorización independiente. El shadow de juicio post-publicación
+legado permanece desactivado, al igual que verified-raw, worker y diagnostics,
+y el score diagnóstico live permanece intacto. Core (`fly.toml`) y PR71
+(`fly.pr71-vault.toml`) no activan la autoridad. No se ha realizado mutación
+live. Cualquier despliegue del pipeline genérico en otro entorno requiere una
+revisión y autorización separadas. C7 no añade una bandera, allowlist,
+readiness ni ventana de activación propias.
 
 
 ## 13. Validación de campo v1
@@ -512,3 +518,20 @@ score, la persistencia de `pending_reassessment` y la resolución mediante un
 grupo `all_of` nuevo; véase `evidence_vault_c7_group_lifecycle_v1.md`. La
 reapertura cambia solo el estado y los puntos ordinarios de C7; no bloquea el
 scanner, el informe, la API/UI ni un despliegue.
+
+## 17. Aceptación VA5 de integración (sin despliegue)
+
+VA5 acepta únicamente evidencia reproducible de source y CI. La prueba
+`tests/test_vault_authority_acceptance.py` ejecuta la proyección autoritativa
+SV9 real y la hace atravesar sin cambios el endpoint del Scanner y el informe
+HTML; también verifica en runtime que el entorno `production` no puede entrar en
+el runner autoritativo aunque estén presentes los flags operativos de Vault.
+La identidad de assessment, el score y el estado completo de las 80 baldosas se
+comparan entre ambas superficies. El token de wire histórico del shadow se
+conserva solo por compatibilidad de esquema y no implica seleccionar ese
+reporte legado.
+
+Esta aceptación no autoriza despliegue, smoke testing live, acceso a Fly ni
+mutaciones de bases de datos externas. El despliegue explícito de Vault y las
+pruebas smoke live son trabajo de release separado y requieren autorización
+independiente.
