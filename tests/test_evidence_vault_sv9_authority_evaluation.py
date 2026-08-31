@@ -29,7 +29,7 @@ class _Repository:
         self.authority, self.records, self.bad_reload = authority, tuple(records), bad_reload; self.append_calls = self.get_calls = 0; self.candidates = {}; self.mutations = []
         self.context = {"capture_origin": _origin("capture", 9), "operation_origin": _origin("operation", 10)}
     def get_evidence_vault_sv9_judgment_authority(self, _domain, **_kwargs): return deepcopy(self.authority)
-    def load_evidence_vault_sv9_judgment_context(self, _scan, **_kwargs): return {"capture_id": self.context["capture_origin"]["capture_id"], "capture_fingerprint": self.context["capture_origin"]["capture_fingerprint"], "operation_plan_id": self.context["operation_origin"]["operation_id"], "operation_fingerprint": self.context["operation_origin"]["operation_fingerprint"]}
+    def load_evidence_vault_sv9_judgment_context(self, _scan, **_kwargs): return {"canonical_domain": "example.test", "capture_id": self.context["capture_origin"]["capture_id"], "capture_fingerprint": self.context["capture_origin"]["capture_fingerprint"], "operation_plan_id": self.context["operation_origin"]["operation_id"], "operation_fingerprint": self.context["operation_origin"]["operation_fingerprint"]}
     def resolve_evidence_vault_sv9_judgment_evidence(self, _scan, refs, **_kwargs):
         assert refs == sorted(refs); rows = [{"evidence_record_id": f"00000000-0000-0000-0000-{number:012d}", **_identity(number), "content": {"evidence": number}} for number in self.records]
         assert {row["evidence_ref"] for row in rows} == set(refs); return {**self.context, "evidence": rows}
@@ -66,7 +66,7 @@ def test_first_run_requires_trusted_unmapped_evidence_before_ten_calls_and_persi
     flow = _Flow(); result = _run(repo, flow, current=(9,), trusted=(9,))
     assert result["status"] == "candidate_available" and len(flow.calls) == 10 and repo.append_calls == 1 and repo.get_calls == 2
     candidate = next(iter(repo.candidates.values())); assert candidate["evidence_bindings"] == [] and result["candidate"]["id"] == "00000000-0000-0000-0000-000000000203"
-    repeated = _run(repo, _Flow(), current=(9,), trusted=(9,)); assert repeated["status"] == "no_new_score" and repo.append_calls == 1
+    repeated = _run(repo, _Flow(), current=(9,), trusted=(9,)); assert repeated["status"] == "candidate_available" and not repeated["calls_issued"] and repo.append_calls == 1
 
 @pytest.mark.parametrize(("current", "trusted", "reason"), [((3,), (), "exact_reuse"), ((3, 9), (9,), "exact_reuse")])
 def test_exact_reuse_and_explicit_irrelevant_evidence_skip_flow(current, trusted, reason):

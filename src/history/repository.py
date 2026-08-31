@@ -11620,7 +11620,7 @@ def _sv9_judgment_context(conn: Any, source_scan_id: Any, workspace_slug: Any, f
     row = _vault_operation_row(conn, workspace_slug=workspace, source_scan_id=scan, for_update=for_update)
     if row is None: return None
     _vault_operation_plan_record(row)
-    return {"workspace_id": row["workspace_id"], "brand_id": row["brand_id"], "scan_run_id": row["scan_run_id"], "source_scan_id": scan, "capture_id": row["capture_id"], "capture_fingerprint": _require_sha256_text(row["capture_hash"], field="capture_fingerprint"), "operation_plan_id": row["id"], "operation_fingerprint": _require_sha256_text(row["operation_plan_fingerprint"], field="operation_plan_fingerprint")}
+    return {"workspace_id": row["workspace_id"], "brand_id": row["brand_id"], "scan_run_id": row["scan_run_id"], "source_scan_id": scan, "canonical_domain": str(row["canonical_domain"]), "capture_id": row["capture_id"], "capture_fingerprint": _require_sha256_text(row["capture_hash"], field="capture_fingerprint"), "operation_plan_id": row["id"], "operation_fingerprint": _require_sha256_text(row["operation_plan_fingerprint"], field="operation_plan_fingerprint")}
 
 def _sv9_judgment_advisory_refs(value: Any) -> list[str]:
     if type(value) is not list or not value or any(type(row) is not str or not row or row != row.strip() for row in value) or len(set(value)) != len(value):
@@ -11628,7 +11628,7 @@ def _sv9_judgment_advisory_refs(value: Any) -> list[str]:
     return sorted(value)
 
 def _sv9_judgment_public_context(context: Mapping[str, Any]) -> dict[str, Any]:
-    return {name: str(context[name]) for name in ("workspace_id", "brand_id", "scan_run_id", "source_scan_id", "capture_id", "capture_fingerprint", "operation_plan_id", "operation_fingerprint")}
+    return {name: str(context[name]) for name in ("workspace_id", "brand_id", "scan_run_id", "source_scan_id", "canonical_domain", "capture_id", "capture_fingerprint", "operation_plan_id", "operation_fingerprint")}
 
 def _sv9_judgment_binding_rows(candidate: Mapping[str, Any]) -> dict[str, str]:
     rows: dict[str, str] = {}
@@ -11669,7 +11669,7 @@ def _sv9_judgment_stored_record(conn: Any, row: Mapping[str, Any] | None, contex
     actual = {str(binding["evidence_record_id"]): str(binding["evidence_fingerprint"]) for binding in conn.execute(f"SELECT evidence_record_id, evidence_fingerprint FROM {_SCHEMA}.evidence_vault_sv9_judgment_evidence_bindings WHERE candidate_id = %s", (row["id"],)).fetchall()}
     columns = ("schema_version", "canonical_plan_fingerprint", "current_series_fingerprint", "candidate_series_fingerprint", "evaluation_bundle_fingerprint", "assessment_fingerprint", "score_fingerprint", "complete_record_fingerprint")
     if expected != actual or any(str(row[name]) != candidate[name] for name in columns) or any(row[name] != context[name] for name in ("workspace_id", "brand_id", "scan_run_id", "capture_id", "operation_plan_id")) or str(row["source_scan_id"]) != str(context["source_scan_id"]) or (row["authority"], row["review_state"], row["lifecycle_state"], row["runtime_effect"]) != ("pending", "none", "active", "shadow_only"): raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment candidate readback is inconsistent.")
-    return candidate | {"id": str(row["id"]), "created_at": row["created_at"].isoformat()}
+    return candidate | {"id": str(row["id"]), "source_scan_id": str(row["source_scan_id"]), "created_at": row["created_at"].isoformat()}
 _SV9_AUTHORITY_EVENT = "evidence-vault-sv9-judgment-authority-event-v1"
 _SV9_AUTHORITY_REQUEST = "evidence-vault-sv9-judgment-authority-request-v1"
 _SV9_AUTHORITY_COLUMNS = "id workspace_id brand_id event_type sequence predecessor_event_id active_parent_event_id candidate_id candidate_scan_run_id candidate_capture_id candidate_operation_plan_id request_fingerprint event_fingerprint evaluation_bundle_fingerprint canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint assessment_fingerprint score_fingerprint delta_fingerprint idempotency_key_hash event_payload".split()
@@ -11719,8 +11719,8 @@ def _sv9_authority_delta(value: Any) -> dict[str, Any]:
         delta = validate_evidence_vault_sv9_judgment_delta(value)
     except EvidenceVaultSV9JudgmentDeltaError as exc:
         raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment reopen delta is invalid.") from exc
-    if not delta["plan"]["review_set"]:
-        raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment reopen requires a review set.")
+    if not (delta["plan"]["review_set"] or delta["coverage_loss"]):
+        raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment reopen requires a review set or coverage loss.")
     return delta
 
 
