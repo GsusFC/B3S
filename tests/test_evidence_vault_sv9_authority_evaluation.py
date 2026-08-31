@@ -1,7 +1,9 @@
 from copy import deepcopy
 import pytest
 
+from src.services import evidence_vault_sv9_authority_event as authority_event
 from src.services import evidence_vault_sv9_authority_evaluation as service
+from src.services import evidence_vault_sv9_authority_projection as authority_projection
 from src.services.evidence_vault_canonical_core import canonical_fingerprint
 from src.services.evidence_vault_sv9_authoritative_relations import (
     EvidenceVaultSv9AuthoritativeRelationStaleWitnessError,
@@ -27,16 +29,21 @@ def _authority(series=None, sentinel=False):
     sentinels = []
     if sentinel: rows = [row for row in rows if row["component_key"] != "mission"]; sentinels = [_sentinel(series)]
     partition = {"candidate_tile_judgments": rows, "candidate_component_sentinels": sentinels}
-    return {"authority": True, "accepted_candidate": {"id": _ID, **partition}, "accepted_partition": partition, "active_authority_event": {"event_id": "00000000-0000-0000-0000-000000000202"}, "current_head": {"event_fingerprint": _hash(202)}, "reopen_review_overlay": None}
+    current = (rows or sentinels)[0]["series_fingerprint"]
+    candidate = {"schema_version": "evidence-vault-sv9-judgment-candidate-v2", "plan": {}, "canonical_plan_fingerprint": _hash(201), "current_series_fingerprint": current, "candidate_series_fingerprint": _hash(202), "component_evaluations": [], "evidence_bindings": [], **partition, "assessment": {"sv9_score": 1}, "telemetry": {"call_count": 0, "calls_avoided": 0, "reused_tile_count": 0, "evaluated_tile_count": 0}, "assessment_fingerprint": _hash(203), "score_fingerprint": _hash(204), "authoritative_relation_witness": {}}
+    candidate["evaluation_bundle_fingerprint"] = memory.canonical_fingerprint("sv9-judgment-evaluation-bundle-v1", {"canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"], "evaluations": []}); candidate["complete_record_fingerprint"] = authority_event.candidate_complete_record_fingerprint(candidate); candidate |= {"id": _ID, "source_scan_id": "scan", "created_at": "2026-08-30T00:00:00+00:00"}
+    identity = {name: candidate[name] for name in "id complete_record_fingerprint evaluation_bundle_fingerprint canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint assessment_fingerprint score_fingerprint source_scan_id".split()}; request = authority_event.build_evidence_vault_sv9_authority_request(action="adopt_candidate", candidate_id=_ID, expected_predecessor_event_fingerprint=None, delta_fingerprint=None, source_scan_id="scan")
+    event = authority_event.build_evidence_vault_sv9_authority_event(event_id="00000000-0000-0000-0000-000000000202", event_type="adopt", sequence=1, predecessor_event_fingerprint=None, active_parent_event_fingerprint=None, candidate_identity=identity, current_series_fingerprint=current, delta_fingerprint=None, request=request, idempotency_key_hash=authority_event.authority_application_idempotency_fingerprint(request), created_at="2026-08-30T00:00:00+00:00")
+    return authority_projection.build_evidence_vault_sv9_authority_projection(accepted_candidate=candidate, current_head=event, active_authority_event=event, event=event, reopen_review_overlay=None)
 
 class _Repository:
     def __init__(self, authority=None, records=(3,), bad_reload=False):
-        self.authority, self.records, self.bad_reload = authority, tuple(records), bad_reload; self.append_calls = self.get_calls = 0; self.candidates = {}; self.mutations = []
+        self.authority, self.records, self.bad_reload = authority, tuple(records), bad_reload; self.append_calls = self.get_calls = self.authority_calls = self.context_calls = self.evidence_calls = 0; self.candidates = {}; self.mutations = []
         self.context = {"capture_origin": _origin("capture", 9), "operation_origin": _origin("operation", 10)}; self.projection_relations = None; self.projection_status = "available"; self.projection_calls = 0; self.witness_seed = 300
-    def get_evidence_vault_sv9_judgment_authority(self, _domain, **_kwargs): return deepcopy(self.authority)
-    def load_evidence_vault_sv9_judgment_context(self, _scan, **_kwargs): return {"canonical_domain": "example.test", "capture_id": self.context["capture_origin"]["capture_id"], "capture_fingerprint": self.context["capture_origin"]["capture_fingerprint"], "operation_plan_id": self.context["operation_origin"]["operation_id"], "operation_fingerprint": self.context["operation_origin"]["operation_fingerprint"]}
+    def get_evidence_vault_sv9_judgment_authority(self, _domain, **_kwargs): self.authority_calls += 1; return deepcopy(self.authority)
+    def load_evidence_vault_sv9_judgment_context(self, _scan, **_kwargs): self.context_calls += 1; return {"canonical_domain": "example.test", "capture_id": self.context["capture_origin"]["capture_id"], "capture_fingerprint": self.context["capture_origin"]["capture_fingerprint"], "operation_plan_id": self.context["operation_origin"]["operation_id"], "operation_fingerprint": self.context["operation_origin"]["operation_fingerprint"]}
     def resolve_evidence_vault_sv9_judgment_evidence(self, _scan, refs, **_kwargs):
-        assert refs == sorted(refs); rows = [{"evidence_record_id": f"00000000-0000-0000-0000-{number:012d}", **_identity(number), "content": {"evidence": number}} for number in self.records]
+        self.evidence_calls += 1; assert refs == sorted(refs); rows = [{"evidence_record_id": f"00000000-0000-0000-0000-{number:012d}", **_identity(number), "content": {"evidence": number}} for number in self.records]
         assert {row["evidence_ref"] for row in rows} == set(refs); return {**self.context, "evidence": rows}
     def get_evidence_vault_sv9_judgment_candidate(self, _scan, *, canonical_plan_fingerprint, **_kwargs):
         self.get_calls += 1; row = deepcopy(self.candidates.get(canonical_plan_fingerprint))
@@ -155,4 +162,12 @@ def test_invalid_trusted_identity_and_replay_mismatches_fail_closed(monkeypatch)
     assert mismatch["status"] == "no_new_score" and mismatch["reason_codes"] == ["invalid_replay"] and repo.append_calls == 1
     repo, flow = _Repository(None, (9,)), _Flow(); monkeypatch.setattr(service.evaluation, "replay_incremental_evaluations", lambda *_: {"status": "pending"})
     preappend = _run(repo, flow, current=(9,)); assert preappend["status"] == "no_new_score" and preappend["reason_codes"] == ["invalid_replay"] and repo.append_calls == 0
+
+@pytest.mark.parametrize(("name", "missing"), [(name, missing) for name in ("active_authority_event", "current_head", "event") for missing in (False, True)])
+def test_invalid_persisted_event_audit_metadata_stops_all_evaluation_effects(name, missing):
+    repo, flow = _Repository(_authority(), (9,)), _Flow()
+    repo.authority[name].pop("created_at") if missing else repo.authority[name].__setitem__("created_at", None)
+    result = _run(repo, flow, current=(9,))
+    assert (result["status"], result["reason_codes"], result["accepted_authority"], result["candidate"], result["signed_delta"]) == ("no_new_score", ["invalid_input"], None, None, None)
+    assert (repo.authority_calls, repo.projection_calls, repo.context_calls, repo.evidence_calls, repo.get_calls, repo.append_calls, flow.calls) == (1, 0, 0, 0, 0, 0, [])
 # fmt: on
