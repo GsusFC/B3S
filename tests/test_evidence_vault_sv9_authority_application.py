@@ -13,7 +13,17 @@ def _uuid(number): return f"00000000-0000-0000-0000-{number:012d}"
 
 class _ApplicationRepository(_Repository):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs); self.event, self.candidate, self.authority_calls, self.interleave, self.appear = 500, 400, 0, 0, None; self.adopt_failure = self.corrupt_after_adopt = self.authority_failure = self._corrupt = False
+        super().__init__(*args, **kwargs); self.context = {"capture_origin": {"capture_id": _uuid(9), "capture_fingerprint": _hash(9)}, "operation_origin": {"operation_id": _uuid(10), "operation_fingerprint": _hash(10)}}; self.event, self.candidate, self.authority_calls, self.interleave, self.appear = 500, 400, 0, 0, None; self.adopt_failure = self.corrupt_after_adopt = self.authority_failure = self._corrupt = False; self.witness_seed = 300
+    def load_evidence_vault_sv9_authoritative_relation_facts(self, scan, *, workspace_slug="b3s"):
+        source = {"workspace_id": _uuid(1), "brand_id": _uuid(2), "scan_run_id": _uuid(3), "source_scan_id": scan, "workspace_slug": workspace_slug, "canonical_domain": "example.test", "capture_id": self.context["capture_origin"]["capture_id"], "capture_fingerprint": self.context["capture_origin"]["capture_fingerprint"], "operation_plan_id": self.context["operation_origin"]["operation_id"], "operation_fingerprint": self.context["operation_origin"]["operation_fingerprint"], "operation_status": "completed"}
+        evidence, basis = [], []
+        for number in self.records:
+            evidence_id, source_identity_id = _hash(100 + number), _hash(200 + number)
+            evidence.append(source | {"evidence_record_id": _uuid(number), "evidence_ref": f"evidence:{number}", "evidence_fingerprint": _hash(number), "evidence_id": evidence_id, "source_identity_id": source_identity_id})
+            basis.append({"relation_id": _hash(300 + number), "evidence_id": evidence_id, "source_identity_id": source_identity_id, "polarity": "supports"})
+        accepted = [{"tile_id": "M1", "component_key": "mission", "authority_state": "accepted", "review_state": "resolved", "lifecycle_state": "active", "basis": basis}]
+        seed = self.witness_seed; witness = {"canonical_memory_version": _hash(seed), "adoption_event_id": _uuid(seed), "adoption_sequence": 1, "candidate_packet_fingerprint": _hash(seed + 1), "request_fingerprint": _hash(seed + 2)}
+        return {"source": source, "evidence": evidence, "authority": {"witness": witness, "accepted": accepted}}
     def get_evidence_vault_sv9_judgment_authority(self, _domain, **_kwargs):
         self.authority_calls += 1
         if self.authority_failure: raise RuntimeError("authority unavailable")
@@ -46,7 +56,8 @@ class _ApplicationRepository(_Repository):
         self.authority["reopen_review_overlay"] = {"review_state": "pending", "signed_delta": deepcopy(signed_delta), "delta_fingerprint": signed_delta["canonical_delta_fingerprint"]}
         return deepcopy(self.authority), False
 
-def _run(repo, flow, *, current=(9,), relations=(), trusted=(9,), source="scan", domain="example.test"):
+def _run(repo, flow, *, current=(9,), relations=None, trusted=(), source="scan", domain="example.test"):
+    relations = [_relation(repo, "M1", number=value) for value in current] if relations is None else list(relations)
     return application.run_evidence_vault_sv9_authority_application(
         repository=repo, flow=flow, domain_or_url=domain, source_scan_id=source,
         current_evidence=[_identity(value) for value in current], authoritative_relations=list(relations),
@@ -56,8 +67,8 @@ def _run(repo, flow, *, current=(9,), relations=(), trusted=(9,), source="scan",
 def _stage(repo):
     return evaluation_service.run_evidence_vault_sv9_authority_evaluation(
         repository=repo, flow=_Flow(), domain_or_url="example.test", source_scan_id="scan",
-        current_evidence=[_identity(9)], authoritative_relations=[], current_series_contract=_series(),
-        trusted_irrelevant_evidence=[_identity(9)],
+        current_evidence=[_identity(9)], authoritative_relations=[_relation(repo, "M1", number=9)], current_series_contract=_series(),
+        trusted_irrelevant_evidence=[],
     )
 
 def test_idempotency_binds_action_source_candidate_delta_and_predecessor():
@@ -82,20 +93,20 @@ def test_first_adopt_crash_recovery_and_idempotent_retry_are_append_safe():
 def test_source_identity_and_interleavings_reject_without_new_event():
     repo, flow = _ApplicationRepository(records=(9,)), _Flow(); mismatch = _run(repo, flow, domain="other.test")
     assert mismatch["status"] == "authority_conflict" and mismatch["reason_codes"] == ["invalid_source_identity"] and not flow.calls and not repo.get_calls and not repo.append_calls and not repo.mutations
-    appeared, other = _ApplicationRepository(records=(9,)), _ApplicationRepository(records=(3,)); assert _run(other, _Flow(), current=(3,), trusted=(3,), source="other")["status"] == "authority_established"; appeared.appear, appeared.interleave = deepcopy(other.authority), 2
+    appeared, other = _ApplicationRepository(records=(9,)), _ApplicationRepository(records=(3,)); assert _run(other, _Flow(), current=(3,), source="other")["status"] == "authority_established"; appeared.appear, appeared.interleave = deepcopy(other.authority), 2
     conflict = _run(appeared, _Flow()); assert conflict["status"] == "authority_conflict" and not appeared.mutations
     for disposition in ("relevant", "contradiction"):
         repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"; repo.records, repo.authority_calls, repo.interleave = (3, 9), 0, 2
-        result = _run(repo, _Flow(), current=(3, 9), trusted=(3,), relations=[_relation(repo, "M1", disposition, 9)], source=f"scan-{disposition}")
+        result = _run(repo, _Flow(), current=(3, 9), relations=[_relation(repo, "M1", number=3), _relation(repo, "M1", disposition, 9)], source=f"scan-{disposition}")
         assert result["evaluation_status"] == ("candidate_available" if disposition == "relevant" else "review_required") and result["status"] == "authority_conflict" and repo.mutations == ["adopt"]
 
 def test_supersede_and_same_reopen_are_single_append_state_transitions():
     repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"; repo.records = (3, 9); prior = repo.authority["accepted_candidate"]["id"]
-    advanced = _run(repo, _Flow(), current=(3, 9), trusted=(3,), relations=[_relation(repo, "M1", number=9)], source="scan-2")
+    advanced = _run(repo, _Flow(), current=(3, 9), relations=[_relation(repo, "M1", number=3), _relation(repo, "M1", number=9)], source="scan-2")
     assert advanced["status"] == "authority_advanced" and repo.authority["accepted_candidate"]["id"] != prior and repo.authority["accepted_candidate"]["source_scan_id"] == "scan-2"
-    review = _run(repo, _Flow(), current=(3, 9), relations=[_relation(repo, "M1", "contradiction", 9)], trusted=(3,), source="scan-3"); events = len(repo.mutations)
+    repo.records = (9,); review = _run(repo, _Flow(), current=(9,), relations=[_relation(repo, "M1", number=9)], source="scan-3"); events = len(repo.mutations)
     assert review["status"] == "review_required" and repo.mutations[-1] == "reopen" and repo.authority["accepted_candidate"]["id"] != prior
-    again = _run(repo, _Flow(), current=(3, 9), relations=[_relation(repo, "M1", "contradiction", 9)], trusted=(3,), source="scan-3")
+    again = _run(repo, _Flow(), current=(9,), relations=[_relation(repo, "M1", number=9)], source="scan-3")
     assert again["status"] == "review_required" and len(repo.mutations) == events
 
 def test_first_run_review_and_no_score_or_repository_failures_fail_closed():
@@ -110,9 +121,9 @@ def test_first_run_review_and_no_score_or_repository_failures_fail_closed():
 def test_stale_predecessor_and_bad_readback_do_not_overwrite_authority():
     repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"; repo.records = (3, 9); before = deepcopy(repo.authority); repo.authority_calls = 0
     repo.adopt_failure = True
-    stale = _run(repo, _Flow(), current=(3, 9), trusted=(3,), relations=[_relation(repo, "M1", number=9)], source="scan-2")
+    stale = _run(repo, _Flow(), current=(3, 9), relations=[_relation(repo, "M1", number=3), _relation(repo, "M1", number=9)], source="scan-2")
     assert stale["status"] == "authority_conflict" and repo.authority == before and repo.mutations == ["adopt", "adopt"] and repo.authority_calls == 3
     repo.adopt_failure = False; repo.corrupt_after_adopt = True
-    mismatch = _run(repo, _Flow(), current=(3, 9), trusted=(3,), relations=[_relation(repo, "A1", number=9)], source="scan-3")
+    mismatch = _run(repo, _Flow(), current=(3, 9), relations=[_relation(repo, "M1", number=3), _relation(repo, "M1", number=9)], source="scan-2")
     assert mismatch["status"] == "authority_conflict" and repo.mutations == ["adopt", "adopt", "adopt"]
 # fmt: on

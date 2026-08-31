@@ -3,11 +3,21 @@ import os
 from pathlib import Path
 import pytest
 from src.history import repository as history
+from src.services import evidence_vault_sv9_authority_evaluation as authority
+from src.services.evidence_vault_incremental_executor import execute_vault_operation_plan
+from src.services.evidence_vault_sv9_authoritative_relations import project_evidence_vault_sv9_authoritative_relations
+from src.services.evidence_vault_incremental_refresh import build_vault_scan_plan
 from src.sv9 import incremental_evaluation as ie
 from src.sv9 import incremental_planner as ip
 from src.sv9 import judgment_memory as jm
 from tests.test_sv9_incremental_evaluation import _Flow, _packets, _prior
 from tests.test_sv9_judgment_memory import _series
+from tests.test_evidence_vault_operation_execution_postgres import (
+    ExecutorLLM,
+    _persist_baseline,
+    _reset_repository,
+    _row,
+)
 
 
 # fmt: off
@@ -69,6 +79,36 @@ def _v2_candidate(base, source_scan, capture, operation):
         {key: value for key, value in candidate.items() if key != "complete_record_fingerprint"},
     )
     return candidate
+
+
+# fmt: off
+class _AuthorityFlow:
+    def __init__(self): self.calls = []
+    def evaluate_component(self, request):
+        self.calls.append(request); rows = [{"tile_id": row["tile_id"], "assessment_state": "ok" if row["evidence"] else "sin_evidencia", "supporting_evidence": [{key: evidence[key] for key in ("evidence_ref", "evidence_fingerprint")} for evidence in row["evidence"]]} for row in request["requested_tiles"]]
+        return ie.ComponentEvaluationOutcome.success(ie.build_component_evaluation(component_key=request["component_key"], series_fingerprint=request["current_series_fingerprint"], request_fingerprint=request["canonical_request_fingerprint"], status="evaluated", tile_results=rows))
+
+def _operational(repository, scan, previous=()):
+    row = _row() | {"ref": f"raw_inputs.{len(previous)}.chunk.0", "content": _row()["content"] if not previous else f"Safer {scan}. {_row()['content']}"}; current = [*previous, row]; memory = repository.get_evidence_vault_operational_memory("example.com"); plan = build_vault_scan_plan(brand_identity="example.com", subject_url="https://example.com", mode="incremental_refresh" if memory else "baseline", current_evidence_records=current, previous_capture_evidence_records=list(previous) or current, known_evidence_records=current, canonical_memory_version=memory["canonical_memory_version"] if memory else None); _persist_baseline(repository, scan, current, plan)
+    execute_vault_operation_plan(repository=repository, source_scan_id=scan, worker_id="candidate-worker", llm=ExecutorLLM()); operation = repository.get_capture_operation_plan(scan)["result_payload"]
+    repository.review_and_adopt_evidence_vault_operational_source("example.com", source_candidate_packet_fingerprint=operation["source_candidate_packet_fingerprint"], decisions=[{"relation_id": operation["basis_relations"][0]["relation_id"], "decision": "accept", "rationale": "Direct literal support."}], reviewer_id="candidate-reviewer", reviewed_at="2026-08-07T13:00:00+02:00", created_at="2026-08-07T11:00:00Z")
+    return current
+
+def _captured_candidate(monkeypatch, repository, scan, series):
+    projection = project_evidence_vault_sv9_authoritative_relations(repository=repository, source_scan_id=scan); evidence = [{key: row[key] for key in ("evidence_ref", "evidence_fingerprint")} for row in repository.resolve_evidence_vault_sv9_judgment_evidence(scan, [row["evidence_ref"] for row in projection["authoritative_relations"]])["evidence"]]; captured = {}
+    def append(_scan, candidate, **_kwargs): captured["candidate"] = deepcopy(candidate); raise RuntimeError
+    with monkeypatch.context() as patch: patch.setattr(repository, "append_evidence_vault_sv9_judgment_candidate", append); authority.run_evidence_vault_sv9_authority_evaluation(repository=repository, flow=_AuthorityFlow(), domain_or_url="example.com", source_scan_id=scan, current_evidence=evidence, authoritative_relations=projection["authoritative_relations"], current_series_contract=series)
+    return captured["candidate"], projection, evidence
+
+def _legacy(candidate):
+    value = {key: row for key, row in candidate.items() if key != "authoritative_relation_witness"}; value["schema_version"] = "evidence-vault-sv9-judgment-candidate-v1"; value["complete_record_fingerprint"] = jm.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v1", {key: row for key, row in value.items() if key != "complete_record_fingerprint"})
+    return value
+
+def _insert(repository, scan, candidate):
+    import psycopg; from psycopg.types.json import Jsonb; from uuid import uuid4
+    context = repository.load_evidence_vault_sv9_judgment_context(scan)
+    with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"], autocommit=True) as conn: conn.execute(f"INSERT INTO b3s_history.evidence_vault_sv9_judgment_candidates (id, workspace_id, brand_id, scan_run_id, source_scan_id, capture_id, operation_plan_id, schema_version, canonical_plan_fingerprint, current_series_fingerprint, candidate_series_fingerprint, evaluation_bundle_fingerprint, assessment_fingerprint, score_fingerprint, complete_record_fingerprint, candidate_payload, authority, review_state, lifecycle_state, runtime_effect) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', 'none', 'active', 'shadow_only')", (uuid4(), context["workspace_id"], context["brand_id"], context["scan_run_id"], scan, context["capture_id"], context["operation_plan_id"], *[candidate[key] for key in ("schema_version", "canonical_plan_fingerprint", "current_series_fingerprint", "candidate_series_fingerprint", "evaluation_bundle_fingerprint", "assessment_fingerprint", "score_fingerprint", "complete_record_fingerprint")], Jsonb(candidate)))
+# fmt: on
 
 
 def test_candidate_witness_migration_has_exact_json_types_and_row_alignment():
@@ -226,4 +266,25 @@ def test_candidate_witness_check_rejects_invalid_payloads_and_row_payload_diverg
         if valid: insert(index, context, source_scan, payload); continue
         payload = payload | {"canonical_plan_fingerprint": f"{index:064x}"}
         rejected(index, context, source_scan, payload)
+# fmt: on
+
+
+# fmt: off
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1",
+    reason="requires disposable PostgreSQL",
+)
+def test_repository_fences_witnessed_candidate_append_and_invalid_readback(monkeypatch):
+    repository, scan = _reset_repository(), "candidate-v2-base"; current = _operational(repository, scan)
+    first, projection, evidence = _captured_candidate(monkeypatch, repository, scan, _series()); second, _, _ = _captured_candidate(monkeypatch, repository, scan, _series(prompt_version="v2")); stored, inserted = repository.append_evidence_vault_sv9_judgment_candidate(scan, first)
+    assert inserted and stored["authoritative_relation_witness"]["authoritative_relations"] == projection["authoritative_relations"] and len(stored["evidence_bindings"]) == 1 and repository.get_evidence_vault_sv9_judgment_candidate(scan, canonical_plan_fingerprint=first["canonical_plan_fingerprint"]) == stored
+    current = _operational(repository, "candidate-v2-next", current)
+    with pytest.raises(history.EvidenceVaultSv9AuthoritativeRelationStaleWitnessError): repository.append_evidence_vault_sv9_judgment_candidate(scan, second)
+    assert repository.get_evidence_vault_sv9_judgment_candidate(scan, canonical_plan_fingerprint=second["canonical_plan_fingerprint"]) is None
+    repository = _reset_repository(); legacy_scan = "candidate-v1-legacy"; _operational(repository, legacy_scan); third, _, _ = _captured_candidate(monkeypatch, repository, legacy_scan, _series(prompt_version="v3")); legacy, _ = repository.append_evidence_vault_sv9_judgment_candidate(legacy_scan, _legacy(third))
+    replayed_legacy = repository.get_evidence_vault_sv9_judgment_candidate(legacy_scan, canonical_plan_fingerprint=legacy["canonical_plan_fingerprint"])
+    assert replayed_legacy["schema_version"].endswith("v1") and replayed_legacy["complete_record_fingerprint"] == legacy["complete_record_fingerprint"]
+    repository = _reset_repository(); invalid_scan = "candidate-v2-invalid"; _operational(repository, invalid_scan); invalid, relations, evidence = _captured_candidate(monkeypatch, repository, invalid_scan, _series(prompt_version="v4")); relation = invalid["authoritative_relation_witness"]["authoritative_relations"][0]; relation["relation_fingerprint"] = "0" * 64 if relation["relation_fingerprint"] != "0" * 64 else "1" * 64; invalid["complete_record_fingerprint"] = jm.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v2", {key: row for key, row in invalid.items() if key != "complete_record_fingerprint"}); _insert(repository, invalid_scan, invalid)
+    flow = _AuthorityFlow(); outcome = authority.run_evidence_vault_sv9_authority_evaluation(repository=repository, flow=flow, domain_or_url="example.com", source_scan_id=invalid_scan, current_evidence=evidence, authoritative_relations=relations["authoritative_relations"], current_series_contract=_series(prompt_version="v4"))
+    assert outcome["status"] == "review_required" and outcome["reason_codes"] == ["invalid_authoritative_relation_witness"] and not flow.calls
 # fmt: on

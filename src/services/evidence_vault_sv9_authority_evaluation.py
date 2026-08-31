@@ -4,6 +4,13 @@ from __future__ import annotations
 from typing import Any, Mapping, Protocol, Sequence
 from uuid import UUID
 from src.history.report_parser import normalize_domain
+from src.services.evidence_vault_sv9_authoritative_relations import (
+    EvidenceVaultSv9AuthoritativeRelationStaleWitnessError,
+    EvidenceVaultSv9AuthoritativeRelationWitnessError,
+    build_evidence_vault_sv9_authoritative_relation_witness,
+    project_evidence_vault_sv9_authoritative_relations,
+    validate_evidence_vault_sv9_authoritative_relation_witness,
+)
 from src.services import evidence_vault_sv9_judgment_delta as delta
 from src.sv9 import incremental_evaluation as evaluation
 from src.sv9 import incremental_planner as planner
@@ -14,6 +21,7 @@ from src.sv9 import judgment_memory as memory
 class EvidenceVaultSv9AuthorityEvaluationRepository(Protocol):
     def get_evidence_vault_sv9_judgment_authority(self, domain_or_url: str, **kwargs: Any) -> dict[str, Any] | None: ...
     def load_evidence_vault_sv9_judgment_context(self, source_scan_id: str, **kwargs: Any) -> dict[str, Any] | None: ...
+    def load_evidence_vault_sv9_authoritative_relation_facts(self, source_scan_id: str, **kwargs: Any) -> dict[str, Any] | None: ...
     def resolve_evidence_vault_sv9_judgment_evidence(self, source_scan_id: str, advisory_evidence_refs: list[str], **kwargs: Any) -> dict[str, Any]: ...
     def get_evidence_vault_sv9_judgment_candidate(self, source_scan_id: str, *, canonical_plan_fingerprint: str, **kwargs: Any) -> dict[str, Any] | None: ...
     def append_evidence_vault_sv9_judgment_candidate(self, source_scan_id: str, candidate: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], bool]: ...
@@ -27,7 +35,18 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
         current = delta.build_evidence_identity_set(current_evidence); trusted = _trusted(trusted_irrelevant_evidence, current)
         authority = repository.get_evidence_vault_sv9_judgment_authority(domain, workspace_slug=workspace_slug)
         prior, sentinels, authority_ids, overlay = _authority(authority)
-        context, records = _source(repository, source_scan_id, current, workspace_slug, domain); relations = _relations(authoritative_relations, context, trusted)
+        try: projection = project_evidence_vault_sv9_authoritative_relations(repository=repository, source_scan_id=source_scan_id, workspace_slug=workspace_slug)
+        except Exception: return _outcome("review_required", authority=authority_ids, reasons=["authoritative_relations_unavailable"])
+        if type(projection) is not dict or projection.get("status") != "available": return _outcome("review_required", authority=authority_ids, reasons=list(projection.get("reason_codes") or ["authoritative_relations_unavailable"]) if type(projection) is dict else ["authoritative_relations_unavailable"])
+        try:
+            pairs = {(row["evidence_ref"], row["evidence_fingerprint"]) for row in projection["authoritative_relations"]}
+            if pairs & trusted: raise EvidenceVaultSv9AuthorityEvaluationError("trusted evidence conflicts with operational authority")
+            if type(authoritative_relations) is not list or authoritative_relations != projection["authoritative_relations"] or pairs != {(row["evidence_ref"], row["evidence_fingerprint"]) for row in current["evidence"]}: return _outcome("review_required", authority=authority_ids, reasons=["authoritative_relation_mismatch"])
+            witness = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id=source_scan_id, projection=projection)
+        except EvidenceVaultSv9AuthorityEvaluationError: raise
+        except Exception: return _outcome("review_required", authority=authority_ids, reasons=["invalid_authoritative_relation_witness"])
+        context, records = _source(repository, source_scan_id, current, workspace_slug, domain)
+        relations = projection["authoritative_relations"]
         signed = delta.build_evidence_vault_sv9_judgment_delta(current_evidence=current, prior_judgments=prior, prior_component_sentinels=sentinels, authoritative_relations=relations, current_series_contract=dict(current_series_contract))
     except EvidenceVaultSv9AuthoritySourceIdentityError: return _outcome("no_new_score", reasons=["invalid_source_identity"])
     except EvidenceVaultSv9AuthorityEvaluationError: return _outcome("no_new_score", reasons=["invalid_input"])
@@ -37,22 +56,37 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
     if _unresolved(plan, prior, sentinels): return _outcome("review_required", plan, authority_ids, review + ["incomplete_review_partition"], ignored, unmapped, signed_delta=signed)
     if not plan["component_workset"]: return _outcome("review_required" if review else "no_new_score", plan, authority_ids, review or ["exact_reuse"], ignored, unmapped, signed_delta=signed if review else None)
     try: existing = repository.get_evidence_vault_sv9_judgment_candidate(source_scan_id, canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], workspace_slug=workspace_slug)
+    except EvidenceVaultSv9AuthoritativeRelationWitnessError: return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped)
     except Exception: return _outcome("no_new_score", plan, authority_ids, ["repository_failure"], ignored, unmapped)
     try: packets, bindings = _packets(plan, records, context)
     except EvidenceVaultSv9AuthorityEvaluationError: return _outcome("no_new_score", plan, authority_ids, ["invalid_input"], ignored, unmapped)
     if existing is not None:
+        try:
+            if existing.get("schema_version") == "evidence-vault-sv9-judgment-candidate-v2": validate_evidence_vault_sv9_authoritative_relation_witness(existing["authoritative_relation_witness"])
+        except (AttributeError, KeyError, TypeError, ValueError): return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped)
         if not _replays(existing, existing, existing, packets): return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped)
+        if existing["schema_version"].endswith("v1"): return _outcome("review_required", plan, authority_ids, review + ["unwitnessed_legacy_candidate"], ignored, unmapped, candidate=existing, signed_delta=signed if review else None, source_scan_id=source_scan_id)
+        if existing["authoritative_relation_witness"] != witness: return _outcome("review_required", plan, authority_ids, review + ["stale_authoritative_relation_witness"], ignored, unmapped, candidate=existing, signed_delta=signed if review else None, source_scan_id=source_scan_id)
         if authority_ids and existing.get("id") == authority_ids["accepted_candidate_id"]: return _outcome("no_new_score", plan, authority_ids, ["exact_reuse"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id)
         return _outcome("review_required" if review else "candidate_available", plan, authority_ids, review or ["candidate_already_present"], ignored, unmapped, candidate=existing, signed_delta=signed if review else None, source_scan_id=source_scan_id)
     result = evaluation.execute_incremental_evaluation(plan, packets, flow)
     if result["status"] != "available": return _outcome("no_new_score", plan, authority_ids, [str(result.get("reason_code") or "evaluation_incomplete")], ignored, unmapped, result)
     if not _complete(result, plan): return _outcome("no_new_score", plan, authority_ids, ["incomplete_candidate"], ignored, unmapped, result)
-    candidate = _candidate(plan, result, bindings)
+    candidate = _candidate(plan, result, bindings, witness)
     if not _replays(candidate, candidate, candidate, packets): return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, result)
     try:
         stored, inserted = repository.append_evidence_vault_sv9_judgment_candidate(source_scan_id, candidate, workspace_slug=workspace_slug)
         reloaded = repository.get_evidence_vault_sv9_judgment_candidate(source_scan_id, canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], workspace_slug=workspace_slug)
+    except EvidenceVaultSv9AuthoritativeRelationStaleWitnessError: return _outcome("review_required", plan, authority_ids, ["stale_authoritative_relation_witness"], ignored, unmapped, result)
+    except EvidenceVaultSv9AuthoritativeRelationWitnessError: return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped, result)
     except Exception: return _outcome("no_new_score", plan, authority_ids, ["repository_failure"], ignored, unmapped, result)
+    try:
+        for value in (stored, reloaded):
+            if value.get("schema_version") == "evidence-vault-sv9-judgment-candidate-v2": validate_evidence_vault_sv9_authoritative_relation_witness(value["authoritative_relation_witness"])
+    except (AttributeError, KeyError, TypeError, ValueError): return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped, result)
+    if not _replays(stored, reloaded, stored, packets): return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, result)
+    if stored["schema_version"].endswith("v1"): return _outcome("review_required", plan, authority_ids, review + ["unwitnessed_legacy_candidate"], ignored, unmapped, result, stored, signed_delta=signed if review else None, source_scan_id=source_scan_id)
+    if stored["authoritative_relation_witness"] != witness: return _outcome("review_required", plan, authority_ids, review + ["stale_authoritative_relation_witness"], ignored, unmapped, result, stored, signed_delta=signed if review else None, source_scan_id=source_scan_id)
     if not _replays(stored, reloaded, candidate, packets): return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, result)
     return _outcome("review_required" if review else "candidate_available", plan, authority_ids, review if inserted else review or ["candidate_already_present"], ignored, unmapped, result, reloaded, signed_delta=signed if review else None, source_scan_id=source_scan_id)
 def _text(value: Any) -> str:
@@ -134,20 +168,22 @@ def _complete(result: Mapping[str, Any], plan: Mapping[str, Any]) -> bool:
         return isinstance(result["assessment"], Mapping) and _capacity(tiles, sentinels) == len(planner._REGISTRY) and len(ids) == len(tiles) and not any(ids & set(planner._COMPONENT_TILES[row["component_key"]]) for row in sentinels) and {row["series_fingerprint"] for row in [*tiles, *sentinels]} == {plan["current_series_fingerprint"]}
     except (AttributeError, KeyError, TypeError, ValueError, memory.JudgmentMemoryContractError, planner.IncrementalPlannerError): return False
 
-def _candidate(plan: Mapping[str, Any], result: Mapping[str, Any], bindings: list[dict[str, str]]) -> dict[str, Any]:
-    candidate = {"schema_version": "evidence-vault-sv9-judgment-candidate-v1", "plan": plan, "canonical_plan_fingerprint": plan["canonical_plan_fingerprint"], "current_series_fingerprint": plan["current_series_fingerprint"], "candidate_series_fingerprint": plan["candidate_series_fingerprint"], "component_evaluations": [row["evaluation"] for row in result["captured_calls"]], "evidence_bindings": bindings, "candidate_tile_judgments": result["candidate_tile_judgments"], "candidate_component_sentinels": result["candidate_component_sentinels"], "assessment": result["assessment"], "telemetry": {key: result[key] for key in ("call_count", "calls_avoided", "reused_tile_count", "evaluated_tile_count")}}
-    candidate["evaluation_bundle_fingerprint"] = memory.canonical_fingerprint("sv9-judgment-evaluation-bundle-v1", {"canonical_plan_fingerprint": plan["canonical_plan_fingerprint"], "evaluations": candidate["component_evaluations"]}); candidate["assessment_fingerprint"], candidate["score_fingerprint"] = result["assessment"]["assessment_fingerprint"], result["assessment"]["score_fingerprint"]; candidate["complete_record_fingerprint"] = memory.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v1", candidate)
+def _candidate(plan: Mapping[str, Any], result: Mapping[str, Any], bindings: list[dict[str, str]], witness: Mapping[str, Any]) -> dict[str, Any]:
+    candidate = {"schema_version": "evidence-vault-sv9-judgment-candidate-v2", "plan": plan, "canonical_plan_fingerprint": plan["canonical_plan_fingerprint"], "current_series_fingerprint": plan["current_series_fingerprint"], "candidate_series_fingerprint": plan["candidate_series_fingerprint"], "component_evaluations": [row["evaluation"] for row in result["captured_calls"]], "evidence_bindings": bindings, "candidate_tile_judgments": result["candidate_tile_judgments"], "candidate_component_sentinels": result["candidate_component_sentinels"], "assessment": result["assessment"], "telemetry": {key: result[key] for key in ("call_count", "calls_avoided", "reused_tile_count", "evaluated_tile_count")}, "authoritative_relation_witness": dict(witness)}
+    candidate["evaluation_bundle_fingerprint"] = memory.canonical_fingerprint("sv9-judgment-evaluation-bundle-v1", {"canonical_plan_fingerprint": plan["canonical_plan_fingerprint"], "evaluations": candidate["component_evaluations"]}); candidate["assessment_fingerprint"], candidate["score_fingerprint"] = result["assessment"]["assessment_fingerprint"], result["assessment"]["score_fingerprint"]; candidate["complete_record_fingerprint"] = memory.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v2", candidate)
     return candidate
 def _replays(stored: Any, reloaded: Any, candidate: Mapping[str, Any], packets: list[dict[str, Any]]) -> bool:
     try:
         keys = "schema_version plan canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint component_evaluations evidence_bindings candidate_tile_judgments candidate_component_sentinels assessment telemetry evaluation_bundle_fingerprint assessment_fingerprint score_fingerprint complete_record_fingerprint".split()
+        if candidate.get("schema_version") == "evidence-vault-sv9-judgment-candidate-v2": keys.append("authoritative_relation_witness"); validate_evidence_vault_sv9_authoritative_relation_witness(candidate["authoritative_relation_witness"])
+        elif candidate.get("schema_version") != "evidence-vault-sv9-judgment-candidate-v1": return False
         if type(stored) is not dict or type(reloaded) is not dict or any(stored[key] != candidate[key] or reloaded[key] != candidate[key] for key in keys): return False
         replay = evaluation.replay_incremental_evaluations(reloaded["plan"], packets, reloaded["component_evaluations"])
         record = {key: reloaded[key] for key in reloaded if key not in {"id", "source_scan_id", "created_at", "complete_record_fingerprint"}}
-        return replay["status"] == "available" and all(reloaded[key] == replay[key] for key in ("candidate_tile_judgments", "candidate_component_sentinels", "assessment")) and reloaded["assessment_fingerprint"] == replay["assessment"]["assessment_fingerprint"] and reloaded["score_fingerprint"] == replay["assessment"]["score_fingerprint"] and reloaded["evaluation_bundle_fingerprint"] == memory.canonical_fingerprint("sv9-judgment-evaluation-bundle-v1", {"canonical_plan_fingerprint": reloaded["canonical_plan_fingerprint"], "evaluations": reloaded["component_evaluations"]}) and reloaded["complete_record_fingerprint"] == memory.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v1", record)
+        return replay["status"] == "available" and all(reloaded[key] == replay[key] for key in ("candidate_tile_judgments", "candidate_component_sentinels", "assessment")) and reloaded["assessment_fingerprint"] == replay["assessment"]["assessment_fingerprint"] and reloaded["score_fingerprint"] == replay["assessment"]["score_fingerprint"] and reloaded["evaluation_bundle_fingerprint"] == memory.canonical_fingerprint("sv9-judgment-evaluation-bundle-v1", {"canonical_plan_fingerprint": reloaded["canonical_plan_fingerprint"], "evaluations": reloaded["component_evaluations"]}) and reloaded["complete_record_fingerprint"] == memory.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v2" if reloaded["schema_version"].endswith("v2") else "evidence-vault-sv9-judgment-candidate-record-v1", record)
     except (AttributeError, KeyError, TypeError, ValueError): return False
 def _outcome(status: str, plan: Mapping[str, Any] | None = None, authority: Mapping[str, str] | None = None, reasons: list[str] | None = None, ignored: int = 0, unmapped: int = 0, result: Mapping[str, Any] | None = None, candidate: Mapping[str, Any] | None = None, signed_delta: Mapping[str, Any] | None = None, source_scan_id: str | None = None) -> dict[str, Any]:
     values, bound = result or {}, plan or {}; output = {"status": status, "reason_codes": list(dict.fromkeys(reasons or [])), "calls_issued": int(values.get("call_count", 0)), "calls_avoided": int(values.get("calls_avoided", bound.get("calls_avoided", 0))), "reused_tiles": int(values.get("reused_tile_count", len(planner._REGISTRY) - len(bound.get("tile_workset", [])))), "evaluated_tiles": int(values.get("evaluated_tile_count", 0)), "review_tile_count": len(bound.get("review_set", [])), "trusted_irrelevant_evidence_count": ignored, "unmapped_evidence_count": unmapped, "accepted_authority": dict(authority) if authority else None, "candidate": None, "signed_delta": dict(signed_delta) if signed_delta is not None else None}
-    if candidate is not None: output["candidate"] = {key: candidate[key] for key in ("id", "canonical_plan_fingerprint", "complete_record_fingerprint", "assessment_fingerprint", "score_fingerprint")} | {"source_scan_id": str(candidate.get("source_scan_id") or source_scan_id or "")}
+    if candidate is not None: output["candidate"] = {key: candidate[key] for key in ("id", "canonical_plan_fingerprint", "complete_record_fingerprint", "assessment_fingerprint", "score_fingerprint")} | {"source_scan_id": str(candidate.get("source_scan_id") or source_scan_id or ""), "schema_version": str(candidate["schema_version"])} | ({"authoritative_relation_witness_fingerprint": candidate["authoritative_relation_witness"]["witness_fingerprint"]} if candidate["schema_version"].endswith("v2") else {})
     return output
 # fmt: on
