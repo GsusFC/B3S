@@ -948,6 +948,7 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
         canonical_source_capture: dict[str, str] | None = None
         if vault_enabled:
             from src.services.evidence_vault_scan_orchestration import (
+                public_vault_authority_reason_code,
                 prepare_vault_scan_after_capture,
             )
             from web.report_store import _postgres_repository
@@ -981,7 +982,10 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 )
             except Exception as exc:
                 if authority_scanner_enabled:
-                    raise RuntimeError("vault_authority_preparation_unavailable") from None
+                    raise RuntimeError(
+                        public_vault_authority_reason_code(exc)
+                        or "vault_authority_preparation_unavailable"
+                    ) from None
                 # The operation planner is a sidecar.  If its work failed only
                 # after the capture committed, an exact repository readback is
                 # still enough to publish the canonical Flow/SV9 report.
