@@ -90,6 +90,12 @@ _ERRORS = {
     422: {"model": ApiErrorResponse, "description": "Request validation failed"},
     503: {"model": ApiErrorResponse, "description": "Scanner temporarily unavailable"},
 }
+_RESUME_OPENAPI_SCHEMA_NAMES = (
+    "ResumeActionFailure",
+    "ResumeActionLinks",
+    "ResumeActionResult",
+    "ScanResumeActionResponse",
+)
 
 
 def _resume_api_gate() -> None:
@@ -123,6 +129,9 @@ def scanner_openapi(request: Request) -> JSONResponse:
     if not vault_exact_resume_api_enabled():
         spec["paths"].pop("/api/v1/scans/{scan_id}/resume", None)
         spec["paths"].pop("/api/v1/scans/{scan_id}/resume-actions/{action_id}", None)
+        schemas = spec.get("components", {}).get("schemas", {})
+        for schema_name in _RESUME_OPENAPI_SCHEMA_NAMES:
+            schemas.pop(schema_name, None)
     return JSONResponse(spec)
 
 
