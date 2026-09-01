@@ -2740,3 +2740,171 @@ def test_restart_interruption_cas_preserves_jobs_terminalized_after_select():
         finally:
             restart_writer.close()
             terminal_writer.close()
+
+
+def _resume_status(state: str) -> dict:
+    return {"state": state, "phase": state}
+
+
+def _reserve_resume_action(store, scan: str, key: str, fingerprint: str, request=None, status=None):
+    return store.reserve_scanner_resume_action(
+        scan_id=scan,
+        request_payload={"operation": "exact_resume"} if request is None else request,
+        status_payload=_resume_status("accepted") if status is None else status,
+        client_id="scanner-api",
+        idempotency_key_hash=key,
+        request_fingerprint=fingerprint,
+    )
+
+
+def test_scanner_resume_action_lifecycle_replay_conflict_and_retry():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = SQLiteStore(str(Path(tmpdir) / "scanner-resume.sqlite3"))
+        try:
+            created = _reserve_resume_action(store, "vaultresume1", "a" * 64, "b" * 64)
+            replay = _reserve_resume_action(store, "vaultresume1", "a" * 64, "b" * 64)
+            key_conflict = _reserve_resume_action(store, "vaultresume1", "a" * 64, "c" * 64)
+            binding_conflict = _reserve_resume_action(store, "vaultresume8", "a" * 64, "b" * 64)
+            active_conflict = _reserve_resume_action(store, "vaultresume1", "d" * 64, "e" * 64)
+            started = store.start_scanner_resume_action(action_id=created["action_id"])
+            start_stale = store.start_scanner_resume_action(action_id=created["action_id"])
+            finalized = store.finalize_scanner_resume_action(
+                action_id=created["action_id"], state="failed", status_payload=_resume_status("failed")
+            )
+            terminal_stale = store.finalize_scanner_resume_action(
+                action_id=created["action_id"], state="completed", status_payload=_resume_status("completed")
+            )
+            retry = _reserve_resume_action(store, "vaultresume1", "f" * 64, "a" * 64)
+            store.finalize_scanner_resume_action(
+                action_id=retry["action_id"], state="completed", status_payload=_resume_status("completed")
+            )
+            completed_replay = _reserve_resume_action(store, "vaultresume1", "f" * 64, "a" * 64)
+            readback = store.get_scanner_resume_action(action_id=created["action_id"])
+        finally:
+            store.close()
+
+    assert created["outcome"] == "created" and replay == {**created, "outcome": "replay"}
+    assert key_conflict == active_conflict == {"outcome": "conflict", "scan_id": "vaultresume1", "action_id": None, "state": None}
+    assert binding_conflict["outcome"] == "conflict" and binding_conflict["action_id"] is None
+    assert started["outcome"] == "started" and start_stale["outcome"] == "stale"
+    assert finalized["outcome"] == "finalized" and terminal_stale["action"]["state"] == "failed"
+    assert retry["outcome"] == "created" and completed_replay == {**retry, "outcome": "replay", "state": "completed"}
+    assert readback is not None and readback["state"] == "failed"
+
+
+def test_scanner_resume_action_rejects_unbounded_envelopes_before_writes():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = SQLiteStore(str(Path(tmpdir) / "scanner-resume-inputs.sqlite3"))
+        try:
+            invalid = [
+                ({"operation": ("exact_resume",)}, None),
+                ({"operation": "exact_resume", "control": {"Idempotency-Key": "redacted"}}, None),
+                ({"operation": float("nan")}, None),
+                (None, {"state": "accepted", "phase": "accepted", "provider": "x"}),
+            ]
+            for request, status in invalid:
+                with pytest.raises(ValueError):
+                    _reserve_resume_action(store, "vaultresume2", "1" * 64, "2" * 64, request, status)
+            count = store.conn.execute("SELECT COUNT(*) FROM b3s_scanner_resume_actions").fetchone()[0]
+        finally:
+            store.close()
+
+    assert count == 0
+
+
+def test_scanner_resume_action_restart_recovery_and_cas_race():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = str(Path(tmpdir) / "scanner-resume-recovery.sqlite3")
+        writer = SQLiteStore(db_path)
+        action = _reserve_resume_action(writer, "vaultresume3", "3" * 64, "4" * 64)
+        writer.start_scanner_resume_action(action_id=action["action_id"])
+        writer.close()
+        SQLiteStore.reset_schema_init_metrics()
+        restart = SQLiteStore(db_path)
+        try:
+            assert restart.interrupt_incomplete_scanner_resume_actions() == 1
+            interrupted = restart.get_scanner_resume_action(action_id=action["action_id"])
+            replay = _reserve_resume_action(restart, "vaultresume3", "3" * 64, "4" * 64)
+            retry = _reserve_resume_action(restart, "vaultresume3", "5" * 64, "6" * 64)
+            restart.finalize_scanner_resume_action(
+                action_id=retry["action_id"], state="failed", status_payload=_resume_status("failed")
+            )
+            race = _reserve_resume_action(restart, "vaultresume4", "7" * 64, "8" * 64)
+            terminal = SQLiteStore(db_path)
+
+            class RaceBeforeRecoveryUpdate:
+                def __init__(self, connection):
+                    self.connection, self.raced = connection, False
+
+                def execute(self, statement, parameters=()):
+                    if not self.raced and "UPDATE b3s_scanner_resume_actions" in statement:
+                        self.raced = True
+                        terminal.finalize_scanner_resume_action(
+                            action_id=race["action_id"], state="completed", status_payload=_resume_status("completed")
+                        )
+                    return self.connection.execute(statement, parameters)
+
+                def __getattr__(self, name):
+                    return getattr(self.connection, name)
+
+            raced = RaceBeforeRecoveryUpdate(restart.conn)
+            restart.conn = raced
+            assert restart.interrupt_incomplete_scanner_resume_actions() == 0 and raced.raced
+            persisted = terminal.get_scanner_resume_action(action_id=race["action_id"])
+        finally:
+            terminal.close()
+            restart.close()
+
+    assert interrupted is not None and interrupted["state"] == "interrupted"
+    assert replay == {**action, "outcome": "replay", "state": "interrupted"}
+    assert retry["outcome"] == "created"
+    assert persisted is not None and persisted["state"] == "completed"
+
+
+def test_scanner_resume_action_corruption_fails_closed_before_finalization():
+    from src.storage.scanner_api_jobs import ScannerResumeActionCorruptionError
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = SQLiteStore(str(Path(tmpdir) / "scanner-resume-corrupt.sqlite3"))
+        try:
+            active = _reserve_resume_action(store, "vaultresume5", "9" * 64, "a" * 64)
+            store.conn.execute("UPDATE b3s_scanner_resume_actions SET status_json = '{' WHERE action_id = ?", (active["action_id"],))
+            store.conn.commit()
+            with pytest.raises(ScannerResumeActionCorruptionError):
+                store.finalize_scanner_resume_action(action_id=active["action_id"], state="failed", status_payload=_resume_status("failed"))
+            active_state = store.conn.execute("SELECT state FROM b3s_scanner_resume_actions WHERE action_id = ?", (active["action_id"],)).fetchone()[0]
+            terminal = _reserve_resume_action(store, "vaultresume6", "b" * 64, "c" * 64)
+            store.finalize_scanner_resume_action(action_id=terminal["action_id"], state="completed", status_payload=_resume_status("completed"))
+            store.conn.execute("UPDATE b3s_scanner_resume_actions SET request_json = '[' WHERE action_id = ?", (terminal["action_id"],))
+            store.conn.commit()
+            with pytest.raises(ScannerResumeActionCorruptionError):
+                store.get_scanner_resume_action(action_id=terminal["action_id"])
+            with pytest.raises(ScannerResumeActionCorruptionError):
+                store.finalize_scanner_resume_action(action_id=terminal["action_id"], state="failed", status_payload=_resume_status("failed"))
+            terminal_state = store.conn.execute("SELECT state FROM b3s_scanner_resume_actions WHERE action_id = ?", (terminal["action_id"],)).fetchone()[0]
+        finally:
+            store.close()
+
+    assert active_state == "accepted" and terminal_state == "completed"
+
+
+def test_scanner_resume_action_concurrent_reservation_has_one_active_winner():
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path, gate = str(Path(tmpdir) / "scanner-resume-race.sqlite3"), Barrier(2)
+        SQLiteStore(db_path).close()
+
+        def reserve(key, fingerprint):
+            store = SQLiteStore(db_path)
+            try:
+                gate.wait()
+                return _reserve_resume_action(store, "vaultresume7", key, fingerprint)
+            finally:
+                store.close()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(reserve, ["d" * 64, "e" * 64], ["f" * 64, "1" * 64]))
+
+    assert sorted(result["outcome"] for result in results) == ["conflict", "created"]
