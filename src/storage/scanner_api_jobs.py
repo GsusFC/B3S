@@ -30,8 +30,8 @@ class ScannerResumeAction(TypedDict):
     scan_id: str
     state: ResumeActionState
     request_fingerprint: str
-    request_payload: dict[str, str]
-    status_payload: dict[str, str]
+    request_payload: dict[str, Any]
+    status_payload: dict[str, Any]
     created_at: str
     updated_at: str
     completed_at: str | None
@@ -56,6 +56,9 @@ _RESUME_STATES = _RESUME_TERMINAL | {"accepted", "running"}
 _RESUME_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 _RESUME_FORBIDDEN = {"idempotencykey", "url", "provider", "prompt", "token", "secret", "credential", "authorization", "body", "payload", "evidence"}
+_RESUME_PUBLICATION_ACTIONS = frozenset({"publish_current", "record_no_score", "retain_source"})
+_RESUME_FAILURE_CODES = frozenset({"vault_exact_resume_busy", "vault_exact_resume_invalid_action", "vault_exact_resume_operation_invalid", "vault_exact_resume_operation_missing", "vault_exact_resume_superseded", "vault_exact_resume_report_invalid", "vault_exact_resume_execution_failed"})
+_RESUME_INTERRUPTED_CODE = "vault_exact_resume_interrupted"
 
 
 class ScannerApiJobsStoreMixin:
@@ -301,18 +304,20 @@ class ScannerApiJobsStoreMixin:
         return {"outcome": "created", "scan_id": scan_id, "action_id": action_id, "state": "accepted"}
 
     def start_scanner_resume_action(self, *, action_id: str) -> ScannerResumeActionTransition:
-        return self._transition(action_id, "running", _resume_envelope(_resume_status("running"), "running"))
+        return self._transition(action_id, "running", _resume_status("running"))
 
     def finalize_scanner_resume_action(
         self, *, action_id: str, state: ResumeActionTerminalState, status_payload: dict[str, Any]
     ) -> ScannerResumeActionTransition:
         if state not in _RESUME_TERMINAL:
             raise ValueError("scanner resume action state must be terminal")
-        return self._transition(action_id, state, _resume_envelope(status_payload, state))
+        return self._transition(action_id, state, status_payload)
 
-    def _transition(self, action_id: str, state: str, status_json: str) -> ScannerResumeActionTransition:
+    def _transition(self, action_id: str, state: str, status_payload: dict[str, Any]) -> ScannerResumeActionTransition:
         action_id, now = _resume_id(action_id), _utc_now()
         completed_at = now if state in _RESUME_TERMINAL else None
+        status_json = _resume_envelope(status_payload, state)
+        prior_state = "accepted" if state == "running" else "running"
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             action = _resume_action(self.conn.execute("SELECT * FROM b3s_scanner_resume_actions WHERE action_id=?", (action_id,)).fetchone())
@@ -320,15 +325,15 @@ class ScannerApiJobsStoreMixin:
                 self.conn.commit()
                 return {"outcome": "not_found", "action": None}
             cursor = self.conn.execute(
-                """UPDATE b3s_scanner_resume_actions SET state=?, status_json=?, updated_at=?, completed_at=? WHERE action_id=? AND (state='accepted' OR (? AND state IN ('accepted', 'running')))""",
-                (state, status_json, now, completed_at, action_id, int(state in _RESUME_TERMINAL)),
+                """UPDATE b3s_scanner_resume_actions SET state=?, status_json=?, updated_at=?, completed_at=? WHERE action_id=? AND state=?""",
+                (state, status_json, now, completed_at, action_id, prior_state),
             )
             self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
         if cursor.rowcount:
-            action = {**action, "state": state, "status_payload": _resume_status(state), "updated_at": now, "completed_at": completed_at}
+            action = {**action, "state": state, "status_payload": status_payload, "updated_at": now, "completed_at": completed_at}
             return {"outcome": "started" if state == "running" else "finalized", "action": action}
         return {"outcome": "stale", "action": action}
 
@@ -349,7 +354,7 @@ class ScannerApiJobsStoreMixin:
         try:
             for row in rows:
                 _resume_action(row)
-            now, status_json = _utc_now(), _resume_envelope(_resume_status("interrupted"), "interrupted")
+            now, status_json = _utc_now(), _resume_envelope(_resume_interrupted_status(), "interrupted")
             count = sum(
                 self.conn.execute("UPDATE b3s_scanner_resume_actions SET state='interrupted', status_json=?, updated_at=?, completed_at=? WHERE action_id=? AND state IN ('accepted', 'running')", (status_json, now, now, str(row["action_id"]))).rowcount
                 for row in rows
@@ -380,13 +385,47 @@ def _resume_digest(value: str) -> str:
 
 
 def _resume_status(state: str) -> dict[str, str]:
+    if state not in {"accepted", "running"}:
+        raise ValueError("scanner resume action status is invalid")
     return {"state": state, "phase": state}
+
+
+def _resume_interrupted_status() -> dict[str, Any]:
+    return {
+        "state": "interrupted",
+        "reason_code": _RESUME_INTERRUPTED_CODE,
+        "retryable": True,
+    }
 
 
 def _resume_envelope(value: Any, state: str | None = None) -> str:
     _resume_json(value)
-    expected = {"operation": "exact_resume"} if state is None else _resume_status(state)
-    if value != expected:
+    if state is None:
+        valid = value == {"operation": "exact_resume"}
+    elif state in {"accepted", "running"}:
+        valid = value == _resume_status(state)
+    elif state == "completed":
+        valid = (
+            isinstance(value, dict)
+            and set(value) == {"state", "publication_action", "report_id"}
+            and value.get("state") == state
+            and value.get("publication_action") in _RESUME_PUBLICATION_ACTIONS
+            and isinstance(value.get("report_id"), str)
+            and _RESUME_ID.fullmatch(value["report_id"]) is not None
+        )
+    elif state == "failed":
+        valid = (
+            isinstance(value, dict)
+            and set(value) == {"state", "reason_code", "retryable"}
+            and value.get("state") == state
+            and value.get("reason_code") in _RESUME_FAILURE_CODES
+            and isinstance(value.get("retryable"), bool)
+        )
+    elif state == "interrupted":
+        valid = value == _resume_interrupted_status()
+    else:
+        valid = False
+    if not valid:
         raise ValueError("scanner resume action envelope is invalid")
     return json_dumps(value)
 

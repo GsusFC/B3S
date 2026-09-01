@@ -36,6 +36,7 @@ from web.api_v1 import install_scanner_api
 from web.api_v1.errors import ApiError
 from web.api_v1.models import EvidenceScoringRecoveryReviewCreateRequest
 from web.api_v1.service import create_evidence_scoring_recovery_review
+from web.exact_resume_controller import recover_interrupted_vault_exact_resume_actions
 from web.report_store import (
     domain_key,
     evidence_claim_tile_ledger_for_domain,
@@ -134,6 +135,7 @@ def _initialize_runtime() -> None:
         raise RuntimeError("Google OIDC site access configuration is invalid")
     verify_postgres_runtime_ready()
     recover_interrupted_scans()
+    recover_interrupted_vault_exact_resume_actions()
 
 
 @asynccontextmanager

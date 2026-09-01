@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -2743,6 +2744,12 @@ def test_restart_interruption_cas_preserves_jobs_terminalized_after_select():
 
 
 def _resume_status(state: str) -> dict:
+    if state == "completed":
+        return {"state": "completed", "publication_action": "publish_current", "report_id": "vaultresume-report"}
+    if state == "failed":
+        return {"state": "failed", "reason_code": "vault_exact_resume_execution_failed", "retryable": True}
+    if state == "interrupted":
+        return {"state": "interrupted", "reason_code": "vault_exact_resume_interrupted", "retryable": True}
     return {"state": state, "phase": state}
 
 
@@ -2775,7 +2782,11 @@ def test_scanner_resume_action_lifecycle_replay_conflict_and_retry():
                 action_id=created["action_id"], state="completed", status_payload=_resume_status("completed")
             )
             retry = _reserve_resume_action(store, "vaultresume1", "f" * 64, "a" * 64)
-            store.finalize_scanner_resume_action(
+            accepted_terminal = store.finalize_scanner_resume_action(
+                action_id=retry["action_id"], state="completed", status_payload=_resume_status("completed")
+            )
+            retry_started = store.start_scanner_resume_action(action_id=retry["action_id"])
+            retry_finalized = store.finalize_scanner_resume_action(
                 action_id=retry["action_id"], state="completed", status_payload=_resume_status("completed")
             )
             completed_replay = _reserve_resume_action(store, "vaultresume1", "f" * 64, "a" * 64)
@@ -2788,6 +2799,8 @@ def test_scanner_resume_action_lifecycle_replay_conflict_and_retry():
     assert binding_conflict["outcome"] == "conflict" and binding_conflict["action_id"] is None
     assert started["outcome"] == "started" and start_stale["outcome"] == "stale"
     assert finalized["outcome"] == "finalized" and terminal_stale["action"]["state"] == "failed"
+    assert accepted_terminal["outcome"] == "stale"
+    assert retry_started["outcome"] == "started" and retry_finalized["outcome"] == "finalized"
     assert retry["outcome"] == "created" and completed_replay == {**retry, "outcome": "replay", "state": "completed"}
     assert readback is not None and readback["state"] == "failed"
 
@@ -2824,8 +2837,10 @@ def test_scanner_resume_action_restart_recovery_and_cas_race():
         try:
             assert restart.interrupt_incomplete_scanner_resume_actions() == 1
             interrupted = restart.get_scanner_resume_action(action_id=action["action_id"])
+            stale_terminal = restart.finalize_scanner_resume_action(action_id=action["action_id"], state="completed", status_payload=_resume_status("completed"))
             replay = _reserve_resume_action(restart, "vaultresume3", "3" * 64, "4" * 64)
             retry = _reserve_resume_action(restart, "vaultresume3", "5" * 64, "6" * 64)
+            restart.start_scanner_resume_action(action_id=retry["action_id"])
             restart.finalize_scanner_resume_action(
                 action_id=retry["action_id"], state="failed", status_payload=_resume_status("failed")
             )
@@ -2839,6 +2854,7 @@ def test_scanner_resume_action_restart_recovery_and_cas_race():
                 def execute(self, statement, parameters=()):
                     if not self.raced and "UPDATE b3s_scanner_resume_actions" in statement:
                         self.raced = True
+                        terminal.start_scanner_resume_action(action_id=race["action_id"])
                         terminal.finalize_scanner_resume_action(
                             action_id=race["action_id"], state="completed", status_payload=_resume_status("completed")
                         )
@@ -2856,6 +2872,7 @@ def test_scanner_resume_action_restart_recovery_and_cas_race():
             restart.close()
 
     assert interrupted is not None and interrupted["state"] == "interrupted"
+    assert stale_terminal["outcome"] == "stale" and stale_terminal["action"]["state"] == "interrupted"
     assert replay == {**action, "outcome": "replay", "state": "interrupted"}
     assert retry["outcome"] == "created"
     assert persisted is not None and persisted["state"] == "completed"
@@ -2874,6 +2891,7 @@ def test_scanner_resume_action_corruption_fails_closed_before_finalization():
                 store.finalize_scanner_resume_action(action_id=active["action_id"], state="failed", status_payload=_resume_status("failed"))
             active_state = store.conn.execute("SELECT state FROM b3s_scanner_resume_actions WHERE action_id = ?", (active["action_id"],)).fetchone()[0]
             terminal = _reserve_resume_action(store, "vaultresume6", "b" * 64, "c" * 64)
+            store.start_scanner_resume_action(action_id=terminal["action_id"])
             store.finalize_scanner_resume_action(action_id=terminal["action_id"], state="completed", status_payload=_resume_status("completed"))
             store.conn.execute("UPDATE b3s_scanner_resume_actions SET request_json = '[' WHERE action_id = ?", (terminal["action_id"],))
             store.conn.commit()
@@ -2908,3 +2926,185 @@ def test_scanner_resume_action_concurrent_reservation_has_one_active_winner():
             results = list(executor.map(reserve, ["d" * 64, "e" * 64], ["f" * 64, "1" * 64]))
 
     assert sorted(result["outcome"] for result in results) == ["conflict", "created"]
+
+
+class _InlineThread:
+    def __init__(self, *, target, daemon):
+        self.target = target
+
+    def start(self):
+        self.target()
+
+
+class _DeferredThread:
+    targets = []
+
+    def __init__(self, *, target, daemon):
+        self.target = target
+
+    def start(self):
+        self.targets.append(self.target)
+
+
+class _FailingThread:
+    def __init__(self, *, target, daemon):
+        self.target = target
+
+    def start(self):
+        raise RuntimeError("thread construction detail")
+
+
+def test_vault_exact_resume_controller_has_one_two_connection_start_winner_and_ignores_replay(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from web import exact_resume_controller as controller
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path, gate = str(Path(tmpdir) / "resume-controller-race.sqlite3"), Barrier(2)
+        store = SQLiteStore(db_path)
+        try:
+            created = _reserve_resume_action(store, "vaultcontroller1", "a" * 64, "b" * 64)
+            replay = _reserve_resume_action(store, "vaultcontroller1", "a" * 64, "b" * 64)
+        finally:
+            store.close()
+        calls = []
+
+        def run_exact_resume(*, action, **kwargs):
+            calls.append((action["action_id"], set(kwargs)))
+            return SimpleNamespace(action="publish_current", report_id="vaultcontroller1")
+
+        monkeypatch.setattr(controller, "_run_vault_exact_resume", run_exact_resume)
+        ignored = controller.launch_vault_exact_resume_action(reservation=replay, repository=object(), database_path=db_path, thread_factory=_InlineThread)
+
+        def launch(_index):
+            gate.wait()
+            return controller.launch_vault_exact_resume_action(reservation=created, repository=object(), database_path=db_path, thread_factory=_InlineThread)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(launch, range(2)))
+        store = SQLiteStore(db_path)
+        try:
+            persisted = store.get_scanner_resume_action(action_id=created["action_id"])
+        finally:
+            store.close()
+
+    assert ignored.outcome == "ignored"
+    assert sorted(outcome.outcome for outcome in outcomes) == ["stale", "started"]
+    assert calls == [(created["action_id"], {"scan_id", "repository"})]
+    assert persisted is not None and persisted["state"] == "completed"
+
+
+def test_vault_exact_resume_controller_persists_publications_and_safe_failures(monkeypatch):
+    from src.services.evidence_vault_scan_orchestration import VaultExactResumeError
+    from web import exact_resume_controller as controller
+
+    publications = ["publish_current", "record_no_score", "retain_source"]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = str(Path(tmpdir) / "resume-controller-projections.sqlite3")
+        store = SQLiteStore(db_path)
+        try:
+            reservations = [_reserve_resume_action(store, f"vaultcontroller{index}", str(index) * 64, "f" * 64) for index in range(1, 4)]
+        finally:
+            store.close()
+        for reservation, publication in zip(reservations, publications, strict=True):
+            report_id = f"report-{publication}"
+            monkeypatch.setattr(controller, "_run_vault_exact_resume", lambda **_kwargs: SimpleNamespace(action=publication, report_id=report_id))
+            controller.launch_vault_exact_resume_action(reservation=reservation, repository=object(), database_path=db_path, thread_factory=_InlineThread)
+        store = SQLiteStore(db_path)
+        try:
+            typed = _reserve_resume_action(store, "vaultcontrollertyped", "4" * 64, "e" * 64)
+            arbitrary = _reserve_resume_action(store, "vaultcontrollerarbitrary", "5" * 64, "d" * 64)
+        finally:
+            store.close()
+
+        def typed_error(**_kwargs):
+            raise VaultExactResumeError("vault_exact_resume_superseded", retryable=False)
+
+        def arbitrary_error(**_kwargs):
+            raise RuntimeError("private execution detail")
+
+        monkeypatch.setattr(controller, "_run_vault_exact_resume", typed_error)
+        controller.launch_vault_exact_resume_action(reservation=typed, repository=object(), database_path=db_path, thread_factory=_InlineThread)
+        monkeypatch.setattr(controller, "_run_vault_exact_resume", arbitrary_error)
+        controller.launch_vault_exact_resume_action(reservation=arbitrary, repository=object(), database_path=db_path, thread_factory=_InlineThread)
+        store = SQLiteStore(db_path)
+        try:
+            actions = [store.get_scanner_resume_action(action_id=reservation["action_id"]) for reservation in [*reservations, typed, arbitrary]]
+        finally:
+            store.close()
+
+    assert [action["status_payload"] for action in actions[:3]] == [
+        {"state": "completed", "publication_action": publication, "report_id": f"report-{publication}"}
+        for publication in publications
+    ]
+    assert actions[3]["status_payload"] == {
+        "state": "failed", "reason_code": "vault_exact_resume_superseded", "retryable": False
+    }
+    assert actions[4]["status_payload"] == {
+        "state": "failed", "reason_code": "vault_exact_resume_execution_failed", "retryable": True
+    }
+    assert "private execution detail" not in str(actions[4])
+
+
+def test_vault_exact_resume_controller_fences_stale_corrupt_non_running_and_failed_threads(monkeypatch):
+    from web import exact_resume_controller as controller
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = str(Path(tmpdir) / "resume-controller-fencing.sqlite3")
+        store = SQLiteStore(db_path)
+        try:
+            stale = _reserve_resume_action(store, "vaultcontrollerstale", "6" * 64, "c" * 64)
+        finally:
+            store.close()
+        calls, _DeferredThread.targets = [], []
+        monkeypatch.setattr(controller, "_run_vault_exact_resume", lambda **kwargs: calls.append(kwargs))
+        started = controller.launch_vault_exact_resume_action(reservation=stale, repository=object(), database_path=db_path, thread_factory=_DeferredThread)
+        assert controller.recover_interrupted_vault_exact_resume_actions(database_path=db_path) == 1
+        _DeferredThread.targets.pop()()
+        store = SQLiteStore(db_path)
+        try:
+            failed = _reserve_resume_action(store, "vaultcontrollerstart", "7" * 64, "b" * 64)
+            corrupt = _reserve_resume_action(store, "vaultcontrollercorrupt", "8" * 64, "a" * 64)
+            running = _reserve_resume_action(store, "vaultcontrollerrunning", "9" * 64, "9" * 64)
+            store.conn.execute("UPDATE b3s_scanner_resume_actions SET status_json='{' WHERE action_id=?", (corrupt["action_id"],))
+            store.conn.commit()
+            store.start_scanner_resume_action(action_id=running["action_id"])
+        finally:
+            store.close()
+        start_failed = controller.launch_vault_exact_resume_action(reservation=failed, repository=object(), database_path=db_path, thread_factory=_FailingThread)
+        corrupt_result = controller.launch_vault_exact_resume_action(reservation=corrupt, repository=object(), database_path=db_path, thread_factory=_InlineThread)
+        running_result = controller.launch_vault_exact_resume_action(reservation=running, repository=object(), database_path=db_path, thread_factory=_InlineThread)
+        store = SQLiteStore(db_path)
+        try:
+            stale_action = store.get_scanner_resume_action(action_id=stale["action_id"])
+            failed_action = store.get_scanner_resume_action(action_id=failed["action_id"])
+            states = [
+                store.conn.execute("SELECT state FROM b3s_scanner_resume_actions WHERE action_id=?", (reservation["action_id"],)).fetchone()[0]
+                for reservation in [corrupt, running]
+            ]
+        finally:
+            store.close()
+
+    assert [started.outcome, start_failed.outcome, corrupt_result.outcome, running_result.outcome] == ["started", "thread_start_failed", "invalid", "stale"]
+    assert calls == [] and states == ["accepted", "running"]
+    assert stale_action["status_payload"] == {"state": "interrupted", "reason_code": "vault_exact_resume_interrupted", "retryable": True}
+    assert failed_action["status_payload"] == {"state": "failed", "reason_code": "vault_exact_resume_execution_failed", "retryable": True}
+
+
+def test_app_runtime_recovers_orphaned_vault_resume_actions(monkeypatch):
+    from web import app as web_app
+
+    class MissingEnv:
+        def is_file(self):
+            return False
+
+    calls = []
+    monkeypatch.setattr(web_app, "Path", lambda _path: MissingEnv())
+    monkeypatch.setattr(web_app, "google_oidc_enabled", lambda _env: False)
+    monkeypatch.setattr(web_app, "verify_postgres_runtime_ready", lambda: calls.append("postgres"))
+    monkeypatch.setattr(web_app, "recover_interrupted_scans", lambda: calls.append("scan"))
+    monkeypatch.setattr(web_app, "recover_interrupted_vault_exact_resume_actions", lambda: calls.append("resume"))
+    web_app._initialize_runtime()
+
+    assert calls == ["postgres", "scan", "resume"]
