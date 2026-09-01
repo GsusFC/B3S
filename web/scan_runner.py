@@ -21,9 +21,12 @@ from typing import Any, Mapping
 from urllib.parse import urlparse
 
 from src.build_info import current_build_sha
+from src.history.report_parser import normalize_domain
+from src.services.evidence_vault_scan_orchestration import VaultExactResumeError, vault_exact_resume_error
 from src.services.scanner_report_assessment import (
     validate_report_sv9_assessment as _validate_report_sv9_assessment,
 )
+from src.services.scanner_report_assessment import ScannerReportAssessmentError
 from src.services.evidence_vault_acquisition_outcome import (
     trusted_acquisition_report_metadata,
 )
@@ -41,6 +44,33 @@ _SCAN_EVENTS: dict[str, threading.Event] = {}
 _VAULT_ACTIVATIONS: set[str] = set()
 _LOCK = threading.Lock()
 _LOG = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass(frozen=True)
+class _ScanOwner: scan_id: str; kind: str; token: object
+@dataclasses.dataclass(frozen=True)
+class _ExactResumePublication: action: str; report_id: str
+class _ExactResumeFailure(RuntimeError):
+    def __init__(self, kind: str) -> None:
+        if kind not in _EXACT_RESUME_FAILURE_KINDS: raise ValueError("exact resume failure kind is invalid")
+        self.kind = kind; super().__init__(kind)
+_SCAN_OWNERS: dict[str, _ScanOwner] = {}
+_EXACT_RESUME_FAILURE_KINDS = frozenset({"busy", "operation_invalid", "report_invalid", "superseded"})
+def _acquire_scan_owner_locked(scan_id: str, kind: str) -> _ScanOwner | None:
+    if kind not in {"ordinary", "exact_resume"}: raise ValueError("scan owner kind is invalid")
+    if scan_id in _SCAN_OWNERS: return None
+    owner = _ScanOwner(scan_id, kind, object())
+    _SCAN_OWNERS[scan_id] = owner
+    return owner
+def _acquire_scan_owner(scan_id: str, kind: str) -> _ScanOwner | None:
+    with _LOCK: return _acquire_scan_owner_locked(scan_id, kind)
+def _current_scan_owner(owner: _ScanOwner) -> bool:
+    with _LOCK: return _SCAN_OWNERS.get(owner.scan_id) == owner
+def _release_scan_owner(owner: _ScanOwner) -> bool:
+    with _LOCK:
+        if _SCAN_OWNERS.get(owner.scan_id) != owner: return False
+        del _SCAN_OWNERS[owner.scan_id]
+        return True
 
 _PHASES = (
     ("capture", "Capture: owned pages, Exa, GitHub proof, SearchAPI fallback, visual evidence"),
@@ -73,26 +103,30 @@ def start_scan(
 ) -> str:
     url = normalize_url(url)
     brand_name = (brand_name or "").strip() or default_brand_name(url)
-    scan_id = str(scan_id or new_scan_id())
     started_at = datetime.now(timezone.utc).isoformat()
-    with _LOCK:
-        _SCANS[scan_id] = {
-            "id": scan_id,
-            "url": url,
-            "brand_name": brand_name,
-            "state": "running",
-            "phase": "capture",
-            "phases": [{"key": key, "label": label, "state": "pending"} for key, label in _PHASES],
-            "acquisition": [],
-            "acquisition_gate": {"state": "pending", "issues": [], "warnings": [], "fallbacks": []},
-            "allow_degraded_fallback": bool(allow_degraded_fallback),
-            "error": None,
-            "error_code": None,
-            "started_at": started_at,
-            "completed_at": None,
-        }
-        _SCAN_EVENTS[scan_id] = threading.Event()
-        persisted_status = _status_copy_locked(_SCANS[scan_id])
+    explicit = bool(scan_id)
+    owner: _ScanOwner | None = None
+    created_status: dict[str, Any] | None = None
+    for _attempt in range(8):
+        candidate = str(scan_id if explicit else new_scan_id())
+        with _LOCK:
+            owner = None if candidate in _SCANS else _acquire_scan_owner_locked(candidate, "ordinary")
+            if owner is not None:
+                created_status = {"id": candidate, "url": url, "brand_name": brand_name, "state": "running", "phase": "capture", "phases": [{"key": key, "label": label, "state": "pending"} for key, label in _PHASES], "acquisition": [], "acquisition_gate": {"state": "pending", "issues": [], "warnings": [], "fallbacks": []}, "allow_degraded_fallback": bool(allow_degraded_fallback), "error": None, "error_code": None, "started_at": started_at, "completed_at": None}
+                _SCANS[candidate] = created_status
+                _SCAN_EVENTS[candidate] = threading.Event()
+                persisted_status = _status_copy_locked(created_status)
+                scan_id = candidate
+                break
+        if explicit:
+            break
+    if owner is None or created_status is None: raise ValueError("scan_id is already active")
+
+    def rollback() -> None:
+        with _LOCK:
+            if _SCAN_OWNERS.get(owner.scan_id) != owner: return
+            if _SCANS.get(owner.scan_id) is created_status: _SCANS.pop(owner.scan_id, None); _SCAN_EVENTS.pop(owner.scan_id, None)
+            _SCAN_OWNERS.pop(owner.scan_id, None)
     try:
         _persist_scan_status(
             persisted_status,
@@ -104,17 +138,15 @@ def start_scan(
             client_id=client_id,
         )
     except Exception:
-        with _LOCK:
-            _SCANS.pop(scan_id, None)
-            _SCAN_EVENTS.pop(scan_id, None)
+        rollback()
         raise
-    thread = threading.Thread(
-        target=_run,
-        args=(scan_id, url, brand_name, bool(allow_degraded_fallback)),
-        daemon=True,
-    )
-    thread.start()
-    return scan_id
+    try:
+        thread = threading.Thread(target=_run, args=(scan_id, url, brand_name, bool(allow_degraded_fallback), owner), daemon=True)
+        thread.start()
+    except Exception:
+        rollback()
+        raise
+    return str(scan_id)
 
 
 def scan_status(scan_id: str) -> dict[str, Any] | None:
@@ -348,6 +380,61 @@ def _scan_cancelled(scan_id: str) -> bool:
     with _LOCK:
         status = _SCANS.get(scan_id)
         return status is None or status.get("state") == "cancelled"
+
+
+def _exact_owner_current(scan_id: str, token: object) -> bool:
+    with _LOCK: owner = _SCAN_OWNERS.get(scan_id); return bool(owner and owner.kind == "exact_resume" and owner.token is token)
+def _load_report_for_exact_owner(owner_scan_id: str, token: object, report_id: str) -> dict[str, Any] | None:
+    with _LOCK:
+        owner = _SCAN_OWNERS.get(owner_scan_id)
+        if owner is None or owner.kind != "exact_resume" or owner.token is not token: raise _ExactResumeFailure("busy")
+        return load_report(report_id)
+def _validate_exact_current_report(report: Any, *, scan_id: str, binding: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(report, Mapping): raise _ExactResumeFailure("report_invalid")
+    raw = report.get("raw"); source_capture = raw.get("source_capture") if isinstance(raw, Mapping) else None
+    valid = report.get("id") == scan_id == binding.get("source_scan_id") and normalize_domain(str(report.get("url") or "")) == binding.get("canonical_domain") and isinstance(raw, Mapping) and raw.get("source_run_id") == binding.get("source_run_id") and source_capture == {key: binding.get(key) for key in ("source_scan_id", "observation_hash", "capture_hash")}
+    if not valid: raise _ExactResumeFailure("report_invalid")
+    try: _validate_report_sv9_assessment(report, required=True)
+    except ScannerReportAssessmentError as exc: raise _ExactResumeFailure("report_invalid") from exc
+    return dict(report)
+def _publish_exact_report(scan_id: str, owner: _ScanOwner, report: Mapping[str, Any], binding: Mapping[str, Any], action: str) -> _ExactResumePublication:
+    if not _current_scan_owner(owner): raise _ExactResumeFailure("busy")
+    save_report(dict(report)); saved = _load_report_for_exact_owner(scan_id, owner.token, scan_id)
+    _validate_exact_current_report(saved, scan_id=scan_id, binding=binding)
+    return _ExactResumePublication(action, scan_id)
+def _run_vault_exact_resume(*, scan_id: str, action: Mapping[str, Any], repository: Any) -> _ExactResumePublication:
+    """Private VR2 seam; it is intentionally not wired to an API route yet."""
+    owner: _ScanOwner | None = None; prepared: Mapping[str, Any] | None = None
+    try:
+        from src.services import evidence_vault_scan_orchestration as orchestration
+
+        owner = _acquire_scan_owner(scan_id, "exact_resume")
+        if owner is None: raise vault_exact_resume_error("busy")
+        prepared = orchestration.prepare_vault_exact_resume(repository=repository, action=action, scan_id=scan_id)
+        binding = prepared["report_binding"]
+        current = _load_report_for_exact_owner(scan_id, owner.token, scan_id)
+        if current is not None:
+            _validate_exact_current_report(current, scan_id=scan_id, binding=binding)
+            return _ExactResumePublication("publish_current", scan_id)
+        return _run_vault_sv9_authority_scanner(scan_id=scan_id, url=str(prepared["url"]), brand_name=str(prepared["brand_name"]), repository=repository, preparation=prepared["preparation"], canonical_snapshot=prepared["canonical_snapshot"], canonical_source_capture={key: str(binding[key]) for key in ("source_scan_id", "observation_hash", "capture_hash")}, gate={}, exact_owner=owner, exact_report_binding=binding)
+    except VaultExactResumeError: raise
+    except _ExactResumeFailure as exc: raise vault_exact_resume_error(exc.kind) from None
+    except Exception:
+        if owner is None: raise vault_exact_resume_error("execution_failed") from None
+        if not _exact_owner_current(scan_id, owner.token): raise vault_exact_resume_error("busy") from None
+        if prepared is not None:
+            try: recovered = _load_report_for_exact_owner(scan_id, owner.token, scan_id); recovered is None or _validate_exact_current_report(recovered, scan_id=scan_id, binding=prepared["report_binding"])
+            except _ExactResumeFailure as exc: raise vault_exact_resume_error(exc.kind) from None
+            except Exception: recovered = None
+            if recovered is not None:
+                return _ExactResumePublication("publish_current", scan_id)
+        try: orchestration.prepare_vault_exact_resume(repository=repository, action=action, scan_id=scan_id)
+        except VaultExactResumeError: raise
+        except Exception: pass
+        if not _exact_owner_current(scan_id, owner.token): raise vault_exact_resume_error("busy")
+        raise vault_exact_resume_error("execution_failed") from None
+    finally:
+        if owner is not None: _release_scan_owner(owner)
 
 
 def _vault_operational_pipeline_enabled() -> bool:
@@ -739,13 +826,17 @@ def _authority_evidence_from_relations(relations: Any) -> list[dict[str, str]]:
     return [evidence[key] for key in sorted(evidence)]
 
 
-def _accepted_authority_source_report(application_result: Mapping[str, Any], scan_id: str) -> dict[str, Any] | None:
+def _accepted_authority_source_report(application_result: Mapping[str, Any], scan_id: str, exact_owner: _ScanOwner | None = None) -> dict[str, Any] | None:
     authority = application_result.get("authority")
     candidate = authority.get("accepted_candidate") if isinstance(authority, Mapping) else None
     source_scan_id = candidate.get("source_scan_id") if isinstance(candidate, Mapping) else None
     if not isinstance(source_scan_id, str) or not source_scan_id or source_scan_id == scan_id:
+        if exact_owner is not None and isinstance(candidate, Mapping):
+            raise _ExactResumeFailure("report_invalid")
         return None
-    return load_report(source_scan_id)
+    source = _load_report_for_exact_owner(scan_id, exact_owner.token, source_scan_id) if exact_owner else load_report(source_scan_id)
+    if exact_owner and source is None: raise _ExactResumeFailure("report_invalid")
+    return source
 
 
 def _authority_scanner_payload(
@@ -754,6 +845,7 @@ def _authority_scanner_payload(
     canonical_snapshot: Mapping[str, Any],
     canonical_source_capture: Mapping[str, str] | None,
     gate: Mapping[str, Any],
+    exact_report_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = copy.deepcopy(publication.get("scanner_payload"))
     if not isinstance(payload, dict):
@@ -761,6 +853,7 @@ def _authority_scanner_payload(
     source_capture = canonical_source_capture or canonical_snapshot.get("source_capture")
     if isinstance(source_capture, Mapping):
         payload["source_capture"] = dict(source_capture)
+    if exact_report_binding is not None: payload["source_run_id"] = exact_report_binding["source_run_id"]
     payload["acquisition_gate"] = dict(canonical_snapshot.get("acquisition_gate") or gate)
     payload["acquisition_artifacts"] = _acquisition_artifacts_from_snapshot(
         dict(canonical_snapshot)
@@ -778,10 +871,15 @@ def _run_vault_sv9_authority_scanner(
     canonical_snapshot: Mapping[str, Any],
     canonical_source_capture: Mapping[str, str] | None,
     gate: Mapping[str, Any],
-) -> bool:
+    exact_owner: _ScanOwner | None = None,
+    exact_report_binding: Mapping[str, Any] | None = None,
+) -> bool | _ExactResumePublication:
     """Run the authoritative path without evaluating the legacy Flow/SV9 lane."""
 
-    if _scan_cancelled(scan_id):
+    exact = exact_owner is not None
+    if exact and not _current_scan_owner(exact_owner):
+        raise _ExactResumeFailure("busy")
+    if not exact and _scan_cancelled(scan_id):
         return False
     authority_boundary_entered = False
     release_guard = True
@@ -791,18 +889,23 @@ def _run_vault_sv9_authority_scanner(
             repository=repository,
             preparation=preparation,
         )
-        if _scan_cancelled(scan_id):
+        if exact and not _current_scan_owner(exact_owner): raise _ExactResumeFailure("busy")
+        if not exact and _scan_cancelled(scan_id):
             return False
-        authority_boundary_entered = _enter_vault_authority_boundary(scan_id)
-        if not authority_boundary_entered:
-            return False
-        if _activate_vault_result_unless_cancelled(
-            scan_id,
-            repository,
-            url,
-            operation_plan_fingerprint=fingerprint,
-        ) is None:
-            return False
+        if exact:
+            activation = repository.activate_evidence_vault_operational_scanner_result(url, source_scan_id=scan_id, operation_plan_fingerprint=fingerprint, workspace_slug="b3s")
+            operation = repository.get_capture_operation_plan(scan_id, workspace_slug="b3s")
+            if not isinstance(activation, Mapping) or not isinstance(operation, Mapping): raise _ExactResumeFailure("operation_invalid")
+            if operation.get("status") == "superseded": raise _ExactResumeFailure("superseded")
+            if operation.get("status") != "completed": raise _ExactResumeFailure("operation_invalid")
+        else:
+            authority_boundary_entered = _enter_vault_authority_boundary(scan_id)
+            if not authority_boundary_entered:
+                return False
+            if _activate_vault_result_unless_cancelled(
+                scan_id, repository, url, operation_plan_fingerprint=fingerprint
+            ) is None:
+                return False
         from src.config import SV9_FLOW_MODEL
         from src.services.evidence_vault_sv9_authority_application import (
             run_evidence_vault_sv9_authority_application,
@@ -854,19 +957,25 @@ def _run_vault_sv9_authority_scanner(
             workspace_slug="b3s",
             trusted_irrelevant_evidence=[],
         )
+        source_report = _accepted_authority_source_report(application_result, scan_id, exact_owner)
         publication = project_vault_authority_publication(
             application_result,
             scan_id,
-            _accepted_authority_source_report(application_result, scan_id),
+            source_report,
         )
         action = publication.get("action") if isinstance(publication, Mapping) else None
-        _set_phase(scan_id, "interpret", "done")
-        _set_phase(scan_id, "score", "done")
-        _set_phase(scan_id, "report", "running")
+        if exact and source_report is not None and action != "retain_source": raise _ExactResumeFailure("report_invalid")
+        if not exact:
+            _set_phase(scan_id, "interpret", "done")
+            _set_phase(scan_id, "score", "done")
+            _set_phase(scan_id, "report", "running")
         if action == "retain_source":
             source_report_id = publication.get("source_report_id")
             if not isinstance(source_report_id, str) or not source_report_id:
-                raise RuntimeError("vault_authority_source_report_unavailable")
+                raise _ExactResumeFailure("report_invalid") if exact else RuntimeError("vault_authority_source_report_unavailable")
+            if exact:
+                if not isinstance(source_report, Mapping) or source_report.get("id") != source_report_id: raise _ExactResumeFailure("report_invalid")
+                return _ExactResumePublication("retain_source", source_report_id)
             return _finish_scan_without_new_score(scan_id, source_report_id)
         if action not in {"publish_current", "record_no_score"}:
             raise RuntimeError("vault_authority_publication_invalid")
@@ -879,22 +988,28 @@ def _run_vault_sv9_authority_scanner(
                 canonical_snapshot=canonical_snapshot,
                 canonical_source_capture=canonical_source_capture,
                 gate=gate,
+                exact_report_binding=exact_report_binding,
             ),
         )
         _validate_report_sv9_assessment(report, required=True)
+        if exact: return _publish_exact_report(scan_id, exact_owner, report, exact_report_binding or {}, str(action))
         return _publish_completed_report(scan_id, report)
+    except _ExactResumeFailure:
+        raise
     except Exception:
+        if exact:
+            raise
         # The outer runner marks the error terminal and releases this guard
         # under the same lock; releasing here opens a cancellation window.
         release_guard = not authority_boundary_entered
         raise RuntimeError("vault_authority_preparation_failed") from None
     finally:
-        if release_guard:
+        if not exact and release_guard:
             with _LOCK:
                 _VAULT_ACTIVATIONS.discard(scan_id)
 
 
-def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool) -> None:
+def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool, owner: _ScanOwner | None = None) -> None:
     try:
         vault_repository = None
         vault_preparation: dict[str, Any] | None = None
@@ -1145,6 +1260,9 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool)
                 _persist_scan_status(persisted_status)
             except Exception:
                 _LOG.exception("failed to persist terminal scanner error", extra={"scan_id": scan_id})
+    finally:
+        if owner is not None:
+            _release_scan_owner(owner)
 
 
 def _capture_verified_raw_shadow(

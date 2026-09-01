@@ -12,8 +12,10 @@ from src.services.evidence_vault_incremental_refresh import (
 )
 from src.services.evidence_vault_scan_orchestration import (
     EvidenceVaultScanOrchestrationError,
+    VaultExactResumeError,
     bind_vault_report_to_capture_observation,
     build_capture_observation_from_snapshot,
+    prepare_vault_exact_resume,
     prepare_vault_scan_after_capture,
 )
 
@@ -976,3 +978,32 @@ def test_retry_reclaims_expired_lease_but_leaves_active_lease_busy() -> None:
     assert active["operation_plan"] is None
     assert active["resume"]["execution_required"] is False
     assert active["resume"]["work_required"] is False
+
+
+def test_exact_resume_reads_only_the_frozen_pending_operation() -> None:
+    from src.services.evidence_vault_canonical_core import canonical_fingerprint
+    from src.services.evidence_vault_incremental_executor import execute_vault_operation_plan, validate_vault_operation_result
+    from src.services.evidence_vault_incremental_refresh import validate_vault_scan_plan
+    from tests.test_evidence_vault_incremental_executor import ExecutorLLM, MemoryRepository
+    initial = _Repository(memory=None, history=[])
+    first = prepare_vault_scan_after_capture(repository=initial, snapshot=_snapshot("Exact"), scan_id="scan-exact", url="https://example.com", brand_name="Example", environment="vault", incremental_enabled=True, observed_at="2026-08-06T11:00:00Z")
+    raw, plan = initial.persisted[0], first["operation_plan"]
+    operation = {"source_scan_id": "scan-exact", "brand_identity": "example.com", "status": "pending", "lease_active": False, "raw_observation": raw, "plan": plan, "observation_hash": canonical_json_hash(raw), "capture_hash": canonical_json_hash(raw["capture_payload"]), "operation_plan_fingerprint": plan["operation_plan_fingerprint"], "canonical_memory_version": plan["canonical_memory_version"], "result_payload": None, "result_fingerprint": None, "candidate_packet_fingerprint": None}
+    class ExactRepository:
+        def get_capture_operation_plan(self, *_args, **_kwargs): return operation
+        def persist_capture_observation(self, *_args, **_kwargs): raise AssertionError("exact resume persisted a capture")
+    action = {"action_id": "action-exact", "scan_id": "scan-exact", "state": "running", "request_payload": {"operation": "exact_resume"}, "status_payload": {"state": "running", "phase": "running"}, "request_fingerprint": canonical_json_hash({"operation": "exact_resume"})}
+    resumed = prepare_vault_exact_resume(repository=ExactRepository(), action=action, scan_id="scan-exact")
+    assert resumed["canonical_snapshot"] == raw["capture_payload"] and resumed["preparation"]["operation_plan"] == plan
+    action["request_fingerprint"] = "0" * 64
+    with pytest.raises(VaultExactResumeError, match="invalid_action"): prepare_vault_exact_resume(repository=ExactRepository(), action=action, scan_id="scan-exact")
+    action["request_fingerprint"] = canonical_json_hash({"operation": "exact_resume"}); executor = MemoryRepository(plan=plan, rows=raw["evidence_records"])
+    executor.context.update(source_scan_id="scan-exact", brand_identity="example.com", observation_hash=operation["observation_hash"], raw_observation=raw, plan=plan, evidence_records=raw["evidence_records"]); execute_vault_operation_plan(repository=executor, source_scan_id="scan-exact", worker_id="test", llm=ExecutorLLM())
+    result = executor.operation["result_payload"]; operation.update(status="completed", result_payload=result, result_fingerprint=canonical_fingerprint("evidence-vault-operation-result-v1", result), candidate_packet_fingerprint=result["candidate_packet_fingerprint"])
+    assert prepare_vault_exact_resume(repository=ExactRepository(), action=action, scan_id="scan-exact")["preparation"]["resume"]["analysis_status"] == "completed"
+    other, bad = "0" * 64, deepcopy(result); bad.update(selected_evidence_fingerprints=[other], evidence_work_dispositions={other: "ineligible_label_type"}, semantic_labels={}, tile_shortlists={}, shortlist_truncations={}, shortlisted_tile_ids=[], relation_proposal_call_count=0, relation_proposal={"schema_version": result["relation_proposal"]["schema_version"], "relations": [], "discarded_relations": []}, basis_relations=[]); validate_vault_operation_result(bad)
+    operation.update(result_payload=bad, result_fingerprint=canonical_fingerprint("evidence-vault-operation-result-v1", bad), candidate_packet_fingerprint=bad["candidate_packet_fingerprint"])
+    with pytest.raises(VaultExactResumeError, match="operation_invalid"): prepare_vault_exact_resume(repository=ExactRepository(), action=action, scan_id="scan-exact")
+    drift = deepcopy(plan); context = drift["semantic_context"]; context["evidence_fingerprints"] = [other]; drift["operations"].update(classify_evidence_fingerprints=[other], propose_tile_relations_for_fingerprints=[other], llm_required=True); context["context_fingerprint"] = canonical_fingerprint(context["schema_version"], {key: context[key] for key in ("schema_version", "scope", "evidence_fingerprints", "semantic_analysis_contract")}); drift["operation_plan_fingerprint"] = canonical_fingerprint(drift["schema_version"], {key: value for key, value in drift.items() if key != "operation_plan_fingerprint"}); validate_vault_scan_plan(drift)
+    result2 = deepcopy(result); result2["operation_plan_fingerprint"] = drift["operation_plan_fingerprint"]; operation.update(plan=drift, operation_plan_fingerprint=drift["operation_plan_fingerprint"], result_payload=result2, result_fingerprint=canonical_fingerprint("evidence-vault-operation-result-v1", result2))
+    with pytest.raises(VaultExactResumeError, match="operation_invalid"): prepare_vault_exact_resume(repository=ExactRepository(), action=action, scan_id="scan-exact")
