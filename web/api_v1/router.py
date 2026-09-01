@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -53,6 +53,7 @@ from .models import (
     ScanCreateRequest,
     ScanEvidenceResponse,
     ScanResultResponse,
+    ScanResumeActionResponse,
     ScanStatusResponse,
     VaultSv9ShadowDiagnosticsResponse,
 )
@@ -71,7 +72,10 @@ from .service import (
     get_evidence_memory_adjudications,
     get_evidence_scoring_recovery_reviews,
     get_scan,
+    get_vault_exact_resume_action,
     register_evidence_claim_tile_review_packet,
+    create_vault_exact_resume_action,
+    vault_exact_resume_api_enabled,
 )
 
 
@@ -86,6 +90,11 @@ _ERRORS = {
     422: {"model": ApiErrorResponse, "description": "Request validation failed"},
     503: {"model": ApiErrorResponse, "description": "Scanner temporarily unavailable"},
 }
+
+
+def _resume_api_gate() -> None:
+    if not vault_exact_resume_api_enabled():
+        raise ApiError(404, "not_found", "Resource not found.", headers={"Cache-Control": "no-store"})
 
 
 @router.get("/health", include_in_schema=False)
@@ -180,6 +189,62 @@ def read_scan(scan_id: str, response: Response, _principal: ReadPrincipal) -> di
     if public["status"] in {"running", "blocked"}:
         response.headers["Retry-After"] = "5"
     return public
+
+
+@router.post(
+    "/scans/{scan_id}/resume",
+    dependencies=[Depends(_resume_api_gate)],
+    response_model=ScanResumeActionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    operation_id="resumeScan",
+    responses=_ERRORS,
+)
+async def resume_scan(
+    scan_id: str,
+    request: Request,
+    response: Response,
+    principal: WritePrincipal,
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
+) -> dict[str, Any]:
+    if await request.body():
+        raise ApiError(422, "request_validation_failed", "The request does not match the API contract.")
+    action, replayed = create_vault_exact_resume_action(
+        scan_id,
+        client_id=principal.client_id,
+        idempotency_key=idempotency_key,
+    )
+    response.headers["Location"] = f"/api/v1/scans/{scan_id}/resume-actions/{action['action_id']}"
+    response.headers["Cache-Control"] = "no-store"
+    if action["state"] in {"accepted", "running"}:
+        response.headers["Retry-After"] = "5"
+    if replayed:
+        response.headers["Idempotent-Replayed"] = "true"
+    return action
+
+
+@router.get(
+    "/scans/{scan_id}/resume-actions/{action_id}",
+    dependencies=[Depends(_resume_api_gate)],
+    response_model=ScanResumeActionResponse,
+    operation_id="getScanResumeAction",
+    responses=_ERRORS,
+)
+def read_resume_action(
+    scan_id: str,
+    action_id: str,
+    response: Response,
+    _principal: ReadPrincipal,
+) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    action = get_vault_exact_resume_action(scan_id, action_id)
+    if action is None:
+        raise ApiError(404, "not_found", "Resource not found.", headers={"Cache-Control": "no-store"})
+    if action["state"] in {"accepted", "running"}:
+        response.headers["Retry-After"] = "5"
+    return action
 
 
 @router.post(

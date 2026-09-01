@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator
 
 
 Language = Literal["es"]
@@ -793,6 +793,47 @@ class ApiCapabilitiesResponse(StrictModel):
     job_execution: Literal["process_bound"] = "process_bound"
     restart_behavior: Literal["marks_incomplete_as_failed"] = "marks_incomplete_as_failed"
     supported_languages: list[Language] = Field(default_factory=lambda: ["es"])
+
+
+ResumeActionState = Literal["accepted", "running", "completed", "failed", "interrupted"]
+ResumeActionPublication = Literal["publish_current", "record_no_score", "retain_source"]
+ResumeActionFailureCode = Literal["vault_exact_resume_busy", "vault_exact_resume_invalid_action", "vault_exact_resume_operation_invalid", "vault_exact_resume_operation_missing", "vault_exact_resume_superseded", "vault_exact_resume_report_invalid", "vault_exact_resume_execution_failed", "vault_exact_resume_interrupted"]
+
+
+class ResumeActionLinks(StrictModel):
+    self: str
+    scan: str
+
+
+class ResumeActionResult(StrictModel):
+    publication_action: ResumeActionPublication
+    report_id: StrictStr = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+class ResumeActionFailure(StrictModel):
+    reason_code: ResumeActionFailureCode
+    retryable: StrictBool
+
+
+class ScanResumeActionResponse(StrictModel):
+    object: Literal["scan_resume_action"] = "scan_resume_action"
+    api_version: Literal["v1"] = "v1"
+    action_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    scan_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    state: ResumeActionState
+    created_at: AwareDatetime
+    updated_at: AwareDatetime
+    completed_at: AwareDatetime | None = None
+    result: ResumeActionResult | None = None
+    failure: ResumeActionFailure | None = None
+    links: ResumeActionLinks
+
+    @field_validator("created_at", "updated_at", "completed_at", mode="before")
+    @classmethod
+    def _timestamps_are_iso_text(cls, value: object) -> object:
+        if value is not None and not isinstance(value, str):
+            raise ValueError("timestamps must be ISO strings")
+        return value
 
 
 class ApiErrorBody(StrictModel):

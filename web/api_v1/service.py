@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from typing import Any
 
@@ -38,6 +39,7 @@ from src.services.evidence_scoring_recovery_review import (
     EvidenceScoringRecoveryReviewUnavailableError,
 )
 from src.storage.sqlite_store import SQLiteStore
+from web.exact_resume_controller import launch_vault_exact_resume_action
 from web.report_store import (
     append_evidence_claim_reconciliation_for_domain,
     append_evidence_claim_tile_review_for_domain,
@@ -49,11 +51,13 @@ from web.report_store import (
     list_evidence_claim_tile_reviews_for_domain,
     list_evidence_memory_adjudications_for_domain,
     list_evidence_scoring_recovery_reviews_for_domain,
+    _postgres_repository,
     load_report,
     new_scan_id,
     register_evidence_claim_tile_review_packet_for_domain,
 )
 from web.scan_runner import (
+    _vault_operational_pipeline_enabled,
     _load_persisted_scan_status,
     default_brand_name,
     normalize_url,
@@ -62,10 +66,189 @@ from web.scan_runner import (
 )
 
 from .errors import ApiError
+from .models import ScanResumeActionResponse
 from .presenters import completed_status_from_report
 
 
 _IDEMPOTENCY_KEY_RE = re.compile(r"^[\x21-\x7E]{1,200}$")
+_RESUME_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_EXACT_RESUME_REQUEST = {"operation": "exact_resume"}
+_RESUME_NOT_FOUND = (404, "not_found", "Resource not found.")
+
+
+def vault_exact_resume_api_enabled() -> bool:
+    """Return the fail-closed, Vault-only API gate without touching storage."""
+
+    if (
+        os.environ.get("B3S_VAULT_EXACT_RESUME_API_ENABLED", "false")
+        .strip()
+        .lower()
+        != "true"
+    ):
+        return False
+    return _vault_operational_pipeline_enabled()
+
+
+def create_vault_exact_resume_action(
+    scan_id: str,
+    *,
+    client_id: str,
+    idempotency_key: str | None,
+) -> tuple[dict[str, Any], bool]:
+
+    _require_resume_api()
+    _validate_resume_id(scan_id, "scan_id")
+    key_hash = _idempotency_key_hash(idempotency_key)
+    if key_hash is None:
+        raise ApiError(
+            400,
+            "idempotency_key_required",
+            "Idempotency-Key is required for exact resume actions.",
+        )
+    fingerprint = _request_fingerprint(_EXACT_RESUME_REQUEST)
+    try:
+        repository = _postgres_repository()
+    except Exception as exc:
+        raise ApiError(503, "vault_resume_repository_unavailable", "The Vault resume repository is temporarily unavailable.") from exc
+    if repository is None:
+        raise ApiError(503, "vault_resume_repository_unavailable", "The Vault resume repository is temporarily unavailable.")
+    try:
+        store = SQLiteStore(BRAND3_DB_PATH)
+        try:
+            reservation = store.reserve_scanner_resume_action(
+                scan_id=scan_id,
+                request_payload=dict(_EXACT_RESUME_REQUEST),
+                status_payload={"state": "accepted", "phase": "accepted"},
+                client_id=client_id,
+                idempotency_key_hash=key_hash,
+                request_fingerprint=fingerprint,
+            )
+        finally:
+            store.close()
+    except Exception as exc:
+        _resume_store_unavailable(exc)
+
+    outcome = reservation.get("outcome")
+    if outcome == "conflict":
+        raise ApiError(
+            409,
+            "resume_action_conflict",
+            "An exact-resume action conflicts with the requested scan or key.",
+        )
+    if outcome not in {"created", "replay"}:
+        _resume_store_unavailable()
+    action_id = reservation.get("action_id")
+    if not isinstance(action_id, str):
+        _resume_store_unavailable()
+    if outcome == "created":
+        try:
+            launch_vault_exact_resume_action(
+                reservation=reservation,
+                repository=repository,
+                database_path=BRAND3_DB_PATH,
+            )
+        except Exception as exc:
+            raise ApiError(503, "vault_resume_action_unavailable", "The Vault exact-resume action is temporarily unavailable.") from exc
+    action = _read_resume_action(action_id)
+    if action is None:
+        _resume_store_unavailable()
+    public = _public_resume_action(action)
+    if public["scan_id"] != scan_id:
+        _resume_store_unavailable()
+    return public, outcome == "replay"
+
+
+def get_vault_exact_resume_action(
+    scan_id: str,
+    action_id: str,
+) -> dict[str, Any] | None:
+
+    _require_resume_api()
+    _validate_resume_id(scan_id, "scan_id")
+    _validate_resume_id(action_id, "action_id")
+    action = _read_resume_action(action_id)
+    if action is None:
+        return None
+    public = _public_resume_action(action)
+    if public["scan_id"] != scan_id:
+        return None
+    return public
+
+
+def _require_resume_api() -> None:
+    if not vault_exact_resume_api_enabled():
+        raise ApiError(*_RESUME_NOT_FOUND)
+
+
+def _validate_resume_id(value: str, field: str) -> None:
+    if not isinstance(value, str) or _RESUME_ID_RE.fullmatch(value) is None:
+        raise ApiError(400, f"invalid_{field}", f"The {field} is invalid.")
+
+
+def _read_resume_action(action_id: str) -> dict[str, Any] | None:
+    try:
+        store = SQLiteStore(BRAND3_DB_PATH)
+        try:
+            return store.get_scanner_resume_action(action_id=action_id)
+        finally:
+            store.close()
+    except Exception as exc:
+        _resume_store_unavailable(exc)
+
+
+def _resume_store_unavailable(exc: BaseException | None = None) -> None:
+    error = ApiError(
+        503,
+        "scanner_resume_action_store_unavailable",
+        "The exact-resume action store is temporarily unavailable.",
+    )
+    if exc is None:
+        raise error
+    raise error from exc
+
+
+def _public_resume_action(action: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(action, dict):
+        _resume_store_unavailable()
+    state = action.get("state")
+    if state not in {"accepted", "running", "completed", "failed", "interrupted"}:
+        _resume_store_unavailable()
+    action_id, scan_id = action.get("action_id"), action.get("scan_id")
+    if not all(isinstance(value, str) for value in (action_id, scan_id)):
+        _resume_store_unavailable()
+    public: dict[str, Any] = {
+        "object": "scan_resume_action",
+        "api_version": "v1",
+        "action_id": action_id,
+        "scan_id": scan_id,
+        "state": state,
+        "created_at": action.get("created_at"),
+        "updated_at": action.get("updated_at"),
+        "completed_at": action.get("completed_at"),
+        "result": None,
+        "failure": None,
+        "links": {
+            "self": f"/api/v1/scans/{scan_id}/resume-actions/{action_id}",
+            "scan": f"/api/v1/scans/{scan_id}",
+        },
+    }
+    status_payload = action.get("status_payload")
+    if not isinstance(status_payload, dict):
+        _resume_store_unavailable()
+    if state == "completed":
+        public["result"] = {
+            "publication_action": status_payload.get("publication_action"),
+            "report_id": status_payload.get("report_id"),
+        }
+    elif state in {"failed", "interrupted"}:
+        public["failure"] = {
+            "reason_code": status_payload.get("reason_code"),
+            "retryable": status_payload.get("retryable"),
+        }
+    try:
+        return ScanResumeActionResponse.model_validate(public).model_dump(mode="json")
+    except Exception as exc:
+        _resume_store_unavailable(exc)
 
 
 def create_scan_job(

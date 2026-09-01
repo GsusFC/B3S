@@ -3108,3 +3108,101 @@ def test_app_runtime_recovers_orphaned_vault_resume_actions(monkeypatch):
     web_app._initialize_runtime()
 
     assert calls == ["postgres", "scan", "resume"]
+
+
+def _enable_resume_api(monkeypatch, database_path, repository=None):
+    for name, value in (("B3S_SCANNER_API_TOKEN", TOKEN), ("B3S_VAULT_EXACT_RESUME_API_ENABLED", "true"),
+                        ("BRAND3_ENVIRONMENT", "vault"), ("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr("web.api_v1.service.BRAND3_DB_PATH", str(database_path))
+    monkeypatch.setattr("web.api_v1.service._postgres_repository", lambda: repository or object())
+
+
+@pytest.mark.parametrize("flag,environment,pipeline", [("false", "vault", "true"), ("true", "production", "true"), ("true", "vault", "false")])
+def test_vault_resume_api_gate_precedes_auth_and_side_effects(monkeypatch, flag, environment, pipeline):
+    monkeypatch.setenv("B3S_VAULT_EXACT_RESUME_API_ENABLED", flag)
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", environment)
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", pipeline)
+    calls = []
+    monkeypatch.setattr("web.api_v1.service.SQLiteStore", lambda *_: calls.append("store"))
+    monkeypatch.setattr("web.api_v1.service.launch_vault_exact_resume_action", lambda **_: calls.append("launch"))
+    client = TestClient(app)
+    post = client.post("/api/v1/scans/hidden-scan/resume")
+    get = client.get("/api/v1/scans/hidden-scan/resume-actions/hidden-action")
+    assert post.status_code == get.status_code == 404 and calls == [] and post.headers["cache-control"] == get.headers["cache-control"] == "no-store"
+
+
+def test_vault_resume_api_contract_guards_and_replay(monkeypatch, tmp_path):
+    database_path, repository = tmp_path / "resume-idempotency.sqlite3", object()
+    _enable_resume_api(monkeypatch, database_path, repository)
+    _configure_evidence_reviewer(monkeypatch)
+    calls = []
+    monkeypatch.setattr("web.api_v1.service.launch_vault_exact_resume_action", lambda **kwargs: calls.append(kwargs))
+    client = TestClient(app)
+    denied = client.post("/api/v1/scans/auth-scan/resume", headers={**REVIEW_AUTH, "Idempotency-Key": "reviewer-read-only"})
+    assert denied.status_code == 403 and denied.json()["error"]["details"]["required_scope"] == "scans:write"
+    monkeypatch.setattr("web.api_v1.service._postgres_repository", lambda: None)
+    failed = client.post("/api/v1/scans/guard-scan/resume", headers={**AUTH, "Idempotency-Key": "repo-failure"})
+    assert failed.status_code == 503 and failed.json()["error"]["code"] == "vault_resume_repository_unavailable" and not database_path.exists()
+    monkeypatch.setattr("web.api_v1.service._postgres_repository", lambda: repository)
+    touches = []
+    monkeypatch.setattr("web.api_v1.service.SQLiteStore", lambda *_: touches.append("store"))
+    for body in (b"{}", b"null"):
+        response = client.post("/api/v1/scans/body-scan/resume", content=body, headers={**AUTH, "Content-Type": "application/json", "Idempotency-Key": body.decode()})
+        assert response.status_code == 422 and response.json()["error"]["code"] == "request_validation_failed"
+    monkeypatch.setattr("web.api_v1.service.SQLiteStore", SQLiteStore)
+    assert touches == [] and calls == []
+    headers = {**AUTH, "Idempotency-Key": "resume-once"}
+    first = client.post("/api/v1/scans/exact-scan/resume", headers=headers)
+    replay = client.post("/api/v1/scans/exact-scan/resume", headers=headers)
+    assert first.status_code == replay.status_code == 202
+    assert first.json()["action_id"] == replay.json()["action_id"] and first.headers["location"] == first.json()["links"]["self"]
+    assert first.headers["retry-after"] == "5" and "idempotent-replayed" not in first.headers
+    assert replay.headers["idempotent-replayed"] == "true" and len(calls) == 1
+    assert calls[0]["repository"] is repository and calls[0]["reservation"]["outcome"] == "created"
+    conflict = client.post("/api/v1/scans/exact-scan/resume", headers={**AUTH, "Idempotency-Key": "resume-conflict"})
+    assert conflict.status_code == 409 and "request_payload" not in conflict.text
+    action_id = first.json()["action_id"]
+    assert client.get(f"/api/v1/scans/exact-scan/resume-actions/{action_id}", headers=REVIEW_AUTH).status_code == 200
+
+
+@pytest.mark.parametrize("mutation,injected", [({"status_payload": {"publication_action": "retain_source", "report_id": "../secret"}}, "../secret"), ({"created_at": "timestamp-secret"}, "timestamp"), ({"state": "failed", "status_payload": {"reason_code": "vault_exact_resume_superseded", "retryable": "retry-secret"}}, "retryable")])
+def test_vault_resume_api_binds_action_to_scan_and_projects_all_states(monkeypatch, tmp_path, mutation, injected):
+    database_path = tmp_path / "resume-projection.sqlite3"
+    _enable_resume_api(monkeypatch, database_path)
+    states, terminal_status = {}, {"completed": {"state": "completed", "publication_action": "retain_source", "report_id": "safe-report"}, "failed": {"state": "failed", "reason_code": "vault_exact_resume_superseded", "retryable": False}, "interrupted": {"state": "interrupted", "reason_code": "vault_exact_resume_interrupted", "retryable": True}}
+    store = SQLiteStore(str(database_path))
+    try:
+        for index, state in enumerate(("accepted", "running", "completed", "failed", "interrupted")):
+            scan_id = f"resume-scan-{index}"
+            reservation = _reserve_resume_action(store, scan_id, f"{index + 1}" * 64, f"{index + 2}" * 64)
+            action_id = reservation["action_id"]
+            if state != "accepted":
+                store.start_scanner_resume_action(action_id=action_id)
+            if state in terminal_status:
+                store.finalize_scanner_resume_action(action_id=action_id, state=state, status_payload=terminal_status[state])
+            states[state] = (scan_id, action_id)
+    finally:
+        store.close()
+    client = TestClient(app)
+    for state, (scan_id, action_id) in states.items():
+        response = client.get(f"/api/v1/scans/{scan_id}/resume-actions/{action_id}", headers=AUTH)
+        payload = response.json()
+        assert response.status_code == 200 and payload["state"] == state and all(isinstance(payload[field], str) for field in ("created_at", "updated_at"))
+        assert set(payload) == {
+            "object", "api_version", "action_id", "scan_id", "state",
+            "created_at", "updated_at", "completed_at", "result", "failure", "links",
+        }
+        assert all(field not in response.text for field in ("request_payload", "request_fingerprint"))
+        if state == "completed":
+            assert payload["result"] == {"publication_action": "retain_source", "report_id": "safe-report"} and payload["failure"] is None
+        elif state in {"failed", "interrupted"}:
+            assert payload["result"] is None and payload["failure"]["reason_code"].startswith("vault_exact_resume_") and isinstance(payload["failure"]["retryable"], bool)
+        else:
+            assert payload["result"] is None and payload["failure"] is None
+    mismatch = client.get(f"/api/v1/scans/wrong-scan/resume-actions/{states['completed'][1]}", headers=AUTH)
+    missing = client.get("/api/v1/scans/missing-scan/resume-actions/missing-action", headers=AUTH)
+    assert mismatch.status_code == missing.status_code == 404 and mismatch.json()["error"]["code"] == missing.json()["error"]["code"] == "not_found" and mismatch.headers["cache-control"] == missing.headers["cache-control"] == "no-store"
+    monkeypatch.setattr("web.api_v1.service._read_resume_action", lambda _: {"action_id": "bad-action", "scan_id": "bad-scan", "state": "completed", "created_at": "2026-07-20T10:00:00+00:00", "updated_at": "2026-07-20T10:00:00+00:00", "completed_at": None, "status_payload": {"publication_action": "retain_source", "report_id": "safe-report"}, **mutation})
+    malformed = client.get("/api/v1/scans/bad-scan/resume-actions/bad-action", headers=AUTH)
+    assert malformed.status_code == 503 and malformed.json()["error"]["code"] == "scanner_resume_action_store_unavailable" and injected not in malformed.text
