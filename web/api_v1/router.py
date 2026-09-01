@@ -120,6 +120,9 @@ def scanner_openapi(request: Request) -> JSONResponse:
         for path, value in spec.get("paths", {}).items()
         if path.startswith("/api/v1/") and path not in {"/api/v1/openapi.json", "/api/v1/docs"}
     }
+    if not vault_exact_resume_api_enabled():
+        spec["paths"].pop("/api/v1/scans/{scan_id}/resume", None)
+        spec["paths"].pop("/api/v1/scans/{scan_id}/resume-actions/{action_id}", None)
     return JSONResponse(spec)
 
 

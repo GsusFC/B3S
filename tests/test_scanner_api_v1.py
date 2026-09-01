@@ -2581,6 +2581,16 @@ def test_openapi_is_dedicated_to_v1_routes():
     assert "B3SScannerBearer" in response.json()["components"]["securitySchemes"]
 
 
+@pytest.mark.parametrize("flag,environment,pipeline,visible", [("false", "vault", "true", False), ("true", "production", "true", False), ("true", "vault", "false", False), ("true", "vault", "true", True)])
+def test_openapi_resume_paths_follow_runtime_gate(monkeypatch, flag, environment, pipeline, visible):
+    monkeypatch.setenv("B3S_VAULT_EXACT_RESUME_API_ENABLED", flag)
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", environment)
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", pipeline)
+    paths = TestClient(app).get("/api/v1/openapi.json").json()["paths"]
+    resume_paths = ("/api/v1/scans/{scan_id}/resume", "/api/v1/scans/{scan_id}/resume-actions/{action_id}")
+    assert all((path in paths) is visible for path in resume_paths)
+
+
 def test_scanner_job_store_persists_idempotency_and_marks_restart_interruption():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = str(Path(tmpdir) / "scanner.sqlite3")
