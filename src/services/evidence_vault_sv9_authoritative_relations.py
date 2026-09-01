@@ -10,6 +10,7 @@ from src.services.evidence_vault_canonical_core import (
     canonical_fingerprint,
 )
 from src.services.evidence_vault_sv9_judgment_delta import (
+    build_evidence_identity_set,
     build_authoritative_evidence_tile_relation,
 )
 
@@ -30,7 +31,7 @@ class EvidenceVaultSv9AuthoritativeRelationStaleWitnessError(EvidenceVaultSv9Aut
 def project_evidence_vault_sv9_authoritative_relations(
     *, repository: Any, source_scan_id: str, workspace_slug: str = "b3s"
 ) -> dict[str, Any]:
-    """Return VA1 relations only when every current persisted fact is proven."""
+    """Return VA1 relations only when every authoritative basis row is proven."""
 
     try:
         facts = repository.load_evidence_vault_sv9_authoritative_relation_facts(
@@ -54,27 +55,106 @@ def _review(reason: str) -> dict[str, Any]:
     return {"status": "review_required", "reason_codes": [reason], "authoritative_relations": [], "operational_witness": None, "projection_fingerprint": None}
 
 
-def _project(source: Mapping[str, Any], evidence: Any, authority: Mapping[str, Any]) -> dict[str, Any]:
+def project_evidence_vault_sv9_capture_current(
+    *, repository: Any, source_scan_id: str, workspace_slug: str = "b3s"
+) -> dict[str, Any]:
+    """Project the complete persisted capture evidence identity set."""
+
+    try:
+        facts = repository.load_evidence_vault_sv9_authoritative_relation_facts(
+            source_scan_id, workspace_slug=workspace_slug
+        )
+        if facts is None:
+            return _capture_review("source_unavailable")
+        source = facts["source"]
+        _validate_source(source, source_scan_id=source_scan_id, workspace_slug=workspace_slug)
+        rows = _capture_rows(source, facts["evidence"], reject_duplicate_pairs=True)
+        current = build_evidence_identity_set(
+            [{key: row[key] for key in ("evidence_ref", "evidence_fingerprint")} for row in rows]
+        )
+        return {"status": "available", "reason_codes": [], "current_evidence": current["evidence"]}
+    except ValueError as exc:
+        reason = str(exc) if str(exc) in {"operation_not_immutable", "source_identity_mismatch"} else "invalid_capture_current"
+        return _capture_review(reason)
+    except Exception:
+        return _capture_review("invalid_capture_current")
+
+
+def _capture_review(reason: str) -> dict[str, Any]:
+    return {"status": "review_required", "reason_codes": [reason], "current_evidence": []}
+
+
+def _validate_source(
+    source: Mapping[str, Any], *, source_scan_id: str, workspace_slug: str
+) -> tuple[dict[str, str], dict[str, str]]:
+    expected_scan_id, expected_workspace = _text(source_scan_id), _text(workspace_slug)
+    source_scan = _text(source["source_scan_id"])
+    source_workspace = _text(source["workspace_slug"])
+    if (
+        source_scan != expected_scan_id
+        or source_workspace != expected_workspace
+    ):
+        raise ValueError("source_identity_mismatch")
+    for name in ("workspace_id", "brand_id", "scan_run_id"):
+        _text(source[name])
+    if source["operation_status"] not in {"completed", "not_required"}:
+        raise ValueError("operation_not_immutable")
     _text(source["canonical_domain"])
     capture = {"capture_id": _uuid(source["capture_id"]), "capture_fingerprint": _sha(source["capture_fingerprint"])}
     operation = {"operation_id": _uuid(source["operation_plan_id"]), "operation_fingerprint": _sha(source["operation_fingerprint"])}
+    return capture, operation
+
+
+def _capture_rows(
+    source: Mapping[str, Any], evidence: Any, *, reject_duplicate_pairs: bool
+) -> list[dict[str, Any]]:
+    if not isinstance(evidence, list):
+        raise ValueError("capture evidence")
+    rows, pairs = [], set()
+    for raw in evidence:
+        if not isinstance(raw, Mapping) or any(
+            raw.get(name) != source[name]
+            for name in ("workspace_id", "brand_id", "source_scan_id", "canonical_domain", "capture_id")
+        ):
+            raise ValueError("cross-source evidence")
+        record_id = _uuid(raw.get("evidence_record_id"))
+        evidence_ref = _text(raw.get("evidence_ref"))
+        evidence_fingerprint = _sha(raw.get("evidence_fingerprint"))
+        pair = evidence_ref, evidence_fingerprint
+        if reject_duplicate_pairs and pair in pairs:
+            raise ValueError("duplicate capture pair")
+        pairs.add(pair)
+        evidence_id, source_identity_id = raw.get("evidence_id"), raw.get("source_identity_id")
+        if (evidence_id is None) != (source_identity_id is None):
+            raise ValueError("canonical identity")
+        identity = None if evidence_id is None else (_sha(evidence_id), _sha(source_identity_id))
+        rows.append(
+            {
+                "evidence_ref": evidence_ref,
+                "evidence_fingerprint": evidence_fingerprint,
+                "evidence_record_id": record_id,
+                "canonical_identity": identity,
+            }
+        )
+    return rows
+
+
+def _project(source: Mapping[str, Any], evidence: Any, authority: Mapping[str, Any]) -> dict[str, Any]:
+    capture, operation = _validate_source(
+        source, source_scan_id=source["source_scan_id"], workspace_slug=source["workspace_slug"]
+    )
     registry = {str(row["tile_id"]): str(row["component_key"]) for row in build_tile_contract_registry()["tiles"]}
     order = {tile: index for index, tile in enumerate(registry)}
-    current: dict[tuple[str, str], Mapping[str, Any]] = {}
-    if not isinstance(evidence, list) or not evidence:
-        return _review("unmatched_current_evidence")
-    for row in evidence:
-        if not isinstance(row, Mapping) or any(row.get(name) != source[name] for name in ("workspace_id", "brand_id", "source_scan_id", "canonical_domain", "capture_id")):
-            raise ValueError("cross-source evidence")
-        key = (_sha(row.get("evidence_id")), _sha(row.get("source_identity_id")))
-        if key in current:
-            raise ValueError("ambiguous evidence identity")
-        current[key] = {"evidence_ref": _text(row.get("evidence_ref")), "evidence_fingerprint": _sha(row.get("evidence_fingerprint")), "evidence_record_id": _uuid(row.get("evidence_record_id"))}
+    rows = _capture_rows(source, evidence, reject_duplicate_pairs=False)
+    current_by_identity: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for row in rows:
+        if row["canonical_identity"] is not None:
+            current_by_identity.setdefault(row["canonical_identity"], []).append(row)
     witness = authority.get("witness")
     if not isinstance(witness, Mapping) or not isinstance(witness.get("adoption_sequence"), int) or witness["adoption_sequence"] < 1:
         raise ValueError("adoption witness")
     witness = {"canonical_memory_version": _sha(witness.get("canonical_memory_version")), "adoption_event_id": _uuid(witness.get("adoption_event_id")), "adoption_sequence": witness["adoption_sequence"], "candidate_packet_fingerprint": _sha(witness.get("candidate_packet_fingerprint")), "request_fingerprint": _sha(witness.get("request_fingerprint"))}
-    accepted, relations, covered, seen = authority.get("accepted"), [], set(), set()
+    accepted, relations, authoritative_basis, seen = authority.get("accepted"), [], set(), set()
     if not isinstance(accepted, list):
         raise ValueError("accepted authority")
     for tile in accepted:
@@ -97,16 +177,18 @@ def _project(source: Mapping[str, Any], evidence: Any, authority: Mapping[str, A
             if not isinstance(basis, Mapping) or basis.get("polarity") not in _POLARITIES:
                 raise ValueError("nonprojectable basis")
             key = (_sha(basis.get("evidence_id")), _sha(basis.get("source_identity_id")))
-            row = current.get(key)
-            if row is None:
+            authoritative_basis.add(key)
+            matches = current_by_identity.get(key, [])
+            if len(matches) != 1:
                 return _review("unmatched_current_evidence")
+            row = matches[0]
             relation_key = (tile_id, row["evidence_record_id"])
             if relation_key in seen or not _sha(basis.get("relation_id")):
                 raise ValueError("cartesian or duplicate relation")
-            seen.add(relation_key); covered.add(key)
+            seen.add(relation_key)
             relation = build_authoritative_evidence_tile_relation(tile_id=tile_id, component_key=component, disposition="relevant", evidence_ref=row["evidence_ref"], evidence_fingerprint=row["evidence_fingerprint"], capture_origin=capture, operation_origin=operation)
             relations.append(build_authoritative_evidence_tile_relation(_raw=relation, _signed=True))
-    if set(current) != covered:
+    if any(len(current_by_identity.get(key, [])) != 1 for key in authoritative_basis):
         return _review("unmatched_current_evidence")
     relations.sort(key=lambda row: (order[row["tile_id"]], row["evidence_ref"], row["evidence_fingerprint"]))
     fingerprint = canonical_fingerprint(_VERSION, {"source_scan_id": source["source_scan_id"], "capture_origin": capture, "operation_origin": operation, "operational_witness": witness, "authoritative_relations": relations})

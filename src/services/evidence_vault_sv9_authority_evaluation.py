@@ -8,6 +8,7 @@ from src.services.evidence_vault_sv9_authoritative_relations import (
     EvidenceVaultSv9AuthoritativeRelationStaleWitnessError,
     EvidenceVaultSv9AuthoritativeRelationWitnessError,
     build_evidence_vault_sv9_authoritative_relation_witness,
+    project_evidence_vault_sv9_capture_current,
     project_evidence_vault_sv9_authoritative_relations,
     validate_evidence_vault_sv9_authoritative_relation_witness,
 )
@@ -38,14 +39,20 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
         current = delta.build_evidence_identity_set(current_evidence); trusted = _trusted(trusted_irrelevant_evidence, current)
         authority = repository.get_evidence_vault_sv9_judgment_authority(domain, workspace_slug=workspace_slug)
         prior, sentinels, authority_ids, overlay = _authority(authority)
+        try:
+            persisted_current = project_evidence_vault_sv9_capture_current(repository=repository, source_scan_id=source_scan_id, workspace_slug=workspace_slug)
+            if type(persisted_current) is not dict or persisted_current.get("status") != "available": return _outcome("review_required", authority=authority_ids, reasons=list(persisted_current.get("reason_codes") or ["capture_current_unavailable"]) if type(persisted_current) is dict else ["capture_current_unavailable"])
+            persisted_identity = delta.build_evidence_identity_set(persisted_current["current_evidence"])
+            if persisted_identity != current: return _outcome("review_required", authority=authority_ids, reasons=["current_evidence_mismatch"])
+        except Exception: return _outcome("review_required", authority=authority_ids, reasons=["capture_current_unavailable"])
         try: projection = project_evidence_vault_sv9_authoritative_relations(repository=repository, source_scan_id=source_scan_id, workspace_slug=workspace_slug)
         except Exception: return _outcome("review_required", authority=authority_ids, reasons=["authoritative_relations_unavailable"])
         if type(projection) is not dict or projection.get("status") != "available": return _outcome("review_required", authority=authority_ids, reasons=list(projection.get("reason_codes") or ["authoritative_relations_unavailable"]) if type(projection) is dict else ["authoritative_relations_unavailable"])
         try:
             pairs = {(row["evidence_ref"], row["evidence_fingerprint"]) for row in projection["authoritative_relations"]}
             if pairs & trusted: raise EvidenceVaultSv9AuthorityEvaluationError("trusted evidence conflicts with operational authority")
-            if type(authoritative_relations) is not list or authoritative_relations != projection["authoritative_relations"] or pairs != {(row["evidence_ref"], row["evidence_fingerprint"]) for row in current["evidence"]}: return _outcome("review_required", authority=authority_ids, reasons=["authoritative_relation_mismatch"])
-            witness = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id=source_scan_id, projection=projection)
+            current_pairs = {(row["evidence_ref"], row["evidence_fingerprint"]) for row in current["evidence"]}
+            if type(authoritative_relations) is not list or authoritative_relations != projection["authoritative_relations"] or not pairs <= current_pairs: return _outcome("review_required", authority=authority_ids, reasons=["authoritative_relation_mismatch"])
         except EvidenceVaultSv9AuthorityEvaluationError: raise
         except Exception: return _outcome("review_required", authority=authority_ids, reasons=["invalid_authoritative_relation_witness"])
         context, records = _source(repository, source_scan_id, current, workspace_slug, domain)
@@ -58,6 +65,9 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
     if unmapped: return _outcome("review_required", plan, authority_ids, review, ignored, unmapped, signed_delta=signed)
     if _unresolved(plan, prior, sentinels): return _outcome("review_required", plan, authority_ids, review + ["incomplete_review_partition"], ignored, unmapped, signed_delta=signed)
     if not plan["component_workset"]: return _outcome("review_required" if review else "no_new_score", plan, authority_ids, review or ["exact_reuse"], ignored, unmapped, signed_delta=signed if review else None)
+    try: witness = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id=source_scan_id, projection=projection)
+    except EvidenceVaultSv9AuthorityEvaluationError: raise
+    except Exception: return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped)
     try: existing = repository.get_evidence_vault_sv9_judgment_candidate(source_scan_id, canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], workspace_slug=workspace_slug)
     except EvidenceVaultSv9AuthoritativeRelationWitnessError: return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped)
     except Exception: return _outcome("no_new_score", plan, authority_ids, ["repository_failure"], ignored, unmapped)

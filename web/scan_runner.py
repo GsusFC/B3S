@@ -808,24 +808,6 @@ def _enter_vault_authority_boundary(scan_id: str) -> bool:
         return True
 
 
-def _authority_evidence_from_relations(relations: Any) -> list[dict[str, str]]:
-    if not isinstance(relations, list):
-        raise RuntimeError("vault_authoritative_relations_invalid")
-    evidence: dict[tuple[str, str], dict[str, str]] = {}
-    for relation in relations:
-        if not isinstance(relation, Mapping):
-            raise RuntimeError("vault_authoritative_relations_invalid")
-        ref = relation.get("evidence_ref")
-        fingerprint = relation.get("evidence_fingerprint")
-        if not isinstance(ref, str) or not ref or not isinstance(fingerprint, str) or not fingerprint:
-            raise RuntimeError("vault_authoritative_relations_invalid")
-        evidence[(ref, fingerprint)] = {
-            "evidence_ref": ref,
-            "evidence_fingerprint": fingerprint,
-        }
-    return [evidence[key] for key in sorted(evidence)]
-
-
 def _accepted_authority_source_report(application_result: Mapping[str, Any], scan_id: str, exact_owner: _ScanOwner | None = None) -> dict[str, Any] | None:
     authority = application_result.get("authority")
     candidate = authority.get("accepted_candidate") if isinstance(authority, Mapping) else None
@@ -914,6 +896,7 @@ def _run_vault_sv9_authority_scanner(
             project_vault_authority_publication,
         )
         from src.services.evidence_vault_sv9_authoritative_relations import (
+            project_evidence_vault_sv9_capture_current,
             project_evidence_vault_sv9_authoritative_relations,
         )
         from src.sv9.incremental_flow_adapter import FlowSv9StrictComponentAdapter
@@ -928,35 +911,73 @@ def _run_vault_sv9_authority_scanner(
             source_scan_id=scan_id,
             workspace_slug="b3s",
         )
+        capture_current_projection = project_evidence_vault_sv9_capture_current(
+            repository=repository,
+            source_scan_id=scan_id,
+            workspace_slug="b3s",
+        )
         relations = (
             relation_projection.get("authoritative_relations")
             if isinstance(relation_projection, Mapping)
             and relation_projection.get("status") == "available"
             else []
         )
-        current_evidence = _authority_evidence_from_relations(relations)
-        model = os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL") or SV9_FLOW_MODEL
-        application_result = run_evidence_vault_sv9_authority_application(
-            repository=repository,
-            flow=FlowSv9StrictComponentAdapter(
-                FlowSv9ShadowJsonProvider(),
-                environ=shadow_provider_environment_snapshot(os.environ),
-                model=model,
-            ),
-            domain_or_url=url,
-            source_scan_id=scan_id,
-            current_evidence=current_evidence,
-            authoritative_relations=list(relations),
-            current_series_contract=build_judgment_series_contract(
-                evaluator_version="evidence-vault-sv9-judgment-authority-v1",
-                prompt_version="sv9-strict-component-v1",
-                model_version=model,
-                flow_version="sv9-flow-strict-component-v1",
-                normalization_version="vault-capture-v1",
-            ),
-            workspace_slug="b3s",
-            trusted_irrelevant_evidence=[],
+        current_evidence = (
+            capture_current_projection.get("current_evidence")
+            if isinstance(capture_current_projection, Mapping)
+            and capture_current_projection.get("status") == "available"
+            else None
         )
+        partition_failure = None
+        if not isinstance(relations, list):
+            partition_failure = "authoritative_relations_unavailable"
+            relations = []
+        elif not isinstance(relation_projection, Mapping) or relation_projection.get("status") != "available":
+            partition_failure = (
+                list(relation_projection.get("reason_codes") or ["authoritative_relations_unavailable"])[0]
+                if isinstance(relation_projection, Mapping)
+                else "authoritative_relations_unavailable"
+            )
+            relations = []
+        if not isinstance(current_evidence, list):
+            partition_failure = (
+                list(capture_current_projection.get("reason_codes") or ["capture_current_unavailable"])[0]
+                if isinstance(capture_current_projection, Mapping)
+                else "capture_current_unavailable"
+            )
+            current_evidence = []
+        if partition_failure is not None:
+            application_result = {
+                "status": "no_new_score",
+                "reason_codes": [partition_failure],
+                "evaluation_status": None,
+                "candidate": None,
+                "signed_delta": None,
+                "authority": None,
+            }
+        else:
+            model = os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL") or SV9_FLOW_MODEL
+            application_result = run_evidence_vault_sv9_authority_application(
+                repository=repository,
+                flow=FlowSv9StrictComponentAdapter(
+                    FlowSv9ShadowJsonProvider(),
+                    environ=shadow_provider_environment_snapshot(os.environ),
+                    model=model,
+                ),
+                domain_or_url=url,
+                source_scan_id=scan_id,
+                current_evidence=current_evidence,
+                authoritative_relations=list(relations),
+                current_series_contract=build_judgment_series_contract(
+                    evaluator_version="evidence-vault-sv9-judgment-authority-v1",
+                    prompt_version="sv9-strict-component-v1",
+                    model_version=model,
+                    flow_version="sv9-flow-strict-component-v1",
+                    normalization_version="vault-capture-v1",
+                ),
+                workspace_slug="b3s",
+                trusted_irrelevant_evidence=[],
+            )
         source_report = _accepted_authority_source_report(application_result, scan_id, exact_owner)
         publication = project_vault_authority_publication(
             application_result,
