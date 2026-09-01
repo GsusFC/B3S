@@ -11769,9 +11769,16 @@ def _sv9_authoritative_relation_accepted(conn: Any, context: Mapping[str, Any], 
             else: raise EvidenceVaultOperationalAuthorityError("Operational human source provenance is invalid.")
             if value.get("decision_event_id") not in {row.get("decision_event_id") for row in source_tiles[0].get("basis") or [] if isinstance(row, Mapping) and row.get("review_status") == "accepted"}: raise EvidenceVaultOperationalAuthorityError("Operational human decision provenance is invalid.")
         else: raise EvidenceVaultOperationalAuthorityError("Operational accepted tile has no supported authority source.")
+        assessment_state = source_tiles[0].get("candidate_state")
+        if assessment_state not in {"ok", "no", "sin_evidencia"}:
+            raise EvidenceVaultOperationalAuthorityError("Operational accepted assessment state is invalid.")
         basis = [dict(row) for row in source_tiles[0].get("basis") or [] if isinstance(row, Mapping)]
-        if not basis or any(row.get("polarity") not in {"supports", "contradicts", "demonstrates_absence"} for row in basis): raise EvidenceVaultOperationalAuthorityError("Operational accepted basis is not projectable.")
-        rows.append({"tile_id": tile, "component_key": component, "authority_state": "accepted", "review_state": "resolved", "lifecycle_state": "active", "basis": basis})
+        if assessment_state == "sin_evidencia":
+            if basis:
+                raise EvidenceVaultOperationalAuthorityError("Operational sin_evidencia basis is not empty.")
+        elif not basis or any(row.get("polarity") not in {"supports", "contradicts", "demonstrates_absence"} for row in basis):
+            raise EvidenceVaultOperationalAuthorityError("Operational accepted basis is not projectable.")
+        rows.append({"tile_id": tile, "component_key": component, "assessment_state": assessment_state, "authority_state": "accepted", "review_state": "resolved", "lifecycle_state": "active", "basis": basis})
     if len({row["tile_id"] for row in rows}) != len(rows): raise EvidenceVaultOperationalAuthorityError("Operational accepted tile ids are duplicated.")
     return sorted(rows, key=lambda row: order[row["tile_id"]])
 

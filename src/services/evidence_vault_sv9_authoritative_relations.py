@@ -18,6 +18,7 @@ from src.services.evidence_vault_sv9_judgment_delta import (
 _VERSION = "evidence-vault-sv9-authoritative-relation-projection-v1"
 _WITNESS_VERSION = "evidence-vault-sv9-authoritative-relation-witness-v1"
 _POLARITIES = frozenset({"supports", "contradicts", "demonstrates_absence"})
+_ASSESSMENT_STATES = frozenset({"ok", "no", "sin_evidencia"})
 _WITNESS_FIELDS = frozenset("schema_version source_scan_id operational_witness authoritative_relations projection_fingerprint witness_fingerprint".split())
 _OPERATIONAL_WITNESS_FIELDS = frozenset("canonical_memory_version adoption_event_id adoption_sequence candidate_packet_fingerprint request_fingerprint".split())
 
@@ -80,9 +81,19 @@ def _project(source: Mapping[str, Any], evidence: Any, authority: Mapping[str, A
         if not isinstance(tile, Mapping) or tile.get("authority_state") != "accepted" or tile.get("review_state") != "resolved" or tile.get("lifecycle_state") != "active":
             raise ValueError("non-active authority")
         tile_id, component = _text(tile.get("tile_id")), _text(tile.get("component_key"))
-        if registry.get(tile_id) != component or not isinstance(tile.get("basis"), list) or not tile["basis"]:
+        assessment_state = tile.get("assessment_state")
+        if assessment_state not in _ASSESSMENT_STATES:
+            raise ValueError("invalid assessment state")
+        basis = tile.get("basis")
+        if registry.get(tile_id) != component or not isinstance(basis, list):
             raise ValueError("unknown tile")
-        for basis in tile["basis"]:
+        if assessment_state == "sin_evidencia":
+            if basis:
+                raise ValueError("sin_evidencia basis")
+            continue
+        if not basis:
+            raise ValueError("unknown tile")
+        for basis in basis:
             if not isinstance(basis, Mapping) or basis.get("polarity") not in _POLARITIES:
                 raise ValueError("nonprojectable basis")
             key = (_sha(basis.get("evidence_id")), _sha(basis.get("source_identity_id")))

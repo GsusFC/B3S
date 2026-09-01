@@ -5,6 +5,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
+from src.history import repository as history
 from src.services.evidence_vault_canonical_core import build_tile_contract_registry
 from src.services.evidence_vault_sv9_authoritative_relations import (
     EvidenceVaultSv9AuthoritativeRelationWitnessError,
@@ -39,7 +40,7 @@ def _facts(*, polarity="supports", count=1):
     evidence_id, document_id = _sha("evidence"), _sha("document")
     evidence = [{"workspace_id": workspace, "brand_id": brand, "source_scan_id": "scan-1", "canonical_domain": "brand.test", "capture_id": capture, "evidence_record_id": _id("record"), "evidence_ref": "evidence-1", "evidence_fingerprint": _sha("content"), "evidence_id": evidence_id, "source_identity_id": document_id}]
     registry = build_tile_contract_registry()["tiles"][:count]
-    accepted = [{"tile_id": tile["tile_id"], "component_key": tile["component_key"], "authority_state": "accepted", "review_state": "resolved", "lifecycle_state": "active", "basis": [{"relation_id": _sha(f"relation-{tile['tile_id']}"), "evidence_id": evidence_id, "source_identity_id": document_id, "polarity": polarity}]} for tile in registry]
+    accepted = [{"tile_id": tile["tile_id"], "component_key": tile["component_key"], "assessment_state": "ok", "authority_state": "accepted", "review_state": "resolved", "lifecycle_state": "active", "basis": [{"relation_id": _sha(f"relation-{tile['tile_id']}"), "evidence_id": evidence_id, "source_identity_id": document_id, "polarity": polarity}]} for tile in registry]
     witness = {"canonical_memory_version": _sha("memory"), "adoption_event_id": _id("event"), "adoption_sequence": 1, "candidate_packet_fingerprint": _sha("packet"), "request_fingerprint": _sha("request")}
     return {"source": source, "evidence": evidence, "authority": {"witness": witness, "accepted": accepted}}
 
@@ -47,6 +48,54 @@ def _facts(*, polarity="supports", count=1):
 def _project(facts):
     repo = _Repository(facts)
     return project_evidence_vault_sv9_authoritative_relations(repository=repo, source_scan_id="scan-1"), repo
+
+
+class _Rows:
+    def __init__(self, rows): self.rows = rows
+    def fetchall(self): return self.rows
+
+
+class _Connection:
+    def __init__(self, rows): self.rows, self.calls = rows, []
+    def execute(self, *args): self.calls.append(args); return _Rows(self.rows)
+
+
+def _repository_projection_inputs(assessment_state):
+    source_fingerprint = _sha("source-packet")
+    source_tile = {"tile_id": "M1", "candidate_state": assessment_state, "basis": [], "coverage_refs": [], "unresolved_refs": [], "delta_kind": "baseline"}
+    source = {"packet": {"manifest": {"brand_identity": "brand.test"}, "candidate_tiles": [source_tile]}, "reference_resolution": {}}
+    accepted = {"tile_id": "M1", "component_key": "mission", "semantic_state": assessment_state, "basis": [], "coverage_refs": [], "unresolved_refs": [], "source_delta_kind": "baseline", "source_candidate_packet_fingerprint": source_fingerprint, "authority_profile_id": "scanner-semantic-v1", "authority_source": "policy", "decision_event_id": None, "authority_matrix_fingerprint": _sha("authority-matrix"), "authority_decision_fingerprint": _sha("authority-decision")}
+    memory = {"brand_identity": "brand.test", "lifecycle_state": "active", "authority": True, "content": {"accepted_tiles": [accepted]}}
+    context = {"brand_id": _id("repository-brand"), "canonical_domain": "brand.test"}
+    connection = _Connection([{"packet_kind": "operational_source_v2"}])
+    return connection, context, memory, source
+
+
+def _patch_repository_projection_seams(monkeypatch, source):
+    monkeypatch.setattr(history, "_vault_operational_source_packet_record", lambda _row: source)
+    monkeypatch.setattr(history, "_sv9_authoritative_relation_source_operation", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(history, "evaluate_scanner_semantic_authority", lambda **_kwargs: {"authority_profile_id": "scanner-semantic-v1", "authority_matrix_fingerprint": _sha("authority-matrix"), "authority_decision_fingerprint": _sha("authority-decision")})
+    monkeypatch.setattr(history, "validate_authority_decision", lambda *_args, **_kwargs: None)
+
+
+def test_repository_projection_carries_empty_sin_evidencia_state_without_basis(monkeypatch):
+    connection, context, memory, source = _repository_projection_inputs("sin_evidencia")
+    _patch_repository_projection_seams(monkeypatch, source)
+
+    projected = history._sv9_authoritative_relation_accepted(connection, context, memory)
+
+    assert len(projected) == 1
+    assert projected[0]["assessment_state"] == "sin_evidencia"
+    assert projected[0]["basis"] == []
+
+
+@pytest.mark.parametrize("assessment_state", ["ok", "no"])
+def test_repository_projection_rejects_empty_basis_for_evidence_state(monkeypatch, assessment_state):
+    connection, context, memory, source = _repository_projection_inputs(assessment_state)
+    _patch_repository_projection_seams(monkeypatch, source)
+
+    with pytest.raises(history.EvidenceVaultOperationalAuthorityError, match="projectable"):
+        history._sv9_authoritative_relation_accepted(connection, context, memory)
 
 
 def test_projects_exact_one_to_many_without_advisory_inputs_or_cartesian_expansion():
@@ -63,6 +112,51 @@ def test_all_accepted_operational_polarities_project_as_relevant(polarity):
     result, _ = _project(_facts(polarity=polarity))
     assert result["status"] == "available"
     assert result["authoritative_relations"][0]["disposition"] == "relevant"
+
+
+def test_sin_evidencia_with_empty_basis_does_not_poison_projection():
+    facts = _facts(count=2)
+    facts["authority"]["accepted"][0]["assessment_state"] = "ok"
+    facts["authority"]["accepted"][1]["assessment_state"] = "sin_evidencia"
+    facts["authority"]["accepted"][1]["basis"] = []
+
+    result, _ = _project(facts)
+
+    assert result["status"] == "available"
+    assert len(result["authoritative_relations"]) == 1
+    assert result["authoritative_relations"][0]["tile_id"] == facts["authority"]["accepted"][0]["tile_id"]
+
+
+@pytest.mark.parametrize("assessment_state", ["ok", "no"])
+def test_empty_basis_for_evidence_bearing_assessment_state_fails_closed(assessment_state):
+    facts = _facts()
+    facts["authority"]["accepted"][0]["assessment_state"] = assessment_state
+    facts["authority"]["accepted"][0]["basis"] = []
+
+    result, _ = _project(facts)
+
+    assert result["status"] == "review_required"
+    assert result["authoritative_relations"] == []
+
+
+def test_nonempty_basis_for_sin_evidencia_fails_closed():
+    facts = _facts()
+    facts["authority"]["accepted"][0]["assessment_state"] = "sin_evidencia"
+
+    result, _ = _project(facts)
+
+    assert result["status"] == "review_required"
+    assert result["authoritative_relations"] == []
+
+
+def test_unknown_assessment_state_fails_closed():
+    facts = _facts()
+    facts["authority"]["accepted"][0]["assessment_state"] = "unknown"
+
+    result, _ = _project(facts)
+
+    assert result["status"] == "review_required"
+    assert result["authoritative_relations"] == []
 
 
 @pytest.mark.parametrize("mutate", [
