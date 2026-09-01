@@ -2586,9 +2586,13 @@ def test_openapi_resume_paths_follow_runtime_gate(monkeypatch, flag, environment
     monkeypatch.setenv("B3S_VAULT_EXACT_RESUME_API_ENABLED", flag)
     monkeypatch.setenv("BRAND3_ENVIRONMENT", environment)
     monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", pipeline)
-    paths = TestClient(app).get("/api/v1/openapi.json").json()["paths"]
+    document = TestClient(app).get("/api/v1/openapi.json").json()
+    paths = document["paths"]
+    schemas = document["components"]["schemas"]
     resume_paths = ("/api/v1/scans/{scan_id}/resume", "/api/v1/scans/{scan_id}/resume-actions/{action_id}")
+    resume_schemas = ("ResumeActionFailure", "ResumeActionLinks", "ResumeActionResult", "ScanResumeActionResponse")
     assert all((path in paths) is visible for path in resume_paths)
+    assert all((schema in schemas) is visible for schema in resume_schemas)
 
 
 def test_scanner_job_store_persists_idempotency_and_marks_restart_interruption():
