@@ -24,7 +24,7 @@ class _ApplicationRepository(_Repository):
             evidence_id, source_identity_id = _hash(100 + number), _hash(200 + number)
             evidence.append(source | {"evidence_record_id": _uuid(number), "evidence_ref": f"evidence:{number}", "evidence_fingerprint": _hash(number), "evidence_id": evidence_id, "source_identity_id": source_identity_id})
             basis.append({"relation_id": _hash(300 + number), "evidence_id": evidence_id, "source_identity_id": source_identity_id, "polarity": "supports"})
-        accepted = [{"tile_id": "M1", "component_key": "mission", "authority_state": "accepted", "review_state": "resolved", "lifecycle_state": "active", "basis": basis}]
+        accepted = [{"tile_id": "M1", "component_key": "mission", "assessment_state": "ok", "authority_state": "accepted", "review_state": "resolved", "lifecycle_state": "active", "basis": basis}]
         seed = self.witness_seed; witness = {"canonical_memory_version": _hash(seed), "adoption_event_id": _uuid(seed), "adoption_sequence": 1, "candidate_packet_fingerprint": _hash(seed + 1), "request_fingerprint": _hash(seed + 2)}
         return {"source": source, "evidence": evidence, "authority": {"witness": witness, "accepted": accepted}}
     def get_evidence_vault_sv9_judgment_authority(self, _domain, **_kwargs):
