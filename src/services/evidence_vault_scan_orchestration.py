@@ -15,14 +15,15 @@ from src.history.capture_observation import (
     CAPTURE_OBSERVATION_SCHEMA_VERSION,
     parse_capture_observation,
 )
+from src.history.models import ReportImportError
 from src.history.report_parser import canonical_json_hash, normalize_domain
-from src.services.evidence_vault_incremental_refresh import (
-    build_vault_scan_plan,
-    resolve_vault_scan_mode,
-)
+from src.services.evidence_vault_canonical_core import canonical_fingerprint
+from src.services.evidence_vault_incremental_executor import EvidenceVaultIncrementalExecutorError, validate_vault_operation_result
+from src.services.evidence_vault_incremental_refresh import EvidenceVaultOperationPlanError, build_vault_scan_plan, resolve_vault_scan_mode, validate_vault_scan_plan
 from src.services.evidence_vault_semantic_analysis_contract import (
     current_semantic_analysis_contract,
 )
+from src.services.scanner_evidence_comparison import canonical_evidence_representatives
 from src.sv9_flow.evidence_worker import build_evidence_pack_from_snapshot
 
 
@@ -31,6 +32,19 @@ VAULT_INCREMENTAL_CAPTURE_PIPELINE_VERSION = "vault-incremental-capture-v2"
 
 class EvidenceVaultScanOrchestrationError(ValueError):
     """A persisted Vault scan cannot be planned or resumed safely."""
+
+
+class VaultExactResumeError(EvidenceVaultScanOrchestrationError):
+    """A closed, public-safe outcome for the private exact-resume seam."""
+    def __init__(self, reason_code: str, *, retryable: bool) -> None:
+        self.reason_code, self.retryable = reason_code, retryable
+        super().__init__(reason_code)
+_EXACT_RESUME_ERRORS = {"busy": ("vault_exact_resume_busy", True), "invalid_action": ("vault_exact_resume_invalid_action", False), "operation_invalid": ("vault_exact_resume_operation_invalid", False), "operation_missing": ("vault_exact_resume_operation_missing", False), "superseded": ("vault_exact_resume_superseded", False), "report_invalid": ("vault_exact_resume_report_invalid", False), "execution_failed": ("vault_exact_resume_execution_failed", True)}
+def vault_exact_resume_error(kind: str) -> VaultExactResumeError:
+    """Map only a closed exact-resume kind to a public-safe error."""
+
+    reason_code, retryable = _EXACT_RESUME_ERRORS.get(kind, _EXACT_RESUME_ERRORS["execution_failed"])
+    return VaultExactResumeError(reason_code, retryable=retryable)
 
 
 _VAULT_AUTHORITY_STAGE_REASON_CODES = {
@@ -381,6 +395,40 @@ def prepare_vault_scan_after_capture(
         "report_observation": dict(observation),
         "operation_plan": plan,
     }
+
+
+def prepare_vault_exact_resume(*, repository: VaultCaptureRepository, action: Mapping[str, Any], scan_id: str, workspace_slug: str = "b3s") -> dict[str, Any]:
+    """Recover one frozen operation without recapturing or replanning it."""
+    scan_id, request = str(scan_id or "").strip(), {"operation": "exact_resume"}
+    if not (scan_id and isinstance(action, Mapping) and isinstance(action.get("action_id"), str) and action["action_id"].strip() and action.get("scan_id") == scan_id and action.get("state") == "running" and action.get("request_payload") == request and action.get("status_payload") == {"state": "running", "phase": "running"} and action.get("request_fingerprint") == canonical_json_hash(request)):
+        raise vault_exact_resume_error("invalid_action")
+    try: operation = repository.get_capture_operation_plan(scan_id, workspace_slug=workspace_slug)
+    except (EvidenceVaultScanOrchestrationError, ReportImportError): raise vault_exact_resume_error("operation_invalid") from None
+    if not isinstance(operation, Mapping): raise vault_exact_resume_error("operation_missing" if operation is None else "operation_invalid")
+    raw, plan = operation.get("raw_observation"), operation.get("plan")
+    try: parsed = parse_capture_observation(dict(raw)); validate_vault_scan_plan(plan)
+    except (ReportImportError, EvidenceVaultOperationPlanError, TypeError, ValueError): raise vault_exact_resume_error("operation_invalid") from None
+    plan = dict(plan)
+    if any((operation.get("source_scan_id") != scan_id, parsed.source_scan_id != scan_id, operation.get("observation_hash") != parsed.observation_hash, operation.get("capture_hash") != parsed.capture_hash, operation.get("operation_plan_fingerprint") != plan["operation_plan_fingerprint"], operation.get("canonical_memory_version") != plan["canonical_memory_version"], normalize_domain(str(plan["subject_url"])) != parsed.canonical_domain, plan["brand_identity"] != parsed.canonical_domain, operation.get("brand_identity") != parsed.canonical_domain)):
+        raise vault_exact_resume_error("operation_invalid")
+    representatives = canonical_evidence_representatives(parsed.evidence_records, subject_url=plan["subject_url"]); planned = sorted(plan["operations"]["classify_evidence_fingerprints"])
+    if plan["semantic_context"]["evidence_fingerprints"] != sorted(representatives) or not set(planned).issubset(representatives): raise vault_exact_resume_error("operation_invalid")
+    status = str(operation.get("status") or "")
+    if status == "superseded": raise vault_exact_resume_error("superseded")
+    active = status in {"claimed", "running"}
+    if status not in {"pending", "not_required", "claimed", "running", "result_persisted", "completed", "failed_retryable"}: raise vault_exact_resume_error("operation_invalid")
+    if active and operation.get("lease_active") is True: raise vault_exact_resume_error("busy")
+    if active and operation.get("lease_active") is not False: raise vault_exact_resume_error("operation_invalid")
+    if not active and operation.get("lease_active") is not False and operation.get("lease_active") is not None: raise vault_exact_resume_error("operation_invalid")
+    has_result = any(operation.get(field) is not None for field in ("result_payload", "result_fingerprint", "candidate_packet_fingerprint"))
+    if status in {"result_persisted", "completed"}:
+        result = operation.get("result_payload")
+        try: validate_vault_operation_result(result); result_fingerprint = canonical_fingerprint("evidence-vault-operation-result-v1", result)
+        except (EvidenceVaultIncrementalExecutorError, TypeError, ValueError): raise vault_exact_resume_error("operation_invalid") from None
+        if any((operation.get("result_fingerprint") != result_fingerprint, result.get("operation_plan_fingerprint") != plan["operation_plan_fingerprint"], result.get("observation_hash") != parsed.observation_hash, result.get("canonical_memory_version") != plan["canonical_memory_version"], operation.get("candidate_packet_fingerprint") != result.get("candidate_packet_fingerprint"))): raise vault_exact_resume_error("operation_invalid")
+        if result.get("output_kind") == "candidate_overlay" and result.get("selected_evidence_fingerprints") != planned: raise vault_exact_resume_error("operation_invalid")
+    elif has_result: raise vault_exact_resume_error("operation_invalid")
+    return {"url": parsed.canonical_url, "brand_name": parsed.brand_name, "canonical_snapshot": deepcopy(parsed.capture_payload), "report_binding": {"source_scan_id": parsed.source_scan_id, "source_run_id": parsed.source_run_id, "observation_hash": parsed.observation_hash, "capture_hash": parsed.capture_hash, "canonical_domain": parsed.canonical_domain}, "preparation": {"operation_plan": plan if status != "completed" else None, "resume": {"analysis_status": status, "operation_plan_fingerprint": plan["operation_plan_fingerprint"], "analysis_result_fingerprint": operation.get("result_fingerprint"), "semantic_work_completed": status in {"result_persisted", "completed"} and bool(plan["operations"]["llm_required"]), "materialization_required": status == "result_persisted"}}}
 
 
 def _trusted_capture_binding_matches(
@@ -758,8 +806,11 @@ __all__ = [
     "EvidenceVaultScanOrchestrationError",
     "EvidenceVaultScanOrchestrationStageError",
     "VAULT_INCREMENTAL_CAPTURE_PIPELINE_VERSION",
+    "VaultExactResumeError",
     "bind_vault_report_to_capture_observation",
     "build_capture_observation_from_snapshot",
+    "prepare_vault_exact_resume",
     "prepare_vault_scan_after_capture",
     "public_vault_authority_reason_code",
+    "vault_exact_resume_error",
 ]
