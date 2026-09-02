@@ -42,11 +42,21 @@
       }
     },
     {
-      "name": "b3s_start_scan",
-      "risk": "consequential",
+      "name": "b3s_prepare_scan",
+      "risk": "reversible",
       "expectedAnnotations": {
         "readOnly": false,
         "untrustedContent": true
+      },
+      "input": {
+        "url": "https://webmcp-smoke.invalid",
+        "brandName": "WebMCP smoke",
+        "allowDegradedFallback": false
+      },
+      "expectedOutputSubset": {
+        "prepared": true,
+        "submitted": false,
+        "requiresHumanSubmit": true
       }
     },
     {
