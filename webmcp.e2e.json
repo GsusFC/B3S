@@ -1,0 +1,61 @@
+{
+  "timeoutMs": 5000,
+  "tools": [
+    {
+      "name": "b3s_list_brand_analyses",
+      "risk": "read-only",
+      "expectedAnnotations": {
+        "readOnly": true,
+        "untrustedContent": true
+      }
+    },
+    {
+      "name": "b3s_get_brand_analysis",
+      "risk": "read-only",
+      "expectedAnnotations": {
+        "readOnly": true,
+        "untrustedContent": true
+      }
+    },
+    {
+      "name": "b3s_read_report_markdown",
+      "risk": "read-only",
+      "expectedAnnotations": {
+        "readOnly": true,
+        "untrustedContent": true
+      }
+    },
+    {
+      "name": "b3s_get_scan_status",
+      "risk": "read-only",
+      "expectedAnnotations": {
+        "readOnly": true,
+        "untrustedContent": true
+      }
+    },
+    {
+      "name": "b3s_start_scan",
+      "risk": "consequential",
+      "expectedAnnotations": {
+        "readOnly": false,
+        "untrustedContent": true
+      }
+    },
+    {
+      "name": "b3s_continue_degraded_scan",
+      "risk": "consequential",
+      "expectedAnnotations": {
+        "readOnly": false,
+        "untrustedContent": true
+      }
+    },
+    {
+      "name": "b3s_cancel_scan",
+      "risk": "consequential",
+      "expectedAnnotations": {
+        "readOnly": false,
+        "untrustedContent": true
+      }
+    }
+  ]
+}
