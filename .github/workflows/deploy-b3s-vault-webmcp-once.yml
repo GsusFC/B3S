@@ -1,8 +1,9 @@
 name: One-time deploy WebMCP to b3s-vault
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - ops/deploy-b3s-vault-webmcp-184502a
     paths:
       - ".github/workflows/deploy-b3s-vault-webmcp-once.yml"
 
@@ -19,9 +20,8 @@ jobs:
     if: >-
       ${{
         github.repository == 'GsusFC/B3S' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        github.event.pull_request.head.ref == 'ops/deploy-b3s-vault-webmcp-184502a' &&
-        github.event.pull_request.base.ref == 'main'
+        github.ref == 'refs/heads/ops/deploy-b3s-vault-webmcp-184502a' &&
+        github.actor == 'GsusFC'
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
