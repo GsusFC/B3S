@@ -8,8 +8,8 @@ from src.services.evidence_vault_sv9_authoritative_relations import (
     EvidenceVaultSv9AuthoritativeRelationStaleWitnessError,
     EvidenceVaultSv9AuthoritativeRelationWitnessError,
     build_evidence_vault_sv9_authoritative_relation_witness,
-    project_evidence_vault_sv9_capture_current,
-    project_evidence_vault_sv9_authoritative_relations,
+    project_evidence_vault_sv9_evaluation_input,
+    validate_evidence_vault_sv9_evaluation_input,
     validate_evidence_vault_sv9_authoritative_relation_witness,
 )
 from src.services.evidence_vault_sv9_authority_projection import (
@@ -24,39 +24,72 @@ from src.sv9 import judgment_memory as memory
 # fmt: off
 class EvidenceVaultSv9AuthorityEvaluationRepository(Protocol):
     def get_evidence_vault_sv9_judgment_authority(self, domain_or_url: str, **kwargs: Any) -> dict[str, Any] | None: ...
-    def load_evidence_vault_sv9_judgment_context(self, source_scan_id: str, **kwargs: Any) -> dict[str, Any] | None: ...
     def load_evidence_vault_sv9_authoritative_relation_facts(self, source_scan_id: str, **kwargs: Any) -> dict[str, Any] | None: ...
     def resolve_evidence_vault_sv9_judgment_evidence(self, source_scan_id: str, advisory_evidence_refs: list[str], **kwargs: Any) -> dict[str, Any]: ...
     def get_evidence_vault_sv9_judgment_candidate(self, source_scan_id: str, *, canonical_plan_fingerprint: str, **kwargs: Any) -> dict[str, Any] | None: ...
     def append_evidence_vault_sv9_judgment_candidate(self, source_scan_id: str, candidate: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], bool]: ...
 class EvidenceVaultSv9AuthorityEvaluationError(ValueError): pass
 class EvidenceVaultSv9AuthoritySourceIdentityError(EvidenceVaultSv9AuthorityEvaluationError): pass
-def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9AuthorityEvaluationRepository, flow: evaluation.Sv9StrictComponentFlowPort, domain_or_url: str, source_scan_id: str, current_evidence: list[Mapping[str, Any]], authoritative_relations: list[Mapping[str, Any]], current_series_contract: Mapping[str, Any], workspace_slug: str = "b3s", trusted_irrelevant_evidence: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
+def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9AuthorityEvaluationRepository, flow: evaluation.Sv9StrictComponentFlowPort, domain_or_url: str, source_scan_id: str, current_series_contract: Mapping[str, Any], workspace_slug: str = "b3s", trusted_irrelevant_evidence: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
     """Evaluate exact trusted deltas without adopting, reopening, or superseding authority."""
     try:
         domain = normalize_domain(_text(domain_or_url)); _text(source_scan_id); _text(workspace_slug)
         if not domain: raise EvidenceVaultSv9AuthorityEvaluationError("domain is invalid")
-        current = delta.build_evidence_identity_set(current_evidence); trusted = _trusted(trusted_irrelevant_evidence, current)
         authority = repository.get_evidence_vault_sv9_judgment_authority(domain, workspace_slug=workspace_slug)
         prior, sentinels, authority_ids, overlay = _authority(authority)
         try:
-            persisted_current = project_evidence_vault_sv9_capture_current(repository=repository, source_scan_id=source_scan_id, workspace_slug=workspace_slug)
-            if type(persisted_current) is not dict or persisted_current.get("status") != "available": return _outcome("review_required", authority=authority_ids, reasons=list(persisted_current.get("reason_codes") or ["capture_current_unavailable"]) if type(persisted_current) is dict else ["capture_current_unavailable"])
-            persisted_identity = delta.build_evidence_identity_set(persisted_current["current_evidence"])
-            if persisted_identity != current: return _outcome("review_required", authority=authority_ids, reasons=["current_evidence_mismatch"])
-        except Exception: return _outcome("review_required", authority=authority_ids, reasons=["capture_current_unavailable"])
-        try: projection = project_evidence_vault_sv9_authoritative_relations(repository=repository, source_scan_id=source_scan_id, workspace_slug=workspace_slug)
-        except Exception: return _outcome("review_required", authority=authority_ids, reasons=["authoritative_relations_unavailable"])
-        if type(projection) is not dict or projection.get("status") != "available": return _outcome("review_required", authority=authority_ids, reasons=list(projection.get("reason_codes") or ["authoritative_relations_unavailable"]) if type(projection) is dict else ["authoritative_relations_unavailable"])
-        try:
-            pairs = {(row["evidence_ref"], row["evidence_fingerprint"]) for row in projection["authoritative_relations"]}
-            if pairs & trusted: raise EvidenceVaultSv9AuthorityEvaluationError("trusted evidence conflicts with operational authority")
-            current_pairs = {(row["evidence_ref"], row["evidence_fingerprint"]) for row in current["evidence"]}
-            if type(authoritative_relations) is not list or authoritative_relations != projection["authoritative_relations"] or not pairs <= current_pairs: return _outcome("review_required", authority=authority_ids, reasons=["authoritative_relation_mismatch"])
-        except EvidenceVaultSv9AuthorityEvaluationError: raise
-        except Exception: return _outcome("review_required", authority=authority_ids, reasons=["invalid_authoritative_relation_witness"])
-        context, records = _source(repository, source_scan_id, current, workspace_slug, domain)
-        relations = projection["authoritative_relations"]
+            evaluation_input = project_evidence_vault_sv9_evaluation_input(
+                repository=repository,
+                source_scan_id=source_scan_id,
+                workspace_slug=workspace_slug,
+            )
+            if type(evaluation_input) is not dict or evaluation_input.get("status") != "available":
+                return _outcome(
+                    "review_required",
+                    authority=authority_ids,
+                    reasons=(
+                        list(evaluation_input.get("reason_codes") or ["invalid_evaluation_input"])
+                        if type(evaluation_input) is dict
+                        else ["invalid_evaluation_input"]
+                    ),
+                )
+            evaluation_input = validate_evidence_vault_sv9_evaluation_input(
+                evaluation_input,
+                source_scan_id=source_scan_id,
+                workspace_slug=workspace_slug,
+            )
+            current = delta.build_evidence_identity_set(
+                evaluation_input["current_evidence"]
+            )
+            trusted = _trusted(trusted_irrelevant_evidence, current)
+            relations = evaluation_input["authoritative_relations"]
+            relation_pairs = {
+                (row["evidence_ref"], row["evidence_fingerprint"])
+                for row in relations
+            }
+            if relation_pairs & trusted:
+                raise EvidenceVaultSv9AuthorityEvaluationError(
+                    "trusted evidence conflicts with operational authority"
+                )
+            context, records = _source(
+                repository,
+                source_scan_id,
+                evaluation_input,
+                workspace_slug,
+                domain,
+            )
+        except EvidenceVaultSv9AuthoritySourceIdentityError:
+            raise
+        except EvidenceVaultSv9AuthorityEvaluationError:
+            raise
+        except ValueError as exc:
+            if str(exc) == "invalid_source_identity":
+                raise EvidenceVaultSv9AuthoritySourceIdentityError from exc
+            return _outcome(
+                "review_required",
+                authority=authority_ids,
+                reasons=["invalid_evaluation_input"],
+            )
         signed = delta.build_evidence_vault_sv9_judgment_delta(current_evidence=current, prior_judgments=prior, prior_component_sentinels=sentinels, authoritative_relations=relations, current_series_contract=dict(current_series_contract))
     except EvidenceVaultSv9AuthoritySourceIdentityError: return _outcome("no_new_score", reasons=["invalid_source_identity"])
     except EvidenceVaultSv9AuthorityEvaluationError: return _outcome("no_new_score", reasons=["invalid_input"])
@@ -65,7 +98,17 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
     if unmapped: return _outcome("review_required", plan, authority_ids, review, ignored, unmapped, signed_delta=signed)
     if _unresolved(plan, prior, sentinels): return _outcome("review_required", plan, authority_ids, review + ["incomplete_review_partition"], ignored, unmapped, signed_delta=signed)
     if not plan["component_workset"]: return _outcome("review_required" if review else "no_new_score", plan, authority_ids, review or ["exact_reuse"], ignored, unmapped, signed_delta=signed if review else None)
-    try: witness = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id=source_scan_id, projection=projection)
+    try:
+        witness = build_evidence_vault_sv9_authoritative_relation_witness(
+            source_scan_id=source_scan_id,
+            projection={
+                "status": "available",
+                "reason_codes": [],
+                "authoritative_relations": relations,
+                "operational_witness": evaluation_input["operational_witness"],
+                "projection_fingerprint": evaluation_input["relation_projection_fingerprint"],
+            },
+        )
     except EvidenceVaultSv9AuthorityEvaluationError: raise
     except Exception: return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped)
     try: existing = repository.get_evidence_vault_sv9_judgment_candidate(source_scan_id, canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], workspace_slug=workspace_slug)
@@ -125,12 +168,27 @@ def _trusted(value: Sequence[Mapping[str, Any]], current: Mapping[str, Any]) -> 
     return pairs
 def _source(repository: EvidenceVaultSv9AuthorityEvaluationRepository, scan: str, current: Mapping[str, Any], workspace: str, domain: str) -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, Any]]]:
     try:
-        loaded = repository.load_evidence_vault_sv9_judgment_context(scan, workspace_slug=workspace)
-        if loaded["canonical_domain"] != domain: raise EvidenceVaultSv9AuthoritySourceIdentityError("source domain is invalid")
-        context = {"capture_origin": {"capture_id": loaded["capture_id"], "capture_fingerprint": loaded["capture_fingerprint"]}, "operation_origin": {"operation_id": loaded["operation_plan_id"], "operation_fingerprint": loaded["operation_fingerprint"]}}
+        loaded = current["source_identity"]
+        if loaded["canonical_domain"] != domain:
+            raise EvidenceVaultSv9AuthoritySourceIdentityError("source domain is invalid")
+        context = {
+            "capture_origin": {
+                "capture_id": loaded["capture_id"],
+                "capture_fingerprint": loaded["capture_fingerprint"],
+            },
+            "operation_origin": {
+                "operation_id": loaded["operation_plan_id"],
+                "operation_fingerprint": loaded["operation_fingerprint"],
+            },
+        }
         evaluation.build_evidence_packet(component_key=next(iter(planner._COMPONENT_TILES)), tiles=[], **context, series_fingerprint="0" * 64)
-        if not current["evidence"]: return context, {}
-        resolved = repository.resolve_evidence_vault_sv9_judgment_evidence(scan, [row["evidence_ref"] for row in current["evidence"]], workspace_slug=workspace)
+        if not current["current_evidence"]:
+            return context, {}
+        resolved = repository.resolve_evidence_vault_sv9_judgment_evidence(
+            scan,
+            [row["evidence_ref"] for row in current["current_evidence"]],
+            workspace_slug=workspace,
+        )
         if {key: resolved[key] for key in context} != context: raise ValueError
         records = {}
         for raw in resolved["evidence"]:
@@ -138,7 +196,7 @@ def _source(repository: EvidenceVaultSv9AuthorityEvaluationRepository, scan: str
             identifier = str(UUID(raw["evidence_record_id"])); evidence = evaluation._evidence([{key: raw[key] for key in ("evidence_ref", "evidence_fingerprint", "content")}], True)[0]; pair = evidence["evidence_ref"], evidence["evidence_fingerprint"]
             if identifier != raw["evidence_record_id"] or pair in records: raise ValueError
             records[pair] = {"evidence_record_id": identifier, **evidence}
-        if set(records) != {(row["evidence_ref"], row["evidence_fingerprint"]) for row in current["evidence"]}: raise ValueError
+        if set(records) != {(row["evidence_ref"], row["evidence_fingerprint"]) for row in current["current_evidence"]}: raise ValueError
         return context, records
     except EvidenceVaultSv9AuthoritySourceIdentityError: raise
     except (AttributeError, KeyError, TypeError, ValueError, evaluation.IncrementalEvaluationError) as exc: raise EvidenceVaultSv9AuthorityEvaluationError("persisted evidence is invalid") from exc

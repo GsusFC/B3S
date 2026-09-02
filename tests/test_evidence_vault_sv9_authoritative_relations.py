@@ -14,6 +14,7 @@ from src.services.evidence_vault_sv9_authoritative_relations import (
     project_evidence_vault_sv9_evaluation_input,
     project_evidence_vault_sv9_capture_current,
     project_evidence_vault_sv9_authoritative_relations,
+    validate_evidence_vault_sv9_evaluation_input,
     validate_evidence_vault_sv9_authoritative_relation_witness,
 )
 from src.services.evidence_vault_sv9_judgment_delta import (
@@ -367,4 +368,28 @@ def test_boolean_adoption_sequence_fails_closed_for_evaluation_input():
     assert result["status"] == "review_required"
     assert result["reason_codes"] == ["invalid_authoritative_facts"]
     assert result["evaluation_input_fingerprint"] is None
+
+
+def test_evaluation_input_validator_replays_nested_contract_and_rejects_tampering():
+    facts = _facts(count=2)
+    value = project_evidence_vault_sv9_evaluation_input(
+        repository=_Repository(facts), source_scan_id="scan-1"
+    )
+    assert validate_evidence_vault_sv9_evaluation_input(
+        value, source_scan_id="scan-1"
+    ) == value
+    for mutate in (
+        lambda row: row.__setitem__("schema_version", "unknown"),
+        lambda row: row["source_identity"].__setitem__("brand_id", "not-a-uuid"),
+        lambda row: row["authoritative_relations"][0].__setitem__(
+            "relation_fingerprint", _sha("tampered")
+        ),
+        lambda row: row.__setitem__("evaluation_input_fingerprint", _sha("tampered")),
+    ):
+        tampered = deepcopy(value)
+        mutate(tampered)
+        with pytest.raises(ValueError):
+            validate_evidence_vault_sv9_evaluation_input(
+                tampered, source_scan_id="scan-1"
+            )
 # fmt: on

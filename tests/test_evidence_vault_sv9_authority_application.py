@@ -69,17 +69,18 @@ class _ApplicationRepository(_Repository):
         return deepcopy(self.authority), False
 
 def _run(repo, flow, *, current=(9,), relations=None, trusted=(), source="scan", domain="example.test"):
+    repo.records = tuple(current)
     relations = [_relation(repo, "M1", number=value) for value in current] if relations is None else list(relations)
+    repo.projection_relations = relations
     return application.run_evidence_vault_sv9_authority_application(
         repository=repo, flow=flow, domain_or_url=domain, source_scan_id=source,
-        current_evidence=[_identity(value) for value in current], authoritative_relations=list(relations),
         current_series_contract=_series(), trusted_irrelevant_evidence=[_identity(value) for value in trusted],
     )
 
 def _stage(repo):
     return evaluation_service.run_evidence_vault_sv9_authority_evaluation(
         repository=repo, flow=_Flow(), domain_or_url="example.test", source_scan_id="scan",
-        current_evidence=[_identity(9)], authoritative_relations=[_relation(repo, "M1", number=9)], current_series_contract=_series(),
+        current_series_contract=_series(),
         trusted_irrelevant_evidence=[],
     )
 
@@ -163,7 +164,7 @@ def test_pending_overlay_blocks_adoption_stable_success_and_retention(monkeypatc
     assert _run(repo, _Flow())["status"] == "authority_conflict" and repo.mutations == before
 
 def test_first_run_review_and_no_score_or_repository_failures_fail_closed():
-    first = _ApplicationRepository(records=()); unresolved = _run(first, _Flow())
+    first = _ApplicationRepository(records=()); unresolved = _run(first, _Flow(), current=())
     assert unresolved["status"] == "first_run_unresolved" and not first.mutations
     failed = _ApplicationRepository(records=(9,)); assert _run(failed, _Flow(fail=1), relations=[_relation(failed, "M1", number=9)], trusted=())["status"] == "first_run_unresolved"
     repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"
