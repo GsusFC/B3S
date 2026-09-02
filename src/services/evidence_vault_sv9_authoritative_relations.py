@@ -17,15 +17,117 @@ from src.services.evidence_vault_sv9_judgment_delta import (
 # fmt: off
 
 _VERSION = "evidence-vault-sv9-authoritative-relation-projection-v1"
+EVIDENCE_VAULT_SV9_EVALUATION_INPUT_VERSION = "evidence-vault-sv9-evaluation-input-v1"
+_EVALUATION_INPUT_VERSION = EVIDENCE_VAULT_SV9_EVALUATION_INPUT_VERSION
 _WITNESS_VERSION = "evidence-vault-sv9-authoritative-relation-witness-v1"
 _POLARITIES = frozenset({"supports", "contradicts", "demonstrates_absence"})
 _ASSESSMENT_STATES = frozenset({"ok", "no", "sin_evidencia"})
+_SOURCE_IDENTITY_FIELDS = (
+    "workspace_id",
+    "brand_id",
+    "scan_run_id",
+    "source_scan_id",
+    "workspace_slug",
+    "canonical_domain",
+    "capture_id",
+    "capture_fingerprint",
+    "operation_plan_id",
+    "operation_fingerprint",
+    "operation_status",
+)
 _WITNESS_FIELDS = frozenset("schema_version source_scan_id operational_witness authoritative_relations projection_fingerprint witness_fingerprint".split())
 _OPERATIONAL_WITNESS_FIELDS = frozenset("canonical_memory_version adoption_event_id adoption_sequence candidate_packet_fingerprint request_fingerprint".split())
 
 
 class EvidenceVaultSv9AuthoritativeRelationWitnessError(ValueError): pass
 class EvidenceVaultSv9AuthoritativeRelationStaleWitnessError(EvidenceVaultSv9AuthoritativeRelationWitnessError): pass
+
+
+def project_evidence_vault_sv9_evaluation_input(
+    *, repository: Any, source_scan_id: str, workspace_slug: str = "b3s"
+) -> dict[str, Any]:
+    """Build one authority-bound, deterministic SV9 evaluation-input bundle."""
+
+    try:
+        facts = repository.load_evidence_vault_sv9_authoritative_relation_facts(
+            source_scan_id, workspace_slug=workspace_slug
+        )
+    except Exception:
+        return _evaluation_review("source_unavailable")
+    if facts is None:
+        return _evaluation_review("source_unavailable")
+
+    try:
+        source_identity = _source_identity_from_facts(
+            facts, source_scan_id=source_scan_id, workspace_slug=workspace_slug
+        )
+    except ValueError as exc:
+        return _evaluation_review(
+            _known_reason(exc, "invalid_source_identity", "source_identity_mismatch", "operation_not_immutable")
+        )
+    except Exception:
+        return _evaluation_review("invalid_source_identity")
+
+    try:
+        current_evidence = _capture_current_from_facts(
+            facts, source_scan_id=source_scan_id, workspace_slug=workspace_slug
+        )
+    except ValueError as exc:
+        return _evaluation_review(
+            _known_reason(exc, "invalid_capture_current", "source_identity_mismatch", "operation_not_immutable")
+        )
+    except Exception:
+        return _evaluation_review("invalid_capture_current")
+
+    try:
+        projection = _authoritative_relation_projection_from_facts(
+            facts, source_scan_id=source_scan_id, workspace_slug=workspace_slug
+        )
+    except ValueError as exc:
+        return _evaluation_review(
+            _known_reason(
+                exc,
+                "invalid_authoritative_facts",
+                "source_identity_mismatch",
+                "operation_not_immutable",
+                "no_operational_authority",
+            )
+        )
+    except Exception:
+        return _evaluation_review("invalid_authoritative_facts")
+    if projection.get("status") != "available":
+        reasons = projection.get("reason_codes")
+        return _evaluation_review(
+            reasons[0] if isinstance(reasons, list) and reasons and isinstance(reasons[0], str) else "invalid_authoritative_facts"
+        )
+
+    try:
+        relations = projection["authoritative_relations"]
+        witness = projection["operational_witness"]
+        relation_fingerprint = _sha(projection["projection_fingerprint"])
+        if not isinstance(relations, list) or not isinstance(witness, dict):
+            raise ValueError("invalid_authoritative_facts")
+        projection_version = _text(_VERSION)
+        payload = {
+            "source_identity": source_identity,
+            "current_evidence": current_evidence,
+            "authoritative_relations": relations,
+            "operational_witness": witness,
+            "relation_projection_fingerprint": relation_fingerprint,
+            "projection_version": projection_version,
+        }
+        result = {
+            "status": "available",
+            "reason_codes": [],
+            "schema_version": _EVALUATION_INPUT_VERSION,
+            **payload,
+        }
+        result["evaluation_input_fingerprint"] = canonical_fingerprint(
+            _EVALUATION_INPUT_VERSION, payload
+        )
+        return result
+    except Exception:
+        return _evaluation_review("invalid_evaluation_input")
 
 
 def project_evidence_vault_sv9_authoritative_relations(
@@ -37,16 +139,20 @@ def project_evidence_vault_sv9_authoritative_relations(
         facts = repository.load_evidence_vault_sv9_authoritative_relation_facts(
             source_scan_id, workspace_slug=workspace_slug
         )
-        if facts is None:
-            return _review("source_unavailable")
-        source, authority = facts["source"], facts["authority"]
-        if source["source_scan_id"] != str(source_scan_id).strip() or source["workspace_slug"] != str(workspace_slug).strip():
-            return _review("source_identity_mismatch")
-        if source["operation_status"] not in {"completed", "not_required"}:
-            return _review("operation_not_immutable")
-        if authority is None:
-            return _review("no_operational_authority")
-        return _project(source, facts["evidence"], authority)
+        return _authoritative_relation_projection_from_facts(
+            facts, source_scan_id=source_scan_id, workspace_slug=workspace_slug
+        )
+    except ValueError as exc:
+        return _review(
+            _known_reason(
+                exc,
+                "invalid_authoritative_facts",
+                "source_unavailable",
+                "source_identity_mismatch",
+                "operation_not_immutable",
+                "no_operational_authority",
+            )
+        )
     except Exception:
         return _review("invalid_authoritative_facts")
 
@@ -64,24 +170,96 @@ def project_evidence_vault_sv9_capture_current(
         facts = repository.load_evidence_vault_sv9_authoritative_relation_facts(
             source_scan_id, workspace_slug=workspace_slug
         )
-        if facts is None:
-            return _capture_review("source_unavailable")
-        source = facts["source"]
-        _validate_source(source, source_scan_id=source_scan_id, workspace_slug=workspace_slug)
-        rows = _capture_rows(source, facts["evidence"], reject_duplicate_pairs=True)
-        current = build_evidence_identity_set(
-            [{key: row[key] for key in ("evidence_ref", "evidence_fingerprint")} for row in rows]
+        current = _capture_current_from_facts(
+            facts, source_scan_id=source_scan_id, workspace_slug=workspace_slug
         )
-        return {"status": "available", "reason_codes": [], "current_evidence": current["evidence"]}
+        return {"status": "available", "reason_codes": [], "current_evidence": current}
     except ValueError as exc:
-        reason = str(exc) if str(exc) in {"operation_not_immutable", "source_identity_mismatch"} else "invalid_capture_current"
-        return _capture_review(reason)
+        return _capture_review(
+            _known_reason(
+                exc,
+                "invalid_capture_current",
+                "source_unavailable",
+                "operation_not_immutable",
+                "source_identity_mismatch",
+            )
+        )
     except Exception:
         return _capture_review("invalid_capture_current")
 
 
 def _capture_review(reason: str) -> dict[str, Any]:
     return {"status": "review_required", "reason_codes": [reason], "current_evidence": []}
+
+
+def _evaluation_review(reason: str) -> dict[str, Any]:
+    return {
+        "status": "review_required",
+        "reason_codes": [reason],
+        "schema_version": _EVALUATION_INPUT_VERSION,
+        "source_identity": None,
+        "current_evidence": [],
+        "authoritative_relations": [],
+        "operational_witness": None,
+        "relation_projection_fingerprint": None,
+        "projection_version": _VERSION,
+        "evaluation_input_fingerprint": None,
+    }
+
+
+def _known_reason(exc: ValueError, default: str, *known: str) -> str:
+    return str(exc) if str(exc) in known else default
+
+
+def _source_identity_from_facts(
+    facts: Mapping[str, Any], *, source_scan_id: str, workspace_slug: str
+) -> dict[str, str]:
+    source = facts["source"]
+    capture, operation = _validate_source(
+        source, source_scan_id=source_scan_id, workspace_slug=workspace_slug
+    )
+    identity = {
+        name: _uuid(source[name])
+        if name in {"workspace_id", "brand_id", "scan_run_id"}
+        else _text(source[name])
+        for name in _SOURCE_IDENTITY_FIELDS
+    }
+    identity.update(
+        capture_id=capture["capture_id"],
+        capture_fingerprint=capture["capture_fingerprint"],
+        operation_plan_id=operation["operation_id"],
+        operation_fingerprint=operation["operation_fingerprint"],
+    )
+    return identity
+
+
+def _capture_current_from_facts(
+    facts: Mapping[str, Any] | None, *, source_scan_id: str, workspace_slug: str
+) -> list[dict[str, str]]:
+    if facts is None:
+        raise ValueError("source_unavailable")
+    source = facts["source"]
+    _validate_source(source, source_scan_id=source_scan_id, workspace_slug=workspace_slug)
+    rows = _capture_rows(source, facts["evidence"], reject_duplicate_pairs=True)
+    current = build_evidence_identity_set(
+        [{key: row[key] for key in ("evidence_ref", "evidence_fingerprint")} for row in rows]
+    )
+    return current["evidence"]
+
+
+def _authoritative_relation_projection_from_facts(
+    facts: Mapping[str, Any] | None, *, source_scan_id: str, workspace_slug: str
+) -> dict[str, Any]:
+    if facts is None:
+        raise ValueError("source_unavailable")
+    source, authority = facts["source"], facts["authority"]
+    if source["source_scan_id"] != str(source_scan_id).strip() or source["workspace_slug"] != str(workspace_slug).strip():
+        raise ValueError("source_identity_mismatch")
+    if source["operation_status"] not in {"completed", "not_required"}:
+        raise ValueError("operation_not_immutable")
+    if authority is None:
+        raise ValueError("no_operational_authority")
+    return _project(source, facts["evidence"], authority)
 
 
 def _validate_source(
@@ -112,9 +290,15 @@ def _capture_rows(
         raise ValueError("capture evidence")
     rows, pairs = [], set()
     for raw in evidence:
-        if not isinstance(raw, Mapping) or any(
-            raw.get(name) != source[name]
-            for name in ("workspace_id", "brand_id", "source_scan_id", "canonical_domain", "capture_id")
+        if not isinstance(raw, Mapping):
+            raise ValueError("cross-source evidence")
+        if (
+            not _same_uuid_or_original(raw.get("workspace_id"), source["workspace_id"])
+            or not _same_uuid_or_original(raw.get("brand_id"), source["brand_id"])
+            or any(
+                raw.get(name) != source[name]
+                for name in ("source_scan_id", "canonical_domain", "capture_id")
+            )
         ):
             raise ValueError("cross-source evidence")
         record_id = _uuid(raw.get("evidence_record_id"))
@@ -151,7 +335,7 @@ def _project(source: Mapping[str, Any], evidence: Any, authority: Mapping[str, A
         if row["canonical_identity"] is not None:
             current_by_identity.setdefault(row["canonical_identity"], []).append(row)
     witness = authority.get("witness")
-    if not isinstance(witness, Mapping) or not isinstance(witness.get("adoption_sequence"), int) or witness["adoption_sequence"] < 1:
+    if not isinstance(witness, Mapping) or type(witness.get("adoption_sequence")) is not int or witness["adoption_sequence"] < 1:
         raise ValueError("adoption witness")
     witness = {"canonical_memory_version": _sha(witness.get("canonical_memory_version")), "adoption_event_id": _uuid(witness.get("adoption_event_id")), "adoption_sequence": witness["adoption_sequence"], "candidate_packet_fingerprint": _sha(witness.get("candidate_packet_fingerprint")), "request_fingerprint": _sha(witness.get("request_fingerprint"))}
     accepted, relations, authoritative_basis, seen = authority.get("accepted"), [], set(), set()
@@ -257,4 +441,11 @@ def _uuid(value: Any) -> str:
         return str(UUID(value))
     except (TypeError, ValueError, AttributeError) as exc:
         raise ValueError("uuid identity") from exc
+
+
+def _same_uuid_or_original(left: Any, right: Any) -> bool:
+    try:
+        return _uuid(left) == _uuid(right)
+    except ValueError:
+        return left == right
 # fmt: on
