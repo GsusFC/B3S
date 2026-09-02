@@ -1,0 +1,181 @@
+name: One-time deploy WebMCP to b3s-vault
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/deploy-b3s-vault-webmcp-once.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-b3s-vault-webmcp-184502a
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy exact authorized SHA to b3s-vault
+    if: >-
+      ${{
+        github.repository == 'GsusFC/B3S' &&
+        github.ref == 'refs/heads/main' &&
+        github.actor == 'GsusFC'
+      }}
+    runs-on: ubuntu-latest
+    environment: pr71-vault
+    timeout-minutes: 25
+    env:
+      DEPLOY_SHA: 184502a46ce0c9660285803e94a46491eac6c8df
+      VAULT_APP: b3s-vault
+      VAULT_CONFIG: fly.vault.toml
+      VAULT_URL: https://b3s-vault.fly.dev
+      PRODUCTION_URL: https://b3s.fly.dev
+    steps:
+      - name: Check out the exact authorized source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Attest source and Vault-only configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
+          test -z "$(git status --porcelain)"
+          python3 - <<'PY'
+          import pathlib
+          import tomllib
+
+          config_path = pathlib.Path("fly.vault.toml")
+          config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+          assert config.get("app") == "b3s-vault"
+          assert config.get("build", {}).get("dockerfile") == "Dockerfile"
+          assert config.get("env", {}).get("BRAND3_ENVIRONMENT") == "vault"
+          assert config.get("env", {}).get("BRAND3_BASE_URL") == "https://b3s-vault.fly.dev"
+          assert config.get("env", {}).get("B3S_POSTGRES_REQUIRED") == "true"
+          mounts = config.get("mounts") or []
+          assert any(
+              mount.get("source") == "b3s_vault_data"
+              and mount.get("destination") == "/data"
+              for mount in mounts
+          )
+          assert pathlib.Path("fly.toml").read_bytes() != config_path.read_bytes()
+          PY
+
+      - name: Install pinned Fly CLI
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # pinned 2026-07-27
+
+      - name: Capture pre-deployment runtime identities
+        id: before
+        shell: bash
+        run: |
+          set -euo pipefail
+          read_health() {
+            local url="$1"
+            curl --fail --silent --show-error --max-time 20 "$url/health" \
+              | python3 -c 'import json, re, sys; payload=json.load(sys.stdin); sha=str(payload.get("commit_sha") or ""); assert payload.get("status") == "ok"; assert re.fullmatch(r"[0-9a-f]{40}", sha); print(sha)'
+          }
+          production_sha="$(read_health "$PRODUCTION_URL")"
+          vault_sha="$(read_health "$VAULT_URL")"
+          echo "production_sha=$production_sha" >> "$GITHUB_OUTPUT"
+          echo "vault_sha=$vault_sha" >> "$GITHUB_OUTPUT"
+          echo "Production baseline: $production_sha"
+          echo "Vault baseline: $vault_sha"
+
+      - name: Validate live Vault target and configuration
+        shell: bash
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$FLY_API_TOKEN"
+          flyctl config validate -a "$VAULT_APP" -c "$VAULT_CONFIG"
+          flyctl status -a "$VAULT_APP"
+          flyctl volumes list -a "$VAULT_APP" --json > "$RUNNER_TEMP/vault-volumes-before.json"
+          python3 - "$RUNNER_TEMP/vault-volumes-before.json" <<'PY'
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          names = set()
+          def visit(value):
+              if isinstance(value, dict):
+                  for key, child in value.items():
+                      if str(key).casefold() == "name" and isinstance(child, str):
+                          names.add(child)
+                      visit(child)
+              elif isinstance(value, list):
+                  for child in value:
+                      visit(child)
+          visit(data)
+          assert "b3s_vault_data" in names, f"Vault volume not found; observed names={sorted(names)}"
+          PY
+
+      - name: Deploy exact SHA to b3s-vault
+        shell: bash
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          flyctl deploy \
+            --remote-only \
+            -a "$VAULT_APP" \
+            -c "$VAULT_CONFIG" \
+            --build-arg B3S_BUILD_SHA="$DEPLOY_SHA"
+
+      - name: Verify Vault commit and production isolation
+        shell: bash
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          PRODUCTION_SHA_BEFORE: ${{ steps.before.outputs.production_sha }}
+          VAULT_SHA_BEFORE: ${{ steps.before.outputs.vault_sha }}
+        run: |
+          set -euo pipefail
+          observed=""
+          for attempt in $(seq 1 60); do
+            observed="$(curl --fail --silent --show-error --max-time 20 "$VAULT_URL/health" \
+              | python3 -c 'import json, sys; payload=json.load(sys.stdin); print(str(payload.get("commit_sha") or "") if payload.get("status") == "ok" else "")')" || observed=""
+            if [ "$observed" = "$DEPLOY_SHA" ]; then
+              break
+            fi
+            echo "Waiting for Vault commit (attempt $attempt/60; observed: ${observed:-unavailable})"
+            sleep 5
+          done
+          test "$observed" = "$DEPLOY_SHA"
+
+          production_sha_after="$(curl --fail --silent --show-error --max-time 20 "$PRODUCTION_URL/health" \
+            | python3 -c 'import json, re, sys; payload=json.load(sys.stdin); sha=str(payload.get("commit_sha") or ""); assert payload.get("status") == "ok"; assert re.fullmatch(r"[0-9a-f]{40}", sha); print(sha)')"
+          test "$production_sha_after" = "$PRODUCTION_SHA_BEFORE"
+
+          flyctl status -a "$VAULT_APP"
+          flyctl volumes list -a "$VAULT_APP" --json > "$RUNNER_TEMP/vault-volumes-after.json"
+          python3 - "$RUNNER_TEMP/vault-volumes-after.json" <<'PY'
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          names = set()
+          def visit(value):
+              if isinstance(value, dict):
+                  for key, child in value.items():
+                      if str(key).casefold() == "name" and isinstance(child, str):
+                          names.add(child)
+                      visit(child)
+              elif isinstance(value, list):
+                  for child in value:
+                      visit(child)
+          visit(data)
+          assert "b3s_vault_data" in names, f"Vault volume not found after deploy; observed names={sorted(names)}"
+          PY
+
+          {
+            echo "### B3S Vault deployment"
+            echo "- Vault before: \`$VAULT_SHA_BEFORE\`"
+            echo "- Vault after: \`$DEPLOY_SHA\`"
+            echo "- Production unchanged: \`$production_sha_after\`"
+            echo "- Target: \`b3s-vault\` via \`fly.vault.toml\`"
+          } >> "$GITHUB_STEP_SUMMARY"
