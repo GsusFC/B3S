@@ -35,6 +35,11 @@ _SOURCE_IDENTITY_FIELDS = (
     "operation_fingerprint",
     "operation_status",
 )
+_EVALUATION_INPUT_FIELDS = frozenset(
+    "status reason_codes schema_version source_identity current_evidence "
+    "authoritative_relations operational_witness relation_projection_fingerprint "
+    "projection_version evaluation_input_fingerprint".split()
+)
 _WITNESS_FIELDS = frozenset("schema_version source_scan_id operational_witness authoritative_relations projection_fingerprint witness_fingerprint".split())
 _OPERATIONAL_WITNESS_FIELDS = frozenset("canonical_memory_version adoption_event_id adoption_sequence candidate_packet_fingerprint request_fingerprint".split())
 
@@ -128,6 +133,162 @@ def project_evidence_vault_sv9_evaluation_input(
         return result
     except Exception:
         return _evaluation_review("invalid_evaluation_input")
+
+
+def validate_evidence_vault_sv9_evaluation_input(
+    value: Any, *, source_scan_id: str, workspace_slug: str = "b3s"
+) -> dict[str, Any]:
+    """Validate a projected evaluation input without consulting mutable state.
+
+    The evaluator receives this value across a trust boundary.  Validation is
+    deliberately replay-based: every nested signed projection is rebuilt and
+    the two envelope fingerprints are recomputed before any Flow call.
+    """
+
+    try:
+        if type(value) is not dict or set(value) != _EVALUATION_INPUT_FIELDS:
+            raise ValueError("evaluation input fields")
+        if (
+            value["status"] != "available"
+            or value["reason_codes"] != []
+            or value["schema_version"] != _EVALUATION_INPUT_VERSION
+            or value["projection_version"] != _VERSION
+        ):
+            raise ValueError("evaluation input envelope")
+        source = _validate_evaluation_source_identity(
+            value["source_identity"],
+            source_scan_id=source_scan_id,
+            workspace_slug=workspace_slug,
+        )
+        current = build_evidence_identity_set(value["current_evidence"])
+        if value["current_evidence"] != current["evidence"]:
+            raise ValueError("evaluation input evidence is not canonical")
+        relations = _validate_evaluation_relations(
+            value["authoritative_relations"],
+            source=source,
+            current=current["evidence"],
+        )
+        witness = _validate_evaluation_operational_witness(
+            value["operational_witness"]
+        )
+        expected_projection_fingerprint = canonical_fingerprint(
+            _VERSION,
+            {
+                "source_scan_id": source["source_scan_id"],
+                "capture_origin": {
+                    "capture_id": source["capture_id"],
+                    "capture_fingerprint": source["capture_fingerprint"],
+                },
+                "operation_origin": {
+                    "operation_id": source["operation_plan_id"],
+                    "operation_fingerprint": source["operation_fingerprint"],
+                },
+                "operational_witness": witness,
+                "authoritative_relations": relations,
+            },
+        )
+        if value["relation_projection_fingerprint"] != expected_projection_fingerprint:
+            raise ValueError("evaluation input projection fingerprint")
+        payload = {
+            "source_identity": source,
+            "current_evidence": current["evidence"],
+            "authoritative_relations": relations,
+            "operational_witness": witness,
+            "relation_projection_fingerprint": expected_projection_fingerprint,
+            "projection_version": _VERSION,
+        }
+        expected = {
+            "status": "available",
+            "reason_codes": [],
+            "schema_version": _EVALUATION_INPUT_VERSION,
+            **payload,
+            "evaluation_input_fingerprint": canonical_fingerprint(
+                _EVALUATION_INPUT_VERSION, payload
+            ),
+        }
+        if value != expected:
+            raise ValueError("evaluation input replay mismatch")
+        return expected
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("evaluation input is invalid") from exc
+
+
+def _validate_evaluation_source_identity(
+    value: Any, *, source_scan_id: str, workspace_slug: str
+) -> dict[str, str]:
+    if type(value) is not dict or set(value) != set(_SOURCE_IDENTITY_FIELDS):
+        raise ValueError("invalid_source_identity")
+    source = {
+        name: _uuid(value[name])
+        if name in {"workspace_id", "brand_id", "scan_run_id", "capture_id", "operation_plan_id"}
+        else _sha(value[name])
+        if name in {"capture_fingerprint", "operation_fingerprint"}
+        else _text(value[name])
+        for name in _SOURCE_IDENTITY_FIELDS
+    }
+    if (
+        source["source_scan_id"] != _text(source_scan_id)
+        or source["workspace_slug"] != _text(workspace_slug)
+        or source["operation_status"] not in {"completed", "not_required"}
+    ):
+        raise ValueError("invalid_source_identity")
+    if value != source:
+        raise ValueError("invalid_source_identity")
+    return source
+
+
+def _validate_evaluation_operational_witness(value: Any) -> dict[str, Any]:
+    if type(value) is not dict or set(value) != _OPERATIONAL_WITNESS_FIELDS:
+        raise ValueError("invalid_authoritative_facts")
+    witness = {
+        "canonical_memory_version": _sha(value["canonical_memory_version"]),
+        "adoption_event_id": _uuid(value["adoption_event_id"]),
+        "adoption_sequence": value["adoption_sequence"],
+        "candidate_packet_fingerprint": _sha(value["candidate_packet_fingerprint"]),
+        "request_fingerprint": _sha(value["request_fingerprint"]),
+    }
+    if type(witness["adoption_sequence"]) is not int or witness["adoption_sequence"] < 1:
+        raise ValueError("invalid_authoritative_facts")
+    if value != witness:
+        raise ValueError("invalid_authoritative_facts")
+    return witness
+
+
+def _validate_evaluation_relations(
+    value: Any, *, source: Mapping[str, Any], current: list[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    if type(value) is not list:
+        raise ValueError("invalid_authoritative_facts")
+    rows = [build_authoritative_evidence_tile_relation(_raw=row, _signed=True) for row in value]
+    capture = {
+        "capture_id": source["capture_id"],
+        "capture_fingerprint": source["capture_fingerprint"],
+    }
+    operation = {
+        "operation_id": source["operation_plan_id"],
+        "operation_fingerprint": source["operation_fingerprint"],
+    }
+    current_pairs = {(row["evidence_ref"], row["evidence_fingerprint"]) for row in current}
+    registry = {str(row["tile_id"]): index for index, row in enumerate(build_tile_contract_registry()["tiles"])}
+    keys = []
+    seen = set()
+    for row in rows:
+        pair = row["evidence_ref"], row["evidence_fingerprint"]
+        key = row["tile_id"], *pair
+        if (
+            pair not in current_pairs
+            or key in seen
+            or row["capture_origin"] != capture
+            or row["operation_origin"] != operation
+        ):
+            raise ValueError("invalid_authoritative_facts")
+        seen.add(key)
+        keys.append((registry[row["tile_id"]], *pair))
+    if keys != sorted(keys) or len(keys) != len(set(keys)) or value != rows:
+        raise ValueError("invalid_authoritative_facts")
+    return rows
 
 
 def project_evidence_vault_sv9_authoritative_relations(

@@ -8,7 +8,8 @@ from src.services.evidence_vault_canonical_core import canonical_fingerprint
 from src.services.evidence_vault_sv9_authoritative_relations import (
     EvidenceVaultSv9AuthoritativeRelationStaleWitnessError,
     EvidenceVaultSv9AuthoritativeRelationWitnessError,
-)
+    EVIDENCE_VAULT_SV9_EVALUATION_INPUT_VERSION,
+    )
 from src.services import evidence_vault_sv9_judgment_delta as delta
 from src.sv9 import incremental_evaluation as evaluation
 from src.sv9 import incremental_planner as planner
@@ -39,7 +40,7 @@ def _authority(series=None, sentinel=False):
 class _Repository:
     def __init__(self, authority=None, records=(3,), bad_reload=False):
         self.authority, self.records, self.bad_reload = authority, tuple(records), bad_reload; self.append_calls = self.get_calls = self.authority_calls = self.context_calls = self.evidence_calls = 0; self.candidates = {}; self.mutations = []
-        self.context = {"capture_origin": _origin("capture", 9), "operation_origin": _origin("operation", 10)}; self.projection_relations = None; self.projection_status = "available"; self.projection_calls = 0; self.witness_seed = 300
+        self.context = {"capture_origin": {"capture_id": "00000000-0000-0000-0000-000000000009", "capture_fingerprint": _hash(9)}, "operation_origin": {"operation_id": "00000000-0000-0000-0000-000000000010", "operation_fingerprint": _hash(10)}}; self.projection_relations = None; self.projection_status = "available"; self.projection_calls = 0; self.witness_seed = 300
     def get_evidence_vault_sv9_judgment_authority(self, _domain, **_kwargs): self.authority_calls += 1; return deepcopy(self.authority)
     def load_evidence_vault_sv9_judgment_context(self, _scan, **_kwargs): self.context_calls += 1; return {"canonical_domain": "example.test", "capture_id": self.context["capture_origin"]["capture_id"], "capture_fingerprint": self.context["capture_origin"]["capture_fingerprint"], "operation_plan_id": self.context["operation_origin"]["operation_id"], "operation_fingerprint": self.context["operation_origin"]["operation_fingerprint"]}
     def resolve_evidence_vault_sv9_judgment_evidence(self, _scan, refs, **_kwargs):
@@ -55,9 +56,9 @@ class _Repository:
         self.candidates[key] = deepcopy(candidate) | {"id": "00000000-0000-0000-0000-000000000203"}; return deepcopy(self.candidates[key]), True
     def load_evidence_vault_sv9_authoritative_relation_facts(self, scan, *, workspace_slug="b3s"):
         source = {
-            "workspace_id": "workspace",
-            "brand_id": "brand",
-            "scan_run_id": "run",
+            "workspace_id": "00000000-0000-0000-0000-000000000001",
+            "brand_id": "00000000-0000-0000-0000-000000000002",
+            "scan_run_id": "00000000-0000-0000-0000-000000000003",
             "source_scan_id": scan,
             "workspace_slug": workspace_slug,
             "canonical_domain": "example.test",
@@ -88,6 +89,14 @@ class _Repository:
         fingerprint = canonical_fingerprint("evidence-vault-sv9-authoritative-relation-projection-v1", {"source_scan_id": scan, "capture_origin": self.context["capture_origin"], "operation_origin": self.context["operation_origin"], "operational_witness": operational, "authoritative_relations": rows})
         return {"status": "available", "reason_codes": [], "authoritative_relations": rows, "operational_witness": operational, "projection_fingerprint": fingerprint}
 
+    def evaluation_input(self, scan, workspace):
+        projection = self.project(scan, workspace)
+        if projection.get("status") != "available":
+            return {"status": "review_required", "reason_codes": list(projection.get("reason_codes") or ["invalid_evaluation_input"]), "schema_version": EVIDENCE_VAULT_SV9_EVALUATION_INPUT_VERSION, "source_identity": None, "current_evidence": [], "authoritative_relations": [], "operational_witness": None, "relation_projection_fingerprint": None, "projection_version": "evidence-vault-sv9-authoritative-relation-projection-v1", "evaluation_input_fingerprint": None}
+        source = {"workspace_id": "00000000-0000-0000-0000-000000000001", "brand_id": "00000000-0000-0000-0000-000000000002", "scan_run_id": "00000000-0000-0000-0000-000000000003", "source_scan_id": scan, "workspace_slug": workspace, "canonical_domain": "example.test", "capture_id": self.context["capture_origin"]["capture_id"], "capture_fingerprint": self.context["capture_origin"]["capture_fingerprint"], "operation_plan_id": self.context["operation_origin"]["operation_id"], "operation_fingerprint": self.context["operation_origin"]["operation_fingerprint"], "operation_status": "completed"}
+        payload = {"source_identity": source, "current_evidence": [_identity(number) for number in self.records], "authoritative_relations": projection["authoritative_relations"], "operational_witness": projection["operational_witness"], "relation_projection_fingerprint": projection["projection_fingerprint"], "projection_version": "evidence-vault-sv9-authoritative-relation-projection-v1"}
+        return {"status": "available", "reason_codes": [], "schema_version": EVIDENCE_VAULT_SV9_EVALUATION_INPUT_VERSION, **payload, "evaluation_input_fingerprint": canonical_fingerprint(EVIDENCE_VAULT_SV9_EVALUATION_INPUT_VERSION, payload)}
+
 class _Flow:
     def __init__(self, fail=None, sentinel=False, malformed=False): self.fail, self.sentinel, self.malformed, self.calls = fail, sentinel, malformed, []
     def evaluate_component(self, request):
@@ -102,11 +111,11 @@ class _Flow:
 def _relation(repo, tile, disposition="relevant", number=9): return delta.build_authoritative_evidence_tile_relation(tile_id=tile, component_key=dict(planner._REGISTRY)[tile], disposition=disposition, **_identity(number), **repo.context)
 @pytest.fixture(autouse=True)
 def _authoritative_projection(monkeypatch):
-    monkeypatch.setattr(service, "project_evidence_vault_sv9_authoritative_relations", lambda *, repository, source_scan_id, workspace_slug: repository.project(source_scan_id, workspace_slug))
+    monkeypatch.setattr(service, "project_evidence_vault_sv9_evaluation_input", lambda *, repository, source_scan_id, workspace_slug: repository.evaluation_input(source_scan_id, workspace_slug))
 
 def _run(repo, flow, current=(3,), relations=None, series=None, trusted=(), projection_relations=None):
-    relations = [_relation(repo, "M1", number=number) for number in current] if relations is None else list(relations); repo.projection_relations = relations if projection_relations is None else list(projection_relations)
-    result = service.run_evidence_vault_sv9_authority_evaluation(repository=repo, flow=flow, domain_or_url="example.test", source_scan_id="scan", current_evidence=[_identity(number) for number in current], authoritative_relations=relations, current_series_contract=_series() if series is None else series, trusted_irrelevant_evidence=[_identity(number) for number in trusted])
+    relations = [_relation(repo, "M1", number=number) for number in current] if relations is None else list(relations); repo.records = tuple(current); repo.projection_relations = relations if projection_relations is None else list(projection_relations)
+    result = service.run_evidence_vault_sv9_authority_evaluation(repository=repo, flow=flow, domain_or_url="example.test", source_scan_id="scan", current_series_contract=_series() if series is None else series, trusted_irrelevant_evidence=[_identity(number) for number in trusted])
     assert not repo.mutations; return result
 
 def test_first_run_with_exact_operational_projection_persists_witnessed_candidate():
@@ -128,11 +137,15 @@ def test_exact_one_or_many_component_worksets_reuse_all_other_authority(tiles, c
     candidate = next(iter(repo.candidates.values())); assert result["status"] == "candidate_available" and [row["component_key"] for row in flow.calls] == components
     assert {row["tile_id"] for row in candidate["evidence_bindings"]} == set(tiles) and all(row["tile_id"] not in planner._COMPONENT_TILES["coherencia"] for row in candidate["evidence_bindings"])
 
-@pytest.mark.parametrize("disposition", ["contradiction", "human_review_required"])
-def test_advisory_relation_substitution_requires_review_without_flow_or_write(disposition):
+def test_tampered_evaluation_input_stops_before_flow_or_write():
     repo, flow = _Repository(_authority(), (3, 9)), _Flow()
-    result = _run(repo, flow, current=(3, 9), relations=[_relation(repo, "M1", disposition), _relation(repo, "A1")], projection_relations=[_relation(repo, "M1", number=3), _relation(repo, "M1")])
-    assert result["status"] == "review_required" and result["reason_codes"] == ["authoritative_relation_mismatch"] and not flow.calls and repo.append_calls == 0
+    original = repo.evaluation_input("scan", "b3s")
+    original["authoritative_relations"][0]["evidence_ref"] = "tampered"
+    repo.evaluation_input = lambda *_args: original
+    result = _run(repo, flow, current=(3, 9))
+    assert result["status"] == "review_required"
+    assert result["reason_codes"] == ["invalid_evaluation_input"]
+    assert not flow.calls and repo.append_calls == 0
 
 
 def test_projection_review_and_stale_witness_freeze_candidate_io():
@@ -145,15 +158,13 @@ def test_projection_review_and_stale_witness_freeze_candidate_io():
     invalid = _run(repo, _Flow(), current=(9,)); assert invalid["status"] == "review_required" and invalid["reason_codes"] == ["invalid_authoritative_relation_witness"] and invalid["calls_issued"] == 0 and repo.append_calls == 1
 
 
-@pytest.mark.parametrize("current", [(3,), (3, 9)])
-def test_current_evidence_must_equal_persisted_capture_before_delta_or_flow(current):
-    persisted = (3, 9) if current == (3,) else (3,)
-    repo, flow = _Repository(records=persisted), _Flow()
-    result = _run(repo, flow, current=current)
-
-    assert result["status"] == "review_required"
-    assert result["reason_codes"] == ["current_evidence_mismatch"]
-    assert not flow.calls and repo.append_calls == 0
+def test_evaluation_uses_one_bundle_and_derives_source_without_context_loader():
+    repo, flow = _Repository(records=(9,)), _Flow()
+    result = _run(repo, flow, current=(9,))
+    assert result["status"] == "candidate_available"
+    assert repo.projection_calls == 1
+    assert repo.context_calls == 0
+    assert repo.evidence_calls == 1
 
 
 def test_persisted_full_capture_is_passed_to_delta_as_unmapped_review_evidence():

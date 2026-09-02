@@ -27,12 +27,11 @@ class EvidenceVaultSv9AuthorityApplicationRepository(evaluation_service.Evidence
     def adopt_evidence_vault_sv9_judgment_candidate(self, source_scan_id: str, candidate_id: str, **kwargs: Any) -> tuple[dict[str, Any], bool]: ...
     def reopen_evidence_vault_sv9_judgment_authority(self, source_scan_id: str, signed_delta: Mapping[str, Any], **kwargs: Any) -> tuple[dict[str, Any], bool]: ...
 
-def run_evidence_vault_sv9_authority_application(*, repository: EvidenceVaultSv9AuthorityApplicationRepository, flow: evaluation.Sv9StrictComponentFlowPort, domain_or_url: str, source_scan_id: str, current_evidence: list[Mapping[str, Any]], authoritative_relations: list[Mapping[str, Any]], current_series_contract: Mapping[str, Any], workspace_slug: str = "b3s", trusted_irrelevant_evidence: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
+def run_evidence_vault_sv9_authority_application(*, repository: EvidenceVaultSv9AuthorityApplicationRepository, flow: evaluation.Sv9StrictComponentFlowPort, domain_or_url: str, source_scan_id: str, current_series_contract: Mapping[str, Any], workspace_slug: str = "b3s", trusted_irrelevant_evidence: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
     """Evaluate first, then append at most one authority event or fail closed."""
     try:
         outcome = evaluation_service.run_evidence_vault_sv9_authority_evaluation(
             repository=repository, flow=flow, domain_or_url=domain_or_url, source_scan_id=source_scan_id,
-            current_evidence=current_evidence, authoritative_relations=authoritative_relations,
             current_series_contract=current_series_contract, workspace_slug=workspace_slug,
             trusted_irrelevant_evidence=trusted_irrelevant_evidence,
         )

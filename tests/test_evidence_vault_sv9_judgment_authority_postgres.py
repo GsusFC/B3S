@@ -264,17 +264,11 @@ def test_authority_application_adopts_witnessed_candidate_and_replays() -> None:
             repository=repository, source_scan_id="authority-service-current"
         )
         assert projection["status"] == "available"
-        source = repository.resolve_evidence_vault_sv9_judgment_evidence(
-            "authority-service-current", [row["evidence_ref"] for row in projection["authoritative_relations"]]
-        )
-        identity = [{key: row[key] for key in ("evidence_ref", "evidence_fingerprint")} for row in source["evidence"]]
         applied = application.run_evidence_vault_sv9_authority_application(
             repository=repository,
             flow=_AuthorityFlow(),
             domain_or_url="example.com",
             source_scan_id="authority-service-current",
-            current_evidence=identity,
-            authoritative_relations=projection["authoritative_relations"],
             current_series_contract=_series(),
         )
         repeated = application.run_evidence_vault_sv9_authority_application(
@@ -282,8 +276,6 @@ def test_authority_application_adopts_witnessed_candidate_and_replays() -> None:
             flow=_AuthorityFlow(),
             domain_or_url="example.com",
             source_scan_id="authority-service-current",
-            current_evidence=identity,
-            authoritative_relations=projection["authoritative_relations"],
             current_series_contract=_series(),
         )
         stored = repository.get_evidence_vault_sv9_judgment_candidate(

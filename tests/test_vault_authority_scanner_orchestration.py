@@ -21,8 +21,8 @@ def test_authority_terminal_actions_and_completed_non_llm_resume_are_guarded(mon
     from src import config
     from src.services import evidence_vault_incremental_executor as executor, evidence_vault_sv9_authority_application as application, evidence_vault_sv9_authority_report as publication, evidence_vault_sv9_authoritative_relations as relations
     monkeypatch.setattr(config, "SV9_FLOW_MODEL", "test-model"); monkeypatch.setattr(executor, "execute_vault_operation_plan", lambda **_k: {"execution_status": "completed"})
-    monkeypatch.setattr(relations, "project_evidence_vault_sv9_authoritative_relations", lambda **_k: {"status": "available", "authoritative_relations": [{"evidence_ref": "one", "evidence_fingerprint": "f"}, {"evidence_ref": "one", "evidence_fingerprint": "f"}]})
-    monkeypatch.setattr(relations, "project_evidence_vault_sv9_capture_current", lambda **_k: {"status": "available", "reason_codes": [], "current_evidence": [{"evidence_ref": "two", "evidence_fingerprint": "g"}]})
+    monkeypatch.setattr(relations, "project_evidence_vault_sv9_authoritative_relations", lambda **_k: pytest.fail("legacy relation projector called"))
+    monkeypatch.setattr(relations, "project_evidence_vault_sv9_capture_current", lambda **_k: pytest.fail("legacy capture projector called"))
     for action in ("publish_current", "retain_source", "record_no_score"):
         scan_id, saved, validated, sources, source, activations = f"scan-{action}", [], [], [], {"id": "prior"}, []; scan_runner._SCANS[scan_id] = _status(scan_id); scan_runner._SCAN_EVENTS[scan_id] = scan_runner.threading.Event()
         class Repo:
@@ -33,7 +33,7 @@ def test_authority_terminal_actions_and_completed_non_llm_resume_are_guarded(mon
         def assert_guard(identity): assert identity in scan_runner._VAULT_ACTIVATIONS
         def assert_terminal(identity): assert identity not in scan_runner._VAULT_ACTIVATIONS and scan_runner._SCANS[identity]["state"] == "done"
         def apply(**kwargs):
-            assert kwargs["current_evidence"] == [{"evidence_ref": "two", "evidence_fingerprint": "g"}] and kwargs["trusted_irrelevant_evidence"] == [] and activations == ["p"]
+            assert "current_evidence" not in kwargs and "authoritative_relations" not in kwargs and kwargs["trusted_irrelevant_evidence"] == [] and activations == ["p"]
             assert scan_runner.cancel_scan(scan_id)["reason"] == "vault_activation_in_progress"
             return {"authority": {"accepted_candidate": {"source_scan_id": "prior" if action == "retain_source" else scan_id}}}
         monkeypatch.setattr(application, "run_evidence_vault_sv9_authority_application", apply)
@@ -43,7 +43,7 @@ def test_authority_terminal_actions_and_completed_non_llm_resume_are_guarded(mon
         scan_runner._SCANS.pop(scan_id, None); scan_runner._SCAN_EVENTS.pop(scan_id, None)
 
 
-def test_authority_scanner_capture_partition_failure_records_no_score_without_application(monkeypatch) -> None:
+def test_authority_scanner_delegates_capture_partition_failure_to_application(monkeypatch) -> None:
     from src.services import evidence_vault_sv9_authority_application as application
     from src.services import evidence_vault_sv9_authority_report as publication
     from src.services import evidence_vault_sv9_authoritative_relations as relations
@@ -53,21 +53,10 @@ def test_authority_scanner_capture_partition_failure_records_no_score_without_ap
     scan_runner._SCAN_EVENTS[scan_id] = scan_runner.threading.Event()
     monkeypatch.setattr(scan_runner, "_execute_vault_operational_preparation", lambda **_kwargs: "p")
     monkeypatch.setattr(scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": True})
-    monkeypatch.setattr(
-        relations,
-        "project_evidence_vault_sv9_authoritative_relations",
-        lambda **_kwargs: {"status": "available", "authoritative_relations": []},
-    )
-    monkeypatch.setattr(
-        relations,
-        "project_evidence_vault_sv9_capture_current",
-        lambda **_kwargs: {
-            "status": "review_required",
-            "reason_codes": ["invalid_capture_current"],
-            "current_evidence": [],
-        },
-    )
-    monkeypatch.setattr(application, "run_evidence_vault_sv9_authority_application", lambda **_kwargs: pytest.fail("application called"))
+    monkeypatch.setattr(relations, "project_evidence_vault_sv9_authoritative_relations", lambda **_kwargs: pytest.fail("legacy relation projector called"))
+    monkeypatch.setattr(relations, "project_evidence_vault_sv9_capture_current", lambda **_kwargs: pytest.fail("legacy capture projector called"))
+    calls = []
+    monkeypatch.setattr(application, "run_evidence_vault_sv9_authority_application", lambda **kwargs: calls.append(kwargs) or {"status": "no_new_score", "reason_codes": ["invalid_capture_current"], "evaluation_status": "review_required", "candidate": None, "signed_delta": None, "authority": None})
     monkeypatch.setattr(
         publication,
         "project_vault_authority_publication",
@@ -91,6 +80,7 @@ def test_authority_scanner_capture_partition_failure_records_no_score_without_ap
             canonical_source_capture=None,
             gate={"state": "pass"},
         ) is True
+        assert calls and "current_evidence" not in calls[0] and "authoritative_relations" not in calls[0]
     finally:
         scan_runner._VAULT_ACTIVATIONS.discard(scan_id)
         scan_runner._SCANS.pop(scan_id, None)
