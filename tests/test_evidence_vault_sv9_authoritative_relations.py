@@ -10,6 +10,7 @@ from src.services.evidence_vault_canonical_core import build_tile_contract_regis
 from src.services.evidence_vault_sv9_authoritative_relations import (
     EvidenceVaultSv9AuthoritativeRelationWitnessError,
     build_evidence_vault_sv9_authoritative_relation_witness,
+    project_evidence_vault_sv9_capture_current,
     project_evidence_vault_sv9_authoritative_relations,
     validate_evidence_vault_sv9_authoritative_relation_witness,
 )
@@ -169,6 +170,7 @@ def test_unknown_assessment_state_fails_closed():
     lambda f: f["evidence"][0].__setitem__("source_identity_id", _sha("other")),
     lambda f: f["source"].__setitem__("source_scan_id", "other-scan"),
     lambda f: f["source"].__setitem__("workspace_slug", "other"),
+    lambda f: f["source"].__setitem__("workspace_id", ""),
     lambda f: f["evidence"][0].__setitem__("source_scan_id", "other-scan"),
     lambda f: f["evidence"][0].__setitem__("capture_id", _id("other-capture")),
     lambda f: f["evidence"][0].__setitem__("canonical_domain", "other.test"),
@@ -183,9 +185,45 @@ def test_unverifiable_or_nonactive_facts_fail_closed(mutate):
 
 def test_unmapped_current_evidence_and_invalidating_basis_require_review():
     facts = _facts(); extra = deepcopy(facts["evidence"][0]); extra["evidence_record_id"] = _id("extra"); extra["evidence_ref"] = "evidence-2"; extra["evidence_id"] = _sha("extra"); facts["evidence"].append(extra)
-    assert _project(facts)[0]["reason_codes"] == ["unmatched_current_evidence"]
+    assert _project(facts)[0]["status"] == "available"
     facts = _facts(); facts["authority"]["accepted"][0]["basis"][0]["polarity"] = "invalidates_candidate"
     assert _project(facts)[0]["status"] == "review_required"
+
+
+def test_relation_projection_partitions_capture_rows_from_authoritative_basis():
+    facts = _facts(); identity_less = deepcopy(facts["evidence"][0]); identity_less.update(evidence_record_id=_id("identity-less"), evidence_ref="evidence-identity-less", evidence_fingerprint=_sha("identity-less"), evidence_id=None, source_identity_id=None); unreferenced = deepcopy(facts["evidence"][0]); unreferenced.update(evidence_record_id=_id("unreferenced"), evidence_ref="evidence-unreferenced", evidence_fingerprint=_sha("unreferenced"), evidence_id=_sha("unreferenced-evidence"), source_identity_id=_sha("unreferenced-source")); facts["evidence"].extend((identity_less, unreferenced))
+    result, _ = _project(facts)
+    assert result["status"] == "available" and [(row["evidence_ref"], row["evidence_fingerprint"]) for row in result["authoritative_relations"]] == [("evidence-1", _sha("content"))]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda facts: facts["authority"]["accepted"][0]["basis"][0].update(
+            evidence_id=_sha("missing-evidence"),
+            source_identity_id=_sha("missing-source"),
+        ),
+        lambda facts: facts["evidence"].append(deepcopy(facts["evidence"][0])),
+    ],
+)
+def test_referenced_basis_identity_must_resolve_exactly_once(mutate):
+    facts = _facts(); mutate(facts); result, _ = _project(facts)
+    assert result["status"] == "review_required" and result["authoritative_relations"] == []
+
+
+def test_one_sided_canonical_identity_fails_closed_but_absent_identity_is_allowed():
+    facts = _facts(); facts["evidence"][0]["source_identity_id"] = None; result, _ = _project(facts); assert result["status"] == "review_required"
+    facts = _facts(); facts["evidence"][0].update(evidence_id=None, source_identity_id=None); facts["authority"]["accepted"][0].update(assessment_state="sin_evidencia", basis=[]); result, _ = _project(facts); assert result["status"] == "available" and result["authoritative_relations"] == []; facts["evidence"] = []; result, _ = _project(facts); current = project_evidence_vault_sv9_capture_current(repository=_Repository(facts), source_scan_id="scan-1"); assert result["status"] == "available" and result["authoritative_relations"] == [] and current["status"] == "available" and current["current_evidence"] == []
+
+
+def test_full_capture_current_projection_includes_identityless_rows_and_rejects_duplicate_pairs():
+    facts = _facts(); identity_less = deepcopy(facts["evidence"][0]); identity_less.update(evidence_record_id=_id("identity-less"), evidence_ref="evidence-identity-less", evidence_fingerprint=_sha("identity-less"), evidence_id=None, source_identity_id=None); facts["evidence"].append(identity_less); result, _ = _project(facts)
+    current = project_evidence_vault_sv9_capture_current(repository=_Repository(facts), source_scan_id="scan-1")
+    assert current["status"] == "available" and current["current_evidence"] == [{"evidence_ref": "evidence-1", "evidence_fingerprint": _sha("content")}, {"evidence_ref": "evidence-identity-less", "evidence_fingerprint": _sha("identity-less")} ] and result["status"] == "available"
+    duplicate = deepcopy(facts); duplicate["evidence"].append(deepcopy(duplicate["evidence"][0])); current = project_evidence_vault_sv9_capture_current(repository=_Repository(duplicate), source_scan_id="scan-1")
+    assert current["status"] == "review_required" and current["current_evidence"] == []
+    drifted = deepcopy(facts); drifted["source"]["source_scan_id"] = "other-scan"; current = project_evidence_vault_sv9_capture_current(repository=_Repository(drifted), source_scan_id="scan-1")
+    assert current["status"] == "review_required" and current["reason_codes"] == ["source_identity_mismatch"]
 
 
 def test_projection_is_deterministic_head_bound_and_signed_relations_replay():

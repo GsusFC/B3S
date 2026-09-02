@@ -22,6 +22,7 @@ def test_authority_terminal_actions_and_completed_non_llm_resume_are_guarded(mon
     from src.services import evidence_vault_incremental_executor as executor, evidence_vault_sv9_authority_application as application, evidence_vault_sv9_authority_report as publication, evidence_vault_sv9_authoritative_relations as relations
     monkeypatch.setattr(config, "SV9_FLOW_MODEL", "test-model"); monkeypatch.setattr(executor, "execute_vault_operation_plan", lambda **_k: {"execution_status": "completed"})
     monkeypatch.setattr(relations, "project_evidence_vault_sv9_authoritative_relations", lambda **_k: {"status": "available", "authoritative_relations": [{"evidence_ref": "one", "evidence_fingerprint": "f"}, {"evidence_ref": "one", "evidence_fingerprint": "f"}]})
+    monkeypatch.setattr(relations, "project_evidence_vault_sv9_capture_current", lambda **_k: {"status": "available", "reason_codes": [], "current_evidence": [{"evidence_ref": "two", "evidence_fingerprint": "g"}]})
     for action in ("publish_current", "retain_source", "record_no_score"):
         scan_id, saved, validated, sources, source, activations = f"scan-{action}", [], [], [], {"id": "prior"}, []; scan_runner._SCANS[scan_id] = _status(scan_id); scan_runner._SCAN_EVENTS[scan_id] = scan_runner.threading.Event()
         class Repo:
@@ -32,7 +33,7 @@ def test_authority_terminal_actions_and_completed_non_llm_resume_are_guarded(mon
         def assert_guard(identity): assert identity in scan_runner._VAULT_ACTIVATIONS
         def assert_terminal(identity): assert identity not in scan_runner._VAULT_ACTIVATIONS and scan_runner._SCANS[identity]["state"] == "done"
         def apply(**kwargs):
-            assert kwargs["current_evidence"] == [{"evidence_ref": "one", "evidence_fingerprint": "f"}] and kwargs["trusted_irrelevant_evidence"] == [] and activations == ["p"]
+            assert kwargs["current_evidence"] == [{"evidence_ref": "two", "evidence_fingerprint": "g"}] and kwargs["trusted_irrelevant_evidence"] == [] and activations == ["p"]
             assert scan_runner.cancel_scan(scan_id)["reason"] == "vault_activation_in_progress"
             return {"authority": {"accepted_candidate": {"source_scan_id": "prior" if action == "retain_source" else scan_id}}}
         monkeypatch.setattr(application, "run_evidence_vault_sv9_authority_application", apply)
@@ -40,6 +41,60 @@ def test_authority_terminal_actions_and_completed_non_llm_resume_are_guarded(mon
         assert scan_runner._run_vault_sv9_authority_scanner(scan_id=scan_id, url="https://example.test", brand_name="Example", repository=Repo(), preparation={"operation_plan": {"operation_plan_fingerprint": "p", "operations": {"llm_required": False}}} if action != "record_no_score" else {"resume": {"analysis_status": "completed", "operation_plan_fingerprint": "p", "semantic_work_completed": False}}, canonical_snapshot={"raw_inputs": [], "acquisition_gate": {"state": "pass"}}, canonical_source_capture=None, gate={"state": "pass"}) is True
         assert scan_runner._SCANS[scan_id]["report_id"] == ("prior" if action == "retain_source" else scan_id) and (saved == [] if action == "retain_source" else len(saved) == 1) and validated == ([] if action == "retain_source" else [True]) and sources == ([source] if action == "retain_source" else [None]) and scan_id not in scan_runner._VAULT_ACTIVATIONS
         scan_runner._SCANS.pop(scan_id, None); scan_runner._SCAN_EVENTS.pop(scan_id, None)
+
+
+def test_authority_scanner_capture_partition_failure_records_no_score_without_application(monkeypatch) -> None:
+    from src.services import evidence_vault_sv9_authority_application as application
+    from src.services import evidence_vault_sv9_authority_report as publication
+    from src.services import evidence_vault_sv9_authoritative_relations as relations
+
+    scan_id = "scan-capture-partition-failure"
+    scan_runner._SCANS[scan_id] = _status(scan_id)
+    scan_runner._SCAN_EVENTS[scan_id] = scan_runner.threading.Event()
+    monkeypatch.setattr(scan_runner, "_execute_vault_operational_preparation", lambda **_kwargs: "p")
+    monkeypatch.setattr(scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": True})
+    monkeypatch.setattr(
+        relations,
+        "project_evidence_vault_sv9_authoritative_relations",
+        lambda **_kwargs: {"status": "available", "authoritative_relations": []},
+    )
+    monkeypatch.setattr(
+        relations,
+        "project_evidence_vault_sv9_capture_current",
+        lambda **_kwargs: {
+            "status": "review_required",
+            "reason_codes": ["invalid_capture_current"],
+            "current_evidence": [],
+        },
+    )
+    monkeypatch.setattr(application, "run_evidence_vault_sv9_authority_application", lambda **_kwargs: pytest.fail("application called"))
+    monkeypatch.setattr(
+        publication,
+        "project_vault_authority_publication",
+        lambda *_args: {
+            "action": "record_no_score",
+            "source_report_id": None,
+            "scanner_payload": {"sv9": {"brand3_score": None}},
+        },
+    )
+    monkeypatch.setattr(scan_runner, "_compose_report", lambda identity, *_args: {"id": identity})
+    monkeypatch.setattr(scan_runner, "_validate_report_sv9_assessment", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scan_runner, "_publish_completed_report", lambda *_args: True)
+    try:
+        assert scan_runner._run_vault_sv9_authority_scanner(
+            scan_id=scan_id,
+            url="https://example.test",
+            brand_name="Example",
+            repository=object(),
+            preparation={"operation_plan": {"operation_plan_fingerprint": "p", "operations": {"llm_required": False}}},
+            canonical_snapshot={"raw_inputs": [], "acquisition_gate": {"state": "pass"}},
+            canonical_source_capture=None,
+            gate={"state": "pass"},
+        ) is True
+    finally:
+        scan_runner._VAULT_ACTIVATIONS.discard(scan_id)
+        scan_runner._SCANS.pop(scan_id, None)
+        scan_runner._SCAN_EVENTS.pop(scan_id, None)
 
 
 def test_retained_v1_result_uses_persisted_terminal_report_alias(monkeypatch) -> None:

@@ -53,6 +53,31 @@ class _Repository:
         self.append_calls += 1; key = candidate["canonical_plan_fingerprint"]
         if key in self.candidates: return deepcopy(self.candidates[key]), False
         self.candidates[key] = deepcopy(candidate) | {"id": "00000000-0000-0000-0000-000000000203"}; return deepcopy(self.candidates[key]), True
+    def load_evidence_vault_sv9_authoritative_relation_facts(self, scan, *, workspace_slug="b3s"):
+        source = {
+            "workspace_id": "workspace",
+            "brand_id": "brand",
+            "scan_run_id": "run",
+            "source_scan_id": scan,
+            "workspace_slug": workspace_slug,
+            "canonical_domain": "example.test",
+            "capture_id": "00000000-0000-0000-0000-000000000009",
+            "capture_fingerprint": _hash(9),
+            "operation_plan_id": "00000000-0000-0000-0000-000000000010",
+            "operation_fingerprint": _hash(10),
+            "operation_status": "completed",
+        }
+        evidence = [
+            source
+            | {
+                "evidence_record_id": f"00000000-0000-0000-0000-{number:012d}",
+                **_identity(number),
+                "evidence_id": _hash(100 + number),
+                "source_identity_id": _hash(200 + number),
+            }
+            for number in self.records
+        ]
+        return {"source": source, "evidence": evidence, "authority": None}
     def adopt_evidence_vault_sv9_judgment_candidate(self, *_args, **_kwargs): self.mutations.append("adopt"); raise AssertionError
     def reopen_evidence_vault_sv9_judgment_authority(self, *_args, **_kwargs): self.mutations.append("reopen"); raise AssertionError
     def project(self, scan, workspace):
@@ -118,6 +143,42 @@ def test_projection_review_and_stale_witness_freeze_candidate_io():
     assert stale["status"] == "review_required" and stale["reason_codes"] == ["stale_authoritative_relation_witness"] and stale["calls_issued"] == 0 and repo.append_calls == 1
     repo.witness_seed = 300; stored = next(iter(repo.candidates.values())); stored["authoritative_relation_witness"]["witness_fingerprint"] = _hash(999)
     invalid = _run(repo, _Flow(), current=(9,)); assert invalid["status"] == "review_required" and invalid["reason_codes"] == ["invalid_authoritative_relation_witness"] and invalid["calls_issued"] == 0 and repo.append_calls == 1
+
+
+@pytest.mark.parametrize("current", [(3,), (3, 9)])
+def test_current_evidence_must_equal_persisted_capture_before_delta_or_flow(current):
+    persisted = (3, 9) if current == (3,) else (3,)
+    repo, flow = _Repository(records=persisted), _Flow()
+    result = _run(repo, flow, current=current)
+
+    assert result["status"] == "review_required"
+    assert result["reason_codes"] == ["current_evidence_mismatch"]
+    assert not flow.calls and repo.append_calls == 0
+
+
+def test_persisted_full_capture_is_passed_to_delta_as_unmapped_review_evidence():
+    repo, flow = _Repository(records=(3, 9)), _Flow()
+    result = _run(
+        repo,
+        flow,
+        current=(3, 9),
+        relations=[_relation(repo, "M1", number=3)],
+    )
+
+    assert result["status"] == "review_required"
+    assert result["reason_codes"] == ["unmapped_evidence"]
+    assert result["unmapped_evidence_count"] == 1
+    assert result["signed_delta"]["current_evidence"]["evidence"] == [
+        _identity(3),
+        _identity(9),
+    ]
+    assert not flow.calls and repo.append_calls == 0
+
+
+def test_unreferenced_capture_reviews_before_empty_relation_witness():
+    repo, flow = _Repository(records=(9,)), _Flow(); result = _run(repo, flow, current=(9,), relations=[], projection_relations=[])
+    assert result["status"] == "review_required" and result["reason_codes"] == ["unmapped_evidence"] and result["unmapped_evidence_count"] == 1
+    assert not flow.calls and repo.append_calls == repo.get_calls == 0
 
 
 @pytest.mark.parametrize(("error", "reason"), [
