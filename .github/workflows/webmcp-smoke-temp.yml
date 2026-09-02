@@ -1,0 +1,100 @@
+name: Temporary Vault WebMCP browser proof
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/webmcp-smoke-temp.yml"
+      - "web/static/vault_webmcp.js"
+      - "web/static/vault_webmcp_loader.js"
+      - "web/templates/index.html.j2"
+      - "webmcp.e2e.json"
+
+permissions:
+  contents: read
+
+jobs:
+  local-stagehand:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      PUPPETEER_SKIP_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.18.0"
+
+      - name: Install B3S and pinned Browserbase validator
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+          validator_root="$RUNNER_TEMP/browserbase-skills"
+          git init "$validator_root"
+          git -C "$validator_root" remote add origin https://github.com/browserbase/skills.git
+          git -C "$validator_root" fetch --depth 1 origin 6811ca31163332d9d60309cff48e77f09de37a17
+          git -C "$validator_root" checkout --detach FETCH_HEAD
+
+          corepack enable
+          corepack prepare pnpm@10.15.1 --activate
+          pnpm --dir "$validator_root/skills/add-webmcp" install --frozen-lockfile
+
+      - name: Discover tools and invoke only read or reversible cases
+        shell: bash
+        env:
+          BRAND3_ENVIRONMENT: vault
+          B3S_GOOGLE_OIDC_ENABLED: "false"
+          B3S_POSTGRES_REQUIRED: "false"
+        run: |
+          set -euo pipefail
+          reports_dir="$RUNNER_TEMP/b3s-webmcp-reports"
+          server_log="$RUNNER_TEMP/b3s-webmcp-server.log"
+          mkdir -p "$reports_dir"
+          export B3S_REPORTS_DIR="$reports_dir"
+
+          python -m uvicorn web.app:app --host 0.0.0.0 --port 8000 >"$server_log" 2>&1 &
+          server_pid=$!
+          cleanup() {
+            kill "$server_pid" 2>/dev/null || true
+            wait "$server_pid" 2>/dev/null || true
+            cat "$server_log"
+          }
+          trap cleanup EXIT
+
+          for _ in $(seq 1 60); do
+            if curl --fail --silent http://localhost:8000/health >/dev/null; then
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo "B3S local server stopped before becoming ready" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://localhost:8000/health >/dev/null
+
+          chrome_path="$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
+          test -n "$chrome_path"
+
+          node "$RUNNER_TEMP/browserbase-skills/skills/add-webmcp/scripts/validate-stagehand.mjs" \
+            --url "http://localhost:8000/?webmcp=1" \
+            --config "$GITHUB_WORKSPACE/webmcp.e2e.json" \
+            --local \
+            --headless \
+            --no-sandbox \
+            --executable-path "$chrome_path"
+
+          if grep -q 'POST /scan' "$server_log"; then
+            echo "The WebMCP proof unexpectedly submitted a scan" >&2
+            exit 1
+          fi
