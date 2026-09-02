@@ -6,10 +6,12 @@ from uuid import NAMESPACE_URL, uuid5
 import pytest
 
 from src.history import repository as history
-from src.services.evidence_vault_canonical_core import build_tile_contract_registry
+from src.services.evidence_vault_canonical_core import build_tile_contract_registry, canonical_fingerprint
 from src.services.evidence_vault_sv9_authoritative_relations import (
+    EVIDENCE_VAULT_SV9_EVALUATION_INPUT_VERSION,
     EvidenceVaultSv9AuthoritativeRelationWitnessError,
     build_evidence_vault_sv9_authoritative_relation_witness,
+    project_evidence_vault_sv9_evaluation_input,
     project_evidence_vault_sv9_capture_current,
     project_evidence_vault_sv9_authoritative_relations,
     validate_evidence_vault_sv9_authoritative_relation_witness,
@@ -248,4 +250,121 @@ def test_witness_has_exact_v1_shape_and_rejects_relation_or_origin_tampering():
         for key in path[:-1]: target = target[key]
         target[path[-1]] = "other"
         with pytest.raises(EvidenceVaultSv9AuthoritativeRelationWitnessError): validate_evidence_vault_sv9_authoritative_relation_witness(tampered)
+
+
+def test_evaluation_input_loads_one_snapshot_and_binds_full_partition():
+    facts = _facts(count=2); repo = _Repository(facts)
+    result = project_evidence_vault_sv9_evaluation_input(repository=repo, source_scan_id="scan-1")
+
+    assert repo.calls == [("scan-1", "b3s")]
+    assert result["status"] == "available"
+    assert result["schema_version"] == EVIDENCE_VAULT_SV9_EVALUATION_INPUT_VERSION
+    assert set(result) == {
+        "status", "reason_codes", "schema_version", "source_identity", "current_evidence",
+        "authoritative_relations", "operational_witness", "relation_projection_fingerprint",
+        "projection_version", "evaluation_input_fingerprint",
+    }
+    payload = {key: result[key] for key in (
+        "source_identity", "current_evidence", "authoritative_relations", "operational_witness",
+        "relation_projection_fingerprint", "projection_version",
+    )}
+    assert result["evaluation_input_fingerprint"] == canonical_fingerprint(
+        EVIDENCE_VAULT_SV9_EVALUATION_INPUT_VERSION, payload
+    )
+    assert result["current_evidence"] == project_evidence_vault_sv9_capture_current(
+        repository=_Repository(facts), source_scan_id="scan-1"
+    )["current_evidence"]
+    assert result["authoritative_relations"] == project_evidence_vault_sv9_authoritative_relations(
+        repository=_Repository(facts), source_scan_id="scan-1"
+    )["authoritative_relations"]
+
+
+def test_evaluation_input_is_deterministic_and_rejects_unavailable_or_invalid_facts():
+    facts = _facts(count=2); repo = _Repository(facts)
+    first = project_evidence_vault_sv9_evaluation_input(repository=repo, source_scan_id="scan-1")
+    second = project_evidence_vault_sv9_evaluation_input(repository=_Repository(facts), source_scan_id="scan-1")
+    assert first == second
+
+    unavailable = project_evidence_vault_sv9_evaluation_input(repository=_Repository(None), source_scan_id="scan-1")
+    assert unavailable["status"] == "review_required" and unavailable["reason_codes"] == ["source_unavailable"]
+    assert unavailable["evaluation_input_fingerprint"] is None and unavailable["authoritative_relations"] == []
+
+    invalid = deepcopy(facts); invalid["source"]["operation_status"] = "pending"
+    rejected = project_evidence_vault_sv9_evaluation_input(repository=_Repository(invalid), source_scan_id="scan-1")
+    assert rejected["status"] == "review_required" and rejected["reason_codes"] == ["operation_not_immutable"]
+    assert rejected["source_identity"] is None and rejected["current_evidence"] == []
+
+
+@pytest.mark.parametrize("field", ["workspace_id", "brand_id", "scan_run_id"])
+def test_evaluation_input_rejects_malformed_nonempty_uuid_source_identity(field):
+    facts = _facts()
+    facts["source"][field] = "not-a-uuid"
+
+    result = project_evidence_vault_sv9_evaluation_input(
+        repository=_Repository(facts), source_scan_id="scan-1"
+    )
+
+    assert result["status"] == "review_required"
+    assert result["reason_codes"] == ["invalid_source_identity"]
+    assert result["source_identity"] is None
+    assert result["evaluation_input_fingerprint"] is None
+
+
+@pytest.mark.parametrize("field", ["workspace_id", "brand_id", "scan_run_id"])
+def test_evaluation_input_canonicalizes_uuid_source_identity_before_fingerprint(field):
+    canonical_facts = _facts()
+    canonical = project_evidence_vault_sv9_evaluation_input(
+        repository=_Repository(canonical_facts), source_scan_id="scan-1"
+    )
+    variant_facts = deepcopy(canonical_facts)
+    variant_facts["source"][field] = variant_facts["source"][field].upper()
+    if field in {"workspace_id", "brand_id"}:
+        for row in variant_facts["evidence"]:
+            row[field] = variant_facts["source"][field]
+
+    variant = project_evidence_vault_sv9_evaluation_input(
+        repository=_Repository(variant_facts), source_scan_id="scan-1"
+    )
+
+    assert variant["status"] == "available"
+    assert variant["source_identity"][field] == canonical["source_identity"][field]
+    assert variant["evaluation_input_fingerprint"] == canonical["evaluation_input_fingerprint"]
+
+
+@pytest.mark.parametrize("field", ["workspace_id", "brand_id"])
+@pytest.mark.parametrize("side", ["source", "evidence"])
+def test_evaluation_input_accepts_mixed_uuid_ownership_representations(field, side):
+    canonical_facts = _facts(count=2)
+    canonical = project_evidence_vault_sv9_evaluation_input(
+        repository=_Repository(canonical_facts), source_scan_id="scan-1"
+    )
+    variant_facts = deepcopy(canonical_facts)
+    representation = variant_facts["source"][field].upper()
+    if side == "source":
+        variant_facts["source"][field] = representation
+    else:
+        for row in variant_facts["evidence"]:
+            row[field] = representation
+    repo = _Repository(variant_facts)
+
+    variant = project_evidence_vault_sv9_evaluation_input(
+        repository=repo, source_scan_id="scan-1"
+    )
+
+    assert repo.calls == [("scan-1", "b3s")]
+    assert variant["status"] == "available"
+    assert variant["source_identity"] == canonical["source_identity"]
+    assert variant["evaluation_input_fingerprint"] == canonical["evaluation_input_fingerprint"]
+    assert variant["current_evidence"] == canonical["current_evidence"]
+    assert variant["authoritative_relations"] == canonical["authoritative_relations"]
+
+
+def test_boolean_adoption_sequence_fails_closed_for_evaluation_input():
+    facts = _facts(); facts["authority"]["witness"]["adoption_sequence"] = True
+    result = project_evidence_vault_sv9_evaluation_input(
+        repository=_Repository(facts), source_scan_id="scan-1"
+    )
+    assert result["status"] == "review_required"
+    assert result["reason_codes"] == ["invalid_authoritative_facts"]
+    assert result["evaluation_input_fingerprint"] is None
 # fmt: on
