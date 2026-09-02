@@ -11739,33 +11739,88 @@ def _sv9_authoritative_relation_accepted(conn: Any, context: Mapping[str, Any], 
     registry = {str(row["tile_id"]): str(row["component_key"]) for row in build_tile_contract_registry()["tiles"]}; order = {tile: index for index, tile in enumerate(registry)}
     accepted, rows = memory.get("content", {}).get("accepted_tiles"), []
     if not isinstance(accepted, list): raise EvidenceVaultOperationalAuthorityError("Operational accepted tiles are unavailable.")
+    source_packet_cache: dict[tuple[str, str], tuple[frozenset[str], str, dict[str, Any]]] = {}
+    source_operation_cache: set[tuple[Any, ...]] = set()
+    reviewed_source_event_cache: set[tuple[str, str]] = set()
+    exact_source_resolution_cache: set[tuple[str, str]] = set()
+    all_source_kinds = frozenset({"operational_source_v2", "operational_reviewed_v2"})
+    source_only_kinds = frozenset({"operational_source_v2"})
+
+    def load_source_packet(source_fingerprint: str, packet_kinds: frozenset[str]) -> tuple[dict[str, Any], str]:
+        cache_key = (str(context["brand_id"]), source_fingerprint)
+        cached = source_packet_cache.get(cache_key)
+        if cached is not None and packet_kinds.issubset(cached[0]):
+            source_kind, source = cached[1], cached[2]
+            if source_kind not in packet_kinds:
+                raise EvidenceVaultOperationalAuthorityError("Operational accepted tile source is ambiguous.")
+            return source, source_kind
+        packet_kind_clause = (
+            "'operational_source_v2', 'operational_reviewed_v2'"
+            if packet_kinds == all_source_kinds
+            else "'operational_source_v2'"
+        )
+        source_rows = conn.execute(f"SELECT * FROM {_SCHEMA}.evidence_vault_canonical_memory_packets WHERE brand_id = %s AND packet_fingerprint = %s AND packet_kind IN ({packet_kind_clause})", (context["brand_id"], source_fingerprint)).fetchall()
+        if len(source_rows) != 1:
+            raise EvidenceVaultOperationalAuthorityError("Operational accepted tile source is ambiguous.")
+        source_row = source_rows[0]
+        source_kind = str(source_row["packet_kind"])
+        source = _vault_operational_source_packet_record(source_row)
+        covered_kinds = (cached[0] | packet_kinds) if cached is not None else packet_kinds
+        source_packet_cache[cache_key] = (covered_kinds, source_kind, source)
+        return source, source_kind
+
+    def validate_source_operation_once(source: Mapping[str, Any]) -> None:
+        resolution, packet = source["reference_resolution"], source["packet"]
+        operation_key: tuple[Any, ...] | None = None
+        expected = {"schema_version", "operation_plan_fingerprint", "observation_hash", "result_fingerprint", "source_candidate_packet_fingerprint"}
+        try:
+            if set(resolution) == expected and resolution["schema_version"] == "evidence-vault-operational-source-resolution-v1" and resolution["source_candidate_packet_fingerprint"] == packet["candidate_packet_fingerprint"]:
+                operation_key = (str(context["brand_id"]), resolution["operation_plan_fingerprint"], resolution["observation_hash"], resolution["result_fingerprint"], packet["candidate_packet_fingerprint"])
+                hash(operation_key)
+        except (KeyError, TypeError):
+            operation_key = None
+        if operation_key is None or operation_key not in source_operation_cache:
+            _sv9_authoritative_relation_source_operation(conn, context["brand_id"], source)
+            if operation_key is not None:
+                source_operation_cache.add(operation_key)
+
+    def validate_reviewed_source_events_once(source: Mapping[str, Any]) -> None:
+        event_key = (str(context["brand_id"]), str(source["packet"]["candidate_packet_fingerprint"]))
+        if event_key not in reviewed_source_event_cache:
+            _validate_operational_reviewed_source_events(conn, brand_id=context["brand_id"], source_row=source, source_packet=source["packet"])
+            reviewed_source_event_cache.add(event_key)
+
+    def validate_exact_source_resolution_once(source: Mapping[str, Any]) -> None:
+        resolution, packet_fingerprint = source["reference_resolution"], str(source["packet"]["candidate_packet_fingerprint"])
+        exact_key = (str(context["brand_id"]), packet_fingerprint)
+        if exact_key not in exact_source_resolution_cache:
+            validate_exact_relation_supplement_structure(resolution["artifact"])
+            if build_exact_relation_source_resolution(resolution["artifact"], source_candidate_packet=source["packet"]) != resolution:
+                raise EvidenceVaultOperationalAuthorityError("Operational exact human source is invalid.")
+            exact_source_resolution_cache.add(exact_key)
+
     for value in accepted:
         if not isinstance(value, Mapping): raise EvidenceVaultOperationalAuthorityError("Operational accepted tile is invalid.")
         tile, component, source_fingerprint = str(value.get("tile_id") or ""), str(value.get("component_key") or ""), str(value.get("source_candidate_packet_fingerprint") or "")
         if registry.get(tile) != component or not _is_sha256(source_fingerprint): raise EvidenceVaultOperationalAuthorityError("Operational accepted tile identity is invalid.")
-        source_rows = conn.execute(f"SELECT * FROM {_SCHEMA}.evidence_vault_canonical_memory_packets WHERE brand_id = %s AND packet_fingerprint = %s AND packet_kind IN ('operational_source_v2', 'operational_reviewed_v2')", (context["brand_id"], source_fingerprint)).fetchall()
-        if len(source_rows) != 1: raise EvidenceVaultOperationalAuthorityError("Operational accepted tile source is ambiguous.")
-        source_row, source = source_rows[0], _vault_operational_source_packet_record(source_rows[0])
+        source, source_kind = load_source_packet(source_fingerprint, all_source_kinds)
         if source["packet"]["manifest"].get("brand_identity") != context["canonical_domain"]: raise EvidenceVaultOperationalAuthorityError("Operational accepted tile crosses brands.")
         source_tiles = [dict(row) for row in source["packet"].get("candidate_tiles") or [] if isinstance(row, Mapping) and row.get("tile_id") == tile]
         if len(source_tiles) != 1 or any(value.get(name) != source_tiles[0].get(other) for name, other in {"semantic_state": "candidate_state", "basis": "basis", "coverage_refs": "coverage_refs", "unresolved_refs": "unresolved_refs", "source_delta_kind": "delta_kind"}.items()): raise EvidenceVaultOperationalAuthorityError("Operational accepted tile does not match its source.")
         profile, actor = value.get("authority_profile_id"), value.get("authority_source")
         if actor == "policy":
-            if profile != SCANNER_SEMANTIC_PROFILE_ID or source_row["packet_kind"] != "operational_source_v2": raise EvidenceVaultOperationalAuthorityError("Operational policy profile is not scanner-authoritative.")
-            _sv9_authoritative_relation_source_operation(conn, context["brand_id"], source)
+            if profile != SCANNER_SEMANTIC_PROFILE_ID or source_kind != "operational_source_v2": raise EvidenceVaultOperationalAuthorityError("Operational policy profile is not scanner-authoritative.")
+            validate_source_operation_once(source)
             decision = evaluate_scanner_semantic_authority(candidate_tile=source_tiles[0], authority_matrix=build_initial_authority_profile_matrix())
             validate_authority_decision(decision, candidate_tile=source_tiles[0])
             if value.get("decision_event_id") is not None or any(value.get(name) != decision.get(name) for name in ("authority_profile_id", "authority_matrix_fingerprint", "authority_decision_fingerprint")): raise EvidenceVaultOperationalAuthorityError("Operational scanner policy provenance is invalid.")
         elif actor == "human":
-            if profile != "human-reviewed-relation-v1" or source_row["packet_kind"] != "operational_reviewed_v2" or source["reference_resolution"].get("schema_version") != "evidence-vault-operational-reviewed-resolution-v1": raise EvidenceVaultOperationalAuthorityError("Operational human profile is invalid.")
-            _validate_operational_reviewed_source_events(conn, brand_id=context["brand_id"], source_row=source_row, source_packet=source["packet"])
-            origins = conn.execute(f"SELECT * FROM {_SCHEMA}.evidence_vault_canonical_memory_packets WHERE brand_id = %s AND packet_fingerprint = %s AND packet_kind = 'operational_source_v2'", (context["brand_id"], source["reference_resolution"].get("source_candidate_packet_fingerprint"))).fetchall()
-            if len(origins) != 1: raise EvidenceVaultOperationalAuthorityError("Operational human source is ambiguous.")
-            origin = _vault_operational_source_packet_record(origins[0]); origin_resolution = origin["reference_resolution"]
-            if origin_resolution.get("schema_version") == "evidence-vault-operational-source-resolution-v1": _sv9_authoritative_relation_source_operation(conn, context["brand_id"], origin)
+            if profile != "human-reviewed-relation-v1" or source_kind != "operational_reviewed_v2" or source["reference_resolution"].get("schema_version") != "evidence-vault-operational-reviewed-resolution-v1": raise EvidenceVaultOperationalAuthorityError("Operational human profile is invalid.")
+            validate_reviewed_source_events_once(source)
+            origin, _ = load_source_packet(str(source["reference_resolution"].get("source_candidate_packet_fingerprint") or ""), source_only_kinds); origin_resolution = origin["reference_resolution"]
+            if origin_resolution.get("schema_version") == "evidence-vault-operational-source-resolution-v1": validate_source_operation_once(origin)
             elif origin_resolution.get("schema_version") == "evidence-vault-exact-relation-source-resolution-v1" and origin_resolution.get("source_kind") == "exact_relation_supplement":
-                validate_exact_relation_supplement_structure(origin_resolution["artifact"])
-                if build_exact_relation_source_resolution(origin_resolution["artifact"], source_candidate_packet=origin["packet"]) != origin_resolution: raise EvidenceVaultOperationalAuthorityError("Operational exact human source is invalid.")
+                validate_exact_source_resolution_once(origin)
             else: raise EvidenceVaultOperationalAuthorityError("Operational human source provenance is invalid.")
             if value.get("decision_event_id") not in {row.get("decision_event_id") for row in source_tiles[0].get("basis") or [] if isinstance(row, Mapping) and row.get("review_status") == "accepted"}: raise EvidenceVaultOperationalAuthorityError("Operational human decision provenance is invalid.")
         else: raise EvidenceVaultOperationalAuthorityError("Operational accepted tile has no supported authority source.")
