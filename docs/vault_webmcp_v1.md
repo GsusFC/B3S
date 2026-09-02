@@ -4,7 +4,7 @@
 
 Vault WebMCP exposes existing B3S Vault browser capabilities as first-party tools for an agent operating inside the authenticated web application. It is an interaction layer, not a new authorization system, API authority, evidence contract, or scoring path.
 
-The browser session remains authoritative. Every tool calls the same routes and handlers already used by the web interface, with the existing Google OIDC, reviewer-session, same-origin, validation, and persistence boundaries intact.
+The browser session remains authoritative. Every tool uses the same routes, forms, and handlers already used by the web interface, with the existing Google OIDC, reviewer-session, same-origin, validation, and persistence boundaries intact.
 
 ## Surfaces
 
@@ -18,11 +18,13 @@ Entry point: the authenticated Vault index at `/`.
 | `b3s_get_brand_analysis` | `GET /brand/{domain}` | Reads score, status, evidence links, history, and Vault memory | Read-only |
 | `b3s_read_report_markdown` | `GET /report/{report_id}.md` | Reads one persisted report with a bounded output | Read-only |
 | `b3s_get_scan_status` | `GET /api/scan/{scan_id}` | Reads current scan phases, acquisition, and gate state | Read-only |
-| `b3s_start_scan` | `POST /scan` | Starts a real acquisition and evaluation | Consequential; requires `confirm=true` |
+| `b3s_prepare_scan` | Visible `POST /scan` form | Fills URL, brand name, and degraded-fallback choice without submitting | Reversible browser state; human submit required |
 | `b3s_continue_degraded_scan` | `POST /api/scan/{scan_id}/continue` | Continues a blocked scan after re-reading its gate | Consequential; requires `confirm=true` |
 | `b3s_cancel_scan` | `POST /api/scan/{scan_id}/cancel` | Cancels a running or blocked scan after re-reading its state | Consequential; requires `confirm=true` |
 
 Read results containing captured, page, provider, or user-controlled text are marked as untrusted content.
+
+`b3s_prepare_scan` deliberately does not submit the scan. The ordinary browser `POST /scan` path creates a fresh scan ID for every request and has no durable idempotency key. Allowing an agent to call it directly would make transport or model retries capable of starting duplicate acquisitions and spending provider credits twice. A direct WebMCP launch must wait for a session-authenticated, request-bound, durable idempotency boundary; client-side deduplication is not sufficient.
 
 ### Protected reviewer surface
 
@@ -42,6 +44,7 @@ Vault WebMCP v1 cannot:
 - bypass Google OIDC, the protected reviewer session, same-origin checks, or server validation;
 - read or expose cookies, bearer tokens, API keys, credentials, environment variables, or raw database access;
 - call the token-authenticated Scanner API v1 by manufacturing browser credentials;
+- directly start a scan through the replay-unsafe browser form;
 - accept, reject, revoke, or sign evidence-review decisions automatically;
 - modify immutable captures, evidence lineage, fingerprints, historical reports, or append-only journals;
 - change tile contracts, SV9 weights, scoring authority, canonical selection, publication gates, or Phase Zero/One/Two boundaries;
@@ -62,7 +65,8 @@ No polyfill or third-party runtime is shipped. If the browser does not expose `n
 - Execute-time validation independently rejects unknown fields, missing fields, wrong types, invalid enums, and out-of-range integers.
 - Outputs are compact JSON-serializable values, never HTML documents, DOM nodes, secrets, cookies, or headers.
 - Read-only tools never mutate B3S state.
-- Scan mutations re-read the current server state before acting and read it again afterward.
+- Scan preparation reads back the actual form values and reports `submitted=false` and `requiresHumanSubmit=true`.
+- Continue and cancel re-read current server state before acting and read it again afterward.
 - Review preparation reports the actual state of the visible form and never returns a signed-success shape.
 
 ## Validation
@@ -84,4 +88,4 @@ node "$ADD_WEBMCP_SKILL_DIR/scripts/validate-stagehand.mjs" \
   --local
 ```
 
-The reviewer configuration is `webmcp.review.e2e.json`; it must be run in an authenticated disposable reviewer session. Consequential scan tools remain discovery-only in the committed configurations and must not be invoked by validation without an explicitly authorized live-acquisition boundary.
+The FLOC configuration invokes one read-only lookup and the reversible scan-preparation tool. Continue and cancel remain discovery-only and must not be invoked without an explicitly authorized disposable scan. The reviewer configuration is `webmcp.review.e2e.json`; it must be run in an authenticated disposable reviewer session.
