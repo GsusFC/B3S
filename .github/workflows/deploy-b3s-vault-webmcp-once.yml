@@ -24,6 +24,7 @@ jobs:
         github.actor == 'GsusFC'
       }}
     runs-on: ubuntu-latest
+    environment: pr71-vault
     timeout-minutes: 25
     env:
       DEPLOY_SHA: 184502a46ce0c9660285803e94a46491eac6c8df
