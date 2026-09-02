@@ -1,0 +1,21 @@
+{
+  "timeoutMs": 5000,
+  "tools": [
+    {
+      "name": "b3s_list_vault_review_cases",
+      "risk": "read-only",
+      "expectedAnnotations": {
+        "readOnly": true,
+        "untrustedContent": true
+      }
+    },
+    {
+      "name": "b3s_prepare_vault_review_decision",
+      "risk": "reversible",
+      "expectedAnnotations": {
+        "readOnly": false,
+        "untrustedContent": true
+      }
+    }
+  ]
+}
