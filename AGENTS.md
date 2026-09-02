@@ -26,6 +26,31 @@ Complete the current task with the minimum sufficient change.
 - Do not refactor adjacent code unless it blocks the requested change. Report worthwhile cleanup separately.
 - Remove code you replace. Keep an old path only when compatibility is an explicit requirement.
 
+
+## Complexity budget
+
+For bug fixes and narrowly scoped changes, the default budget is zero new:
+
+- Public or versioned contracts, schemas, or wire formats
+- Adapters, services, layers, pipelines, or alternate execution paths
+- Persisted state concepts, storage structures, or migrations
+- Fingerprints, identity schemes, modes, or lifecycle states
+
+Finding a limitation does not authorize spending this budget. Before proposing any item above, demonstrate all of the following in the minimal plan:
+
+1. The existing mechanism and why it cannot represent the required behavior
+2. Why the problem belongs to the layer being changed
+3. The smallest repair attempted within the current contracts and why it is insufficient
+4. A present requirement or real caller; future flexibility is not evidence
+
+If any point is missing, keep the architecture unchanged.
+
+- Keep orchestration concerns such as retry, checkpointing, and resumption in the owning orchestrator. Do not push them into semantic, provider, or transport contracts when an existing deterministic request already identifies the work.
+- Prefer reconstructing derived state and reusing validated idempotent results over persisting growing snapshots or creating a checkpoint protocol.
+- Do not version or split a contract merely to distinguish full from partial execution when the existing contract already represents a subset.
+- When presenting alternatives, include the smallest option that preserves current boundaries, including “no new abstraction.” Do not ask for a choice only between scope-expanding designs.
+- If a discovered constraint invalidates the premise of the plan, return to the premise and redesign the minimal fix before continuing.
+
 ## B3S invariants
 
 - B3S is an evidence lab, not a scorer with a crawler. Preserve the evidence-first flow described in `README.md`.
