@@ -7,6 +7,15 @@
       "expectedAnnotations": {
         "readOnly": true,
         "untrustedContent": true
+      },
+      "input": {
+        "query": "",
+        "limit": 5
+      },
+      "expectedOutputSubset": {
+        "total": 0,
+        "matched": 0,
+        "analyses": []
       }
     },
     {
