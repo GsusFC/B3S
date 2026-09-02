@@ -18,7 +18,7 @@ FLOC_TOOLS = {
     "b3s_get_brand_analysis",
     "b3s_read_report_markdown",
     "b3s_get_scan_status",
-    "b3s_start_scan",
+    "b3s_prepare_scan",
     "b3s_continue_degraded_scan",
     "b3s_cancel_scan",
 }
@@ -37,6 +37,7 @@ def test_vault_webmcp_is_loaded_only_from_explicit_surfaces() -> None:
     review = _read(TEMPLATES / "vault_review.html.j2")
 
     assert index.count('data-b3s-webmcp-surface="floc"') == 1
+    assert index.count("data-b3s-scan-form") == 1
     assert review.count('data-b3s-webmcp-surface="review"') == 1
     assert 'data-b3s-webmcp-domain="{{ review.domain }}"' in review
     assert index.count('/static/vault_webmcp_loader.js') == 1
@@ -52,14 +53,17 @@ def test_vault_webmcp_loader_fails_closed_outside_vault() -> None:
     assert "if (!isVault && !isOptInLocal) return;" in loader
 
 
-def test_vault_webmcp_contract_keeps_auth_and_review_authority_outside_browser_code() -> None:
+def test_vault_webmcp_contract_keeps_auth_and_final_authority_outside_browser_code() -> None:
     source = _read(STATIC / "vault_webmcp.js")
 
     assert "navigator.modelContext || document.modelContext" in source
     assert source.count("additionalProperties: false") == len(FLOC_TOOLS | REVIEW_TOOLS)
     assert "closedInput(rawInput" in source
-    assert "requiresHumanSubmit: true" in source
-    assert "submitted: false" in source
+    assert source.count("requiresHumanSubmit: true") == 2
+    assert source.count("submitted: false") == 2
+    assert 'name: "b3s_start_scan"' not in source
+    assert 'name: "b3s_prepare_scan"' in source
+    assert 'fetch("/scan"' not in source
     assert "/vault/review/${encodeURIComponent(reviewDomain)}/decisions" not in source
     assert "document.cookie" not in source
     assert "Authorization" not in source
@@ -84,11 +88,24 @@ def test_vault_webmcp_discovery_configs_match_registered_tools() -> None:
         if tool["risk"] == "consequential"
     }
     assert consequential == {
-        "b3s_start_scan",
         "b3s_continue_degraded_scan",
         "b3s_cancel_scan",
     }
-    assert all("input" not in tool for tool in floc_config["tools"] if tool["risk"] == "consequential")
+    assert all(
+        "input" not in tool
+        for tool in floc_config["tools"]
+        if tool["risk"] == "consequential"
+    )
+
+    prepare_scan = next(
+        tool for tool in floc_config["tools"] if tool["name"] == "b3s_prepare_scan"
+    )
+    assert prepare_scan["risk"] == "reversible"
+    assert prepare_scan["expectedOutputSubset"] == {
+        "prepared": True,
+        "submitted": False,
+        "requiresHumanSubmit": True,
+    }
 
 
 def test_vault_webmcp_javascript_parses_when_node_is_available() -> None:
