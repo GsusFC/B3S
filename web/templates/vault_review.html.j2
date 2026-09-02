@@ -168,4 +168,7 @@
   <a href="{{ review.empty_action.href }}">{{ review.empty_action.label }}</a>
 </section>
 {% endif %}
+
+<div hidden data-b3s-webmcp-surface="review" data-b3s-webmcp-domain="{{ review.domain }}"></div>
+<script src="/static/vault_webmcp_loader.js" defer></script>
 {% endblock %}
