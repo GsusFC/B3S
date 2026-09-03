@@ -11,7 +11,6 @@ from src.services import evidence_vault_sv9_authority_report as publication
 from src.sv9.aggregator import aggregate
 from src.sv9.models import ComponentResult, STATUS_NOT_DETECTED
 from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository, _Flow, _relation, _run
-from tests.test_evidence_vault_sv9_authority_projection import _delta
 from tests.test_vault_sv9_parity import _components, _vision_sentinel_result
 from web import scan_runner
 
@@ -54,9 +53,9 @@ def _retained():
     outcome = _run(repo, _Flow(fail=1), relations=[_relation(repo, "M1", number=9)], trusted=()); assert _shape(outcome) == RETAINED; return repo, outcome, source
 
 def _pending():
-    repo, _outcome, source = _retained(); signed = _delta(1); head = repo.authority["current_head"]["event_fingerprint"]
-    repo.reopen_evidence_vault_sv9_judgment_authority("scan-3", signed, expected_predecessor_event_fingerprint=head, idempotency_key_hash=application._idempotency("reopen_authority", "scan-3", None, signed["canonical_delta_fingerprint"], head))
-    outcome = _app("review_required", "review_required", signed_delta=signed, authority=deepcopy(repo.authority)); assert _shape(outcome) == PENDING; return outcome, source
+    repo, _outcome, source = _retained()
+    outcome = _run(repo, _Flow(), current=(3,), relations=[_relation(repo, "M1", number=3)], source="scan-3")
+    assert _shape(outcome) == PENDING; return outcome, source
 
 def _candidate_review(with_authority):
     if with_authority:

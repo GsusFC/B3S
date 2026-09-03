@@ -8,6 +8,7 @@ from typing import Any
 
 from src.services import evidence_vault_sv9_authority_event as authority_event
 from src.services import evidence_vault_sv9_judgment_delta as judgment_delta
+from src.services import evidence_vault_sv9_workset_partition as partitioning
 
 # fmt: off
 _FIELDS = frozenset("authority authority_scope production_runtime_effect scanner_runtime_effect accepted_candidate accepted_partition assessment score current_head active_authority_event event reopen_review_overlay".split())
@@ -18,7 +19,8 @@ _ACTIVE_BINDINGS = (
     ("current_series_fingerprint", "current_series_fingerprint"), ("candidate_series_fingerprint", "candidate_series_fingerprint"),
     ("assessment_fingerprint", "assessment_fingerprint"), ("score_fingerprint", "score_fingerprint"),
 )
-_OVERLAY_FIELDS = frozenset({"review_state", "signed_delta", "delta_fingerprint"})
+_OVERLAY_FIELDS_V1 = frozenset({"review_state", "signed_delta", "delta_fingerprint"})
+_OVERLAY_FIELDS_V2 = _OVERLAY_FIELDS_V1 | {"workset_partition", "workset_partition_fingerprint"}
 # fmt: on
 
 
@@ -86,7 +88,9 @@ def _overlay(value: Any, head: Mapping[str, Any], active: Mapping[str, Any]) -> 
             _fail("stable head")
         return None
     overlay = _mapping(value, "review overlay")
-    if set(overlay) != _OVERLAY_FIELDS or overlay["review_state"] != "pending":
+    v2 = head["schema_version"].endswith("v2")
+    fields = _OVERLAY_FIELDS_V2 if v2 else _OVERLAY_FIELDS_V1
+    if set(overlay) != fields or overlay["review_state"] != "pending":
         _fail("review overlay")
     try:
         signed = judgment_delta.validate_evidence_vault_sv9_judgment_delta(overlay["signed_delta"])
@@ -94,7 +98,7 @@ def _overlay(value: Any, head: Mapping[str, Any], active: Mapping[str, Any]) -> 
         raise EvidenceVaultSv9AuthorityProjectionError("SV9 authority projection review overlay is invalid.") from exc
     fingerprint = signed["canonical_delta_fingerprint"]
     # Repository replay authenticates the omitted prior head; this wrapper binds active-parent state only.
-    if (
+    valid = (
         not _same(overlay["signed_delta"], signed)
         or overlay["delta_fingerprint"] != fingerprint
         or head["event_type"] != "reopen"
@@ -104,7 +108,27 @@ def _overlay(value: Any, head: Mapping[str, Any], active: Mapping[str, Any]) -> 
         or head["active_parent_event_fingerprint"] != active["event_fingerprint"]
         or head["current_series_fingerprint"] != active["current_series_fingerprint"]
         or signed["plan"]["current_series_fingerprint"] != active["current_series_fingerprint"]
-    ):
+    )
+    if v2:
+        try:
+            partition = partitioning.validate_evidence_vault_sv9_workset_partition(
+                overlay["workset_partition"]
+            )
+        except Exception as exc:
+            raise EvidenceVaultSv9AuthorityProjectionError(
+                "SV9 authority projection review overlay is invalid."
+            ) from exc
+        valid = valid or (
+            not _same(overlay["workset_partition"], partition)
+            or partition["judgment_delta"] != signed
+            or partition["input_binding"]["canonical_delta_fingerprint"] != fingerprint
+            or overlay["workset_partition_fingerprint"] != partition["partition_fingerprint"]
+            or head["workset_partition_fingerprint"] != partition["partition_fingerprint"]
+            or head["request"]["workset_partition_fingerprint"]
+            != partition["partition_fingerprint"]
+        )
+        overlay["workset_partition"] = partition
+    if valid:
         _fail("review overlay binding")
     return overlay
 

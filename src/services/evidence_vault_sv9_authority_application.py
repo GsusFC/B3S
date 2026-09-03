@@ -8,6 +8,7 @@ from uuid import UUID
 from src.services import evidence_vault_sv9_authority_event as authority_event
 from src.services import evidence_vault_sv9_authority_evaluation as evaluation_service
 from src.services import evidence_vault_sv9_judgment_delta as delta
+from src.services import evidence_vault_sv9_workset_partition as partitioning
 from src.services.evidence_vault_sv9_authoritative_relations import (
     EvidenceVaultSv9AuthoritativeRelationStaleWitnessError,
     EvidenceVaultSv9AuthoritativeRelationWitnessError,
@@ -25,7 +26,7 @@ class EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError(Exception):
 
 class EvidenceVaultSv9AuthorityApplicationRepository(evaluation_service.EvidenceVaultSv9AuthorityEvaluationRepository, Protocol):
     def adopt_evidence_vault_sv9_judgment_candidate(self, source_scan_id: str, candidate_id: str, **kwargs: Any) -> tuple[dict[str, Any], bool]: ...
-    def reopen_evidence_vault_sv9_judgment_authority(self, source_scan_id: str, signed_delta: Mapping[str, Any], **kwargs: Any) -> tuple[dict[str, Any], bool]: ...
+    def reopen_evidence_vault_sv9_judgment_authority(self, source_scan_id: str, signed_delta: Mapping[str, Any], *, workset_partition: Mapping[str, Any], **kwargs: Any) -> tuple[dict[str, Any], bool]: ...
 
 def run_evidence_vault_sv9_authority_application(*, repository: EvidenceVaultSv9AuthorityApplicationRepository, flow: evaluation.Sv9StrictComponentFlowPort, domain_or_url: str, source_scan_id: str, current_series_contract: Mapping[str, Any], workspace_slug: str = "b3s", trusted_irrelevant_evidence: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
     """Evaluate first, then append at most one authority event or fail closed."""
@@ -92,23 +93,30 @@ def _apply_review(repository, domain: str, source: str, workspace: str, outcome:
         return _result("authority_conflict", outcome)
     if state == "absent": return _result("first_run_unresolved", outcome) if _same_snapshot(state, details, predecessor) else _result("authority_conflict", outcome)
     signed = _signed_delta(outcome.get("signed_delta"))
-    if signed is None:
+    partition = _workset_partition(outcome.get("workset_partition"), signed)
+    if signed is None or partition is None:
         return _result("authority_conflict", outcome, authority)
     fingerprint = signed["canonical_delta_fingerprint"]
-    if details["overlay"] == fingerprint:
+    partition_fingerprint = partition["partition_fingerprint"]
+    if _same_review_overlay(details["overlay"], fingerprint, partition_fingerprint):
         return _result("review_required", outcome, authority, signed_delta=signed)
     if not _same_snapshot(state, details, predecessor):
         return _result("authority_conflict", outcome)
-    key = _idempotency("reopen_authority", source, None, fingerprint, predecessor)
+    key = _idempotency(
+        "reopen_authority", source, None, fingerprint, predecessor, partition_fingerprint
+    )
     try:
         repository.reopen_evidence_vault_sv9_judgment_authority(
             source, signed, expected_predecessor_event_fingerprint=predecessor,
             idempotency_key_hash=key, workspace_slug=workspace,
+            workset_partition=partition,
         )
     except Exception:
         pass
     state, authority, details = _read(repository, domain, workspace)
-    if state == "authority" and details["overlay"] == fingerprint:
+    if state == "authority" and _same_review_overlay(
+        details["overlay"], fingerprint, partition_fingerprint
+    ):
         return _result("review_required", outcome, authority, signed_delta=signed)
     return _result("authority_conflict", outcome)
 
@@ -147,7 +155,17 @@ def _authority(value: Any) -> dict[str, Any]:
         signed = _signed_delta(overlay.get("signed_delta"))
         if signed is None or overlay.get("delta_fingerprint") != signed["canonical_delta_fingerprint"] or head["event_type"] != "reopen" or head["delta_fingerprint"] != signed["canonical_delta_fingerprint"] or head["active_parent_event_id"] != active["event_id"] or head["active_parent_event_fingerprint"] != active["event_fingerprint"]:
             raise ValueError("authority review overlay is inconsistent")
-    return {"candidate": candidate, "head": head["event_fingerprint"], "kind": active["event_type"], "overlay": None if overlay is None else overlay["delta_fingerprint"]}
+    return {
+        "candidate": candidate,
+        "head": head["event_fingerprint"],
+        "kind": active["event_type"],
+        "overlay": None
+        if overlay is None
+        else {
+            "delta_fingerprint": overlay["delta_fingerprint"],
+            "workset_partition_fingerprint": overlay.get("workset_partition_fingerprint"),
+        },
+    }
 
 def _candidate(value: Any) -> dict[str, str] | None:
     try:
@@ -171,6 +189,22 @@ def _signed_delta(value: Any) -> dict[str, Any] | None:
     except Exception:
         return None
 
+
+def _workset_partition(value: Any, signed: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    try:
+        if signed is None:
+            raise ValueError
+        partition = partitioning.validate_evidence_vault_sv9_workset_partition(value)
+        if (
+            partition["judgment_delta"] != signed
+            or partition["input_binding"]["canonical_delta_fingerprint"]
+            != signed["canonical_delta_fingerprint"]
+        ):
+            raise ValueError
+        return partition
+    except Exception:
+        return None
+
 def _matches(details: Mapping[str, Any], candidate: Mapping[str, str]) -> bool:
     return all(details["candidate"].get(key) == value for key, value in candidate.items())
 
@@ -182,12 +216,23 @@ def _snapshot(outcome: Mapping[str, Any]) -> tuple[bool, str | None]:
 def _same_snapshot(state: str, details: Mapping[str, Any] | None, predecessor: str | None) -> bool:
     return state == "absent" if predecessor is None else state == "authority" and details["head"] == predecessor
 
+
+def _same_review_overlay(
+    overlay: Mapping[str, Any] | None,
+    delta_fingerprint: str,
+    workset_partition_fingerprint: str,
+) -> bool:
+    return overlay == {
+        "delta_fingerprint": delta_fingerprint,
+        "workset_partition_fingerprint": workset_partition_fingerprint,
+    }
+
 def _success(outcome: Mapping[str, Any], authority: Mapping[str, Any], details: Mapping[str, Any], candidate: Mapping[str, str]) -> dict[str, Any]:
     status = "authority_established" if details["kind"] == "adopt" else "authority_advanced"
     return _result(status, outcome, authority, candidate)
 
-def _idempotency(action: str, source: str, candidate: str | None, fingerprint: str | None, predecessor: str | None) -> str:
-    request = authority_event.build_evidence_vault_sv9_authority_request(action=action, candidate_id=candidate, expected_predecessor_event_fingerprint=predecessor, delta_fingerprint=fingerprint, source_scan_id=source)
+def _idempotency(action: str, source: str, candidate: str | None, fingerprint: str | None, predecessor: str | None, workset_partition_fingerprint: str | None = None) -> str:
+    request = authority_event.build_evidence_vault_sv9_authority_request(action=action, candidate_id=candidate, expected_predecessor_event_fingerprint=predecessor, delta_fingerprint=fingerprint, source_scan_id=source, workset_partition_fingerprint=workset_partition_fingerprint)
     return authority_event.authority_application_idempotency_fingerprint(request)
 
 def _result(status: str, outcome: Mapping[str, Any], authority: Mapping[str, Any] | None = None, candidate: Mapping[str, str] | None = None, signed_delta: Mapping[str, Any] | None = None) -> dict[str, Any]:

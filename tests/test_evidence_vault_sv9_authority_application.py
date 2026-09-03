@@ -9,6 +9,8 @@ from src.services import evidence_vault_sv9_authority_event as authority_event
 from src.services import evidence_vault_sv9_authority_evaluation as evaluation_service
 from src.services import evidence_vault_sv9_authority_projection as authority_projection
 from src.services import evidence_vault_sv9_judgment_delta as delta
+from src.services import evidence_vault_sv9_workset_partition as partitioning
+from src.services.evidence_vault_canonical_core import canonical_fingerprint
 from tests.test_evidence_vault_sv9_authority_evaluation import _Flow, _Repository, _authority, _hash, _identity, _relation, _series
 from tests.test_sv9_judgment_memory import _judgment
 
@@ -16,7 +18,7 @@ def _uuid(number): return f"00000000-0000-0000-0000-{number:012d}"
 
 class _ApplicationRepository(_Repository):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs); self.context = {"capture_origin": {"capture_id": _uuid(9), "capture_fingerprint": _hash(9)}, "operation_origin": {"operation_id": _uuid(10), "operation_fingerprint": _hash(10)}}; self.event, self.candidate, self.authority_calls, self.interleave, self.appear = 500, 400, 0, 0, None; self.adopt_failure = self.corrupt_after_adopt = self.authority_failure = self._corrupt = False; self.witness_seed = 300; self.adopt_error = None; self.authority_responses = []
+        super().__init__(*args, **kwargs); self.context = {"capture_origin": {"capture_id": _uuid(9), "capture_fingerprint": _hash(9)}, "operation_origin": {"operation_id": _uuid(10), "operation_fingerprint": _hash(10)}}; self.event, self.candidate, self.authority_calls, self.interleave, self.appear = 500, 400, 0, 0, None; self.adopt_failure = self.corrupt_after_adopt = self.authority_failure = self._corrupt = False; self.witness_seed = 300; self.adopt_error = None; self.authority_responses = []; self.reopen_partitions = []
     def load_evidence_vault_sv9_authoritative_relation_facts(self, scan, *, workspace_slug="b3s"):
         source = {"workspace_id": _uuid(1), "brand_id": _uuid(2), "scan_run_id": _uuid(3), "source_scan_id": scan, "workspace_slug": workspace_slug, "canonical_domain": "example.test", "capture_id": self.context["capture_origin"]["capture_id"], "capture_fingerprint": self.context["capture_origin"]["capture_fingerprint"], "operation_plan_id": self.context["operation_origin"]["operation_id"], "operation_fingerprint": self.context["operation_origin"]["operation_fingerprint"], "operation_status": "completed"}
         evidence, basis = [], []
@@ -26,7 +28,7 @@ class _ApplicationRepository(_Repository):
             basis.append({"relation_id": _hash(300 + number), "evidence_id": evidence_id, "source_identity_id": source_identity_id, "polarity": "supports"})
         accepted = [{"tile_id": "M1", "component_key": "mission", "assessment_state": "ok", "authority_state": "accepted", "review_state": "resolved", "lifecycle_state": "active", "basis": basis}]
         seed = self.witness_seed; witness = {"canonical_memory_version": _hash(seed), "adoption_event_id": _uuid(seed), "adoption_sequence": 1, "candidate_packet_fingerprint": _hash(seed + 1), "request_fingerprint": _hash(seed + 2)}
-        return {"source": source, "evidence": evidence, "authority": {"witness": witness, "accepted": accepted}}
+        return {"source": source, "evidence": evidence, "authority": {"witness": witness, "accepted": accepted}, "evaluation_hint_seeds": []}
     def get_evidence_vault_sv9_judgment_authority(self, _domain, **_kwargs):
         self.authority_calls += 1
         if self.authority_failure: raise RuntimeError("authority unavailable")
@@ -57,15 +59,19 @@ class _ApplicationRepository(_Repository):
         if self.adopt_failure: raise RuntimeError("stale")
         self._accept(candidate_id, scan, "supersede" if self.authority else "adopt", idempotency_key_hash); self._corrupt = self.corrupt_after_adopt
         return deepcopy(self.authority), False
-    def reopen_evidence_vault_sv9_judgment_authority(self, scan, signed_delta, *, expected_predecessor_event_fingerprint, idempotency_key_hash, **_kwargs):
+    def reopen_evidence_vault_sv9_judgment_authority(self, scan, signed_delta, *, expected_predecessor_event_fingerprint, idempotency_key_hash, workset_partition, **_kwargs):
         self.mutations.append("reopen")
         if expected_predecessor_event_fingerprint != self.authority["current_head"]["event_fingerprint"]: raise RuntimeError("stale")
+        partition = partitioning.validate_evidence_vault_sv9_workset_partition(workset_partition)
+        if partition["judgment_delta"] != signed_delta: raise RuntimeError("partition")
+        self.reopen_partitions.append(deepcopy(partition))
         previous, active = self.authority["current_head"], self.authority["active_authority_event"]; self.event += 1
         fingerprint = signed_delta["canonical_delta_fingerprint"]
-        request = authority_event.build_evidence_vault_sv9_authority_request(action="reopen_authority", candidate_id=None, expected_predecessor_event_fingerprint=previous["event_fingerprint"], delta_fingerprint=fingerprint, source_scan_id=scan)
-        event = authority_event.build_evidence_vault_sv9_authority_event(event_id=_uuid(self.event), event_type="reopen", sequence=previous["sequence"] + 1, predecessor_event_fingerprint=previous["event_fingerprint"], active_parent_event_fingerprint=active["event_fingerprint"], candidate_identity=None, current_series_fingerprint=active["current_series_fingerprint"], delta_fingerprint=fingerprint, request=request, idempotency_key_hash=idempotency_key_hash, predecessor_event_id=previous["event_id"], active_parent_event_id=active["event_id"], created_at=f"2026-01-01T00:00:{self.event % 60:02d}+00:00")
+        partition_fingerprint = partition["partition_fingerprint"]
+        request = authority_event.build_evidence_vault_sv9_authority_request(action="reopen_authority", candidate_id=None, expected_predecessor_event_fingerprint=previous["event_fingerprint"], delta_fingerprint=fingerprint, source_scan_id=scan, workset_partition_fingerprint=partition_fingerprint)
+        event = authority_event.build_evidence_vault_sv9_authority_event(event_id=_uuid(self.event), event_type="reopen", sequence=previous["sequence"] + 1, predecessor_event_fingerprint=previous["event_fingerprint"], active_parent_event_fingerprint=active["event_fingerprint"], candidate_identity=None, current_series_fingerprint=active["current_series_fingerprint"], delta_fingerprint=fingerprint, request=request, idempotency_key_hash=idempotency_key_hash, predecessor_event_id=previous["event_id"], active_parent_event_id=active["event_id"], created_at=f"2026-01-01T00:00:{self.event % 60:02d}+00:00", workset_partition_fingerprint=partition_fingerprint)
         self.authority["current_head"] = self.authority["event"] = event
-        self.authority["reopen_review_overlay"] = {"review_state": "pending", "signed_delta": deepcopy(signed_delta), "delta_fingerprint": signed_delta["canonical_delta_fingerprint"]}
+        self.authority["reopen_review_overlay"] = {"review_state": "pending", "signed_delta": deepcopy(signed_delta), "delta_fingerprint": signed_delta["canonical_delta_fingerprint"], "workset_partition": partition, "workset_partition_fingerprint": partition_fingerprint}
         return deepcopy(self.authority), False
 
 def _run(repo, flow, *, current=(9,), relations=None, trusted=(), source="scan", domain="example.test"):
@@ -87,7 +93,7 @@ def _stage(repo):
 def test_idempotency_binds_action_source_candidate_delta_and_predecessor():
     base = application._idempotency("adopt_candidate", "scan", _uuid(1), None, _hash(1))
     assert base == application._idempotency("adopt_candidate", "scan", _uuid(1), None, _hash(1))
-    assert len({base, application._idempotency("reopen_authority", "scan", None, _hash(2), _hash(1)), application._idempotency("reopen_authority", "scan", None, _hash(3), _hash(1)), application._idempotency("adopt_candidate", "scan-2", _uuid(1), None, _hash(1)), application._idempotency("adopt_candidate", "scan", _uuid(2), None, _hash(1)), application._idempotency("adopt_candidate", "scan", _uuid(1), None, _hash(2))}) == 6
+    assert len({base, application._idempotency("reopen_authority", "scan", None, _hash(2), _hash(1), _hash(4)), application._idempotency("reopen_authority", "scan", None, _hash(2), _hash(1), _hash(5)), application._idempotency("reopen_authority", "scan", None, _hash(3), _hash(1), _hash(4)), application._idempotency("adopt_candidate", "scan-2", _uuid(1), None, _hash(1)), application._idempotency("adopt_candidate", "scan", _uuid(2), None, _hash(1)), application._idempotency("adopt_candidate", "scan", _uuid(1), None, _hash(2))}) == 7
 
 def test_coverage_loss_is_reopen_eligible_but_empty_delta_is_not():
     evidence = delta.build_evidence_identity_set([])
@@ -143,7 +149,141 @@ def test_supersede_and_consecutive_reopens_are_single_append_state_transitions()
     again = _run(repo, _Flow(), current=(9,), relations=[_relation(repo, "M1", number=9)], source="scan-3")
     assert again["status"] == "review_required" and len(repo.mutations) == events
     repo.records = (3,); next_reopen = _run(repo, _Flow(), current=(3,), relations=[_relation(repo, "M1", number=3)], source="scan-4")
-    assert next_reopen["status"] == "review_required" and repo.mutations[-2:] == ["reopen", "reopen"] and repo.authority["current_head"]["active_parent_event_id"] == repo.authority["active_authority_event"]["event_id"]
+    head = repo.authority["current_head"]
+    assert next_reopen["status"] == "review_required" and repo.mutations[-2:] == ["reopen", "reopen"] and head["active_parent_event_id"] == repo.authority["active_authority_event"]["event_id"]
+    assert head["schema_version"] == "evidence-vault-sv9-judgment-authority-event-v2" and head["request"]["workset_partition_fingerprint"] == repo.authority["reopen_review_overlay"]["workset_partition_fingerprint"]
+
+def test_continuity_only_reopen_carries_the_validated_partition_through_append_and_replay(monkeypatch):
+    monkeypatch.setattr(
+        evaluation_service,
+        "project_evidence_vault_sv9_evaluation_input",
+        lambda *, repository, source_scan_id, workspace_slug: repository.evaluation_input(
+            source_scan_id, workspace_slug
+        ),
+    )
+    repo = _ApplicationRepository(records=(9,))
+    assert _run(repo, _Flow(), current=(9,))["status"] == "authority_established"
+    repo.reopen = True
+    accepted = deepcopy(repo.authority["accepted_candidate"])
+    mutations = list(repo.mutations)
+
+    result = _run(repo, _Flow(), current=(3, 9))
+
+    overlay = repo.authority["reopen_review_overlay"]
+    partition = overlay["workset_partition"]
+    assert result["status"] == result["evaluation_status"] == "review_required"
+    assert not overlay["signed_delta"]["plan"]["review_set"] and not overlay["signed_delta"]["coverage_loss"]
+    assert partition["review_partition"]["evaluation_input_reopened_tile_ids"] == ["M1"]
+    assert partition["review_partition"]["operational_authority_coverage_loss_tile_ids"] == ["M1"]
+    assert partition["review_partition"]["tile_ids"] != ["M1"]
+    assert repo.mutations == mutations + ["reopen"] and repo.authority["accepted_candidate"] == accepted
+    assert authority_projection.validate_persisted_evidence_vault_sv9_authority_projection(repo.authority) == repo.authority
+
+
+def test_review_handoff_rejects_absent_or_tampered_partitions_without_writes(monkeypatch):
+    monkeypatch.setattr(
+        evaluation_service,
+        "project_evidence_vault_sv9_evaluation_input",
+        lambda *, repository, source_scan_id, workspace_slug: repository.evaluation_input(
+            source_scan_id, workspace_slug
+        ),
+    )
+    repo = _ApplicationRepository(records=(9,))
+    assert _run(repo, _Flow(), current=(9,))["status"] == "authority_established"
+    repo.reopen = True
+    base = evaluation_service.run_evidence_vault_sv9_authority_evaluation(
+        repository=repo,
+        flow=_Flow(),
+        domain_or_url="example.test",
+        source_scan_id="scan",
+        current_series_contract=_series(),
+    )
+    assert base["status"] == "review_required" and base["workset_partition"]["review_partition"]["evaluation_input_reopened_tile_ids"] == ["M1"]
+
+    def rehash(value):
+        value["partition_fingerprint"] = canonical_fingerprint(
+            "evidence-vault-sv9-workset-partition-fingerprint-v1",
+            {key: item for key, item in value.items() if key != "partition_fingerprint"},
+        )
+
+    alternate = delta.build_evidence_vault_sv9_judgment_delta(
+        current_evidence=base["signed_delta"]["current_evidence"],
+        prior_judgments=base["signed_delta"]["prior_judgments"],
+        prior_component_sentinels=base["signed_delta"]["plan"]["prior_component_sentinels"],
+        authoritative_relations=base["signed_delta"]["authoritative_relations"],
+        current_series_contract=_series(prompt_version="partition-mismatch"),
+    )
+    cases = [
+        lambda outcome: outcome.pop("workset_partition"),
+        lambda outcome: (
+            outcome["workset_partition"]["review_partition"]["evaluation_input_reopened_tile_ids"].append("M2"),
+            rehash(outcome["workset_partition"]),
+        ),
+        lambda outcome: (
+            outcome["workset_partition"]["review_partition"].__setitem__("tile_ids", ["M2"]),
+            rehash(outcome["workset_partition"]),
+        ),
+        lambda outcome: outcome.__setitem__(
+            "workset_partition",
+            partitioning.build_evidence_vault_sv9_workset_partition(
+                evaluation_input=base["workset_partition"]["evaluation_input"],
+                judgment_delta=alternate,
+                trusted_irrelevant_evidence=[],
+            ),
+        ),
+    ]
+    accepted = deepcopy(repo.authority["accepted_candidate"])
+    for mutate in cases:
+        outcome = deepcopy(base); mutate(outcome); before = list(repo.mutations)
+        monkeypatch.setattr(evaluation_service, "run_evidence_vault_sv9_authority_evaluation", lambda **_kwargs: outcome)
+        result = _run(repo, _Flow(), current=(3, 9))
+        assert result["status"] == "authority_conflict" and repo.mutations == before
+        assert repo.authority["accepted_candidate"] == accepted and result["candidate"] is None and result["signed_delta"] is None
+
+
+def test_stale_continuity_reopen_predecessor_is_rejected_without_a_second_write(monkeypatch):
+    monkeypatch.setattr(
+        evaluation_service,
+        "project_evidence_vault_sv9_evaluation_input",
+        lambda *, repository, source_scan_id, workspace_slug: repository.evaluation_input(
+            source_scan_id, workspace_slug
+        ),
+    )
+    repo = _ApplicationRepository(records=(9,))
+    assert _run(repo, _Flow(), current=(9,))["status"] == "authority_established"
+    repo.reopen = True
+    repo.records = (3, 9)
+    repo.projection_relations = [_relation(repo, "M1", number=3), _relation(repo, "M1", number=9)]
+    stale = evaluation_service.run_evidence_vault_sv9_authority_evaluation(
+        repository=repo,
+        flow=_Flow(),
+        domain_or_url="example.test",
+        source_scan_id="scan",
+        current_series_contract=_series(),
+    )
+    assert stale["status"] == "review_required"
+    repo.reopen = False
+    advanced = _run(
+        repo,
+        _Flow(),
+        current=(3, 9),
+        relations=[_relation(repo, "M1", number=3), _relation(repo, "M1", number=9)],
+        source="scan-2",
+    )
+    assert advanced["status"] == "authority_advanced"
+    before, accepted = list(repo.mutations), deepcopy(repo.authority["accepted_candidate"])
+    monkeypatch.setattr(
+        evaluation_service,
+        "run_evidence_vault_sv9_authority_evaluation",
+        lambda **_kwargs: deepcopy(stale),
+    )
+
+    result = _run(repo, _Flow(), current=(3, 9), source="scan")
+
+    assert result["status"] == "authority_conflict" and repo.mutations == before
+    assert repo.authority["accepted_candidate"] == accepted
+    assert result["candidate"] is result["signed_delta"] is None
+
 
 def test_selected_older_event_uses_current_head_for_stable_authority():
     repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"; older = deepcopy(repo.authority["event"])

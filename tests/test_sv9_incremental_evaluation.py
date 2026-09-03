@@ -29,7 +29,7 @@ class _Flow:
         if self.mode == "failure" or (self.mode == "second_failure" and len(self.calls) == 2): return ie.ComponentEvaluationOutcome.provider_failure()
         if self.mode == "mixed": return ie.ComponentEvaluationOutcome({}, "provider_failure")
         if self.mode == "empty": return ie.ComponentEvaluationOutcome()
-        rows = [{"tile_id": row["tile_id"], "assessment_state": "ok", "supporting_evidence": [{key: evidence[key] for key in ("evidence_ref", "evidence_fingerprint")} for evidence in row["evidence"]]} for row in request["requested_tiles"]]
+        rows = [{"tile_id": row["tile_id"], "assessment_state": "ok" if row["evidence"] else "sin_evidencia", "supporting_evidence": [{key: evidence[key] for key in ("evidence_ref", "evidence_fingerprint")} for evidence in row["evidence"]]} for row in request["requested_tiles"]]
         rows, status = ([], "not_detected") if self.mode == "not_detected" and request["component_key"] == "mission" else (rows, "evaluated")
         if self.mode == "missing": rows = rows[:-1]
         if self.mode == "duplicate": rows.append(deepcopy(rows[0]))
@@ -128,3 +128,106 @@ def test_composition_rejects_overlap_mixed_series_and_missing_capacity():
         with pytest.raises(ie.IncrementalEvaluationError): ie._assessment(plan, set(), judgments, sentinels)
     with pytest.raises(ie.IncrementalEvaluationError): ie._assessment(empty, set(empty["tile_workset"]), mixed, {})
 # fmt: on
+
+
+from tests.test_evidence_vault_sv9_workset_partition import (
+    _build as _build_workset_partition, _delta as _partition_delta, _input as _partition_input,
+    _prior as _partition_prior, _sentinel as _partition_sentinel,
+)
+
+
+def _partitioned(kind="canonical"):
+    extras, hints, sin_evidencia = (), (), False
+    if kind in {"hint", "both", "sentinel"}: extras, hints = ("hinted",), (("hint", "M1", "hinted"),)
+    if kind == "blocked": extras, hints = ("hinted", "pending"), (("hint", "M1", "hinted"),)
+    if kind == "zero_pending": extras = ("pending",)
+    if kind == "sentinel": sin_evidencia = True
+    source = _partition_input(extras=extras, hints=hints, sin_evidencia=sin_evidencia)
+    prior = _partition_prior(source, without=("mission",)) if kind in {"canonical", "both", "sentinel"} else None
+    sentinels = [_partition_sentinel(source)] if kind == "sentinel" else ()
+    return _build_workset_partition(source, _partition_delta(source, prior=prior, sentinels=sentinels))
+
+
+def _resolved(workset):
+    ids = {binding["evidence_record_id"] for tile in workset["healthy_workset"]["tiles"] for binding in tile["current_evidence_bindings"]}
+    return [{key: row[key] for key in ("evidence_record_id", "evidence_ref", "evidence_fingerprint")} | {"content": {"record": row["evidence_record_id"]}} for row in workset["evaluation_input"]["current_identity_bindings"] if row["evidence_record_id"] in ids]
+
+
+def _persisted():
+    rows = []
+    def persist(request, evaluation, judgments, sentinel):
+        rows.append((deepcopy(request), deepcopy(evaluation), deepcopy(judgments), deepcopy(sentinel)))
+    return rows, persist
+
+
+def _lookup(rows):
+    values = {(request["plan_fingerprint"], request["canonical_request_fingerprint"]): evaluation for request, evaluation, _judgments, _sentinel in rows}
+    return lambda request: values.get((request["plan_fingerprint"], request["canonical_request_fingerprint"]))
+
+
+def test_partial_executor_persists_only_validated_prefix_without_score_authority():
+    workset, flow, stored = _partitioned(), _Flow("second_failure"), None
+    stored, persist = _persisted()
+    result = ie.execute_partial_incremental_evaluation(workset, _resolved(workset), flow, persist_evaluation=persist)
+    request, evaluation, judgments, sentinel = stored[0]
+    assert result["status"] == "provider_failure" and len(stored) == 1 and [row["component_key"] for row in flow.calls] == ["mission", "coherencia"]
+    assert set(request) == ie._REQUEST_FIELDS and request["schema_version"] == ie.COMPONENT_REQUEST_VERSION and "workset_partition_fingerprint" not in request
+    assert all(set(call) == ie._REQUEST_FIELDS and call["schema_version"] == ie.COMPONENT_REQUEST_VERSION and "workset_partition_fingerprint" not in call for call in flow.calls)
+    assert evaluation == result["captured_calls"][0]["evaluation"] and len(judgments) == 5 and sentinel is None
+    assert not {"assessment", "score", "candidate", "adoption", "publication", "accepted_authority", "workset_partition_fingerprint"} & set(result)
+
+
+def test_partial_executor_recovers_per_request_before_flow_and_rebuilds_coherencia_identically():
+    workset, first_flow = _partitioned(), _Flow("second_failure")
+    stored, persist = _persisted()
+    ie.execute_partial_incremental_evaluation(workset, _resolved(workset), first_flow, persist_evaluation=persist)
+    uninterrupted = _Flow(); ie.execute_partial_incremental_evaluation(workset, _resolved(workset), uninterrupted)
+    resumed_flow, resumed_stored = _Flow(), _persisted()
+    result = ie.execute_partial_incremental_evaluation(workset, _resolved(workset), resumed_flow, lookup_evaluation=_lookup(stored), persist_evaluation=resumed_stored[1])
+    assert result["status"] == "partial" and result["call_count"] == 1 and [row["component_key"] for row in resumed_flow.calls] == ["coherencia"]
+    assert resumed_flow.calls[0]["upstream_candidate_state"] == uninterrupted.calls[-1]["upstream_candidate_state"]
+    assert resumed_flow.calls[0]["canonical_request_fingerprint"] == uninterrupted.calls[-1]["canonical_request_fingerprint"]
+    assert len(resumed_stored[0]) == 1 and resumed_stored[0][0][0]["component_key"] == "coherencia"
+
+
+def test_partial_executor_propagates_persistence_failure_before_next_flow_call():
+    workset, flow = _partitioned(), _Flow()
+    with pytest.raises(RuntimeError):
+        ie.execute_partial_incremental_evaluation(workset, _resolved(workset), flow, persist_evaluation=lambda *_args: (_ for _ in ()).throw(RuntimeError("persist")))
+    assert [row["component_key"] for row in flow.calls] == ["mission"]
+
+
+def test_partial_executor_rejects_tampered_recovered_evaluation_through_acceptance():
+    workset, seed_flow = _partitioned(), _Flow("second_failure")
+    stored, persist = _persisted(); ie.execute_partial_incremental_evaluation(workset, _resolved(workset), seed_flow, persist_evaluation=persist)
+    request, evaluation, _judgments, _sentinel = stored[0]
+    tampered = ie.build_component_evaluation(component_key=evaluation["component_key"], series_fingerprint=evaluation["series_fingerprint"], request_fingerprint=_hash(5), status=evaluation["status"], tile_results=evaluation["tile_results"])
+    flow = _Flow(); result = ie.execute_partial_incremental_evaluation(workset, _resolved(workset), flow, lookup_evaluation=lambda candidate: tampered if candidate["component_key"] == request["component_key"] else None)
+    assert result["status"] == "provider_failure" and result["call_count"] == 0 and not result["captured_calls"] and not flow.calls
+
+
+def test_partial_executor_detaches_lookup_request_before_recovery():
+    workset, stored = _partitioned(), None
+    stored, persist = _persisted(); ie.execute_partial_incremental_evaluation(workset, _resolved(workset), _Flow("second_failure"), persist_evaluation=persist)
+    expected_flow = _Flow(); expected = ie.execute_partial_incremental_evaluation(workset, _resolved(workset), expected_flow)
+    def lookup(request):
+        if request["component_key"] == "mission":
+            request["canonical_request_fingerprint"] = _hash(1); request["requested_tiles"][0]["evidence"] = []
+            return stored[0][1]
+        return None
+    flow = _Flow(); result = ie.execute_partial_incremental_evaluation(workset, _resolved(workset), flow, lookup_evaluation=lookup)
+    assert flow.calls == [expected_flow.calls[-1]]
+    assert result["captured_calls"] == expected["captured_calls"] and result["evaluated_tile_judgments"] == expected["evaluated_tile_judgments"]
+
+
+def test_partial_executor_detaches_persistence_material_before_coherencia():
+    workset = _partitioned()
+    expected_flow = _Flow("not_detected"); expected = ie.execute_partial_incremental_evaluation(workset, _resolved(workset), expected_flow)
+    def persist(request, evaluation, judgments, sentinel):
+        request["canonical_request_fingerprint"] = _hash(1); evaluation["request_fingerprint"] = _hash(2)
+        if judgments: judgments[0]["assessment_state"] = "no"
+        if sentinel: sentinel["canonical_component_sentinel_fingerprint"] = _hash(3)
+    flow = _Flow("not_detected"); result = ie.execute_partial_incremental_evaluation(workset, _resolved(workset), flow, persist_evaluation=persist)
+    assert flow.calls == expected_flow.calls and result["captured_calls"] == expected["captured_calls"]
+    assert result["evaluated_tile_judgments"] == expected["evaluated_tile_judgments"]
+    assert result["evaluated_component_sentinels"] == expected["evaluated_component_sentinels"]

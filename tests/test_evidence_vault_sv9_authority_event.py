@@ -101,4 +101,61 @@ def test_coordinated_changes_with_stale_outer_fingerprint_are_rejected():
     with pytest.raises(authority.EvidenceVaultSv9AuthorityEventError): authority.validate_evidence_vault_sv9_authority_event(changed)
     reopened = _event("reopen"); reopened["request"]["source_scan_id"] = "next"; reopened["request_fingerprint"] = canonical_fingerprint(_REQUEST, reopened["request"]); reopened["idempotency_key_hash"] = _old_idempotency(reopened["request"])
     with pytest.raises(authority.EvidenceVaultSv9AuthorityEventError): authority.validate_evidence_vault_sv9_authority_event(reopened)
+
+
+def test_v2_reopen_binds_partition_request_idempotency_and_event_fingerprints():
+    request = authority.build_evidence_vault_sv9_authority_request(
+        action="reopen_authority",
+        candidate_id=None,
+        expected_predecessor_event_fingerprint=_H(80),
+        delta_fingerprint=_H(82),
+        source_scan_id="scan",
+        workset_partition_fingerprint=_H(83),
+    )
+    event = authority.build_evidence_vault_sv9_authority_event(
+        event_id=_U(13),
+        event_type="reopen",
+        sequence=2,
+        predecessor_event_fingerprint=_H(80),
+        active_parent_event_fingerprint=_H(81),
+        candidate_identity=None,
+        current_series_fingerprint=_H(2),
+        delta_fingerprint=_H(82),
+        request=request,
+        idempotency_key_hash=authority.authority_application_idempotency_fingerprint(request),
+        predecessor_event_id=_U(80),
+        active_parent_event_id=_U(81),
+        workset_partition_fingerprint=_H(83),
+    )
+    identity = (*_IDENTITY[:14], "workset_partition_fingerprint", *_IDENTITY[14:])
+    assert request["schema_version"] == "evidence-vault-sv9-judgment-authority-request-v2"
+    assert event["schema_version"] == "evidence-vault-sv9-judgment-authority-event-v2"
+    assert authority.validate_evidence_vault_sv9_authority_event(json.loads(json.dumps(event))) == event
+    assert authority.authority_application_idempotency_fingerprint(request) != _old_idempotency(
+        {key: value for key, value in request.items() if key != "workset_partition_fingerprint"} | {"schema_version": _REQUEST}
+    )
+    missing = {key: value for key, value in request.items() if key != "workset_partition_fingerprint"}
+    with pytest.raises(authority.EvidenceVaultSv9AuthorityEventError):
+        authority.authority_application_idempotency_fingerprint(missing)
+    outer = deepcopy(event)
+    outer["workset_partition_fingerprint"] = _H(99)
+    outer["event_fingerprint"] = canonical_fingerprint(
+        "evidence-vault-sv9-judgment-authority-event-v2", {key: outer[key] for key in identity}
+    )
+    with pytest.raises(authority.EvidenceVaultSv9AuthorityEventError):
+        authority.validate_evidence_vault_sv9_authority_event(outer)
+    request_tamper = deepcopy(event)
+    request_tamper["request"]["workset_partition_fingerprint"] = _H(99)
+    request_tamper["request_fingerprint"] = canonical_fingerprint(
+        "evidence-vault-sv9-judgment-authority-request-v2", request_tamper["request"]
+    )
+    request_tamper["idempotency_key_hash"] = authority.authority_application_idempotency_fingerprint(
+        request_tamper["request"]
+    )
+    request_tamper["event_fingerprint"] = canonical_fingerprint(
+        "evidence-vault-sv9-judgment-authority-event-v2",
+        {key: request_tamper[key] for key in identity},
+    )
+    with pytest.raises(authority.EvidenceVaultSv9AuthorityEventError):
+        authority.validate_evidence_vault_sv9_authority_event(request_tamper)
 # fmt: on

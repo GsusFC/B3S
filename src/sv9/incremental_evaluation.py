@@ -6,6 +6,7 @@ from typing import Literal, Mapping, Protocol
 from src.sv9 import assessment_kernel as kernel
 from src.sv9 import incremental_planner as planner
 from src.sv9 import judgment_memory as memory
+from src.services.evidence_vault_sv9_workset_partition import validate_evidence_vault_sv9_workset_partition
 
 # fmt: off
 EVIDENCE_PACKET_VERSION = "sv9-component-evidence-packet-v1"
@@ -249,6 +250,160 @@ def _run(plan, packets, responder):
             return None
     assessment, candidate_judgments, candidate_sentinels = _assessment(plan, workset, judgments, sentinels)
     return {"status": "available", "reason_code": None, "assessment": assessment, "candidate_tile_judgments": candidate_judgments, "candidate_component_sentinels": candidate_sentinels, "captured_calls": calls, "call_count": len(calls), "calls_avoided": plan["calls_avoided"], "reused_tile_count": 80 - len(plan["tile_workset"]), "evaluated_tile_count": len(plan["tile_workset"])}
+
+
+def _partial_workset(_plan, healthy_tile_ids):
+    _json(healthy_tile_ids)
+    if type(healthy_tile_ids) is not list: _fail("healthy tile ids must be an array")
+    if any(type(tile) is not str or not tile or tile != tile.strip() for tile in healthy_tile_ids): _fail("healthy tile ids are not canonical")
+    if len(healthy_tile_ids) != len(set(healthy_tile_ids)): _fail("healthy tile ids contain duplicates")
+    if any(tile not in _BY_TILE for tile in healthy_tile_ids): _fail("healthy tile ids contain unknown tiles")
+    if healthy_tile_ids != sorted(healthy_tile_ids, key=_ORDER.__getitem__): _fail("healthy tile ids are not registry ordered")
+    return list(healthy_tile_ids)
+
+
+def _partial_evidence(rows):
+    pairs = {}
+    for row in rows:
+        pair = row["evidence_ref"], row["evidence_fingerprint"]
+        if pair in pairs and pairs[pair] != row: _fail("resolved evidence conflicts")
+        pairs[pair] = row
+    return [{key: row[key] for key in ("evidence_ref", "evidence_fingerprint", "content")} for _pair, row in sorted(pairs.items())]
+
+
+def _partial_packets(partition, values):
+    plan, rows = _plan(partition["judgment_delta"]["plan"]), partition["healthy_workset"]["tiles"]
+    workset = _partial_workset(plan, [row["tile_id"] for row in rows])
+    expected = {}
+    for tile in rows:
+        for binding in tile["current_evidence_bindings"]:
+            identity = {key: binding[key] for key in ("evidence_record_id", "evidence_ref", "evidence_fingerprint")}
+            if expected.setdefault(identity["evidence_record_id"], identity) != identity: _fail("signed evidence conflicts")
+    if type(values) is not list: _fail("resolved evidence must be an array")
+    resolved, pairs = {}, set()
+    for raw in values:
+        _fields(raw, frozenset({"evidence_record_id", "evidence_ref", "evidence_fingerprint", "content"}), "resolved evidence")
+        identity = {key: raw[key] for key in ("evidence_record_id", "evidence_ref", "evidence_fingerprint")}
+        record = {**identity, "content": _canon(raw["content"])}
+        pair = identity["evidence_ref"], identity["evidence_fingerprint"]
+        if expected.get(identity["evidence_record_id"]) != identity or identity["evidence_record_id"] in resolved or pair in pairs: _fail("resolved evidence does not match bindings")
+        resolved[identity["evidence_record_id"]], pairs = record, pairs | {pair}
+    if set(resolved) != set(expected): _fail("resolved evidence does not match bindings")
+    hints = {}
+    for hint in partition["evaluation_input"]["non_authoritative_hints"]:
+        hints.setdefault(hint["component_key"], []).append(hint["evidence_record_id"])
+    source = partition["evaluation_input"]["source_identity"]
+    capture = {key: source[key] for key in ("capture_id", "capture_fingerprint")}
+    operation = {"operation_id": source["operation_plan_id"], "operation_fingerprint": source["operation_fingerprint"]}
+    packets = []
+    for component in _COMPONENTS:
+        tiles = [tile for tile in rows if tile["component_key"] == component]
+        if tiles:
+            materialized = []
+            for tile in tiles:
+                records = [resolved[row["evidence_record_id"]] for row in tile["current_evidence_bindings"]]
+                if tile["route_source"] == "signed_hint_component_expansion" and not records:
+                    records = [resolved[record] for record in hints.get(component, ()) if record in resolved]
+                    if not records: _fail("signed hint expansion has no component evidence")
+                materialized.append({"tile_id": tile["tile_id"], "evidence": _partial_evidence(records)})
+            packets.append(build_evidence_packet(component_key=component, tiles=materialized, capture_origin=capture, operation_origin=operation, series_fingerprint=plan["current_series_fingerprint"]))
+    return plan, workset, packets
+
+
+def _partial_progress(status, reason, workset, judgments, sentinels, calls, call_count):
+    return {
+        "status": status, "reason_code": reason,
+        "evaluated_tile_judgments": [judgments[tile] for tile in sorted(judgments, key=_ORDER.__getitem__)],
+        "evaluated_component_sentinels": [sentinels[component] for component in _COMPONENTS if component in sentinels],
+        "captured_calls": calls, "call_count": call_count,
+        "evaluated_tile_count": len(judgments) + sum(len(_COMPONENT_TILES[component]) for component in sentinels),
+    }
+
+
+def _run_partial(plan, packets, workset, responder, call_count, coherencia_state, lookup_evaluation=None, persist_evaluation=None, *, structural_status="invalid_input", structural_reason="invalid_input", failure_status="provider_failure", failure_reason="provider_failure"):
+    workset, judgments, sentinels, calls = set(workset), {}, {}, []
+    packets = [packet for packet in packets if packet["component_key"] != "coherencia"] + [packet for packet in packets if packet["component_key"] == "coherencia"]
+    for index, packet in enumerate(packets):
+        try:
+            if packet["component_key"] == "coherencia" and coherencia_state == "blocked": _fail("blocked coherencia")
+            upstream = _upstream(plan, workset, judgments, sentinels) if packet["component_key"] == "coherencia" else []
+            request = _request(plan, packet, upstream)
+        except Exception:
+            return _partial_progress(structural_status, structural_reason, workset, judgments, sentinels, calls, call_count[0])
+        recovered = lookup_evaluation(_canon(request)) if lookup_evaluation is not None else None
+        try:
+            raw = recovered
+            if raw is None:
+                outcome = _outcome(responder(_canon(request), index))
+                if outcome is None or outcome.evaluation is None: _fail("component provider failure")
+                raw = outcome.evaluation
+            next_judgments, next_sentinels = dict(judgments), dict(sentinels)
+            _accept(plan, request, raw, workset, next_judgments, next_sentinels)
+            evaluation = _evaluation(raw, True)
+        except Exception:
+            return _partial_progress(failure_status, failure_reason, workset, judgments, sentinels, calls, call_count[0])
+        produced_judgments = [next_judgments[tile] for tile in sorted(set(next_judgments) - set(judgments), key=_ORDER.__getitem__)]
+        produced_sentinel = next((next_sentinels[component] for component in _COMPONENTS if component not in sentinels and component in next_sentinels), None)
+        if recovered is None and persist_evaluation is not None:
+            persist_evaluation(_canon(request), _canon(evaluation), _canon(produced_judgments), _canon(produced_sentinel))
+        judgments, sentinels = next_judgments, next_sentinels
+        calls.append({"request": request, "evaluation": evaluation})
+    return _partial_progress("partial", None, workset, judgments, sentinels, calls, call_count[0])
+
+
+def execute_partial_incremental_evaluation(workset_partition, resolved_evidence, flow, *, lookup_evaluation=None, persist_evaluation=None):
+    """Evaluate the validated partition's scoreless healthy workset."""
+    calls, workset = [0], []
+    try:
+        partition = validate_evidence_vault_sv9_workset_partition(workset_partition)
+        plan, workset, packets = _partial_packets(partition, resolved_evidence)
+        if lookup_evaluation is not None and not callable(lookup_evaluation): _fail("evaluation lookup is not callable")
+        if persist_evaluation is not None and not callable(persist_evaluation): _fail("evaluation persistence is not callable")
+    except Exception:
+        return _partial_progress("invalid_input", "invalid_input", workset, {}, {}, [], calls[0])
+    def call(request, _index):
+        calls[0] += 1
+        try: return flow.evaluate_component(request)
+        except Exception: return ComponentEvaluationOutcome.provider_failure()
+    return _run_partial(plan, packets, workset, call, calls, partition["coherencia_dependency"]["state"], lookup_evaluation, persist_evaluation)
+
+
+def replay_partial_incremental_evaluation(workset_partition, resolved_evidence, captured_calls, evaluation_state="partial"):
+    """Replay exact strict partial calls without invoking Flow."""
+    calls, workset = [0], []
+    try:
+        partition = validate_evidence_vault_sv9_workset_partition(workset_partition)
+        plan, workset, packets = _partial_packets(partition, resolved_evidence)
+        if type(evaluation_state) is not str or evaluation_state not in {"partial", "provider_failure"}: _fail("invalid replay state")
+        _json(captured_calls)
+        if type(captured_calls) is not list: _fail("captured calls do not match healthy workset")
+        if evaluation_state == "partial":
+            if len(captured_calls) != len(packets): _fail("captured calls do not match healthy workset")
+            replay_packets = packets
+        else:
+            if not packets or len(captured_calls) >= len(packets): _fail("captured calls do not match failed prefix")
+            replay_packets = packets[:len(captured_calls)]
+        def call(request, index):
+            calls[0] += 1
+            raw = captured_calls[index]
+            _fields(raw, frozenset({"request", "evaluation"}), "captured call")
+            if raw["request"] != request: _fail("captured request does not match replay")
+            return ComponentEvaluationOutcome.success(raw["evaluation"])
+        result = _run_partial(plan, replay_packets, workset, call, calls, partition["coherencia_dependency"]["state"], structural_status="invalid_replay", structural_reason="invalid_replay", failure_status="invalid_replay", failure_reason="invalid_replay")
+        if result["status"] == "invalid_replay": return _partial_progress("invalid_replay", "invalid_replay", workset, {}, {}, [], calls[0])
+        if evaluation_state == "provider_failure" and result["status"] == "partial":
+            try:
+                packet = packets[len(captured_calls)]
+                if packet["component_key"] == "coherencia" and partition["coherencia_dependency"]["state"] == "blocked": _fail("blocked coherencia")
+                upstream = _upstream(plan, set(workset), {row["tile_id"]: row for row in result["evaluated_tile_judgments"]}, {row["component_key"]: row for row in result["evaluated_component_sentinels"]}) if packet["component_key"] == "coherencia" else []
+                _request(plan, packet, upstream)
+            except Exception:
+                return _partial_progress("invalid_replay", "invalid_replay", workset, {}, {}, [], calls[0])
+            result["status"], result["reason_code"], result["call_count"] = "provider_failure", "provider_failure", len(captured_calls) + 1
+        return result
+    except Exception:
+        return _partial_progress("invalid_replay", "invalid_replay", workset, {}, {}, [], calls[0])
+
 def execute_incremental_evaluation(plan, evidence_packets, flow):
     calls, avoided, reused = [0], [0], [0]
     try:

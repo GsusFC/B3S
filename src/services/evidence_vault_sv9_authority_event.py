@@ -10,20 +10,26 @@ from uuid import UUID
 
 from src.sv9 import judgment_memory as memory
 
-_REQUEST_VERSION = "evidence-vault-sv9-judgment-authority-request-v1"
-_IDEMPOTENCY_VERSION = "evidence-vault-sv9-authority-application-idempotency-v1"
-_EVENT_VERSION = "evidence-vault-sv9-judgment-authority-event-v1"
+_REQUEST_VERSION_V1 = "evidence-vault-sv9-judgment-authority-request-v1"
+_REQUEST_VERSION_V2 = "evidence-vault-sv9-judgment-authority-request-v2"
+_IDEMPOTENCY_VERSION_V1 = "evidence-vault-sv9-authority-application-idempotency-v1"
+_IDEMPOTENCY_VERSION_V2 = "evidence-vault-sv9-authority-application-idempotency-v2"
+_EVENT_VERSION_V1 = "evidence-vault-sv9-judgment-authority-event-v1"
+_EVENT_VERSION_V2 = "evidence-vault-sv9-judgment-authority-event-v2"
 _CANDIDATE_RECORDS = {
     "evidence-vault-sv9-judgment-candidate-v1": "evidence-vault-sv9-judgment-candidate-record-v1",
     "evidence-vault-sv9-judgment-candidate-v2": "evidence-vault-sv9-judgment-candidate-record-v2",
 }
 # fmt: off
-_REQUEST_FIELDS = frozenset("schema_version action candidate_id source_scan_id expected_predecessor_event_fingerprint delta_fingerprint".split())
+_REQUEST_FIELDS_V1 = frozenset("schema_version action candidate_id source_scan_id expected_predecessor_event_fingerprint delta_fingerprint".split())
+_REQUEST_FIELDS_V2 = _REQUEST_FIELDS_V1 | {"workset_partition_fingerprint"}
 _CANDIDATE_BASE = tuple("schema_version plan canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint component_evaluations evidence_bindings candidate_tile_judgments candidate_component_sentinels assessment telemetry evaluation_bundle_fingerprint assessment_fingerprint score_fingerprint".split())
 _CANDIDATE_CONTEXT = frozenset({"id", "source_scan_id", "created_at"})
 _CANDIDATE_IDENTITY = frozenset("id complete_record_fingerprint evaluation_bundle_fingerprint canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint assessment_fingerprint score_fingerprint source_scan_id".split())
-_EVENT_IDENTITY = tuple("event_id event_type sequence predecessor_event_fingerprint active_parent_event_fingerprint candidate_id candidate_complete_record_fingerprint evaluation_bundle_fingerprint canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint assessment_fingerprint score_fingerprint delta_fingerprint request_fingerprint idempotency_key_hash".split())
-_EVENT_FIELDS = frozenset({"schema_version", *_EVENT_IDENTITY, "request", "event_fingerprint", "predecessor_event_id", "active_parent_event_id", "created_at"})
+_EVENT_IDENTITY_V1 = tuple("event_id event_type sequence predecessor_event_fingerprint active_parent_event_fingerprint candidate_id candidate_complete_record_fingerprint evaluation_bundle_fingerprint canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint assessment_fingerprint score_fingerprint delta_fingerprint request_fingerprint idempotency_key_hash".split())
+_EVENT_IDENTITY_V2 = (*_EVENT_IDENTITY_V1[:14], "workset_partition_fingerprint", *_EVENT_IDENTITY_V1[14:])
+_EVENT_FIELDS_V1 = frozenset({"schema_version", *_EVENT_IDENTITY_V1, "request", "event_fingerprint", "predecessor_event_id", "active_parent_event_id", "created_at"})
+_EVENT_FIELDS_V2 = frozenset({"schema_version", *_EVENT_IDENTITY_V2, "request", "event_fingerprint", "predecessor_event_id", "active_parent_event_id", "created_at"})
 _CANDIDATE_EVENT_FINGERPRINTS = tuple("candidate_complete_record_fingerprint evaluation_bundle_fingerprint canonical_plan_fingerprint candidate_series_fingerprint assessment_fingerprint score_fingerprint".split())
 # fmt: on
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -89,7 +95,9 @@ def _optional_sha(value: Any, label: str) -> str | None:
 
 def _request(value: Mapping[str, Any]) -> dict[str, Any]:
     request = _mapping(value, "request")
-    if set(request) != _REQUEST_FIELDS or request.get("schema_version") != _REQUEST_VERSION:
+    version = request.get("schema_version")
+    fields = _REQUEST_FIELDS_V1 if version == _REQUEST_VERSION_V1 else _REQUEST_FIELDS_V2
+    if set(request) != fields or version not in {_REQUEST_VERSION_V1, _REQUEST_VERSION_V2}:
         _fail("request")
     if request.get("action") not in {"adopt_candidate", "reopen_authority"}:
         _fail("request action")
@@ -99,23 +107,63 @@ def _request(value: Mapping[str, Any]) -> dict[str, Any]:
     )
     if request["action"] == "adopt_candidate":
         request["candidate_id"] = _uuid(request["candidate_id"], "request candidate_id")
-        if request["delta_fingerprint"] is not None:
+        if request["delta_fingerprint"] is not None or version != _REQUEST_VERSION_V1:
             _fail("request")
     elif request["candidate_id"] is not None:
         _fail("request")
     else:
         request["delta_fingerprint"] = _sha(request["delta_fingerprint"], "request delta_fingerprint")
+        if version == _REQUEST_VERSION_V2:
+            request["workset_partition_fingerprint"] = _sha(
+                request["workset_partition_fingerprint"], "request workset_partition_fingerprint"
+            )
     return request
 
 
-# fmt: off
-def build_evidence_vault_sv9_authority_request(*, action: str, candidate_id: str | None, expected_predecessor_event_fingerprint: str | None, delta_fingerprint: str | None, source_scan_id: str) -> dict[str, Any]:
-    return _request({"schema_version": _REQUEST_VERSION, "action": action, "candidate_id": candidate_id, "source_scan_id": source_scan_id, "expected_predecessor_event_fingerprint": expected_predecessor_event_fingerprint, "delta_fingerprint": delta_fingerprint})
+def _request_fingerprint(request: Mapping[str, Any]) -> str:
+    request = _request(request)
+    return memory.canonical_fingerprint(request["schema_version"], request)
+
+
+def build_evidence_vault_sv9_authority_request(
+    *,
+    action: str,
+    candidate_id: str | None,
+    expected_predecessor_event_fingerprint: str | None,
+    delta_fingerprint: str | None,
+    source_scan_id: str,
+    workset_partition_fingerprint: str | None = None,
+) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "schema_version": (
+            _REQUEST_VERSION_V2 if workset_partition_fingerprint is not None else _REQUEST_VERSION_V1
+        ),
+        "action": action,
+        "candidate_id": candidate_id,
+        "source_scan_id": source_scan_id,
+        "expected_predecessor_event_fingerprint": expected_predecessor_event_fingerprint,
+        "delta_fingerprint": delta_fingerprint,
+    }
+    if workset_partition_fingerprint is not None:
+        value["workset_partition_fingerprint"] = workset_partition_fingerprint
+    return _request(value)
+
 
 def authority_application_idempotency_fingerprint(request: Mapping[str, Any]) -> str:
     request = _request(request)
-    return memory.canonical_fingerprint(_IDEMPOTENCY_VERSION, {"action": request["action"], "source_scan_id": request["source_scan_id"], "candidate_id": request["candidate_id"], "canonical_delta_fingerprint": request["delta_fingerprint"], "expected_predecessor_event_fingerprint": request["expected_predecessor_event_fingerprint"]})
-# fmt: on
+    payload = {
+        "action": request["action"],
+        "source_scan_id": request["source_scan_id"],
+        "candidate_id": request["candidate_id"],
+        "canonical_delta_fingerprint": request["delta_fingerprint"],
+        "expected_predecessor_event_fingerprint": request["expected_predecessor_event_fingerprint"],
+    }
+    if request["schema_version"] == _REQUEST_VERSION_V2:
+        payload["workset_partition_fingerprint"] = request["workset_partition_fingerprint"]
+        version = _IDEMPOTENCY_VERSION_V2
+    else:
+        version = _IDEMPOTENCY_VERSION_V1
+    return memory.canonical_fingerprint(version, payload)
 
 
 def _candidate(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -199,8 +247,9 @@ def _candidate_identity(value: Mapping[str, Any]) -> dict[str, str]:
     return candidate
 
 
-def _identity(event: Mapping[str, Any]) -> dict[str, Any]:
-    return {name: event[name] for name in _EVENT_IDENTITY}
+def _event_identity(event: Mapping[str, Any]) -> dict[str, Any]:
+    identity = _EVENT_IDENTITY_V2 if event["schema_version"] == _EVENT_VERSION_V2 else _EVENT_IDENTITY_V1
+    return {name: event[name] for name in identity}
 
 
 def _semantics(event: Mapping[str, Any]) -> None:
@@ -224,6 +273,7 @@ def _semantics(event: Mapping[str, Any]) -> None:
             request["action"] != "adopt_candidate"
             or request["candidate_id"] != event["candidate_id"]
             or request["delta_fingerprint"] is not None
+            or event["schema_version"] != _EVENT_VERSION_V1
         ):
             _fail("candidate event request")
     elif (
@@ -232,17 +282,27 @@ def _semantics(event: Mapping[str, Any]) -> None:
         or event["delta_fingerprint"] != request["delta_fingerprint"]
     ):
         _fail("reopen event")
+    elif event["schema_version"] == _EVENT_VERSION_V2 and (
+        event["workset_partition_fingerprint"] != request["workset_partition_fingerprint"]
+    ):
+        _fail("reopen workset partition")
 
 
 def validate_evidence_vault_sv9_authority_event(value: Mapping[str, Any]) -> dict[str, Any]:
     event = _mapping(value, "event")
-    if set(event) != _EVENT_FIELDS or event.get("schema_version") != _EVENT_VERSION:
+    version = event.get("schema_version")
+    fields = _EVENT_FIELDS_V1 if version == _EVENT_VERSION_V1 else _EVENT_FIELDS_V2
+    if set(event) != fields or version not in {_EVENT_VERSION_V1, _EVENT_VERSION_V2}:
         _fail("event fields")
     event["event_id"] = _uuid(event["event_id"], "event_id")
     if type(event["sequence"]) is not int or event["sequence"] < 1:
         _fail("event sequence")
     for name in "predecessor_event_fingerprint active_parent_event_fingerprint delta_fingerprint".split():
         event[name] = _optional_sha(event[name], f"event {name}")
+    if version == _EVENT_VERSION_V2:
+        event["workset_partition_fingerprint"] = _sha(
+            event["workset_partition_fingerprint"], "event workset_partition_fingerprint"
+        )
     for name in "predecessor_event_id active_parent_event_id".split():
         event[name] = None if event[name] is None else _uuid(event[name], f"event {name}")
     event["created_at"] = _audit_text(event["created_at"], "event created_at")
@@ -253,28 +313,79 @@ def validate_evidence_vault_sv9_authority_event(value: Mapping[str, Any]) -> dic
         event[name] = _optional_sha(event[name], f"event {name}")
     event["current_series_fingerprint"] = _sha(event["current_series_fingerprint"], "event current_series_fingerprint")
     event["request"] = _request(event["request"])
+    expected_request_version = _REQUEST_VERSION_V2 if version == _EVENT_VERSION_V2 else _REQUEST_VERSION_V1
+    if event["request"]["schema_version"] != expected_request_version:
+        _fail("event request version")
     for name in "request_fingerprint idempotency_key_hash event_fingerprint".split():
         event[name] = _sha(event[name], f"event {name}")
-    if event["request_fingerprint"] != memory.canonical_fingerprint(_REQUEST_VERSION, event["request"]):
+    if event["request_fingerprint"] != _request_fingerprint(event["request"]):
         _fail("event request_fingerprint")
     if event["idempotency_key_hash"] != authority_application_idempotency_fingerprint(event["request"]):
         _fail("event idempotency_key_hash")
     _semantics(event)
-    if event["event_fingerprint"] != memory.canonical_fingerprint(_EVENT_VERSION, _identity(event)):
+    if event["event_fingerprint"] != memory.canonical_fingerprint(version, _event_identity(event)):
         _fail("event event_fingerprint")
     return event
 
 
-# fmt: off
-def build_evidence_vault_sv9_authority_event(*, event_id: str, event_type: str, sequence: int, predecessor_event_fingerprint: str | None, active_parent_event_fingerprint: str | None, candidate_identity: Mapping[str, Any] | None, current_series_fingerprint: str, delta_fingerprint: str | None, request: Mapping[str, Any], idempotency_key_hash: str, predecessor_event_id: str | None = None, active_parent_event_id: str | None = None, created_at: str | None = None) -> dict[str, Any]:
-    candidate, request = (None if candidate_identity is None else _candidate_identity(candidate_identity)), _request(request)
-    if candidate is not None and (request["source_scan_id"] != candidate["source_scan_id"] or current_series_fingerprint != candidate["current_series_fingerprint"]): _fail("candidate identity binding")
-    event = {
-        "schema_version": _EVENT_VERSION, "event_id": event_id, "event_type": event_type, "sequence": sequence, "predecessor_event_fingerprint": predecessor_event_fingerprint, "active_parent_event_fingerprint": active_parent_event_fingerprint,
-        "candidate_id": None if candidate is None else candidate["id"], "candidate_complete_record_fingerprint": None if candidate is None else candidate["complete_record_fingerprint"], "evaluation_bundle_fingerprint": None if candidate is None else candidate["evaluation_bundle_fingerprint"], "canonical_plan_fingerprint": None if candidate is None else candidate["canonical_plan_fingerprint"],
-        "current_series_fingerprint": current_series_fingerprint, "candidate_series_fingerprint": None if candidate is None else candidate["candidate_series_fingerprint"], "assessment_fingerprint": None if candidate is None else candidate["assessment_fingerprint"], "score_fingerprint": None if candidate is None else candidate["score_fingerprint"], "delta_fingerprint": delta_fingerprint,
-        "request_fingerprint": memory.canonical_fingerprint(_REQUEST_VERSION, request), "idempotency_key_hash": idempotency_key_hash, "request": request, "predecessor_event_id": predecessor_event_id, "active_parent_event_id": active_parent_event_id, "created_at": created_at,
+def build_evidence_vault_sv9_authority_event(
+    *,
+    event_id: str,
+    event_type: str,
+    sequence: int,
+    predecessor_event_fingerprint: str | None,
+    active_parent_event_fingerprint: str | None,
+    candidate_identity: Mapping[str, Any] | None,
+    current_series_fingerprint: str,
+    delta_fingerprint: str | None,
+    request: Mapping[str, Any],
+    idempotency_key_hash: str,
+    predecessor_event_id: str | None = None,
+    active_parent_event_id: str | None = None,
+    created_at: str | None = None,
+    workset_partition_fingerprint: str | None = None,
+) -> dict[str, Any]:
+    candidate, request = (
+        None if candidate_identity is None else _candidate_identity(candidate_identity),
+        _request(request),
+    )
+    if candidate is not None and (
+        request["source_scan_id"] != candidate["source_scan_id"]
+        or current_series_fingerprint != candidate["current_series_fingerprint"]
+    ):
+        _fail("candidate identity binding")
+    request_partition = request.get("workset_partition_fingerprint")
+    if workset_partition_fingerprint != request_partition:
+        _fail("request workset partition binding")
+    event_version = _EVENT_VERSION_V2 if request_partition is not None else _EVENT_VERSION_V1
+    event: dict[str, Any] = {
+        "schema_version": event_version,
+        "event_id": event_id,
+        "event_type": event_type,
+        "sequence": sequence,
+        "predecessor_event_fingerprint": predecessor_event_fingerprint,
+        "active_parent_event_fingerprint": active_parent_event_fingerprint,
+        "candidate_id": None if candidate is None else candidate["id"],
+        "candidate_complete_record_fingerprint": (
+            None if candidate is None else candidate["complete_record_fingerprint"]
+        ),
+        "evaluation_bundle_fingerprint": (
+            None if candidate is None else candidate["evaluation_bundle_fingerprint"]
+        ),
+        "canonical_plan_fingerprint": None if candidate is None else candidate["canonical_plan_fingerprint"],
+        "current_series_fingerprint": current_series_fingerprint,
+        "candidate_series_fingerprint": None if candidate is None else candidate["candidate_series_fingerprint"],
+        "assessment_fingerprint": None if candidate is None else candidate["assessment_fingerprint"],
+        "score_fingerprint": None if candidate is None else candidate["score_fingerprint"],
+        "delta_fingerprint": delta_fingerprint,
+        "request_fingerprint": _request_fingerprint(request),
+        "idempotency_key_hash": idempotency_key_hash,
+        "request": request,
+        "predecessor_event_id": predecessor_event_id,
+        "active_parent_event_id": active_parent_event_id,
+        "created_at": created_at,
     }
-    event["event_fingerprint"] = memory.canonical_fingerprint(_EVENT_VERSION, _identity(event))
+    if request_partition is not None:
+        event["workset_partition_fingerprint"] = request_partition
+    event["event_fingerprint"] = memory.canonical_fingerprint(event_version, _event_identity(event))
     return validate_evidence_vault_sv9_authority_event(event)
-# fmt: on

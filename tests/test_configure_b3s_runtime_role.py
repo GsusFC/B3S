@@ -93,8 +93,8 @@ class _Connection:
             return _Result(
                 rows=[
                     {
-                        "version": "033",
-                        "filename": "033_evidence_vault_sv9_judgment_candidate_witness.sql",
+                        "version": "034",
+                        "filename": "034_evidence_vault_sv9_evaluation_checkpoints.sql",
                         "checksum": "a" * 64,
                     }
                 ]
@@ -216,8 +216,8 @@ def _effective_relation_privileges(relations):
 def _install_contract(monkeypatch):
     manifest = [
         (
-            "033",
-            "033_evidence_vault_sv9_judgment_candidate_witness.sql",
+            "034",
+            "034_evidence_vault_sv9_evaluation_checkpoints.sql",
             "a" * 64,
             "SELECT 1",
         )
@@ -227,8 +227,8 @@ def _install_contract(monkeypatch):
         assert expected == manifest
         assert actual == [
             {
-                "version": "033",
-                "filename": "033_evidence_vault_sv9_judgment_candidate_witness.sql",
+                "version": "034",
+                "filename": "034_evidence_vault_sv9_evaluation_checkpoints.sql",
                 "checksum": "a" * 64,
             }
         ]
@@ -254,7 +254,7 @@ def test_configures_exact_runtime_contract_in_one_transaction(monkeypatch, capsy
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
         "status": "ok",
-        "head": "033_evidence_vault_sv9_judgment_candidate_witness.sql",
+        "head": "034_evidence_vault_sv9_evaluation_checkpoints.sql",
     }
     assert dsn not in json.dumps(payload)
     assert connected[0][0] == dsn
@@ -428,7 +428,7 @@ def test_requires_only_migration_database_url(monkeypatch, capsys) -> None:
 
 
 def test_raw_relation_and_journal_contract_is_pinned() -> None:
-    assert runtime_role.EXPECTED_HEAD_VERSION == "033"
+    assert runtime_role.EXPECTED_HEAD_VERSION == "034"
     assert runtime_role.MIGRATION_JOURNAL == "schema_migrations"
     assert runtime_role.WATERMARK_TABLE not in runtime_role.RAW_MIGRATION_019_RELATIONS
     assert runtime_role.PRIVATE_SHADOW_LEDGER_RELATIONS == {
@@ -438,6 +438,8 @@ def test_raw_relation_and_journal_contract_is_pinned() -> None:
         runtime_role.EXPECTED_READ_ONLY_VIEWS
     )
     assert runtime_role.APPEND_ONLY_JUDGMENT_RELATIONS == {
+        "evidence_vault_sv9_evaluation_checkpoint_evidence_bindings",
+        "evidence_vault_sv9_evaluation_checkpoints",
         "evidence_vault_sv9_judgment_authority_events",
         "evidence_vault_sv9_judgment_candidates",
         "evidence_vault_sv9_judgment_evidence_bindings",
@@ -455,7 +457,7 @@ def test_packaged_migration_head_mismatch_names_expected_head() -> None:
     with pytest.raises(runtime_role.RuntimeRoleConfigurationError) as raised:
         runtime_role._verify_exact_head(None, [], lambda *_args: None)
 
-    assert str(raised.value) == "this runtime grant tool requires packaged migration head 033"
+    assert str(raised.value) == "this runtime grant tool requires packaged migration head 034"
 
 
 def test_unexpected_relation_fails_before_any_privilege_change(monkeypatch) -> None:
