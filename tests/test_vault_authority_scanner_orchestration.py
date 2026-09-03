@@ -10,6 +10,30 @@ def _status(scan_id: str) -> dict:
     return {"id": scan_id, "url": "https://example.test", "brand_name": "Example", "state": "running", "phase": "capture", "phases": [{"key": key, "state": "pending"} for key in ("capture", "interpret", "score", "report")], "acquisition_gate": {}, "completed_at": None}
 
 
+def _exact_binding(scan_id: str, *, source_run_id: str = "acquisition-run") -> dict[str, str]:
+    return {
+        "source_scan_id": scan_id,
+        "source_run_id": source_run_id,
+        "observation_hash": "observation-hash",
+        "capture_hash": "capture-hash",
+        "canonical_domain": "example.com",
+    }
+
+
+def _exact_report(scan_id: str, binding: dict[str, str]) -> dict:
+    return {
+        "id": scan_id,
+        "url": "https://example.com",
+        "raw": {
+            "source_run_id": scan_id,
+            "source_capture": {
+                key: binding[key]
+                for key in ("source_scan_id", "observation_hash", "capture_hash")
+            },
+        },
+    }
+
+
 def test_authority_scanner_gate_requires_both_exact_flags(monkeypatch) -> None:
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault"); monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
     monkeypatch.setenv("BRAND3_VAULT_SV9_AUTHORITY_SCANNER_ENABLED", "true"); assert scan_runner._vault_sv9_authority_scanner_enabled() is True
@@ -249,6 +273,44 @@ def test_scan_owner_tokens_fence_exact_reads_and_reject_stale_release(monkeypatc
     with pytest.raises(scan_runner._ExactResumeFailure, match="busy"): scan_runner._load_report_for_exact_owner("owner-scan", current.token, "blocked")
 
 
+def test_exact_current_report_binds_report_identity_to_scan_id(monkeypatch) -> None:
+    scan_id = "report-identity"
+    binding = _exact_binding(scan_id)
+    monkeypatch.setattr(
+        scan_runner,
+        "_validate_report_sv9_assessment",
+        lambda *_args, **_kwargs: {"availability": "available"},
+    )
+
+    projection = scan_runner._validate_exact_current_report(
+        _exact_report(scan_id, binding),
+        scan_id=scan_id,
+        binding=binding,
+    )
+
+    assert projection["availability"] == "available"
+
+
+@pytest.mark.parametrize("tampered_field", ("scan_id", "domain", "source_capture"))
+def test_exact_current_report_rejects_tampered_binding(tampered_field: str) -> None:
+    scan_id = "report-tamper"
+    binding = _exact_binding(scan_id)
+    report = _exact_report(scan_id, binding)
+    if tampered_field == "scan_id":
+        report["id"] = "other-scan"
+    elif tampered_field == "domain":
+        report["url"] = "https://other.example"
+    else:
+        report["raw"]["source_capture"]["capture_hash"] = "tampered"
+
+    with pytest.raises(scan_runner._ExactResumeFailure, match="report_invalid"):
+        scan_runner._validate_exact_current_report(
+            report,
+            scan_id=scan_id,
+            binding=binding,
+        )
+
+
 def test_exact_resume_never_enters_ordinary_scan_state(monkeypatch) -> None:
     from src.services import evidence_vault_scan_orchestration as orchestration
     binding = {"source_scan_id": "exact-state", "source_run_id": "run", "observation_hash": "a", "capture_hash": "b", "canonical_domain": "example.com"}
@@ -280,6 +342,119 @@ def test_exact_resume_persistent_loader_errors_are_retryable(monkeypatch) -> Non
         return value
     monkeypatch.setattr(scan_runner, "_load_report_for_exact_owner", lambda *_a: reads.append(1) or loader()); monkeypatch.setattr(scan_runner, "save_report", lambda _r: None)
     monkeypatch.setattr(scan_runner, "_run_vault_sv9_authority_scanner", lambda **kwargs: scan_runner._publish_exact_report(scan_id, kwargs["exact_owner"], {"id": scan_id}, binding, "publish_current")); expect(); assert reads == [1] * 3
+
+
+def test_exact_resume_replays_when_current_assessment_is_unavailable(monkeypatch) -> None:
+    from src.services import evidence_vault_scan_orchestration as orchestration
+
+    scan_id = "unavailable-current"
+    binding = _exact_binding(scan_id)
+    prepared = {
+        "url": "https://example.com",
+        "brand_name": "Example",
+        "preparation": {},
+        "canonical_snapshot": {},
+        "report_binding": binding,
+    }
+    replayed = []
+    monkeypatch.setattr(orchestration, "prepare_vault_exact_resume", lambda **_kwargs: prepared)
+    monkeypatch.setattr(
+        scan_runner,
+        "_load_report_for_exact_owner",
+        lambda *_args: _exact_report(scan_id, binding),
+    )
+    monkeypatch.setattr(
+        scan_runner,
+        "_validate_exact_current_report",
+        lambda *_args, **_kwargs: {"availability": "unavailable"},
+    )
+    monkeypatch.setattr(
+        scan_runner,
+        "_run_vault_sv9_authority_scanner",
+        lambda **kwargs: replayed.append(kwargs)
+        or scan_runner._ExactResumePublication("record_no_score", scan_id),
+    )
+
+    publication = scan_runner._run_vault_exact_resume(
+        scan_id=scan_id,
+        action={},
+        repository=object(),
+    )
+
+    assert publication.action == "record_no_score"
+    assert len(replayed) == 1
+
+
+def test_exact_resume_does_not_publish_unavailable_recovered_report(monkeypatch) -> None:
+    from src.services import evidence_vault_scan_orchestration as orchestration
+
+    scan_id = "unavailable-recovered"
+    binding = _exact_binding(scan_id)
+    prepared = {
+        "url": "https://example.com",
+        "brand_name": "Example",
+        "preparation": {},
+        "canonical_snapshot": {},
+        "report_binding": binding,
+    }
+    reports = iter((None, _exact_report(scan_id, binding)))
+    scanner_calls = []
+    monkeypatch.setattr(orchestration, "prepare_vault_exact_resume", lambda **_kwargs: prepared)
+    monkeypatch.setattr(
+        scan_runner,
+        "_load_report_for_exact_owner",
+        lambda *_args: next(reports),
+    )
+    monkeypatch.setattr(
+        scan_runner,
+        "_validate_exact_current_report",
+        lambda *_args, **_kwargs: {"availability": "unavailable"},
+    )
+    monkeypatch.setattr(
+        scan_runner,
+        "_run_vault_sv9_authority_scanner",
+        lambda **_kwargs: scanner_calls.append(True)
+        or (_ for _ in ()).throw(RuntimeError("execution")),
+    )
+
+    with pytest.raises(orchestration.VaultExactResumeError) as caught:
+        scan_runner._run_vault_exact_resume(
+            scan_id=scan_id,
+            action={},
+            repository=object(),
+        )
+
+    assert caught.value.reason_code == "vault_exact_resume_execution_failed"
+    assert scanner_calls == [True]
+
+
+def test_exact_resume_composed_report_preserves_scan_source_run_id(monkeypatch) -> None:
+    scan_id = "composed-identity"
+    binding = _exact_binding(scan_id)
+    monkeypatch.setattr(
+        scan_runner,
+        "_validate_report_sv9_assessment",
+        lambda *_args, **_kwargs: {"availability": "legacy"},
+    )
+    payload = scan_runner._authority_scanner_payload(
+        publication={"scanner_payload": {"source_run_id": scan_id, "sv9": {}}},
+        canonical_snapshot={},
+        canonical_source_capture={
+            key: binding[key]
+            for key in ("source_scan_id", "observation_hash", "capture_hash")
+        },
+        gate={},
+        exact_report_binding=binding,
+    )
+
+    report = scan_runner._compose_report(
+        scan_id,
+        "https://example.com",
+        "Example",
+        payload,
+    )
+
+    assert report["raw"]["source_run_id"] == scan_id
 
 def test_cancelled_ordinary_owner_waits_for_worker_finally(monkeypatch) -> None:
     scan_id, entered, cancelling, unwinding, release = "owner-unwind", *(scan_runner.threading.Event() for _ in range(4)); owner, exact = scan_runner._acquire_scan_owner(scan_id, "ordinary"), None
@@ -313,7 +488,7 @@ def test_exact_current_report_reads_use_the_fenced_seam(monkeypatch) -> None:
     scan_id, owner = "fenced-current", None; binding = {"source_scan_id": scan_id, "source_run_id": "run", "observation_hash": "a", "capture_hash": "b", "canonical_domain": "example.com"}; prepared = {"url": "https://example.com", "brand_name": "Example", "preparation": {}, "canonical_snapshot": {}, "report_binding": binding}
     calls, loaded, reports, loader = [], [], iter(({"id": "pre"}, None, {"id": "recovered"}, {"id": "post"})), scan_runner._load_report_for_exact_owner
     def fenced(source, token, report_id): calls.append((source, report_id, scan_runner._exact_owner_current(source, token))); return loader(source, token, report_id)
-    monkeypatch.setattr(orchestration, "prepare_vault_exact_resume", lambda **_k: prepared); monkeypatch.setattr(scan_runner, "load_report", lambda report_id: loaded.append(report_id) or next(reports)); monkeypatch.setattr(scan_runner, "_load_report_for_exact_owner", fenced); monkeypatch.setattr(scan_runner, "_validate_exact_current_report", lambda *_a, **_k: {})
+    monkeypatch.setattr(orchestration, "prepare_vault_exact_resume", lambda **_k: prepared); monkeypatch.setattr(scan_runner, "load_report", lambda report_id: loaded.append(report_id) or next(reports)); monkeypatch.setattr(scan_runner, "_load_report_for_exact_owner", fenced); monkeypatch.setattr(scan_runner, "_validate_exact_current_report", lambda *_a, **_k: {"availability": "available"})
     try:
         monkeypatch.setattr(scan_runner, "_run_vault_sv9_authority_scanner", lambda **_k: (_ for _ in ()).throw(AssertionError("authority replay")))
         assert scan_runner._run_vault_exact_resume(scan_id=scan_id, action={}, repository=object()).action == "publish_current"

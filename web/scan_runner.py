@@ -392,11 +392,11 @@ def _load_report_for_exact_owner(owner_scan_id: str, token: object, report_id: s
 def _validate_exact_current_report(report: Any, *, scan_id: str, binding: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(report, Mapping): raise _ExactResumeFailure("report_invalid")
     raw = report.get("raw"); source_capture = raw.get("source_capture") if isinstance(raw, Mapping) else None
-    valid = report.get("id") == scan_id == binding.get("source_scan_id") and normalize_domain(str(report.get("url") or "")) == binding.get("canonical_domain") and isinstance(raw, Mapping) and raw.get("source_run_id") == binding.get("source_run_id") and source_capture == {key: binding.get(key) for key in ("source_scan_id", "observation_hash", "capture_hash")}
+    valid = report.get("id") == scan_id == binding.get("source_scan_id") and normalize_domain(str(report.get("url") or "")) == binding.get("canonical_domain") and isinstance(raw, Mapping) and raw.get("source_run_id") == scan_id and source_capture == {key: binding.get(key) for key in ("source_scan_id", "observation_hash", "capture_hash")}
     if not valid: raise _ExactResumeFailure("report_invalid")
-    try: _validate_report_sv9_assessment(report, required=True)
+    try: projection = _validate_report_sv9_assessment(report, required=True)
     except ScannerReportAssessmentError as exc: raise _ExactResumeFailure("report_invalid") from exc
-    return dict(report)
+    return projection
 def _publish_exact_report(scan_id: str, owner: _ScanOwner, report: Mapping[str, Any], binding: Mapping[str, Any], action: str) -> _ExactResumePublication:
     if not _current_scan_owner(owner): raise _ExactResumeFailure("busy")
     save_report(dict(report)); saved = _load_report_for_exact_owner(scan_id, owner.token, scan_id)
@@ -414,8 +414,9 @@ def _run_vault_exact_resume(*, scan_id: str, action: Mapping[str, Any], reposito
         binding = prepared["report_binding"]
         current = _load_report_for_exact_owner(scan_id, owner.token, scan_id)
         if current is not None:
-            _validate_exact_current_report(current, scan_id=scan_id, binding=binding)
-            return _ExactResumePublication("publish_current", scan_id)
+            projection = _validate_exact_current_report(current, scan_id=scan_id, binding=binding)
+            if projection.get("availability") == "available":
+                return _ExactResumePublication("publish_current", scan_id)
         return _run_vault_sv9_authority_scanner(scan_id=scan_id, url=str(prepared["url"]), brand_name=str(prepared["brand_name"]), repository=repository, preparation=prepared["preparation"], canonical_snapshot=prepared["canonical_snapshot"], canonical_source_capture={key: str(binding[key]) for key in ("source_scan_id", "observation_hash", "capture_hash")}, gate={}, exact_owner=owner, exact_report_binding=binding)
     except VaultExactResumeError: raise
     except _ExactResumeFailure as exc: raise vault_exact_resume_error(exc.kind) from None
@@ -423,11 +424,14 @@ def _run_vault_exact_resume(*, scan_id: str, action: Mapping[str, Any], reposito
         if owner is None: raise vault_exact_resume_error("execution_failed") from None
         if not _exact_owner_current(scan_id, owner.token): raise vault_exact_resume_error("busy") from None
         if prepared is not None:
-            try: recovered = _load_report_for_exact_owner(scan_id, owner.token, scan_id); recovered is None or _validate_exact_current_report(recovered, scan_id=scan_id, binding=prepared["report_binding"])
+            try:
+                recovered = _load_report_for_exact_owner(scan_id, owner.token, scan_id)
+                if recovered is not None:
+                    projection = _validate_exact_current_report(recovered, scan_id=scan_id, binding=prepared["report_binding"])
+                    if projection.get("availability") == "available":
+                        return _ExactResumePublication("publish_current", scan_id)
             except _ExactResumeFailure as exc: raise vault_exact_resume_error(exc.kind) from None
             except Exception: recovered = None
-            if recovered is not None:
-                return _ExactResumePublication("publish_current", scan_id)
         try: orchestration.prepare_vault_exact_resume(repository=repository, action=action, scan_id=scan_id)
         except VaultExactResumeError: raise
         except Exception: pass
@@ -835,7 +839,6 @@ def _authority_scanner_payload(
     source_capture = canonical_source_capture or canonical_snapshot.get("source_capture")
     if isinstance(source_capture, Mapping):
         payload["source_capture"] = dict(source_capture)
-    if exact_report_binding is not None: payload["source_run_id"] = exact_report_binding["source_run_id"]
     payload["acquisition_gate"] = dict(canonical_snapshot.get("acquisition_gate") or gate)
     payload["acquisition_artifacts"] = _acquisition_artifacts_from_snapshot(
         dict(canonical_snapshot)
