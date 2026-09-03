@@ -39,6 +39,209 @@ def test_authority_migration_declares_append_only_lineage_and_acl_contract() -> 
     assert "NEW.current_series_fingerprint IS DISTINCT FROM parent.candidate_series_fingerprint" not in sql
 
 
+def test_v2_reopen_partition_binding_rejects_nested_source_and_current_projection_tampering(monkeypatch) -> None:
+    from src.history import repository as history
+    from src.services import evidence_vault_sv9_authority_evaluation as evaluation_service
+    from tests.test_evidence_vault_sv9_authority_application import (
+        _ApplicationRepository,
+        _Flow,
+        _run,
+    )
+    from tests.test_sv9_judgment_memory import _series
+
+    monkeypatch.setattr(
+        evaluation_service,
+        "project_evidence_vault_sv9_evaluation_input",
+        lambda *, repository, source_scan_id, workspace_slug: repository.evaluation_input(
+            source_scan_id, workspace_slug
+        ),
+    )
+    repository = _ApplicationRepository(records=(9,))
+    assert _run(repository, _Flow(), current=(9,))["status"] == "authority_established"
+    repository.reopen = True
+    outcome = evaluation_service.run_evidence_vault_sv9_authority_evaluation(
+        repository=repository,
+        flow=_Flow(),
+        domain_or_url="example.test",
+        source_scan_id="scan",
+        current_series_contract=_series(),
+    )
+    partition, signed = outcome["workset_partition"], outcome["signed_delta"]
+    state = {
+        "candidate": repository.authority["accepted_candidate"],
+        "active": {"candidate": repository.authority["accepted_candidate"]},
+    }
+
+    class NoWrites:
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("v2 replay must not query mutable current authority")
+
+    assert history._sv9_authority_partition(partition, signed) == partition
+    history._sv9_authority_reopen_partition_binding(state, signed, partition)
+    dependency_only = {
+        "review_partition": {
+            "evaluation_input_reopened_tile_ids": [],
+            "operational_authority_coverage_loss_tile_ids": [],
+            "planner_review_tile_ids": ["C1"],
+            "tile_ids": ["C1"],
+        },
+        "pending_evidence": [{"tile_id": "M1"}],
+    }
+    with pytest.raises(history.EvidenceVaultSv9JudgmentCandidateError):
+        history._sv9_authority_partition_reopen_tile_ids(dependency_only, signed)
+    assert history._sv9_authority_partition_reopen_tile_ids(
+        dependency_only, {"plan": {"review_set": ["M1"]}, "coverage_loss": []}
+    ) == set()
+    monkeypatch.setattr(
+        history,
+        "_sv9_checkpoint_current_evaluation_input",
+        lambda *_args: deepcopy(partition["evaluation_input"]),
+    )
+    history._sv9_authority_reopen_binding(NoWrites(), state, {}, signed, partition, "b3s")
+    altered_delta = deepcopy(partition)
+    altered_delta["judgment_delta"] = deepcopy(signed)
+    altered_delta["judgment_delta"]["canonical_delta_fingerprint"] = "0" * 64
+    with pytest.raises(history.EvidenceVaultSv9JudgmentCandidateError):
+        history._sv9_authority_partition(altered_delta, signed)
+    altered_source = deepcopy(partition)
+    altered_source["evaluation_input"]["source_identity"]["source_scan_id"] = "other"
+    with pytest.raises(history.EvidenceVaultSv9JudgmentCandidateError):
+        history._sv9_authority_partition(altered_source, signed)
+    stale_current = deepcopy(partition["evaluation_input"])
+    stale_current["relation_projection_fingerprint"] = "0" * 64
+    monkeypatch.setattr(history, "_sv9_checkpoint_current_evaluation_input", lambda *_args: stale_current)
+    with pytest.raises(history.EvidenceVaultSv9JudgmentCandidateError):
+        history._sv9_authority_reopen_binding(NoWrites(), state, {}, signed, partition, "b3s")
+
+
+def test_v2_reopen_payload_replays_only_the_immutable_partition(monkeypatch) -> None:
+    from src.history import repository as history
+    from src.services import evidence_vault_sv9_authority_evaluation as evaluation_service
+    from src.services import evidence_vault_sv9_authority_event as authority_event
+    from tests.test_evidence_vault_sv9_authority_application import (
+        _ApplicationRepository,
+        _Flow,
+        _run,
+    )
+    from tests.test_sv9_judgment_memory import _series
+
+    monkeypatch.setattr(
+        evaluation_service,
+        "project_evidence_vault_sv9_evaluation_input",
+        lambda *, repository, source_scan_id, workspace_slug: repository.evaluation_input(
+            source_scan_id, workspace_slug
+        ),
+    )
+    repository = _ApplicationRepository(records=(9,))
+    assert _run(repository, _Flow(), current=(9,))["status"] == "authority_established"
+    repository.reopen = True
+    outcome = evaluation_service.run_evidence_vault_sv9_authority_evaluation(
+        repository=repository,
+        flow=_Flow(),
+        domain_or_url="example.test",
+        source_scan_id="scan",
+        current_series_contract=_series(),
+    )
+    candidate, partition, signed = (
+        deepcopy(repository.authority["accepted_candidate"]),
+        outcome["workset_partition"],
+        outcome["signed_delta"],
+    )
+    context = {
+        "workspace_id": "00000000-0000-0000-0000-000000000901",
+        "brand_id": "00000000-0000-0000-0000-000000000902",
+    }
+    candidate_row = {
+        "source_scan_id": "scan",
+        "scan_run_id": "00000000-0000-0000-0000-000000000903",
+        "capture_id": "00000000-0000-0000-0000-000000000904",
+        "operation_plan_id": "00000000-0000-0000-0000-000000000905",
+    }
+    adopt_request = history._sv9_authority_request(
+        "adopt_candidate", candidate["id"], None, None, "scan"
+    )
+    adopted = history._sv9_authority_event(
+        context,
+        None,
+        adopt_request,
+        authority_event.authority_application_idempotency_fingerprint(adopt_request),
+        candidate,
+        candidate_row,
+        None,
+        None,
+        "2026-01-01T00:00:00+00:00",
+    )
+    reopen_request = history._sv9_authority_request(
+        "reopen_authority",
+        None,
+        adopted["event_fingerprint"],
+        signed["canonical_delta_fingerprint"],
+        "scan",
+        partition["partition_fingerprint"],
+    )
+    reopened = history._sv9_authority_event(
+        context,
+        {"head": adopted, "active": adopted, "candidate": candidate},
+        reopen_request,
+        authority_event.authority_application_idempotency_fingerprint(reopen_request),
+        None,
+        None,
+        signed,
+        partition,
+        "2026-01-01T00:00:01+00:00",
+    )
+    assert reopened["event_payload"]["workset_partition"] == partition
+    assert (
+        reopened["event_payload"]["workset_partition_fingerprint"]
+        == partition["partition_fingerprint"]
+    )
+
+    def row(event):
+        return {
+            **{key: deepcopy(event[key]) for key in history._SV9_AUTHORITY_COLUMNS},
+            "created_at": event["created_at"],
+        }
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return deepcopy(self.rows)
+
+    class ReplayConnection:
+        def __init__(self, rows):
+            self.rows, self.queries = rows, []
+
+        def execute(self, statement, *_args):
+            self.queries.append(statement)
+            if not statement.lstrip().startswith("SELECT * FROM"):
+                raise AssertionError("replay must not write")
+            return Result(self.rows)
+
+    monkeypatch.setattr(
+        history,
+        "_sv9_authority_candidate",
+        lambda *_args: (deepcopy(candidate), deepcopy(candidate_row)),
+    )
+    connection = ReplayConnection([row(adopted), row(reopened)])
+    replayed = history._replay_sv9_judgment_authority(
+        connection, "b3s", context["workspace_id"], context["brand_id"]
+    )
+    assert replayed["overlay"]["workset_partition"] == partition
+    assert replayed["overlay"]["workset_partition"]["review_partition"][
+        "evaluation_input_reopened_tile_ids"
+    ] == ["M1"]
+    assert len(connection.queries) == 1
+
+    tampered = [row(adopted), row(reopened)]
+    tampered[1]["event_payload"].pop("workset_partition")
+    with pytest.raises(history.EvidenceVaultSv9JudgmentCandidateError):
+        history._replay_sv9_judgment_authority(
+            ReplayConnection(tampered), "b3s", context["workspace_id"], context["brand_id"]
+        )
+
+
 # fmt: off
 @pytest.mark.skipif(
     not os.environ.get("B3S_TEST_DATABASE_URL")

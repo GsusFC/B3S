@@ -46,12 +46,30 @@ def _facts(*, polarity="supports", count=1):
     registry = build_tile_contract_registry()["tiles"][:count]
     accepted = [{"tile_id": tile["tile_id"], "component_key": tile["component_key"], "assessment_state": "ok", "authority_state": "accepted", "review_state": "resolved", "lifecycle_state": "active", "basis": [{"relation_id": _sha(f"relation-{tile['tile_id']}"), "evidence_id": evidence_id, "source_identity_id": document_id, "polarity": polarity}]} for tile in registry]
     witness = {"canonical_memory_version": _sha("memory"), "adoption_event_id": _id("event"), "adoption_sequence": 1, "candidate_packet_fingerprint": _sha("packet"), "request_fingerprint": _sha("request")}
-    return {"source": source, "evidence": evidence, "authority": {"witness": witness, "accepted": accepted}}
+    return {"source": source, "evidence": evidence, "authority": {"witness": witness, "accepted": accepted}, "evaluation_hint_seeds": []}
 
 
 def _project(facts):
     repo = _Repository(facts)
     return project_evidence_vault_sv9_authoritative_relations(repository=repo, source_scan_id="scan-1"), repo
+
+
+def _distinct_facts():
+    facts = _facts(count=2)
+    second = deepcopy(facts["evidence"][0]); second.update(evidence_record_id=_id("second"), evidence_ref="evidence-2", evidence_fingerprint=_sha("content-2"), evidence_id=_sha("evidence-2"), source_identity_id=_sha("source-2"))
+    facts["evidence"].append(second)
+    facts["authority"]["accepted"][1]["basis"][0].update(evidence_id=second["evidence_id"], source_identity_id=second["source_identity_id"])
+    return facts
+
+
+def _hint_seed(*, label="hint", tile_id="M1", evidence_record_id=None, provenance=None, component_key="mission"):
+    return {
+        "hint_id": _id(label),
+        "tile_id": tile_id,
+        "component_key": component_key,
+        "evidence_record_id": evidence_record_id or _id("record"),
+        "provenance_fingerprint": provenance or _sha(f"{label}-provenance"),
+    }
 
 
 class _Rows:
@@ -170,7 +188,6 @@ def test_unknown_assessment_state_fails_closed():
     lambda f: f["authority"]["accepted"][0].__setitem__("component_key", "wrong"),
     lambda f: f["authority"]["witness"].pop("adoption_event_id"),
     lambda f: f["evidence"].append(deepcopy(f["evidence"][0])),
-    lambda f: f["evidence"][0].__setitem__("source_identity_id", _sha("other")),
     lambda f: f["source"].__setitem__("source_scan_id", "other-scan"),
     lambda f: f["source"].__setitem__("workspace_slug", "other"),
     lambda f: f["source"].__setitem__("workspace_id", ""),
@@ -199,19 +216,15 @@ def test_relation_projection_partitions_capture_rows_from_authoritative_basis():
     assert result["status"] == "available" and [(row["evidence_ref"], row["evidence_fingerprint"]) for row in result["authoritative_relations"]] == [("evidence-1", _sha("content"))]
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda facts: facts["authority"]["accepted"][0]["basis"][0].update(
-            evidence_id=_sha("missing-evidence"),
-            source_identity_id=_sha("missing-source"),
-        ),
-        lambda facts: facts["evidence"].append(deepcopy(facts["evidence"][0])),
-    ],
-)
-def test_referenced_basis_identity_must_resolve_exactly_once(mutate):
+@pytest.mark.parametrize("mutate, status, reason", [
+    (lambda facts: facts["authority"]["accepted"][0]["basis"][0].update(evidence_id=_sha("missing-evidence"), source_identity_id=_sha("missing-source")), "available", None),
+    (lambda facts: facts["evidence"].append(dict(facts["evidence"][0], evidence_record_id=_id("duplicate"))), "review_required", "ambiguous_current_evidence"),
+])
+def test_referenced_basis_identity_distinguishes_missing_from_duplicate(mutate, status, reason):
     facts = _facts(); mutate(facts); result, _ = _project(facts)
-    assert result["status"] == "review_required" and result["authoritative_relations"] == []
+    assert result["status"] == status and result["authoritative_relations"] == []
+    if reason: assert result["reason_codes"] == [reason]
+    else: assert result["reopen_tile_ids"] == ["M1"]
 
 
 def test_one_sided_canonical_identity_fails_closed_but_absent_identity_is_allowed():
@@ -242,10 +255,11 @@ def test_projection_is_deterministic_head_bound_and_signed_relations_replay():
 
 
 def test_witness_has_exact_v1_shape_and_rejects_relation_or_origin_tampering():
-    projection, _ = _project(_facts(count=2))
-    witness = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id="scan-1", projection=projection)
-    assert validate_evidence_vault_sv9_authoritative_relation_witness(witness) == witness
-    assert set(witness) == {"schema_version", "source_scan_id", "operational_witness", "authoritative_relations", "projection_fingerprint", "witness_fingerprint"}
+    projection, _ = _project(_facts(count=2)); legacy = {key: projection[key] for key in ("status", "reason_codes", "authoritative_relations", "operational_witness", "projection_fingerprint")}
+    legacy["projection_fingerprint"] = canonical_fingerprint("evidence-vault-sv9-authoritative-relation-projection-v1", {"source_scan_id": "scan-1", "capture_origin": projection["authoritative_relations"][0]["capture_origin"], "operation_origin": projection["authoritative_relations"][0]["operation_origin"], "operational_witness": projection["operational_witness"], "authoritative_relations": projection["authoritative_relations"]})
+    witness = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id="scan-1", projection=projection); legacy_witness = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id="scan-1", projection=legacy)
+    assert validate_evidence_vault_sv9_authoritative_relation_witness(witness) == witness and validate_evidence_vault_sv9_authoritative_relation_witness(legacy_witness) == legacy_witness
+    assert set(witness) == {"schema_version", "source_scan_id", "operational_witness", "authoritative_relations", "projection_fingerprint", "witness_fingerprint"}; invalid = deepcopy(projection); invalid["authority_continuity"][0]["continuity_state"] = "changed"; assert pytest.raises(EvidenceVaultSv9AuthoritativeRelationWitnessError, lambda: build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id="scan-1", projection=invalid)); partial = _distinct_facts(); partial["evidence"].pop(); partial_projection, _ = _project(partial); assert pytest.raises(EvidenceVaultSv9AuthoritativeRelationWitnessError, lambda: build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id="scan-1", projection=partial_projection))
     for path in (("authoritative_relations", 0, "evidence_ref"), ("operational_witness", "canonical_memory_version")):
         tampered = deepcopy(witness); target = tampered
         for key in path[:-1]: target = target[key]
@@ -261,13 +275,12 @@ def test_evaluation_input_loads_one_snapshot_and_binds_full_partition():
     assert result["status"] == "available"
     assert result["schema_version"] == EVIDENCE_VAULT_SV9_EVALUATION_INPUT_VERSION
     assert set(result) == {
-        "status", "reason_codes", "schema_version", "source_identity", "current_evidence",
-        "authoritative_relations", "operational_witness", "relation_projection_fingerprint",
-        "projection_version", "evaluation_input_fingerprint",
+        "status", "reason_codes", "schema_version", "source_identity", "current_evidence", "current_identity_bindings",
+        "authoritative_relations", "authority_continuity", "authority_coverage_loss", "reopen_tile_ids", "operational_witness", "relation_projection_fingerprint", "projection_version", "evaluation_input_fingerprint",
+        "non_authoritative_hints",
     }
     payload = {key: result[key] for key in (
-        "source_identity", "current_evidence", "authoritative_relations", "operational_witness",
-        "relation_projection_fingerprint", "projection_version",
+        "source_identity", "current_evidence", "current_identity_bindings", "authoritative_relations", "authority_continuity", "authority_coverage_loss", "reopen_tile_ids", "operational_witness", "relation_projection_fingerprint", "projection_version", "non_authoritative_hints",
     )}
     assert result["evaluation_input_fingerprint"] == canonical_fingerprint(
         EVIDENCE_VAULT_SV9_EVALUATION_INPUT_VERSION, payload
@@ -294,6 +307,99 @@ def test_evaluation_input_is_deterministic_and_rejects_unavailable_or_invalid_fa
     rejected = project_evidence_vault_sv9_evaluation_input(repository=_Repository(invalid), source_scan_id="scan-1")
     assert rejected["status"] == "review_required" and rejected["reason_codes"] == ["operation_not_immutable"]
     assert rejected["source_identity"] is None and rejected["current_evidence"] == []
+    assert unavailable["non_authoritative_hints"] == rejected["non_authoritative_hints"] == []
+
+
+def test_evaluation_input_projects_capture_bound_non_authoritative_hints_without_authority_fingerprint_drift():
+    facts = _facts()
+    facts["evaluation_hint_seeds"] = [_hint_seed()]
+    hinted = project_evidence_vault_sv9_evaluation_input(repository=_Repository(facts), source_scan_id="scan-1")
+    baseline_facts = _facts()
+    baseline = project_evidence_vault_sv9_evaluation_input(repository=_Repository(baseline_facts), source_scan_id="scan-1")
+
+    assert hinted["status"] == baseline["status"] == "available"
+    assert hinted["relation_projection_fingerprint"] == baseline["relation_projection_fingerprint"]
+    hint = hinted["non_authoritative_hints"][0]
+    assert set(hint) == {
+        "hint_id", "tile_id", "component_key", "evidence_record_id", "provenance_fingerprint",
+        "capture_id", "capture_fingerprint", "authority", "runtime_effect", "hint_fingerprint",
+    }
+    assert hint["tile_id"] == "M1" and hint["component_key"] == "mission"
+    assert hint["evidence_record_id"] == _id("record")
+    assert hint["capture_id"] == hinted["source_identity"]["capture_id"]
+    assert hint["capture_fingerprint"] == hinted["source_identity"]["capture_fingerprint"]
+    assert hint["authority"] is False and hint["runtime_effect"] == "evaluation_routing_only"
+    unsigned = {key: value for key, value in hint.items() if key != "hint_fingerprint"}
+    assert hint["hint_fingerprint"] == canonical_fingerprint(
+        "evidence-vault-sv9-evaluation-hint-fingerprint-v1", unsigned
+    )
+    assert hinted["evaluation_input_fingerprint"] != baseline["evaluation_input_fingerprint"]
+
+
+def test_evaluation_hint_seed_reordering_is_semantically_invariant_and_changes_are_signed():
+    facts = _distinct_facts()
+    first_record, second_record = facts["evidence"][0]["evidence_record_id"], facts["evidence"][1]["evidence_record_id"]
+    facts["evaluation_hint_seeds"] = [
+        _hint_seed(label="second", tile_id="M2", evidence_record_id=second_record),
+        _hint_seed(label="first", tile_id="M1", evidence_record_id=first_record),
+    ]
+    first = project_evidence_vault_sv9_evaluation_input(repository=_Repository(facts), source_scan_id="scan-1")
+    reordered = deepcopy(facts)
+    reordered["evaluation_hint_seeds"].reverse()
+    second = project_evidence_vault_sv9_evaluation_input(repository=_Repository(reordered), source_scan_id="scan-1")
+    assert first == second
+    changed = deepcopy(facts)
+    changed["evaluation_hint_seeds"][0]["provenance_fingerprint"] = _sha("changed-provenance")
+    changed["evaluation_hint_seeds"][0]["hint_id"] = _id("changed-hint")
+    changed_result = project_evidence_vault_sv9_evaluation_input(repository=_Repository(changed), source_scan_id="scan-1")
+    assert changed_result["status"] == "available"
+    assert changed_result["evaluation_input_fingerprint"] != first["evaluation_input_fingerprint"]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda hint: hint.__setitem__("hint_id", _id("other-hint")),
+        lambda hint: hint.__setitem__("tile_id", "unknown"),
+        lambda hint: hint.__setitem__("component_key", "wrong"),
+        lambda hint: hint.__setitem__("evidence_record_id", _id("outside-record")),
+        lambda hint: hint.__setitem__("provenance_fingerprint", _sha("other-provenance")),
+        lambda hint: hint.__setitem__("capture_id", _id("other-capture")),
+        lambda hint: hint.__setitem__("capture_fingerprint", _sha("other-capture")),
+        lambda hint: hint.__setitem__("authority", True),
+        lambda hint: hint.__setitem__("runtime_effect", "authority"),
+        lambda hint: hint.__setitem__("hint_fingerprint", _sha("tampered")),
+    ],
+)
+def test_evaluation_input_validator_rejects_hint_tampering(mutate):
+    facts = _facts()
+    facts["evaluation_hint_seeds"] = [_hint_seed()]
+    value = project_evidence_vault_sv9_evaluation_input(repository=_Repository(facts), source_scan_id="scan-1")
+    tampered = deepcopy(value)
+    mutate(tampered["non_authoritative_hints"][0])
+    with pytest.raises(ValueError):
+        validate_evidence_vault_sv9_evaluation_input(tampered, source_scan_id="scan-1")
+
+
+@pytest.mark.parametrize(
+    "seeds",
+    [
+        [_hint_seed(label="one"), _hint_seed(label="two", provenance=_sha("other"))],
+        [_hint_seed(label="one"), _hint_seed(label="two", provenance=_hint_seed(label="one")["provenance_fingerprint"])],
+        [_hint_seed(label="one"), _hint_seed(label="two", evidence_record_id=_id("record"), provenance=_sha("other"))],
+        [_hint_seed(evidence_record_id=_id("outside-record"))],
+        [_hint_seed(tile_id="unknown")],
+        None,
+        {"hint_id": _id("one")},
+    ],
+)
+def test_evaluation_hint_seeds_fail_closed_for_missing_malformed_or_duplicate_bindings(seeds):
+    facts = _facts()
+    facts["evaluation_hint_seeds"] = seeds
+    result = project_evidence_vault_sv9_evaluation_input(repository=_Repository(facts), source_scan_id="scan-1")
+    assert result["status"] == "review_required"
+    assert result["non_authoritative_hints"] == []
+    assert result["evaluation_input_fingerprint"] is None
 
 
 @pytest.mark.parametrize("field", ["workspace_id", "brand_id", "scan_run_id"])
@@ -392,4 +498,33 @@ def test_evaluation_input_validator_replays_nested_contract_and_rejects_tamperin
             validate_evidence_vault_sv9_evaluation_input(
                 tampered, source_scan_id="scan-1"
             )
+
+
+def test_v2_continuity_reopens_only_changed_or_missing_tiles():
+    facts = _distinct_facts(); facts["evidence"].pop()
+    result, _ = _project(facts)
+    assert result["status"] == "available" and [row["tile_id"] for row in result["authoritative_relations"]] == ["M1"]
+    assert result["reopen_tile_ids"] == ["M2"] and result["authority_coverage_loss"][0]["reason"] == "historical_basis_missing"
+    facts = _distinct_facts(); facts["evidence"][0]["evidence_id"] = _sha("changed")
+    result, _ = _project(facts)
+    assert result["status"] == "available" and [row["tile_id"] for row in result["authoritative_relations"]] == ["M2"]
+    assert result["reopen_tile_ids"] == ["M1"] and result["authority_coverage_loss"][0]["reason"] == "historical_basis_changed"
+def test_v2_duplicate_current_pair_is_global_unsigned_diagnostic():
+    facts = _facts(); facts["evidence"].append(dict(facts["evidence"][0], evidence_record_id=_id("duplicate")))
+    result, _ = _project(facts)
+    assert result["status"] == "review_required" and result["reason_codes"] == ["ambiguous_current_evidence"]
+    assert result["authority_continuity"][0]["continuity_state"] == "ambiguous_duplicate" and result["authoritative_relations"] == []
+def test_v2_all_relations_lost_remains_signed_available_and_replays():
+    facts = _distinct_facts(); facts["evidence"] = []
+    result = project_evidence_vault_sv9_evaluation_input(repository=_Repository(facts), source_scan_id="scan-1")
+    assert result["status"] == "available" and result["authoritative_relations"] == [] and result["reopen_tile_ids"] == ["M1", "M2"]
+    assert validate_evidence_vault_sv9_evaluation_input(result, source_scan_id="scan-1") == result
+def test_v2_fingerprint_is_raw_order_invariant_but_continuity_sensitive():
+    facts = _distinct_facts(); first = project_evidence_vault_sv9_evaluation_input(repository=_Repository(facts), source_scan_id="scan-1")
+    facts["evidence"].reverse(); facts["authority"]["accepted"].reverse()
+    second = project_evidence_vault_sv9_evaluation_input(repository=_Repository(facts), source_scan_id="scan-1")
+    assert second == first
+    facts = _distinct_facts(); facts["evidence"][0]["evidence_id"] = _sha("changed")
+    changed = project_evidence_vault_sv9_evaluation_input(repository=_Repository(facts), source_scan_id="scan-1")
+    assert changed["evaluation_input_fingerprint"] != first["evaluation_input_fingerprint"]
 # fmt: on

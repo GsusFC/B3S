@@ -713,6 +713,7 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
         "031_evidence_vault_sv9_judgment_candidates.sql",
         "032_evidence_vault_sv9_judgment_authority.sql",
         "033_evidence_vault_sv9_judgment_candidate_witness.sql",
+        "034_evidence_vault_sv9_evaluation_checkpoints.sql",
     ]
     assert "packet_kind" in operational_memory_sql
     assert "operational_source_v2" in operational_memory_sql
@@ -1127,6 +1128,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "031_evidence_vault_sv9_judgment_candidates.sql",
             "032_evidence_vault_sv9_judgment_authority.sql",
             "033_evidence_vault_sv9_judgment_candidate_witness.sql",
+            "034_evidence_vault_sv9_evaluation_checkpoints.sql",
         ]
         assert repository.migrate() == []
 
@@ -2072,6 +2074,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "031_evidence_vault_sv9_judgment_candidates.sql",
             "032_evidence_vault_sv9_judgment_authority.sql",
             "033_evidence_vault_sv9_judgment_candidate_witness.sql",
+            "034_evidence_vault_sv9_evaluation_checkpoints.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0
