@@ -309,7 +309,7 @@ def test_production_stays_select_only_and_vault_release_is_target_attested(tmp_p
     assert production["env"]["BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED"] == "false"
     assert vault["deploy"]["release_command"] == VAULT_RELEASE_COMMAND
     assert "--database-url" not in vault["deploy"]["release_command"]
-    assert all(vault["env"].get(key, "false") == value for key, value in {"B3S_POSTGRES_REQUIRED": "true", "BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED": "true", "BRAND3_VAULT_SV9_AUTHORITY_SCANNER_ENABLED": "true", "BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED": "false", "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED": "false", "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH": "", "B3S_VAULT_WORKER_ENABLED": "false", "B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED": "false"}.items())
+    assert all(vault["env"].get(key, "false") == value for key, value in {"B3S_POSTGRES_REQUIRED": "true", "BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED": "true", "BRAND3_VAULT_SV9_AUTHORITY_SCANNER_ENABLED": "true", "BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED": "false", "B3S_VAULT_EXACT_RESUME_API_ENABLED": "true", "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED": "false", "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH": "", "B3S_VAULT_WORKER_ENABLED": "false", "B3S_VAULT_SV9_SHADOW_DIAGNOSTICS_ENABLED": "false"}.items())
     runbook = _read("docs/deployment/b3s_vault_fly.md")
     deployment_chain = ('DEPLOY_SHA="<authorized-full-40-char-SHA>" && git checkout --detach "$DEPLOY_SHA" && observed_head="$(git rev-parse HEAD)" && test "$observed_head" = "$DEPLOY_SHA" && worktree_status="$(git status --porcelain)" && test -z "$worktree_status" && ' "fly config validate -a b3s-vault -c fly.vault.toml && " 'fly deploy --remote-only -a b3s-vault -c fly.vault.toml --build-arg B3S_BUILD_SHA="$DEPLOY_SHA"')
     assert deployment_chain in runbook
@@ -337,6 +337,8 @@ def test_vault_authority_profile_preserves_core_and_pr71_invariance():
     assert vault["env"]["BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED"] == "false"
     assert production["env"]["BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED"] == "false"
     assert pr71["env"]["BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED"] == "false"
+    assert production["env"].get("B3S_VAULT_EXACT_RESUME_API_ENABLED", "false") == "false"
+    assert pr71["env"].get("B3S_VAULT_EXACT_RESUME_API_ENABLED", "false") == "false"
 
 
 def test_vault_docs_bind_configured_profile_to_va5_release_boundary():
