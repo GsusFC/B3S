@@ -156,12 +156,20 @@ def _unmapped(delta: Mapping[str, Any], bindings: list[dict[str, Any]]) -> set[s
         _fail("unmapped evidence")
     return {by_pair[pair] for pair in pairs}
 def _hints(source: Mapping[str, Any], delta: Mapping[str, Any], by_record: Mapping[str, dict[str, Any]], unmapped: set[str]):
-    mapped = {(row["evidence_ref"], row["evidence_fingerprint"]) for row in delta["authoritative_relations"]}
+    mapped = {
+        (row["tile_id"], row["evidence_ref"], row["evidence_fingerprint"])
+        for row in delta["authoritative_relations"]
+    }
+    mapped_pairs = {(evidence_ref, evidence_fingerprint) for _tile, evidence_ref, evidence_fingerprint in mapped}
     hinted_tiles: dict[str, set[str]] = {}
     records = set()
     for hint in source["non_authoritative_hints"]:
         record = by_record.get(hint["evidence_record_id"])
-        if record is None or hint["evidence_record_id"] not in unmapped or (record["evidence_ref"], record["evidence_fingerprint"]) in mapped:
+        if record is None:
+            _fail("hint is not delta-unmapped")
+        pair = record["evidence_ref"], record["evidence_fingerprint"]
+        relation = hint["tile_id"], *pair
+        if (hint["evidence_record_id"] not in unmapped and pair not in mapped_pairs) or relation in mapped:
             _fail("hint is not delta-unmapped")
         hinted_tiles.setdefault(hint["tile_id"], set()).add(hint["evidence_record_id"])
         records.add(hint["evidence_record_id"])
