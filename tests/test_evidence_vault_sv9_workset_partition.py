@@ -105,6 +105,26 @@ def test_hints_route_only_unmapped_evidence_and_partition_pending_and_trusted_ro
     assert value == _build(source, _delta(source), list(reversed(trusted)))
     with pytest.raises(partition.EvidenceVaultSv9WorksetPartitionError):
         _build(source, _delta(source), trusted + [source["current_identity_bindings"][0]])
+
+
+def test_authoritative_evidence_can_feed_a_hint_for_another_tile():
+    source = _input(hints=(("cross-tile-hint", "M2", "1"),))
+    signed_delta = _delta(source, prior=[])
+
+    value = _build(source, signed_delta)
+
+    m2 = next(row for row in value["healthy_workset"]["tiles"] if row["tile_id"] == "M2")
+    assert m2["current_evidence_bindings"] == [source["current_identity_bindings"][0]]
+
+
+def test_hint_reusing_the_same_authoritative_tile_relation_fails_closed():
+    source = _input(hints=(("same-tile-hint", "M1", "1"),))
+    signed_delta = _delta(source, prior=[])
+
+    with pytest.raises(partition.EvidenceVaultSv9WorksetPartitionError):
+        _build(source, signed_delta)
+
+
 def test_reusable_component_sentinel_expands_from_signed_hint_and_blocks_coherencia():
     source = _input(extras=("hinted",), hints=(("hint", "M1", "hinted"),), sin_evidencia=True)
     signed_delta = _delta(source, prior=_prior(source, without=("mission",)), sentinels=[_sentinel(source)])
