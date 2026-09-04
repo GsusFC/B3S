@@ -34,11 +34,60 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+
+      # Temporary audit transport only; remove after retrieving the pinned
+      # checkout. No runtime state, credentials, or production data is exported.
+      - name: Export pinned source and existing dependencies for offline audit
+        run: |
+          set -eu
+          audit_dir="$RUNNER_TEMP/b3s-stabilization"
+          mkdir -p "$audit_dir/wheels"
+          git archive --format=tar.gz --prefix=b3s/ \
+            --output="$audit_dir/source.tar.gz" \
+            dd666ae64d3ca4a4171ef26a4bbbeb0af0c5ef5d
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import tomllib
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "b3s-stabilization"
+          source = root / "source.tar.gz"
+          manifest = {
+              "source_commit": "dd666ae64d3ca4a4171ef26a4bbbeb0af0c5ef5d",
+              "source_tree": "866834042d6d20b876dd445c76ce9d53cad77cbe",
+              "archive_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+              "purpose": "Temporary offline checkout for the stabilization audit",
+          }
+          (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          subprocess.run([
+              sys.executable, "-m", "pip", "download", "--only-binary=:all:",
+              "--python-version", "3.13", "--dest", str(root / "wheels"),
+              "setuptools>=68", "wheel", *project["dependencies"],
+              *project["optional-dependencies"]["dev"],
+          ], check=True)
+          PY
+
+      - name: Upload temporary offline audit checkout
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: b3s-stabilization-source-dd666ae
+          path: ${{ runner.temp }}/b3s-stabilization/
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Install dependencies
         run: |
