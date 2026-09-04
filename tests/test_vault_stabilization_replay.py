@@ -246,3 +246,141 @@ def test_successful_history_read_can_confirm_absence(monkeypatch, tmp_path):
     monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
     monkeypatch.setattr(report_store, "_postgres_repository", lambda: AvailableRepository())
     assert report_store.load_report("absent") is None
+
+
+def test_resume_successor_is_readable_through_api_and_public_report(exact_replay, monkeypatch, tmp_path):
+    """Follow the public resume API through real SQLite and report readers."""
+    from fastapi.testclient import TestClient
+
+    from src.storage.sqlite_store import SQLiteStore
+    from tests.test_scanner_api_v1 import AUTH, _InlineThread, _enable_resume_api
+    from web import exact_resume_controller
+    from web.api_v1 import service
+    from web.app import app
+
+    scan, repository, run, directory = exact_replay
+    assert run(_Flow(fail=2)).action == "record_no_score"
+    original_bytes = (directory / f"{scan}.json").read_bytes()
+    database_path = tmp_path / "resume-api.sqlite3"
+    _enable_resume_api(monkeypatch, database_path, repository)
+    monkeypatch.setattr(
+        service, "launch_vault_exact_resume_action",
+        lambda **kwargs: exact_resume_controller.launch_vault_exact_resume_action(
+            **kwargs, thread_factory=_InlineThread,
+        ),
+    )
+    flow = _Flow()
+    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *a, **k: flow)
+    client = TestClient(app)
+    original = client.get(f"/api/v1/scans/{scan}/result", headers=AUTH)
+    assert original.status_code == 200
+    assert original.json()["score"]["publishable"] is False
+    assert original.json()["score"]["value"] is None
+    headers = {**AUTH, "Idempotency-Key": "composed-api-resume"}
+    response = client.post(f"/api/v1/scans/{scan}/resume", headers=headers)
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    assert payload["state"] == "completed", payload
+    successor_id = payload["result"]["report_id"]
+    assert successor_id != scan and payload["result"]["publication_action"] == "publish_current"
+
+    store = SQLiteStore(str(database_path))
+    try:
+        action = store.get_scanner_resume_action(action_id=payload["action_id"])
+    finally:
+        store.close()
+    assert action["state"] == "completed" and action["status_payload"]["report_id"] == successor_id
+    # Fresh clients and storage connections, not the API's original response.
+    reader = TestClient(app)
+    status = reader.get(response.headers["location"], headers=AUTH)
+    assert status.status_code == 200 and status.json()["result"] == payload["result"]
+    successor = reader.get(f"/api/v1/scans/{successor_id}/result", headers=AUTH)
+    assert successor.status_code == 200, successor.text
+    assert successor.json()["id"] == successor_id
+    assert successor.json()["score"]["publishable"] is True
+    assert successor.json()["score"]["value"] == report_store.load_report(successor_id)["score"]
+    assert successor.headers["etag"] != original.headers["etag"]
+    assert reader.get(f"/api/v1/scans/{successor_id}/result",
+                      headers={**AUTH, "If-None-Match": successor.headers["etag"]}).status_code == 304
+    assert reader.get(f"/api/v1/scans/{scan}/result",
+                      headers={**AUTH, "If-None-Match": original.headers["etag"]}).status_code == 304
+    assert reader.get(f"/report/{successor_id}", follow_redirects=False).status_code == 200
+    assert reader.get(f"/report/{successor_id}.md").status_code == 200
+    assert report_store.load_report(successor_id)["raw"]["source_run_id"] == scan
+    assert (directory / f"{scan}.json").read_bytes() == original_bytes
+    assert len(flow.calls) == 9 and len(repository.checkpoints) == 10
+    no_call = _Flow(fail=1)
+    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *a, **k: no_call)
+    repeated = reader.post(f"/api/v1/scans/{scan}/resume", headers=headers)
+    assert repeated.status_code == 202 and repeated.headers["idempotent-replayed"] == "true"
+    assert repeated.json()["action_id"] == payload["action_id"]
+    assert repeated.json()["result"] == payload["result"] and not no_call.calls
+
+
+@pytest.mark.parametrize("all_finalization_writes_fail", (False, True))
+def test_api_report_survives_action_finalization_failure(exact_replay, monkeypatch, tmp_path, all_finalization_writes_fail):
+    """A saved report is not a completed action until SQLite records completion."""
+    from fastapi.testclient import TestClient
+
+    from src.storage.sqlite_store import SQLiteStore
+    from tests.test_scanner_api_v1 import AUTH, _InlineThread, _enable_resume_api
+    from web import exact_resume_controller
+    from web.api_v1 import service
+    from web.app import app
+
+    scan, repository, run, directory = exact_replay
+    assert run(_Flow(fail=2)).action == "record_no_score"
+    original_bytes = (directory / f"{scan}.json").read_bytes()
+    database_path = tmp_path / "finalization.sqlite3"
+    _enable_resume_api(monkeypatch, database_path, repository)
+    monkeypatch.setattr(
+        service, "launch_vault_exact_resume_action",
+        lambda **kwargs: exact_resume_controller.launch_vault_exact_resume_action(
+            **kwargs, thread_factory=_InlineThread,
+        ),
+    )
+    flow = _Flow()
+    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *a, **k: flow)
+    finalize = SQLiteStore.finalize_scanner_resume_action
+
+    def unavailable(store, **kwargs):
+        if all_finalization_writes_fail or kwargs["state"] == "completed":
+            raise OSError("injected action-finalization storage failure")
+        return finalize(store, **kwargs)
+
+    client = TestClient(app)
+    headers = {**AUTH, "Idempotency-Key": "finalization-first"}
+    with monkeypatch.context() as fault:
+        fault.setattr(SQLiteStore, "finalize_scanner_resume_action", unavailable)
+        response = client.post(f"/api/v1/scans/{scan}/resume", headers=headers)
+    assert response.status_code == 202, response.text
+    first = response.json()
+    assert first["state"] == ("running" if all_finalization_writes_fail else "failed")
+    assert first["result"] is None
+    successor_id = scan_runner._exact_successor_report_id(first)
+    persisted = report_store.load_report(successor_id)
+    assert persisted["sv9_assessment"]["availability"] == "available"
+    assert len(flow.calls) == 9 and len(repository.checkpoints) == 10
+
+    if all_finalization_writes_fail:
+        assert exact_resume_controller.recover_interrupted_vault_exact_resume_actions(
+            database_path=str(database_path),
+        ) == 1
+    status = TestClient(app).get(response.headers["location"], headers=AUTH).json()
+    assert status["state"] == ("interrupted" if all_finalization_writes_fail else "failed")
+    assert status["result"] is None and status["failure"]["retryable"] is True
+    no_call = _Flow(fail=1)
+    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *a, **k: no_call)
+    same_request = client.post(f"/api/v1/scans/{scan}/resume", headers=headers)
+    assert same_request.headers["idempotent-replayed"] == "true"
+    assert same_request.json()["state"] == status["state"] and not no_call.calls
+    # The existing contract uses a new key for a new action after a failed one.
+    retried = client.post(f"/api/v1/scans/{scan}/resume",
+                          headers={**AUTH, "Idempotency-Key": "finalization-retry"})
+    assert retried.status_code == 202 and retried.json()["state"] == "completed", retried.text
+    retry_report = report_store.load_report(retried.json()["result"]["report_id"])
+    assert retry_report["sv9_assessment"] == persisted["sv9_assessment"]
+    assert retry_report["raw"]["source_run_id"] == scan
+    assert report_store.load_report(successor_id) == persisted
+    assert (directory / f"{scan}.json").read_bytes() == original_bytes
+    assert not no_call.calls and len(repository.checkpoints) == 10
