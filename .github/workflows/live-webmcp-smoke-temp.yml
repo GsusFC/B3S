@@ -140,7 +140,7 @@ jobs:
             --no-sandbox \
             --executable-path "$chrome_path"
 
-      - name: Probe live data path and closed-schema rejection
+      - name: Probe all live read paths and contract rejection
         shell: bash
         run: |
           set -euo pipefail
@@ -148,6 +148,18 @@ jobs:
           cat > "$probe" <<'JS'
           import process from "node:process";
           import { localBrowser, Stagehand } from "@browserbasehq/stagehand";
+
+          const checks = [];
+          const record = (name, ok, detail = "") => checks.push({ name, ok, detail });
+          const canonicalDomain = (value) => {
+            let candidate = String(value || "").trim().toLowerCase();
+            try {
+              if (candidate.includes("://")) candidate = new URL(candidate).hostname;
+            } catch {
+              return candidate;
+            }
+            return candidate.replace(/\.$/, "").replace(/^www\./, "");
+          };
 
           const browser = await localBrowser.launch({
             headless: true,
@@ -172,59 +184,95 @@ jobs:
               "b3s_cancel_scan",
             ];
             const names = new Set(tools.map((tool) => tool.name));
-            for (const name of expected) {
-              if (!names.has(name)) throw new Error(`missing live tool: ${name}`);
-            }
+            record(
+              "seven FLOC tools discovered",
+              expected.every((name) => names.has(name)) && tools.length >= expected.length,
+              `discovered=${tools.length}`
+            );
 
-            const byName = (name) => {
-              const tool = tools.find((candidate) => candidate.name === name);
-              if (!tool) throw new Error(`tool disappeared: ${name}`);
-              return tool;
-            };
+            const byName = (name) => tools.find((candidate) => candidate.name === name);
             const invoke = async (tool, input) => {
+              if (!tool) throw new Error("tool not discovered");
               const invocation = await tool.invoke({ input });
               return invocation.result({ timeout: 10_000 });
             };
 
             const listTool = byName("b3s_list_brand_analyses");
-            const listResult = await invoke(listTool, { limit: 1 });
-            if (listResult.status !== "Completed") {
-              throw new Error(`list invocation status=${listResult.status}`);
-            }
-            const listOutput = listResult.output;
-            if (!Number.isInteger(listOutput?.total) || listOutput.total < 1) {
-              throw new Error("live list returned no persisted analyses");
-            }
-            if (!Array.isArray(listOutput.analyses) || listOutput.analyses.length !== 1) {
-              throw new Error("live list did not return one bounded analysis");
-            }
-            const domain = String(listOutput.analyses[0]?.domain || "");
-            if (!domain) throw new Error("live list returned an analysis without a domain");
-
-            const brandResult = await invoke(byName("b3s_get_brand_analysis"), { domain });
-            if (brandResult.status !== "Completed") {
-              throw new Error(`brand invocation status=${brandResult.status}`);
-            }
-            const brandOutput = brandResult.output;
-            if (String(brandOutput?.domain || "").toLowerCase() !== domain.toLowerCase()) {
-              throw new Error("brand analysis did not bind to the selected domain");
-            }
-            if (!brandOutput?.vaultMemory || typeof brandOutput.vaultMemory !== "object") {
-              throw new Error("brand analysis omitted Vault memory state");
+            let listOutput = null;
+            let selectedDomain = "";
+            try {
+              const listResult = await invoke(listTool, { limit: 1 });
+              listOutput = listResult.output;
+              record("bounded live list completed", listResult.status === "Completed", `status=${listResult.status}`);
+              record(
+                "live list contains persisted analyses",
+                Number.isInteger(listOutput?.total) && listOutput.total > 0,
+                `total=${Number.isInteger(listOutput?.total) ? listOutput.total : "invalid"}`
+              );
+              record(
+                "live list respects limit",
+                Array.isArray(listOutput?.analyses) && listOutput.analyses.length === 1,
+                `returned=${Array.isArray(listOutput?.analyses) ? listOutput.analyses.length : "invalid"}`
+              );
+              selectedDomain = String(listOutput?.analyses?.[0]?.domain || "");
+              record("live list exposes a domain", Boolean(selectedDomain));
+            } catch (error) {
+              record("bounded live list completed", false, error instanceof Error ? error.message : String(error));
             }
 
-            const reportId = String(brandOutput.currentReportId || "");
+            let brandOutput = null;
+            if (selectedDomain) {
+              try {
+                const brandResult = await invoke(byName("b3s_get_brand_analysis"), {
+                  domain: selectedDomain,
+                });
+                brandOutput = brandResult.output;
+                record("brand analysis completed", brandResult.status === "Completed", `status=${brandResult.status}`);
+
+                const detailDomain = String(brandOutput?.domain || "");
+                const exact = detailDomain.toLowerCase() === selectedDomain.toLowerCase();
+                const canonical = canonicalDomain(detailDomain) === canonicalDomain(selectedDomain);
+                record(
+                  "domain field stable across list and detail",
+                  exact,
+                  [
+                    `canonical_equal=${canonical}`,
+                    `request_has_www=${selectedDomain.toLowerCase().startsWith("www.")}`,
+                    `detail_has_www=${detailDomain.toLowerCase().startsWith("www.")}`,
+                    `detail_looks_url=${detailDomain.includes("://")}`,
+                    `request_length=${selectedDomain.length}`,
+                    `detail_length=${detailDomain.length}`,
+                  ].join(" ")
+                );
+                record("domain resolves to the same canonical host", canonical);
+                record(
+                  "brand analysis exposes Vault memory state",
+                  Boolean(brandOutput?.vaultMemory) && typeof brandOutput.vaultMemory === "object"
+                );
+              } catch (error) {
+                record("brand analysis completed", false, error instanceof Error ? error.message : String(error));
+              }
+            }
+
+            const reportId = String(
+              brandOutput?.currentReportId || brandOutput?.history?.[0]?.reportId || ""
+            );
             if (reportId) {
-              const reportResult = await invoke(byName("b3s_read_report_markdown"), {
-                reportId,
-                maxChars: 1000,
-              });
-              if (reportResult.status !== "Completed") {
-                throw new Error(`report invocation status=${reportResult.status}`);
+              try {
+                const reportResult = await invoke(byName("b3s_read_report_markdown"), {
+                  reportId,
+                  maxChars: 1000,
+                });
+                record("persisted report read completed", reportResult.status === "Completed", `status=${reportResult.status}`);
+                record(
+                  "persisted report read is non-empty",
+                  Boolean(String(reportResult.output?.markdown || "").trim())
+                );
+              } catch (error) {
+                record("persisted report read completed", false, error instanceof Error ? error.message : String(error));
               }
-              if (!String(reportResult.output?.markdown || "").trim()) {
-                throw new Error("persisted report read returned empty markdown");
-              }
+            } else {
+              record("persisted report identifier available", false);
             }
 
             let malformedRejected = false;
@@ -238,43 +286,55 @@ jobs:
             } catch {
               malformedRejected = true;
             }
-            if (!malformedRejected) throw new Error("closed schema accepted an unknown field");
+            record("unknown input field rejected", malformedRejected);
 
-            const cleanResult = await invoke(listTool, {
-              query: "__b3s_webmcp_clean_recheck__",
-              limit: 1,
-            });
-            if (
-              cleanResult.status !== "Completed" ||
-              cleanResult.output?.matched !== 0 ||
-              !Array.isArray(cleanResult.output?.analyses) ||
-              cleanResult.output.analyses.length !== 0
-            ) {
-              throw new Error("valid lookup failed after malformed-input rejection");
+            try {
+              const cleanResult = await invoke(listTool, {
+                query: "__b3s_webmcp_clean_recheck__",
+                limit: 1,
+              });
+              record(
+                "valid lookup remains clean after rejection",
+                cleanResult.status === "Completed" &&
+                  cleanResult.output?.matched === 0 &&
+                  Array.isArray(cleanResult.output?.analyses) &&
+                  cleanResult.output.analyses.length === 0,
+                `status=${cleanResult.status}`
+              );
+            } catch (error) {
+              record("valid lookup remains clean after rejection", false, error instanceof Error ? error.message : String(error));
             }
 
-            console.log(`PASS live discovery: ${expected.length}/${expected.length} FLOC tools`);
-            console.log(`PASS live list: ${listOutput.total} persisted analysis record(s), bounded output verified`);
-            console.log("PASS live brand and persisted-report read path");
-            console.log("PASS closed-schema rejection and clean re-read");
-            console.log("PASS no consequential or reversible tool invoked");
+            record("no reversible or consequential tool invoked", true);
+          } catch (error) {
+            record("probe execution", false, error instanceof Error ? error.message : String(error));
           } finally {
             await stagehand?.close().catch(() => {});
             await browser.close().catch(() => {});
+          }
+
+          for (const check of checks) {
+            console.log(`${check.ok ? "PASS" : "FAIL"} ${check.name}${check.detail ? ` — ${check.detail}` : ""}`);
+          }
+          const failures = checks.filter((check) => !check.ok);
+          if (failures.length > 0) {
+            console.error(`Live WebMCP diagnostic found ${failures.length} defect(s)`);
+            process.exitCode = 1;
+          } else {
+            console.log(`Live WebMCP diagnostic passed ${checks.length}/${checks.length} checks`);
           }
           JS
 
           node "$probe"
 
       - name: Record smoke result
+        if: always()
         shell: bash
         run: |
           {
             echo "### Live B3S Vault WebMCP smoke"
-            echo "- Live Vault SHA: \`$LIVE_VAULT_SHA\`"
+            echo "- Live Vault SHA: \`${LIVE_VAULT_SHA:-unknown}\`"
             echo "- Reviewed WebMCP ancestor: \`$WEBMCP_ANCESTOR_SHA\`"
-            echo "- Seven FLOC tools discovered in a real browser"
-            echo "- Read-only list, brand analysis and persisted-report paths exercised"
-            echo "- Closed-schema malformed input rejected"
-            echo "- No scan preparation, continuation, cancellation, provider call or data mutation invoked"
+            echo "- Only read paths and malformed-input rejection were exercised"
+            echo "- No scan preparation, continuation, cancellation, provider call or data mutation was invoked"
           } >> "$GITHUB_STEP_SUMMARY"
