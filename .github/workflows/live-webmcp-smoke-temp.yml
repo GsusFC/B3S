@@ -7,7 +7,6 @@ on:
       - ".github/workflows/live-webmcp-smoke-temp.yml"
 
 permissions:
-  actions: read
   contents: read
 
 concurrency:
@@ -16,7 +15,7 @@ concurrency:
 
 jobs:
   live-stagehand:
-    name: Discover and invoke live Vault WebMCP read paths
+    name: Isolate live Vault WebMCP result transport
     if: >-
       ${{
         github.repository == 'GsusFC/B3S' &&
@@ -25,16 +24,15 @@ jobs:
         github.event.pull_request.base.ref == 'main'
       }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
       PUPPETEER_SKIP_DOWNLOAD: "1"
       VAULT_URL: https://b3s-vault.fly.dev
-      WEBMCP_ANCESTOR_SHA: 184502a46ce0c9660285803e94a46491eac6c8df
       BROWSERBASE_SKILLS_SHA: 6811ca31163332d9d60309cff48e77f09de37a17
 
     steps:
-      - name: Check out smoke controller
+      - name: Check out controller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -44,51 +42,7 @@ jobs:
         with:
           node-version: 22.18.0
 
-      - name: Attest live Vault contains the reviewed WebMCP commit
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          API_URL: ${{ github.api_url }}
-          GH_REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          live_sha="$(curl --fail --silent --show-error --max-time 20 "$VAULT_URL/health" \
-            | python3 -c 'import json, re, sys; p=json.load(sys.stdin); s=str(p.get("commit_sha") or ""); assert p.get("status") == "ok"; assert re.fullmatch(r"[0-9a-f]{40}", s); print(s)')"
-          echo "LIVE_VAULT_SHA=$live_sha" >> "$GITHUB_ENV"
-          echo "Live Vault SHA: $live_sha"
-
-          comparison="$RUNNER_TEMP/webmcp-to-live-vault.json"
-          curl --fail --silent --show-error \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            --output "$comparison" \
-            "$API_URL/repos/$GH_REPOSITORY/compare/$WEBMCP_ANCESTOR_SHA...$live_sha"
-
-          LIVE_SHA="$live_sha" python3 - "$comparison" <<'PY'
-          import json
-          import os
-          import sys
-
-          payload = json.load(open(sys.argv[1], encoding="utf-8"))
-          ancestor = os.environ["WEBMCP_ANCESTOR_SHA"]
-          live = os.environ["LIVE_SHA"]
-          assert payload.get("status") in {"ahead", "identical"}
-          assert payload.get("base_commit", {}).get("sha") == ancestor
-          assert payload.get("merge_base_commit", {}).get("sha") == ancestor
-          if live != ancestor:
-              commits = payload.get("commits") or []
-              assert commits and commits[-1].get("sha") == live
-          PY
-
-          curl --fail --silent --show-error --max-time 20 \
-            "$VAULT_URL/static/vault_webmcp_loader.js?sha=$live_sha" \
-            | grep -Fq 'https://b3s-vault.fly.dev'
-          curl --fail --silent --show-error --max-time 20 \
-            "$VAULT_URL/static/vault_webmcp.js?sha=$live_sha" \
-            | grep -Fq 'b3s_list_brand_analyses'
-
-      - name: Install pinned Browserbase validator
+      - name: Install pinned Stagehand
         shell: bash
         run: |
           set -euo pipefail
@@ -97,68 +51,50 @@ jobs:
           git -C "$validator_root" remote add origin https://github.com/browserbase/skills.git
           git -C "$validator_root" fetch --depth 1 origin "$BROWSERBASE_SKILLS_SHA"
           git -C "$validator_root" checkout --detach FETCH_HEAD
-
           corepack enable
           corepack prepare pnpm@10.15.1 --activate
           pnpm --dir "$validator_root/skills/add-webmcp" install --frozen-lockfile
           echo "VALIDATOR_ROOT=$validator_root" >> "$GITHUB_ENV"
 
-      - name: Build a read-only live smoke contract
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-
-          source = json.load(open("webmcp.e2e.json", encoding="utf-8"))
-          source["timeoutMs"] = 10000
-          for tool in source["tools"]:
-              if tool["name"] != "b3s_list_brand_analyses":
-                  tool.pop("input", None)
-                  tool.pop("expectedOutputSubset", None)
-          target = os.path.join(os.environ["RUNNER_TEMP"], "live-webmcp.e2e.json")
-          with open(target, "w", encoding="utf-8") as handle:
-              json.dump(source, handle, indent=2)
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
-              env_file.write(f"LIVE_WEBMCP_CONFIG={target}\n")
-          PY
-
-      - name: Discover seven tools and invoke only the no-match lookup
+      - name: Inspect tool output shape and underlying brand document
         shell: bash
         run: |
           set -euo pipefail
           chrome_path="$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
           test -n "$chrome_path"
-          echo "CHROME_PATH=$chrome_path" >> "$GITHUB_ENV"
+          export CHROME_PATH="$chrome_path"
 
-          node "$VALIDATOR_ROOT/skills/add-webmcp/scripts/validate-stagehand.mjs" \
-            --url "$VAULT_URL/" \
-            --config "$LIVE_WEBMCP_CONFIG" \
-            --local \
-            --headless \
-            --no-sandbox \
-            --executable-path "$chrome_path"
-
-      - name: Probe all live read paths and contract rejection
-        shell: bash
-        run: |
-          set -euo pipefail
-          probe="$VALIDATOR_ROOT/skills/add-webmcp/live-vault-probe.mjs"
+          probe="$VALIDATOR_ROOT/skills/add-webmcp/live-output-shape.mjs"
           cat > "$probe" <<'JS'
           import process from "node:process";
           import { localBrowser, Stagehand } from "@browserbasehq/stagehand";
 
-          const checks = [];
-          const record = (name, ok, detail = "") => checks.push({ name, ok, detail });
-          const canonicalDomain = (value) => {
-            let candidate = String(value || "").trim().toLowerCase();
-            try {
-              if (candidate.includes("://")) candidate = new URL(candidate).hostname;
-            } catch {
-              return candidate;
+          const describe = (value) => {
+            const kind = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+            let keys = [];
+            if (value && typeof value === "object" && !Array.isArray(value)) {
+              keys = Object.keys(value).slice(0, 20);
             }
-            return candidate.replace(/\.$/, "").replace(/^www\./, "");
+            let serializedLength = null;
+            try {
+              serializedLength = JSON.stringify(value).length;
+            } catch {
+              serializedLength = null;
+            }
+            let parseableJsonString = false;
+            let parsedKeys = [];
+            if (typeof value === "string") {
+              try {
+                const parsed = JSON.parse(value);
+                parseableJsonString = true;
+                if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                  parsedKeys = Object.keys(parsed).slice(0, 20);
+                }
+              } catch {
+                // Shape only; do not print the returned content.
+              }
+            }
+            return { kind, keys, serializedLength, parseableJsonString, parsedKeys };
           };
 
           const browser = await localBrowser.launch({
@@ -167,174 +103,87 @@ jobs:
             executablePath: process.env.CHROME_PATH,
           });
           let stagehand;
+          const failures = [];
           try {
             stagehand = await Stagehand.create({ browser });
             const pages = await stagehand.browser.context.pages();
             const page = pages[0] ?? (await stagehand.browser.context.newPage());
             await page.goto(`${process.env.VAULT_URL}/`, { waitUntil: "load" });
-
             const tools = await page.tools({ timeout: 10_000 });
-            const expected = [
-              "b3s_list_brand_analyses",
-              "b3s_get_brand_analysis",
-              "b3s_read_report_markdown",
-              "b3s_get_scan_status",
-              "b3s_prepare_scan",
-              "b3s_continue_degraded_scan",
-              "b3s_cancel_scan",
-            ];
-            const names = new Set(tools.map((tool) => tool.name));
-            record(
-              "seven FLOC tools discovered",
-              expected.every((name) => names.has(name)) && tools.length >= expected.length,
-              `discovered=${tools.length}`
-            );
-
-            const byName = (name) => tools.find((candidate) => candidate.name === name);
-            const invoke = async (tool, input) => {
-              if (!tool) throw new Error("tool not discovered");
+            const byName = (name) => tools.find((tool) => tool.name === name);
+            const invoke = async (name, input) => {
+              const tool = byName(name);
+              if (!tool) throw new Error(`missing tool ${name}`);
               const invocation = await tool.invoke({ input });
-              return invocation.result({ timeout: 10_000 });
+              return invocation.result({ timeout: 15_000 });
             };
 
-            const listTool = byName("b3s_list_brand_analyses");
-            let listOutput = null;
-            let selectedDomain = "";
-            try {
-              const listResult = await invoke(listTool, { limit: 1 });
-              listOutput = listResult.output;
-              record("bounded live list completed", listResult.status === "Completed", `status=${listResult.status}`);
-              record(
-                "live list contains persisted analyses",
-                Number.isInteger(listOutput?.total) && listOutput.total > 0,
-                `total=${Number.isInteger(listOutput?.total) ? listOutput.total : "invalid"}`
-              );
-              record(
-                "live list respects limit",
-                Array.isArray(listOutput?.analyses) && listOutput.analyses.length === 1,
-                `returned=${Array.isArray(listOutput?.analyses) ? listOutput.analyses.length : "invalid"}`
-              );
-              selectedDomain = String(listOutput?.analyses?.[0]?.domain || "");
-              record("live list exposes a domain", Boolean(selectedDomain));
-            } catch (error) {
-              record("bounded live list completed", false, error instanceof Error ? error.message : String(error));
+            const list = await invoke("b3s_list_brand_analyses", { limit: 1 });
+            const domain = String(list.output?.analyses?.[0]?.domain || "");
+            if (list.status !== "Completed" || !domain) {
+              throw new Error("cannot select a live analysis for transport diagnosis");
             }
+            console.log(`LIST_SHAPE ${JSON.stringify(describe(list.output))}`);
+            console.log(`SELECTED_DOMAIN_META ${JSON.stringify({ length: domain.length, hasWww: domain.toLowerCase().startsWith("www."), hasDot: domain.includes(".") })}`);
 
-            let brandOutput = null;
-            if (selectedDomain) {
-              try {
-                const brandResult = await invoke(byName("b3s_get_brand_analysis"), {
-                  domain: selectedDomain,
-                });
-                brandOutput = brandResult.output;
-                record("brand analysis completed", brandResult.status === "Completed", `status=${brandResult.status}`);
+            const liveBrand = await invoke("b3s_get_brand_analysis", { domain });
+            console.log(`LIVE_BRAND_STATUS ${liveBrand.status}`);
+            console.log(`LIVE_BRAND_OUTPUT_SHAPE ${JSON.stringify(describe(liveBrand.output))}`);
 
-                const detailDomain = String(brandOutput?.domain || "");
-                const exact = detailDomain.toLowerCase() === selectedDomain.toLowerCase();
-                const canonical = canonicalDomain(detailDomain) === canonicalDomain(selectedDomain);
-                record(
-                  "domain field stable across list and detail",
-                  exact,
-                  [
-                    `canonical_equal=${canonical}`,
-                    `request_has_www=${selectedDomain.toLowerCase().startsWith("www.")}`,
-                    `detail_has_www=${detailDomain.toLowerCase().startsWith("www.")}`,
-                    `detail_looks_url=${detailDomain.includes("://")}`,
-                    `request_length=${selectedDomain.length}`,
-                    `detail_length=${detailDomain.length}`,
-                  ].join(" ")
-                );
-                record("domain resolves to the same canonical host", canonical);
-                record(
-                  "brand analysis exposes Vault memory state",
-                  Boolean(brandOutput?.vaultMemory) && typeof brandOutput.vaultMemory === "object"
-                );
-              } catch (error) {
-                record("brand analysis completed", false, error instanceof Error ? error.message : String(error));
-              }
-            }
+            const emptyBrand = await invoke("b3s_get_brand_analysis", { domain: "webmcp-no-report.invalid" });
+            console.log(`EMPTY_BRAND_STATUS ${emptyBrand.status}`);
+            console.log(`EMPTY_BRAND_OUTPUT_SHAPE ${JSON.stringify(describe(emptyBrand.output))}`);
 
-            const reportId = String(
-              brandOutput?.currentReportId || brandOutput?.history?.[0]?.reportId || ""
-            );
-            if (reportId) {
-              try {
-                const reportResult = await invoke(byName("b3s_read_report_markdown"), {
-                  reportId,
-                  maxChars: 1000,
-                });
-                record("persisted report read completed", reportResult.status === "Completed", `status=${reportResult.status}`);
-                record(
-                  "persisted report read is non-empty",
-                  Boolean(String(reportResult.output?.markdown || "").trim())
-                );
-              } catch (error) {
-                record("persisted report read completed", false, error instanceof Error ? error.message : String(error));
-              }
-            } else {
-              record("persisted report identifier available", false);
-            }
-
-            let malformedRejected = false;
-            try {
-              const malformed = await invoke(listTool, {
-                query: "__b3s_webmcp_malformed__",
-                limit: 1,
-                unexpected: true,
+            const documentProbe = await page.evaluate(async (selectedDomain) => {
+              const response = await fetch(`/brand/${encodeURIComponent(selectedDomain)}?lang=es`, {
+                credentials: "same-origin",
+                headers: { Accept: "text/html" },
               });
-              malformedRejected = malformed.status !== "Completed";
-            } catch {
-              malformedRejected = true;
-            }
-            record("unknown input field rejected", malformedRejected);
+              const markup = await response.text();
+              const doc = new DOMParser().parseFromString(markup, "text/html");
+              return {
+                status: response.status,
+                ok: response.ok,
+                finalPath: new URL(response.url).pathname,
+                contentType: response.headers.get("content-type") || "",
+                markupLength: markup.length,
+                hasBrandTitle: Boolean(doc.querySelector(".brand-profile-title")),
+                hasBrandDomain: Boolean(doc.querySelector(".brand-profile-domain-link")),
+                brandDomainTextLength: String(doc.querySelector(".brand-profile-domain-link")?.textContent || "").trim().length,
+                hasVaultMemory: Boolean(doc.querySelector("#memoria-vault")),
+                hasReportLink: Boolean(doc.querySelector('.brand-profile-terminal a[href^="/report/"]')),
+                hasIndexTable: Boolean(doc.querySelector("table.reports-table")),
+              };
+            }, domain);
+            console.log(`DIRECT_BRAND_DOCUMENT ${JSON.stringify(documentProbe)}`);
 
-            try {
-              const cleanResult = await invoke(listTool, {
-                query: "__b3s_webmcp_clean_recheck__",
-                limit: 1,
-              });
-              record(
-                "valid lookup remains clean after rejection",
-                cleanResult.status === "Completed" &&
-                  cleanResult.output?.matched === 0 &&
-                  Array.isArray(cleanResult.output?.analyses) &&
-                  cleanResult.output.analyses.length === 0,
-                `status=${cleanResult.status}`
-              );
-            } catch (error) {
-              record("valid lookup remains clean after rejection", false, error instanceof Error ? error.message : String(error));
+            if (liveBrand.status !== "Completed") failures.push("live brand tool did not complete");
+            if (emptyBrand.status !== "Completed") failures.push("empty brand tool did not complete");
+            if (!documentProbe.ok || !documentProbe.hasBrandTitle || !documentProbe.hasBrandDomain) {
+              failures.push("underlying brand document is not the expected page");
             }
-
-            record("no reversible or consequential tool invoked", true);
-          } catch (error) {
-            record("probe execution", false, error instanceof Error ? error.message : String(error));
+            if (failures.length === 0) {
+              console.log("PASS transport isolation completed without invoking any mutation");
+            }
           } finally {
             await stagehand?.close().catch(() => {});
             await browser.close().catch(() => {});
           }
 
-          for (const check of checks) {
-            console.log(`${check.ok ? "PASS" : "FAIL"} ${check.name}${check.detail ? ` — ${check.detail}` : ""}`);
-          }
-          const failures = checks.filter((check) => !check.ok);
-          if (failures.length > 0) {
-            console.error(`Live WebMCP diagnostic found ${failures.length} defect(s)`);
+          if (failures.length) {
+            for (const failure of failures) console.error(`FAIL ${failure}`);
             process.exitCode = 1;
-          } else {
-            console.log(`Live WebMCP diagnostic passed ${checks.length}/${checks.length} checks`);
           }
           JS
 
           node "$probe"
 
-      - name: Record smoke result
+      - name: Record safety boundary
         if: always()
         shell: bash
         run: |
           {
-            echo "### Live B3S Vault WebMCP smoke"
-            echo "- Live Vault SHA: \`${LIVE_VAULT_SHA:-unknown}\`"
-            echo "- Reviewed WebMCP ancestor: \`$WEBMCP_ANCESTOR_SHA\`"
-            echo "- Only read paths and malformed-input rejection were exercised"
-            echo "- No scan preparation, continuation, cancellation, provider call or data mutation was invoked"
+            echo "### Live WebMCP transport diagnostic"
+            echo "- Read-only tools only"
+            echo "- No scan preparation, continuation, cancellation, provider call or data mutation"
           } >> "$GITHUB_STEP_SUMMARY"
