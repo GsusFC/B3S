@@ -40,7 +40,7 @@ def parse_report(report: dict[str, Any]) -> HistoricalReport:
     raw_sv9 = _mapping(raw.get("sv9"))
     evaluation_result = _mapping(raw_sv9.get("result"))
     components = tuple(_mapping(item) for item in _sequence(report.get("components")) if isinstance(item, dict))
-    if not components:
+    if not components and assessment["availability"] != "unavailable":
         raise ReportImportError("report must contain component evaluations")
 
     evidence_records = tuple(
