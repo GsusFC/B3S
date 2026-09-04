@@ -68,9 +68,11 @@ def test_legacy_report_still_requires_components():
 def test_complete_report_keeps_canonical_score_and_identity(exact_replay, monkeypatch):
     _scan, _repository, run, _directory = exact_replay
     monkeypatch.setattr(report_store, "_postgres_repository", lambda: None)
+    assert run(_Flow(fail=2)).action == "record_no_score"
     publication = run(_Flow())
     assert publication.action == "publish_current"
     report = report_store.load_report(publication.report_id)
+    assert report is not None
     parsed = parse_report(report)
 
     assert parsed.components
