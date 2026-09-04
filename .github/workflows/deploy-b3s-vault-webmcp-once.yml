@@ -1,4 +1,4 @@
-name: One-time deploy WebMCP to b3s-vault
+name: One-time verify WebMCP on b3s-vault
 
 on:
   pull_request:
@@ -7,16 +7,15 @@ on:
       - ".github/workflows/deploy-b3s-vault-webmcp-once.yml"
 
 permissions:
-  actions: read
   contents: read
 
 concurrency:
-  group: deploy-b3s-vault-webmcp-184502a
+  group: verify-b3s-vault-webmcp-184502a
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: Deploy exact authorized WebMCP SHA to b3s-vault
+  verify:
+    name: Verify live WebMCP and Vault credential
     if: >-
       ${{
         github.repository == 'GsusFC/B3S' &&
@@ -26,152 +25,47 @@ jobs:
         github.actor == 'GsusFC'
       }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     environment: b3s-vault
     env:
-      DEPLOY_SHA: 184502a46ce0c9660285803e94a46491eac6c8df
-      TRUSTED_CI_RUN_ID: "33656982164"
-      TRUSTED_CI_WORKFLOW_ID: "306885838"
+      WEBMCP_SHA: 184502a46ce0c9660285803e94a46491eac6c8df
       VAULT_APP: b3s-vault
-      VAULT_CONFIG: fly.vault.toml
       VAULT_URL: https://b3s-vault.fly.dev
       PRODUCTION_URL: https://b3s.fly.dev
 
     steps:
-      - name: Check out the exact authorized source
+      - name: Check out the reviewed WebMCP source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.DEPLOY_SHA }}
+          ref: ${{ env.WEBMCP_SHA }}
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Attest exact source, reviewed CI and Vault-only profile
+      - name: Verify reviewed WebMCP source markers
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          API_URL: ${{ github.api_url }}
-          GH_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
+          test "$(git rev-parse HEAD)" = "$WEBMCP_SHA"
           test -z "$(git status --porcelain)"
           test -f web/static/vault_webmcp.js
           test -f web/static/vault_webmcp_loader.js
           grep -Fq 'b3s_prepare_scan' web/static/vault_webmcp.js
+          grep -Fq 'b3s_list_vault_review_cases' web/static/vault_webmcp.js
           grep -Fq 'https://b3s-vault.fly.dev' web/static/vault_webmcp_loader.js
-
-          ci_run="$RUNNER_TEMP/trusted-ci-run.json"
-          curl --fail --silent --show-error \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            --output "$ci_run" \
-            "$API_URL/repos/$GH_REPOSITORY/actions/runs/$TRUSTED_CI_RUN_ID"
-
-          python3 - "$ci_run" <<'PY'
-          import json
-          import os
-          import sys
-
-          run = json.load(open(sys.argv[1], encoding="utf-8"))
-          assert run.get("id") == int(os.environ["TRUSTED_CI_RUN_ID"])
-          assert run.get("workflow_id") == int(os.environ["TRUSTED_CI_WORKFLOW_ID"])
-          assert run.get("name") == "CI"
-          assert run.get("path") == ".github/workflows/ci.yml"
-          assert run.get("event") == "push"
-          assert run.get("head_branch") == "main"
-          assert run.get("head_sha") == os.environ["DEPLOY_SHA"]
-          assert run.get("status") == "completed"
-          assert run.get("conclusion") == "success"
-          assert run.get("run_attempt") == 1
-          assert run.get("repository", {}).get("full_name") == os.environ["GH_REPOSITORY"]
-          assert run.get("head_repository", {}).get("full_name") == os.environ["GH_REPOSITORY"]
-          PY
-
-          python3 - <<'PY'
-          import pathlib
-          import tomllib
-
-          path = pathlib.Path("fly.vault.toml")
-          config = tomllib.loads(path.read_text(encoding="utf-8"))
-          assert config.get("app") == "b3s-vault"
-          assert config.get("build", {}).get("dockerfile") == "Dockerfile"
-          env = config.get("env", {})
-          assert env.get("BRAND3_ENVIRONMENT") == "vault"
-          assert env.get("BRAND3_BASE_URL") == "https://b3s-vault.fly.dev"
-          assert env.get("B3S_POSTGRES_REQUIRED") == "true"
-          assert env.get("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED") == "true"
-          assert env.get("BRAND3_VAULT_SV9_AUTHORITY_SCANNER_ENABLED") == "true"
-          assert env.get("B3S_VAULT_EXACT_RESUME_API_ENABLED") in {None, "false"}
-          mounts = config.get("mounts") or []
-          assert any(
-              item.get("source") == "b3s_vault_data"
-              and item.get("destination") == "/data"
-              for item in mounts
-          )
-          assert pathlib.Path("fly.toml").read_bytes() != path.read_bytes()
-          PY
 
       - name: Install pinned Fly CLI
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # pinned 2026-07-27
 
-      - name: Capture runtime identities and prevent a downgrade
-        id: before
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          API_URL: ${{ github.api_url }}
-          GH_REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          read_health() {
-            local base_url="$1"
-            curl --fail --silent --show-error --max-time 20 "$base_url/health" \
-              | python3 -c 'import json, re, sys; payload=json.load(sys.stdin); sha=str(payload.get("commit_sha") or ""); assert payload.get("status") == "ok"; assert re.fullmatch(r"[0-9a-f]{40}", sha); print(sha)'
-          }
-
-          production_sha="$(read_health "$PRODUCTION_URL")"
-          vault_sha="$(read_health "$VAULT_URL")"
-          echo "production_sha=$production_sha" >> "$GITHUB_OUTPUT"
-          echo "vault_sha=$vault_sha" >> "$GITHUB_OUTPUT"
-          echo "Production baseline: $production_sha"
-          echo "Vault baseline: $vault_sha"
-
-          if [ "$vault_sha" != "$DEPLOY_SHA" ]; then
-            comparison="$RUNNER_TEMP/vault-to-target.json"
-            curl --fail --silent --show-error \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer $GH_TOKEN" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              --output "$comparison" \
-              "$API_URL/repos/$GH_REPOSITORY/compare/$vault_sha...$DEPLOY_SHA"
-            VAULT_SHA="$vault_sha" python3 - "$comparison" <<'PY'
-          import json
-          import os
-          import sys
-
-          payload = json.load(open(sys.argv[1], encoding="utf-8"))
-          vault_sha = os.environ["VAULT_SHA"]
-          deploy_sha = os.environ["DEPLOY_SHA"]
-          assert payload.get("status") in {"ahead", "identical"}
-          assert payload.get("base_commit", {}).get("sha") == vault_sha
-          assert payload.get("merge_base_commit", {}).get("sha") == vault_sha
-          commits = payload.get("commits") or []
-          assert commits and commits[-1].get("sha") == deploy_sha
-          PY
-          fi
-
-      - name: Validate credential, live app and persistent volume
+      - name: Verify credential, app and persistent volume
         shell: bash
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
           set -euo pipefail
           test -n "$FLY_API_TOKEN"
-          flyctl config validate -a "$VAULT_APP" -c "$VAULT_CONFIG"
           flyctl status -a "$VAULT_APP"
-          flyctl volumes list -a "$VAULT_APP" --json > "$RUNNER_TEMP/vault-volumes-before.json"
-          python3 - "$RUNNER_TEMP/vault-volumes-before.json" <<'PY'
+          flyctl volumes list -a "$VAULT_APP" --json > "$RUNNER_TEMP/vault-volumes.json"
+          python3 - "$RUNNER_TEMP/vault-volumes.json" <<'PY'
           import json
           import sys
 
@@ -190,75 +84,69 @@ jobs:
           assert "b3s_vault_data" in names, f"missing b3s_vault_data; observed={sorted(names)}"
           PY
 
-      - name: Deploy the exact authorized SHA only to b3s-vault
+      - name: Verify live Vault descends from WebMCP and production is unchanged
         shell: bash
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          flyctl deploy \
-            --remote-only \
-            -a "$VAULT_APP" \
-            -c "$VAULT_CONFIG" \
-            --build-arg B3S_BUILD_SHA="$DEPLOY_SHA"
+          read_health() {
+            local base_url="$1"
+            curl --fail --silent --show-error --max-time 20 "$base_url/health" \
+              | python3 -c 'import json, re, sys; payload=json.load(sys.stdin); sha=str(payload.get("commit_sha") or ""); assert payload.get("status") == "ok"; assert re.fullmatch(r"[0-9a-f]{40}", sha); print(sha)'
+          }
 
-      - name: Verify commit, assets, volume and production isolation
-        shell: bash
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          PRODUCTION_SHA_BEFORE: ${{ steps.before.outputs.production_sha }}
-          VAULT_SHA_BEFORE: ${{ steps.before.outputs.vault_sha }}
-        run: |
-          set -euo pipefail
-          observed=""
-          for attempt in $(seq 1 60); do
-            observed="$(curl --fail --silent --show-error --max-time 20 "$VAULT_URL/health" \
-              | python3 -c 'import json, sys; payload=json.load(sys.stdin); print(str(payload.get("commit_sha") or "") if payload.get("status") == "ok" else "")')" || observed=""
-            if [ "$observed" = "$DEPLOY_SHA" ]; then
-              break
-            fi
-            echo "Waiting for Vault commit (attempt $attempt/60; observed: ${observed:-unavailable})"
-            sleep 5
-          done
-          test "$observed" = "$DEPLOY_SHA"
+          production_before="$(read_health "$PRODUCTION_URL")"
+          vault_sha="$(read_health "$VAULT_URL")"
+          echo "Production baseline: $production_before"
+          echo "Vault live SHA: $vault_sha"
 
-          curl --fail --silent --show-error --max-time 20 \
-            "$VAULT_URL/static/vault_webmcp_loader.js?sha=$DEPLOY_SHA" \
-            | grep -Fq 'https://b3s-vault.fly.dev'
-          curl --fail --silent --show-error --max-time 20 \
-            "$VAULT_URL/static/vault_webmcp.js?sha=$DEPLOY_SHA" \
-            | grep -Fq 'b3s_prepare_scan'
+          comparison="$RUNNER_TEMP/webmcp-to-vault.json"
+          curl --fail --silent --show-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --output "$comparison" \
+            "$API_URL/repos/$GH_REPOSITORY/compare/$WEBMCP_SHA...$vault_sha"
 
-          production_sha_after="$(curl --fail --silent --show-error --max-time 20 "$PRODUCTION_URL/health" \
-            | python3 -c 'import json, re, sys; payload=json.load(sys.stdin); sha=str(payload.get("commit_sha") or ""); assert payload.get("status") == "ok"; assert re.fullmatch(r"[0-9a-f]{40}", sha); print(sha)')"
-          test "$production_sha_after" = "$PRODUCTION_SHA_BEFORE"
-
-          flyctl status -a "$VAULT_APP"
-          flyctl volumes list -a "$VAULT_APP" --json > "$RUNNER_TEMP/vault-volumes-after.json"
-          python3 - "$RUNNER_TEMP/vault-volumes-after.json" <<'PY'
+          VAULT_SHA="$vault_sha" python3 - "$comparison" <<'PY'
           import json
+          import os
           import sys
 
           payload = json.load(open(sys.argv[1], encoding="utf-8"))
-          names = set()
-          def visit(value):
-              if isinstance(value, dict):
-                  for key, child in value.items():
-                      if str(key).casefold() == "name" and isinstance(child, str):
-                          names.add(child)
-                      visit(child)
-              elif isinstance(value, list):
-                  for child in value:
-                      visit(child)
-          visit(payload)
-          assert "b3s_vault_data" in names, f"missing b3s_vault_data after deploy; observed={sorted(names)}"
+          webmcp_sha = os.environ["WEBMCP_SHA"]
+          vault_sha = os.environ["VAULT_SHA"]
+          assert payload.get("status") in {"ahead", "identical"}
+          assert payload.get("base_commit", {}).get("sha") == webmcp_sha
+          assert payload.get("merge_base_commit", {}).get("sha") == webmcp_sha
+          if vault_sha != webmcp_sha:
+              commits = payload.get("commits") or []
+              assert commits and commits[-1].get("sha") == vault_sha
           PY
 
+          curl --fail --silent --show-error --max-time 20 \
+            "$VAULT_URL/static/vault_webmcp_loader.js?sha=$vault_sha" \
+            | grep -Fq 'https://b3s-vault.fly.dev'
+          curl --fail --silent --show-error --max-time 20 \
+            "$VAULT_URL/static/vault_webmcp.js?sha=$vault_sha" \
+            | grep -Fq 'b3s_prepare_scan'
+          curl --fail --silent --show-error --max-time 20 \
+            "$VAULT_URL/static/vault_webmcp.js?sha=$vault_sha" \
+            | grep -Fq 'b3s_list_vault_review_cases'
+
+          production_after="$(read_health "$PRODUCTION_URL")"
+          test "$production_after" = "$production_before"
+
           {
-            echo "### B3S Vault WebMCP deployment"
-            echo "- Vault before: \`$VAULT_SHA_BEFORE\`"
-            echo "- Vault after: \`$DEPLOY_SHA\`"
-            echo "- Production unchanged: \`$production_sha_after\`"
-            echo "- WebMCP static assets verified"
-            echo "- Target: \`b3s-vault\` via \`fly.vault.toml\`"
+            echo "### B3S Vault WebMCP verification"
+            echo "- Reviewed WebMCP ancestor: \`$WEBMCP_SHA\`"
+            echo "- Live Vault commit: \`$vault_sha\`"
+            echo "- Credential can access Fly app \`b3s-vault\`"
+            echo "- Persistent volume \`b3s_vault_data\` present"
+            echo "- WebMCP loader and tool module served live"
+            echo "- Production unchanged: \`$production_after\`"
+            echo "- No deployment or scan was executed"
           } >> "$GITHUB_STEP_SUMMARY"
