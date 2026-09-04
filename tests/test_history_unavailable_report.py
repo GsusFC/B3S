@@ -65,14 +65,18 @@ def test_legacy_report_still_requires_components():
         parse_report(report)
 
 
-def test_complete_report_keeps_canonical_score_and_identity(exact_replay, monkeypatch):
-    _scan, _repository, run, _directory = exact_replay
-    monkeypatch.setattr(report_store, "_postgres_repository", lambda: None)
-    assert run(_Flow(fail=2)).action == "record_no_score"
-    publication = run(_Flow())
-    assert publication.action == "publish_current"
-    report = report_store.load_report(publication.report_id)
-    assert report is not None
+def test_complete_report_keeps_canonical_score_and_identity():
+    from tests.test_vault_authority_scanner_orchestration import (
+        _assessment_report,
+        _exact_binding,
+    )
+
+    # Use the existing complete assessment fixture for the parser control.
+    # The unchanged PostgreSQL test covers resume and publication; the
+    # lightweight exact_replay fixture omits capture evidence by design.
+    scan = "history-complete-control"
+    report = _assessment_report(scan, _exact_binding(scan))
+    before = canonical_json_hash(report)
     parsed = parse_report(report)
 
     assert parsed.components
@@ -80,3 +84,5 @@ def test_complete_report_keeps_canonical_score_and_identity(exact_replay, monkey
     assert parsed.score == report["sv9_assessment"]["sv9_score"]
     assert parsed.evaluation_config["assessment_fingerprint"] == report["assessment_fingerprint"]
     assert parsed.evaluation_config["score_fingerprint"] == report["score_fingerprint"]
+    assert parsed.report_payload == report
+    assert parsed.report_hash == before == canonical_json_hash(report)
