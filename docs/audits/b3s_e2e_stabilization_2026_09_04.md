@@ -64,24 +64,33 @@ Twenty local regressions passed (10.18 s), covering complete/no-score, repeated 
 
 Existing suites cover missing/duplicate/unmatched evidence, hint identity and authority boundaries, coverage loss, workset isolation, checkpoint contracts, candidate/authority persistence, controller finalization and existing ownership semantics. They remain unchanged except for the already-existing PR #251 scanner tests.
 
-A real Vercel fixture test was added to `tests/test_evidence_vault_scan_orchestration_postgres.py`. It uses the existing disposable-database guard and repository to persist actual capture bytes, then prepares Exact Resume twice from the same durable operation. The frozen fixture has four raw input entries and 71 normalized evidence records; it is not the later 298-record live capture. It makes no model calls.
+The real Vercel fixture test added to `tests/test_evidence_vault_scan_orchestration_postgres.py` passed in canonical CI. It uses the existing disposable-database guard and repository to persist actual capture bytes, then prepares Exact Resume twice from the same durable operation. The frozen fixture has four raw input entries and 71 normalized evidence records; it is not the later 298-record live capture. It makes no model calls.
 
 The existing SoccerSolver/CausaPrima normalized replay was run twice with identical results:
 
 - Manifest SHA-256: `096b611cc6a6708bb17c462f18782a5a22d914857b2e45ec9c54783ddc98c60b`.
 - Result fingerprint: `89ce4392b8364d1d4892e157ca473f0bc7730c57253dd0c642a0c57bfdde5c31`.
-- Gate pass; level `normalized_evidence_pack_only`; authority false; cutover false.
+- Replay gate pass; level `normalized_evidence_pack_only`; authority false; cutover false. This replay gate is distinct from the failing strategic-quality benchmark below.
 - Historical reference: 137 accepted evidence records, 250 occurrences, 80 tiles, recomputed score 91. This is not a newly executed public scan.
+
+An additional composed execution used the real SQLite action controller, scanner/application replay and the actual file report store. A fresh SQLite connection confirmed the completed action with the successor ID: two initial provider-fixture calls and one checkpoint, nine resumed calls and ten total checkpoints, unchanged original report bytes, and zero calls after repeating the same idempotent request. Provider behavior and frozen-operation preparation remained test fixtures; this was not a live scan.
 
 The actual shared-source repository helper was measured using its existing 79-tile spy fixture: **one source lookup/validation, one operation lookup/validation, 79 individual policy checks**. Main already deduplicates this work. No new cache or speculative optimization was added; spy timing is not live PostgreSQL latency.
 
-## Verification record
+## Verification record — final verified logs
 
-- Initial local focused suite: 301 passed, one dependency warning, 31.79 s; Ruff passed.
-- Initial canonical CI run `33919720462`, job `101175013435`: 3,295 passed, one skipped, 235.13 s; Ruff passed; informative benchmark 85 with its existing traceability warning.
-- First full repaired local run: 4,318 passed, 50 skipped, three failed, three subtests passed, 197.86 s. Two failures require historical Git objects absent from the offline archive. One was a partially synchronized PR #251 test; its exact upstream version was restored and the focused 44-test suite passed. These are not reported as a green full run.
-- Local composed suite after negative tests: 20 passed; adjacent publication suite: 29 passed.
-- Full PostgreSQL verification uses the unchanged canonical CI on this PR. Consult the check attached to the final commit; the baseline result is not proof for the repaired tree.
+The following values supersede preliminary counts in earlier progress notes. Test-source verification is pinned to `de536de00840efdf5a456e5a5c7c932deb31294a`; this final record correction changes documentation only.
+
+| Execution | Verified result |
+| --- | --- |
+| Original canonical CI, run `33919720462`, job `101175013435` | Ruff passed; **4,366 passed, 2 skipped, 1 warning, 451.86 s**. Python 3.11.16 and disposable PostgreSQL 16. |
+| Repaired canonical CI, run `33922820002`, job `101184794179`, source `de536de` | Ruff passed; **4,390 passed, 2 skipped, 1 warning, 446.53 s**. Python 3.11.16 and disposable PostgreSQL 16. Run completed successfully. |
+| Strategic-quality benchmark, both original and repaired CI | **Failed**, overall 80.2 versus required 85; SoccerSolver case 75.25; `quality_gate_pass: false`; all ten blocks have zero evidence traceability and `missing_traceable_source`. Exit code 2 is tolerated by the existing informative `continue-on-error` step. This is preexisting, not a passed quality gate. |
+| Local available-suite verification | 4,326 passed, 51 skipped, 2 explicitly deselected, 1 dependency warning, 3 subtests passed, 195.04 s, exit 0. Python 3.13.5; PostgreSQL unavailable locally. The two exclusions require historical Git objects absent from the offline archive. Canonical CI above is the full integrated verification. |
+| Initial focused local suite | 301 passed, one dependency warning, 31.79 s; Ruff passed. |
+| New composed regressions / adjacent publication tests | 20 passed / 29 passed. |
+
+The warning in canonical pytest is the Starlette WSGI middleware deprecation. No failing pytest case remains in the verified canonical run. The initial repaired local attempt did have three failures: two required unavailable historical Git objects; one used an incompletely synchronized PR #251 test. The exact upstream test was restored before final verification. That earlier run is not represented as green.
 
 Commands remain `python -m ruff check .` and `python -m pytest -q`. Focused replay:
 
@@ -95,7 +104,7 @@ No snapshots, event sourcing, checkpoint-v2/v3, new adapters, persistence repres
 
 ## Remaining risks / hypotheses
 
-- **Correctness:** composed application replay, frozen PostgreSQL preparation and separate controller tests do not prove one all-real acquisition-to-publication execution. No live end-to-end scan completed here.
+- **Correctness:** composed application replay, frozen PostgreSQL preparation and controller tests do not prove one all-real acquisition-to-publication execution. No live end-to-end scan completed here. The preexisting strategic-quality benchmark still fails; it is not evidence of validated strategic quality.
 - **Persistence:** the stores are not transactional together. Exception injection and controller tests do not prove OS power-loss durability or deployed restart recovery at every boundary.
 - **Performance:** redundant shared-package work is already addressed. Large live brand histories and the successor fallback's existing report listing remain unmeasured.
 - **Concurrency:** existing semantics remain; no multi-process in-flight load claim is made.
