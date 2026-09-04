@@ -73,8 +73,8 @@ def test_production_shaped_capture_preparation_persists_and_reads_back() -> None
     observations = repository.list_capture_observations_for_domain(url)
     assert len(observations) == 1
     readback = observations[0]
-    assert readback["source_scan_id"] == scan_id and readback["raw_observation"]["source_scan_id"] == scan_id
-    assert readback["metadata"]["operation_plan"]["operation_plan_fingerprint"] == plan["operation_plan_fingerprint"]
+    assert readback["source_scan_id"] == scan_id and readback["metadata"]["operation_plan"]["operation_plan_fingerprint"] == plan["operation_plan_fingerprint"]
+    assert readback["raw_observation"]["source_scan_id"] == scan_id
 def test_validated_dsn_pins_hostaddr_against_environment(monkeypatch) -> None:
     import psycopg
     monkeypatch.setenv("PGHOSTADDR", "203.0.113.7")
@@ -126,3 +126,75 @@ def test_real_vercel_capture_replays_from_frozen_postgres_boundary() -> None:
     assert first["canonical_snapshot"] == operation["raw_observation"]["capture_payload"]
     assert first["preparation"]["operation_plan"] == operation["plan"]
     assert repository.get_capture_operation_plan(scan) == operation
+
+
+def test_exact_resume_uses_real_postgres_sqlite_and_report_publication(monkeypatch, tmp_path):
+    """Real durable stores and frozen preparation; only providers are fixtures."""
+    from fastapi.testclient import TestClient
+
+    from src.history.repository import PostgresHistoryRepository
+    from src.sv9 import incremental_flow_adapter
+    from tests.test_evidence_vault_sv9_authority_evaluation import _Flow
+    from tests.test_evidence_vault_sv9_judgment_candidates_postgres import _operational
+    from tests.test_scanner_api_v1 import AUTH, _InlineThread, _enable_resume_api
+    from web import exact_resume_controller, report_store
+    from web.api_v1 import service
+    from web.app import app
+
+    if not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1":
+        pytest.skip("requires the existing disposable PostgreSQL service")
+    repository = _reset_repository()
+    scan = "stabilization-postgres-publication"
+    _operational(repository, scan)
+    operation = repository.get_capture_operation_plan(scan)
+    assert operation["status"] == "completed"
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+    _enable_resume_api(monkeypatch, tmp_path / "actions.sqlite3", repository)
+    monkeypatch.setattr(
+        service, "launch_vault_exact_resume_action",
+        lambda **kwargs: exact_resume_controller.launch_vault_exact_resume_action(
+            **kwargs, thread_factory=_InlineThread,
+        ),
+    )
+    interrupted = _Flow(fail=2)
+    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *a, **k: interrupted)
+    client = TestClient(app)
+    first = client.post(f"/api/v1/scans/{scan}/resume",
+                        headers={**AUTH, "Idempotency-Key": "postgres-initial"})
+    assert first.status_code == 202 and first.json()["state"] == "completed", first.text
+    assert first.json()["result"] == {"publication_action": "record_no_score", "report_id": scan}
+    original = repository.get_report_payload(scan)
+    assert original is not None and original["sv9_assessment"]["availability"] == "unavailable"
+    original_bytes = report_store.report_path(scan).read_bytes()
+    assert len(interrupted.calls) == 2
+
+    # A new repository instance must reconstruct progress from PostgreSQL.
+    repository = PostgresHistoryRepository(_validated_test_dsn(), schema_policy="verify_head")
+    _enable_resume_api(monkeypatch, tmp_path / "actions.sqlite3", repository)
+    resumed = _Flow()
+    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *a, **k: resumed)
+    headers = {**AUTH, "Idempotency-Key": "postgres-completion"}
+    completed = TestClient(app).post(f"/api/v1/scans/{scan}/resume", headers=headers)
+    assert completed.status_code == 202 and completed.json()["state"] == "completed", completed.text
+    result = completed.json()["result"]
+    assert result["publication_action"] == "publish_current" and result["report_id"] != scan
+    successor = repository.get_report_payload(result["report_id"])
+    assert successor is not None and successor["sv9_assessment"]["availability"] == "available"
+    assert successor["raw"]["source_run_id"] == scan
+    assert successor["raw"]["source_capture"] == {
+        "source_scan_id": scan, "observation_hash": operation["observation_hash"],
+        "capture_hash": operation["capture_hash"],
+    }
+    assert len(resumed.calls) == 9
+    assert repository.get_report_payload(scan) == original
+    assert report_store.report_path(scan).read_bytes() == original_bytes
+    assert repository.get_capture_operation_plan(scan) == operation
+    public = TestClient(app).get(f"/api/v1/scans/{result['report_id']}/result", headers=AUTH)
+    assert public.status_code == 200 and public.json()["score"]["publishable"] is True
+
+    no_call = _Flow(fail=1)
+    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *a, **k: no_call)
+    replayed = TestClient(app).post(f"/api/v1/scans/{scan}/resume", headers=headers)
+    assert replayed.status_code == 202 and replayed.headers["idempotent-replayed"] == "true"
+    assert replayed.json()["result"] == result and not no_call.calls
