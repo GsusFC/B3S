@@ -79,18 +79,18 @@ The actual shared-source repository helper was measured using its existing 79-ti
 
 ## Verification record — final verified logs
 
-The following values supersede preliminary counts in earlier progress notes. Test-source verification is pinned to `de536de00840efdf5a456e5a5c7c932deb31294a`; this final record correction changes documentation only.
+The following values supersede preliminary counts in earlier progress notes. Test-source verification is pinned to `de536de00840efdf5a456e5a5c7c932deb31294a`; subsequent record corrections change documentation only.
 
 | Execution | Verified result |
 | --- | --- |
 | Original canonical CI, run `33919720462`, job `101175013435` | Ruff passed; **4,366 passed, 2 skipped, 1 warning, 451.86 s**. Python 3.11.16 and disposable PostgreSQL 16. |
-| Repaired canonical CI, run `33922820002`, job `101184794179`, source `de536de` | Ruff passed; **4,390 passed, 2 skipped, 1 warning, 446.53 s**. Python 3.11.16 and disposable PostgreSQL 16. Run completed successfully. |
+| Repaired canonical CI, run `33922820002`, job `101184794179`, source `de536de` | Ruff passed; **4,390 passed, 2 skipped, 1 warning, 3 subtests passed, 446.53 s**. Python 3.11.16 and disposable PostgreSQL 16. Run completed successfully. |
 | Strategic-quality benchmark, both original and repaired CI | **Failed**, overall 80.2 versus required 85; SoccerSolver case 75.25; `quality_gate_pass: false`; all ten blocks have zero evidence traceability and `missing_traceable_source`. Exit code 2 is tolerated by the existing informative `continue-on-error` step. This is preexisting, not a passed quality gate. |
 | Local available-suite verification | 4,326 passed, 51 skipped, 2 explicitly deselected, 1 dependency warning, 3 subtests passed, 195.04 s, exit 0. Python 3.13.5; PostgreSQL unavailable locally. The two exclusions require historical Git objects absent from the offline archive. Canonical CI above is the full integrated verification. |
 | Initial focused local suite | 301 passed, one dependency warning, 31.79 s; Ruff passed. |
 | New composed regressions / adjacent publication tests | 20 passed / 29 passed. |
 
-The warning in canonical pytest is the Starlette WSGI middleware deprecation. No failing pytest case remains in the verified canonical run. The initial repaired local attempt did have three failures: two required unavailable historical Git objects; one used an incompletely synchronized PR #251 test. The exact upstream test was restored before final verification. That earlier run is not represented as green.
+The repaired canonical pytest warning concerns the deprecated `anyio.abc.BlockingPortal` alias, emitted through Starlette's test client. No failing pytest case remains in the verified canonical run. The initial repaired local attempt did have three failures: two required unavailable historical Git objects; one used an incompletely synchronized PR #251 test. The exact upstream test was restored before final verification. That earlier run is not represented as green.
 
 Commands remain `python -m ruff check .` and `python -m pytest -q`. Focused replay:
 
