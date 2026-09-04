@@ -859,15 +859,33 @@ def _enter_vault_authority_boundary(scan_id: str) -> bool:
         return True
 
 
-def _accepted_authority_source_report(application_result: Mapping[str, Any], scan_id: str, exact_owner: _ScanOwner | None = None) -> dict[str, Any] | None:
+def _accepted_authority_source_report(application_result: Mapping[str, Any], scan_id: str, exact_owner: _ScanOwner | None = None, *, domain_or_url: str | None = None) -> dict[str, Any] | None:
     authority = application_result.get("authority")
     candidate = authority.get("accepted_candidate") if isinstance(authority, Mapping) else None
     source_scan_id = candidate.get("source_scan_id") if isinstance(candidate, Mapping) else None
-    if not isinstance(source_scan_id, str) or not source_scan_id or source_scan_id == scan_id:
+    if not isinstance(source_scan_id, str) or not source_scan_id:
         if exact_owner is not None and isinstance(candidate, Mapping):
             raise _ExactResumeFailure("report_invalid")
         return None
+    if source_scan_id == scan_id:
+        return None
     source = _load_report_for_exact_owner(scan_id, exact_owner.token, source_scan_id) if exact_owner else load_report(source_scan_id)
+    # An immutable no-score original can have a completed resume successor.
+    # Search only this brand and accept only a persisted, exactly matching
+    # authority projection; never substitute a merely newer report or score.
+    if domain_or_url and (source is None or isinstance(source.get("sv9_assessment"), Mapping) and source["sv9_assessment"].get("availability") == "unavailable"):
+        from src.services.evidence_vault_sv9_authority_report import project_vault_authority_publication
+
+        candidates = list_reports_for_domain(domain_or_url)
+        for candidate_report in sorted(candidates, key=lambda row: str(row.get("id") or "")):
+            candidate_id = candidate_report.get("id")
+            if not isinstance(candidate_id, str) or not candidate_id.startswith("exact-resume-"): continue
+            if source is not None and (candidate_report.get("raw") or {}).get("source_capture") != (source.get("raw") or {}).get("source_capture"): continue
+            if project_vault_authority_publication(application_result, scan_id, candidate_report)["action"] != "retain_source": continue
+            loaded = _load_report_for_exact_owner(scan_id, exact_owner.token, candidate_id) if exact_owner else load_report(candidate_id)
+            if loaded != candidate_report: raise _ExactResumeFailure("report_invalid") if exact_owner else RuntimeError("vault_authority_source_report_changed")
+            source = loaded
+            break
     if exact_owner and source is None: raise _ExactResumeFailure("report_invalid")
     return source
 
@@ -974,7 +992,7 @@ def _run_vault_sv9_authority_scanner(
             workspace_slug="b3s",
             trusted_irrelevant_evidence=[],
         )
-        source_report = _accepted_authority_source_report(application_result, scan_id, exact_owner)
+        source_report = _accepted_authority_source_report(application_result, scan_id, exact_owner, domain_or_url=url)
         publication = project_vault_authority_publication(
             application_result,
             scan_id,

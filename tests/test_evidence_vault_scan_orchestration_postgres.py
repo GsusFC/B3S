@@ -87,3 +87,42 @@ def test_disposable_dsn_guard_rejects_before_connect_or_drop(monkeypatch, dsn: s
     monkeypatch.setattr(psycopg, "connect", lambda *_args, **_kwargs: pytest.fail("unsafe DSN reached connect"))
     with pytest.raises(RuntimeError, match=reason):
         _reset_repository(dsn)
+
+
+def test_real_vercel_capture_replays_from_frozen_postgres_boundary() -> None:
+    """Real captured bytes, real capture/operation tables, no external calls."""
+    import json
+    from pathlib import Path
+
+    from src.history.report_parser import canonical_json_hash
+    from src.services.evidence_vault_scan_orchestration import prepare_vault_exact_resume
+
+    if not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1":
+        pytest.skip("requires the existing disposable PostgreSQL service")
+    repository = _reset_repository()
+    envelope = json.loads((Path(__file__).parents[1] / "fixtures/vercel/vercel_fresh_capture_envelope.json").read_text())
+    snapshot = envelope["snapshot"]
+    scan = "stabilization-vercel-frozen-capture"
+    prepared = prepare_vault_scan_after_capture(
+        repository=repository, snapshot=snapshot, scan_id=scan,
+        url=snapshot["run"]["url"], brand_name=snapshot["run"]["brand_name"],
+        environment="vault", incremental_enabled=True,
+        observed_at="2026-09-04T12:00:00Z",
+    )
+    operation = repository.get_capture_operation_plan(scan)
+    assert prepared["capture_persisted"] is True
+    assert len(operation["raw_observation"]["evidence_records"]) > 0
+    request = {"operation": "exact_resume"}
+    action = {
+        "action_id": "stabilization-vercel-action", "scan_id": scan, "state": "running",
+        "request_payload": request, "status_payload": {"state": "running", "phase": "running"},
+        "request_fingerprint": canonical_json_hash(request),
+    }
+    first = prepare_vault_exact_resume(repository=repository, action=action, scan_id=scan)
+    second = prepare_vault_exact_resume(repository=repository, action=action, scan_id=scan)
+    assert first == second
+    assert first["report_binding"]["observation_hash"] == operation["observation_hash"]
+    assert first["report_binding"]["capture_hash"] == operation["capture_hash"]
+    assert first["canonical_snapshot"] == operation["raw_observation"]["capture_payload"]
+    assert first["preparation"]["operation_plan"] == operation["plan"]
+    assert repository.get_capture_operation_plan(scan) == operation
