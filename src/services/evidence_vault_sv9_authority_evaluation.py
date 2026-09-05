@@ -31,6 +31,7 @@ class EvidenceVaultSv9AuthorityEvaluationRepository(Protocol):
     def get_evidence_vault_sv9_judgment_candidate(self, source_scan_id: str, *, canonical_plan_fingerprint: str, **kwargs: Any) -> dict[str, Any] | None: ...
     def append_evidence_vault_sv9_judgment_candidate(self, source_scan_id: str, candidate: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], bool]: ...
     def get_evidence_vault_sv9_evaluation_checkpoint_component_evaluation(self, source_scan_id: str, *, canonical_plan_fingerprint: str, canonical_request_fingerprint: str, **kwargs: Any) -> dict[str, Any] | None: ...
+    def get_evidence_vault_sv9_evaluation_checkpoint_for_request(self, source_scan_id: str, *, canonical_plan_fingerprint: str, canonical_request_fingerprint: str, **kwargs: Any) -> dict[str, Any] | None: ...
     def append_evidence_vault_sv9_evaluation_checkpoint(self, source_scan_id: str, checkpoint: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], bool]: ...
 class EvidenceVaultSv9AuthorityEvaluationError(ValueError): pass
 class EvidenceVaultSv9AuthoritySourceIdentityError(EvidenceVaultSv9AuthorityEvaluationError): pass
@@ -118,6 +119,8 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
         except EvidenceVaultSv9AuthorityEvaluationError: return _outcome("no_new_score", plan, authority_ids, ["invalid_input"], ignored, unmapped, partition=partition)
         try:
             witness = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id=source_scan_id, projection={"status": "available", "reason_codes": [], "authoritative_relations": relations, "operational_witness": evaluation_input["operational_witness"], "projection_fingerprint": evaluation_input["relation_projection_fingerprint"], **{key: evaluation_input[key] for key in ("current_identity_bindings", "authority_continuity", "authority_coverage_loss", "reopen_tile_ids")}})
+            if authority and not trusted and _accepted_input_replays(repository, authority, evaluation_input, plan, witness, records, context, workspace_slug):
+                return _outcome("no_new_score", plan, authority_ids, ["exact_reuse"], ignored, unmapped, partition=partition)
             existing = repository.get_evidence_vault_sv9_judgment_candidate(source_scan_id, canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], workspace_slug=workspace_slug)
         except EvidenceVaultSv9AuthoritativeRelationWitnessError: return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped, partition=partition)
         except Exception: return _outcome("no_new_score", plan, authority_ids, ["repository_failure"], ignored, unmapped, partition=partition)
@@ -254,12 +257,13 @@ def _resolved(partition: Mapping[str, Any], records: Mapping[tuple[str, str], Ma
         rows.append(record)
     return rows
 def _packets(plan: Mapping[str, Any], records: Mapping[tuple[str, str], Mapping[str, Any]], context: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    projections = {row["tile_id"]: row for row in plan["delta_projections"]}; packets, bindings = [], []
+    # Canonical packets retain authorized plan support, never routing-only hints.
+    items = {row["tile_id"]: row for row in plan["items"]}; packets, bindings = [], []
     for component in plan["component_workset"]:
         tiles = []
         for tile in [tile for tile in plan["tile_workset"] if evaluation._BY_TILE[tile][1] == component]:
             evidence = []
-            for identity in projections.get(tile, {}).get("evidence", []):
+            for identity in items[tile]["evidence"]:
                 record = records.get((identity["evidence_ref"], identity["evidence_fingerprint"]))
                 if record is None: raise EvidenceVaultSv9AuthorityEvaluationError("packet evidence is unavailable")
                 evidence.append({key: record[key] for key in ("evidence_ref", "evidence_fingerprint", "content")}); bindings.append({"tile_id": tile, "evidence_record_id": record["evidence_record_id"], **{key: record[key] for key in ("evidence_ref", "evidence_fingerprint")}})
@@ -308,3 +312,61 @@ def _outcome(status: str, plan: Mapping[str, Any] | None = None, authority: Mapp
     if candidate is not None: output["candidate"] = {key: candidate[key] for key in ("id", "canonical_plan_fingerprint", "complete_record_fingerprint", "assessment_fingerprint", "score_fingerprint")} | {"source_scan_id": str(candidate.get("source_scan_id") or source_scan_id or ""), "schema_version": str(candidate["schema_version"])} | ({"authoritative_relation_witness_fingerprint": candidate["authoritative_relation_witness"]["witness_fingerprint"]} if candidate["schema_version"].endswith("v2") else {})
     return output
 # fmt: on
+
+
+# fmt: on
+
+
+def _accepted_input_replays(repository, authority, current, plan, witness, records, context, workspace):
+    """Reuse accepted authority only with its original, complete checkpoint input proof."""
+    candidate = authority["accepted_candidate"]
+    if (
+        authority["reopen_review_overlay"] is not None
+        or current["non_authoritative_hints"]
+        or candidate["source_scan_id"] != current["source_identity"]["source_scan_id"]
+        or candidate["current_series_fingerprint"] != plan["current_series_fingerprint"]
+        or candidate.get("authoritative_relation_witness") != witness
+        or not candidate["component_evaluations"]
+    ):
+        return False
+    try:
+        packets, bindings = _packets(candidate["plan"], records, context)
+        if bindings != candidate["evidence_bindings"] or not _replays(candidate, candidate, candidate, packets):
+            return False
+        expected_plan = {
+            key: candidate[key]
+            for key in ("canonical_plan_fingerprint", "current_series_fingerprint", "candidate_series_fingerprint")
+        }
+        prior_snapshot = None
+        for component in candidate["component_evaluations"]:
+            try:
+                stored = repository.get_evidence_vault_sv9_evaluation_checkpoint_for_request(
+                    candidate["source_scan_id"],
+                    canonical_plan_fingerprint=candidate["canonical_plan_fingerprint"],
+                    canonical_request_fingerprint=component["request_fingerprint"],
+                    workspace_slug=workspace,
+                )
+            except Exception:
+                # This optional read can deny reuse, never authorize it on failure.
+                return False
+            if not isinstance(stored, Mapping):
+                return False
+            proof = checkpoint.validate_evidence_vault_sv9_evaluation_checkpoint(
+                {key: value for key, value in stored.items() if key not in {"id", "source_scan_id", "created_at"}}
+            )
+            if (
+                proof["evaluation_state"] != "partial"
+                or proof["evaluation_input"] != current
+                or proof["plan_binding"] != expected_plan
+                or proof["healthy_workset"]["component_evaluations"] != [component]
+                or proof["review_partition"]["tile_ids"]
+                or proof["pending_evidence"]
+                or proof["non_authoritative_hints"]
+                or (prior_snapshot is not None and proof["prior_authority_snapshot"] != prior_snapshot)
+            ):
+                return False
+            # All components belong to one historical input; adoption must not rewrite it.
+            prior_snapshot = proof["prior_authority_snapshot"]
+        return True
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False

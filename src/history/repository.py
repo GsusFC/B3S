@@ -6108,6 +6108,30 @@ class PostgresHistoryRepository:
                 canonical_request_fingerprint=request_fingerprint,
             )
 
+    def get_evidence_vault_sv9_evaluation_checkpoint_for_request(
+        self,
+        source_scan_id: str,
+        *,
+        canonical_plan_fingerprint: str,
+        canonical_request_fingerprint: str,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        """Read an unambiguous full input proof without changing checkpoint authority."""
+        plan = _sv9_checkpoint_fingerprint(canonical_plan_fingerprint)
+        request = _sv9_checkpoint_fingerprint(canonical_request_fingerprint)
+        self._ensure_migrated()
+        with self._connect() as conn:
+            _verify_exact_migration_head_under_shared_lock(conn)
+            context = _sv9_judgment_context(conn, source_scan_id, workspace_slug, False)
+            if context is None:
+                return None
+            return _sv9_checkpoint_for_request(
+                conn,
+                context,
+                canonical_plan_fingerprint=plan,
+                canonical_request_fingerprint=request,
+            )
+
     def append_evidence_vault_sv9_evaluation_checkpoint(
         self, source_scan_id: str, checkpoint: Mapping[str, Any], *, workspace_slug: str = "b3s"
     ) -> tuple[dict[str, Any], bool]:
@@ -12095,13 +12119,10 @@ def _sv9_checkpoint_snapshot_matches(value: Any, expected: Mapping[str, Any]) ->
     return type(value) is dict and {key: item for key, item in value.items() if key != "snapshot_fingerprint"} == expected
 
 
-def _sv9_checkpoint_component_evaluation_for_request(
-    conn: Any,
-    context: Mapping[str, Any],
-    *,
-    canonical_plan_fingerprint: str,
+def _sv9_checkpoints_for_request(
+    conn: Any, context: Mapping[str, Any], *, canonical_plan_fingerprint: str,
     canonical_request_fingerprint: str,
-) -> dict[str, Any] | None:
+) -> list[dict[str, Any]]:
     rows = conn.execute(
         f"""SELECT * FROM {_SCHEMA}.evidence_vault_sv9_evaluation_checkpoints
             WHERE workspace_id = %s AND brand_id = %s AND scan_run_id = %s
@@ -12117,7 +12138,7 @@ def _sv9_checkpoint_component_evaluation_for_request(
             canonical_plan_fingerprint,
         ),
     ).fetchall()
-    evaluations: dict[str, dict[str, Any]] = {}
+    matches = []
     for row in rows:
         checkpoint = _sv9_checkpoint_stored_record(conn, row, context)
         values = checkpoint["healthy_workset"]["component_evaluations"]
@@ -12125,19 +12146,36 @@ def _sv9_checkpoint_component_evaluation_for_request(
             raise EvidenceVaultSv9EvaluationCheckpointConflictError(
                 "SV9 evaluation checkpoint stored workset is not singular."
             )
-        evaluation = values[0]
-        if evaluation["request_fingerprint"] != canonical_request_fingerprint:
-            continue
+        if values[0]["request_fingerprint"] == canonical_request_fingerprint:
+            matches.append(checkpoint)
+    return matches
+
+
+def _sv9_checkpoint_for_request(conn: Any, context: Mapping[str, Any], **binding: str) -> dict[str, Any] | None:
+    checkpoints = {row["checkpoint_fingerprint"]: row for row in _sv9_checkpoints_for_request(conn, context, **binding)}
+    if len(checkpoints) > 1:
+        raise EvidenceVaultSv9EvaluationCheckpointConflictError(
+            "SV9 evaluation checkpoint logical identity has ambiguous input proofs."
+        )
+    return json.loads(canonical_json_bytes(next(iter(checkpoints.values())))) if checkpoints else None
+
+
+def _sv9_checkpoint_component_evaluation_for_request(
+    conn: Any, context: Mapping[str, Any], *, canonical_plan_fingerprint: str,
+    canonical_request_fingerprint: str,
+) -> dict[str, Any] | None:
+    evaluations = {}
+    for row in _sv9_checkpoints_for_request(
+        conn, context, canonical_plan_fingerprint=canonical_plan_fingerprint,
+        canonical_request_fingerprint=canonical_request_fingerprint,
+    ):
+        evaluation = row["healthy_workset"]["component_evaluations"][0]
         evaluations[evaluation["canonical_component_evaluation_fingerprint"]] = evaluation
     if len(evaluations) > 1:
         raise EvidenceVaultSv9EvaluationCheckpointConflictError(
             "SV9 evaluation checkpoint logical identity has contradictory canonical evaluations."
         )
-    return (
-        json.loads(canonical_json_bytes(next(iter(evaluations.values()))).decode("utf-8"))
-        if evaluations
-        else None
-    )
+    return json.loads(canonical_json_bytes(next(iter(evaluations.values())))) if evaluations else None
 
 
 def _sv9_checkpoint_insert_values(checkpoint_id: UUID, context: Mapping[str, Any], checkpoint: Mapping[str, Any]) -> tuple[Any, ...]:

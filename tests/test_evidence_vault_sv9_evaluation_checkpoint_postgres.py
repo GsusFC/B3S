@@ -229,3 +229,98 @@ def test_checkpoint_ledger_round_trips_fences_mutation_and_bootstrap_race():
     snapshot = {"state": "accepted_authority", "accepted_candidate_id": candidate["id"], "active_event_id": active["event_id"], "current_head_event_fingerprint": head["event_fingerprint"], "candidate_complete_record_fingerprint": candidate["complete_record_fingerprint"], "canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"], "current_series_fingerprint": candidate["current_series_fingerprint"]}
     accepted, _ = repository.append_evidence_vault_sv9_evaluation_checkpoint(scan, _checkpoint(repository, scan, snapshot, "post-authority")); assert accepted["prior_authority_snapshot"]["state"] == "accepted_authority"
     with pytest.raises(history.EvidenceVaultSv9EvaluationCheckpointStaleWitnessError): repository.append_evidence_vault_sv9_evaluation_checkpoint(scan, bootstrap)
+
+
+@pytest.mark.parametrize("shape", ("single", "duplicate", "missing", "ambiguous"))
+def test_full_checkpoint_request_lookup_preserves_input_and_rejects_ambiguity(monkeypatch, shape):
+    checkpoint = _build(request="accepted-request")
+    other = (
+        deepcopy(checkpoint)
+        if shape != "ambiguous"
+        else _build(request="accepted-request", snapshot={"state": "bootstrap_absent"})
+    )
+    repository, conn, checked = _checkpoint_readback_repository(
+        monkeypatch,
+        rows=[{"id": "first"}] + ([{"id": "second"}] if shape in {"duplicate", "ambiguous"} else []),
+        records={"first": checkpoint, "second": other},
+    )
+    arguments = {
+        "canonical_plan_fingerprint": checkpoint["plan_binding"]["canonical_plan_fingerprint"],
+        "canonical_request_fingerprint": _sha("missing")
+        if shape == "missing"
+        else checkpoint["healthy_workset"]["component_evaluations"][0]["request_fingerprint"],
+    }
+    if shape == "ambiguous":
+        with pytest.raises(history.EvidenceVaultSv9EvaluationCheckpointConflictError):
+            repository.get_evidence_vault_sv9_evaluation_checkpoint_for_request("scan-1", **arguments)
+    else:
+        result = repository.get_evidence_vault_sv9_evaluation_checkpoint_for_request("scan-1", **arguments)
+        assert result == (None if shape == "missing" else checkpoint)
+        if result is not None:
+            result["evaluation_input"].clear()
+            assert checkpoint["evaluation_input"]
+    assert checked == (["first", "second"] if shape in {"duplicate", "ambiguous"} else ["first"])
+    statement, parameters = conn.statements[-1]
+    assert parameters == (*_checkpoint_context().values(), arguments["canonical_plan_fingerprint"])
+    assert all(f"{field} = %s" in statement for field in _checkpoint_context())
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1",
+    reason="requires explicitly enabled disposable PostgreSQL",
+)
+def test_accepted_candidate_reuses_full_checkpoint_input_with_uncited_evidence(monkeypatch):
+    from src.sv9 import incremental_evaluation as evaluator
+
+    class Flow(_AuthorityFlow):
+        def evaluate_component(self, request):
+            value = deepcopy(super().evaluate_component(request).evaluation)
+            for row in value["tile_results"]:
+                row.update(assessment_state="sin_evidencia", supporting_evidence=[])
+            return evaluator.ComponentEvaluationOutcome.success(
+                evaluator.build_component_evaluation(
+                    **{
+                        key: item
+                        for key, item in value.items()
+                        if key not in {"schema_version", "canonical_component_evaluation_fingerprint"}
+                    }
+                )
+            )
+
+    repository = _reset_repository()
+    scan = "checkpoint-accepted-reuse"
+    _operational(repository, scan)
+    run = lambda flow: application.run_evidence_vault_sv9_authority_application(
+        repository=repository,
+        flow=flow,
+        domain_or_url="example.com",
+        source_scan_id=scan,
+        current_series_contract=_series(),
+    )
+    flow = Flow()
+    assert run(flow)["status"] == "authority_established"
+    assert any(tile["evidence"] for request in flow.calls for tile in request["requested_tiles"])
+    accepted = repository.get_evidence_vault_sv9_judgment_authority("example.com")
+    candidate = accepted["accepted_candidate"]
+    current = project_evidence_vault_sv9_evaluation_input(repository=repository, source_scan_id=scan)
+    for component in candidate["component_evaluations"]:
+        proof = repository.get_evidence_vault_sv9_evaluation_checkpoint_for_request(
+            scan,
+            canonical_plan_fingerprint=candidate["canonical_plan_fingerprint"],
+            canonical_request_fingerprint=component["request_fingerprint"],
+        )
+        assert proof["evaluation_input"] == current and proof["healthy_workset"]["component_evaluations"] == [component]
+        assert proof["prior_authority_snapshot"]["state"] == "bootstrap_absent"
+    for method in (
+        "append_evidence_vault_sv9_evaluation_checkpoint",
+        "append_evidence_vault_sv9_judgment_candidate",
+        "adopt_evidence_vault_sv9_judgment_candidate",
+    ):
+        monkeypatch.setattr(
+            repository, method, lambda *_args, **_kwargs: pytest.fail("accepted-input replay wrote new state")
+        )
+    for _ in range(4):
+        flow = Flow()
+        result = run(flow)
+        assert result["status"] == "authority_retained" and result["reason_codes"] == ["exact_reuse"]
+        assert not flow.calls and repository.get_evidence_vault_sv9_judgment_authority("example.com") == accepted

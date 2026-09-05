@@ -9,6 +9,7 @@ import unicodedata
 from typing import Any
 from urllib.parse import urlparse
 
+from src.evidence_identity import normalize_evidence_url
 from src.sv9_flow.evidence_source import SOURCE_CLASS_DERIVED_STRATEGY, classify_source
 from src.sv9_flow._utils import feature_confidence, first_string, unique_strings
 from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
@@ -354,7 +355,7 @@ def _evidence_from_exa_payload(
             # Exa repeats the same article across groups (e.g. mentions + news);
             # keep only the first group's record per URL.
             if url:
-                url_key = url.strip().lower().rstrip("/")
+                url_key = normalize_evidence_url(url)
                 if url_key in seen_urls:
                     continue
                 seen_urls.add(url_key)

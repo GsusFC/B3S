@@ -807,3 +807,229 @@ def test_exact_current_report_reads_use_the_fenced_seam(monkeypatch) -> None:
         with pytest.raises(scan_runner._ExactResumeFailure, match="busy"): scan_runner._publish_exact_report("post-loss", owner, {"id": "post-loss"}, binding, "publish_current")
         assert loaded == [scan_id, scan_id, "post-save"] and [(source, report) for source, report, _current in calls] == [(scan_id, scan_id), (scan_id, scan_id), ("post-save", "post-save"), ("post-loss", "post-loss")] and all(current for *_rest, current in calls[:-1])
     finally: scan_runner._release_scan_owner(owner)
+
+
+@pytest.mark.parametrize("action", ("publish_current", "record_no_score"))
+def test_ordinary_publication_imports_frozen_evidence_without_overwriting_reports(
+    monkeypatch,
+    tmp_path,
+    action,
+) -> None:
+    from uuid import uuid4
+
+    from src.history.capture_observation import parse_capture_observation
+    from src.history.models import ReportConflictError
+    from src.history.report_parser import parse_report
+    from src.history.repository import _validate_capture_to_report_upgrade
+    from src.services import evidence_vault_sv9_authority_application as application
+    from src.services import evidence_vault_sv9_authority_report as publication
+    from src.services.evidence_vault_scan_orchestration import prepare_vault_scan_after_capture
+    from tests.test_evidence_vault_scan_orchestration import _Repository, _snapshot
+
+    scan_id = f"ordinary-{action}"
+    prepared = prepare_vault_scan_after_capture(
+        repository=_Repository(memory=None, history=[]),
+        snapshot=_snapshot("Frozen evidence must reach the report"),
+        scan_id=scan_id,
+        url="https://example.com",
+        brand_name="Example",
+        environment="vault",
+        incremental_enabled=True,
+        observed_at="2026-08-06T11:00:00Z",
+    )
+    observation = prepared["report_observation"]
+    capture = parse_capture_observation(observation)
+    binding = dict(source_scan_id=scan_id, observation_hash=capture.observation_hash, capture_hash=capture.capture_hash)
+    stored_rows = [
+        dict(
+            id=uuid4(),
+            evidence_ref=row["ref"],
+            **{key: row[key] for key in ("source", "evidence_type", "url", "content", "confidence", "metadata")},
+        )
+        for row in capture.evidence_records
+    ]
+    assert stored_rows
+    imported = []
+
+    class CaptureConnection:
+        def execute(self, query, params):
+            assert "FROM b3s_history.evidence_records" in query
+            return self
+
+        def fetchall(self):
+            return deepcopy(stored_rows)
+
+    class CaptureRepository:
+        def import_report(self, report):
+            parsed = parse_report(report)
+            ids = _validate_capture_to_report_upgrade(
+                CaptureConnection(),
+                {
+                    "request_payload": observation,
+                    "source_url": capture.canonical_url,
+                    "content_hash": capture.capture_hash,
+                    "capture_id": uuid4(),
+                },
+                parsed,
+            )
+            assert len(ids) == len(stored_rows)
+            imported.append(parsed)
+
+    report_store = _file_report_store(monkeypatch, tmp_path)
+    original = _assessment_report("prior", binding)
+    report_store.save_report(original)
+    original_bytes = (tmp_path / "prior.json").read_bytes()
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: CaptureRepository())
+    payload = _assessment_report(scan_id, binding, unavailable=action == "record_no_score")["raw"]
+    payload.pop("flow", None)
+    monkeypatch.setattr(application, "run_evidence_vault_sv9_authority_application", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        publication,
+        "project_vault_authority_publication",
+        lambda *_args: {"action": action, "scanner_payload": payload},
+    )
+    monkeypatch.setattr(scan_runner, "_execute_vault_operational_preparation", lambda **_kwargs: "p")
+    monkeypatch.setattr(
+        scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": True}
+    )
+    monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda *_args: None)
+    scan_runner._SCANS[scan_id] = _status(scan_id)
+    try:
+        assert (
+            scan_runner._run_vault_sv9_authority_scanner(
+                scan_id=scan_id,
+                url="https://example.com",
+                brand_name="Example",
+                repository=object(),
+                preparation=prepared,
+                canonical_snapshot=observation["capture_payload"],
+                canonical_source_capture=binding,
+                gate={},
+            )
+            is True
+        )
+        assert len(imported) == 1
+        assert imported[0].evidence_records == capture.evidence_records
+        assert imported[0].evaluation_config["assessment_availability"] == (
+            "unavailable" if action == "record_no_score" else "available"
+        )
+        current_path = tmp_path / f"{scan_id}.json"
+        current_bytes = current_path.read_bytes()
+        changed = deepcopy(imported[0].report_payload)
+        changed["created_at"] = "replacement-must-not-persist"
+        with pytest.raises(ReportConflictError):
+            report_store.save_report(changed)
+        assert current_path.read_bytes() == current_bytes
+        assert (tmp_path / "prior.json").read_bytes() == original_bytes
+    finally:
+        scan_runner._SCANS.pop(scan_id, None)
+        scan_runner._VAULT_ACTIVATIONS.discard(scan_id)
+
+
+@pytest.mark.parametrize("mode", ("ordinary", "exact"))
+def test_accepted_same_source_replay_publishes_without_changing_immutable_reports(monkeypatch, tmp_path, mode):
+    from src import config
+    from src.services import evidence_vault_scan_orchestration as orchestration
+    from src.services import evidence_vault_sv9_authority_report as publication
+    from src.sv9 import incremental_flow_adapter
+    from tests import test_evidence_vault_sv9_authority_application as authority_tests
+
+    original_series = authority_tests._series
+    monkeypatch.setattr(config, "SV9_FLOW_MODEL", "model-v1")
+    monkeypatch.setattr(
+        authority_tests,
+        "_series",
+        lambda: original_series(
+            evaluator_version="evidence-vault-sv9-judgment-authority-v1",
+            prompt_version="sv9-strict-component-v1",
+            model_version="model-v1",
+            flow_version="sv9-flow-strict-component-v1",
+            normalization_version="vault-capture-v1",
+        ),
+    )
+    repo = authority_tests._CheckpointReplayRepository(records=(9,))
+    first = authority_tests._run(repo, authority_tests._Flow())
+    store = _file_report_store(monkeypatch, tmp_path)
+    original = scan_runner._compose_report(
+        "scan",
+        "https://example.test",
+        "Example",
+        publication.project_vault_authority_publication(first, "scan")["scanner_payload"],
+    )
+    store.save_report(original)
+    assert (
+        authority_tests._run(repo, authority_tests._Flow(), current=(3, 9), source="scan-2")["status"]
+        == "authority_advanced"
+    )
+    accepted, writes = deepcopy(repo.authority), (len(repo.checkpoint_appends), repo.append_calls, len(repo.mutations))
+    binding = {**_exact_binding("scan-2"), "canonical_domain": "example.test"}
+    source_capture = {key: binding[key] for key in ("source_scan_id", "observation_hash", "capture_hash")}
+    flow = authority_tests._Flow()
+    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *_args, **_kwargs: flow)
+    monkeypatch.setattr(scan_runner, "_execute_vault_operational_preparation", lambda **_kwargs: "operation")
+    monkeypatch.setattr(
+        scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": False}
+    )
+    monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda *_args: None)
+    if mode == "exact":
+        unavailable = _assessment_report("scan-2", binding, unavailable=True)
+        unavailable["url"] = "https://example.test"
+        store.save_report(unavailable)
+        monkeypatch.setattr(
+            repo,
+            "activate_evidence_vault_operational_scanner_result",
+            lambda *_args, **_kwargs: {"created": False},
+            raising=False,
+        )
+        monkeypatch.setattr(
+            repo, "get_capture_operation_plan", lambda *_args, **_kwargs: {"status": "completed"}, raising=False
+        )
+        monkeypatch.setattr(
+            orchestration,
+            "prepare_vault_exact_resume",
+            lambda **_kwargs: {
+                "url": "https://example.test",
+                "brand_name": "Example",
+                "preparation": {},
+                "canonical_snapshot": {},
+                "report_binding": binding,
+            },
+        )
+    before = {path.name: path.read_bytes() for path in tmp_path.glob("*.json")}
+    scan_runner._SCANS["scan-2"] = _status("scan-2")
+    try:
+        if mode == "ordinary":
+            assert (
+                scan_runner._run_vault_sv9_authority_scanner(
+                    scan_id="scan-2",
+                    url="https://example.test",
+                    brand_name="Example",
+                    repository=repo,
+                    preparation={},
+                    canonical_snapshot={},
+                    canonical_source_capture=source_capture,
+                    gate={},
+                )
+                is True
+            )
+            report_id = scan_runner._SCANS["scan-2"]["report_id"]
+            assert report_id == "scan-2"
+        else:
+            scan_runner._SCANS.pop("scan-2")
+            action = _exact_action("scan-2", "same-source-replay")
+            result = scan_runner._run_vault_exact_resume(scan_id="scan-2", action=action, repository=repo)
+            report_id = result.report_id
+            assert result == scan_runner._ExactResumePublication(
+                "publish_current", scan_runner._exact_successor_report_id(action)
+            )
+            published_bytes = (tmp_path / f"{report_id}.json").read_bytes()
+            for _ in range(4):
+                assert scan_runner._run_vault_exact_resume(scan_id="scan-2", action=action, repository=repo) == result
+                assert (tmp_path / f"{report_id}.json").read_bytes() == published_bytes
+        assert store.load_report(report_id)["score"] == accepted["score"]
+        assert all((tmp_path / name).read_bytes() == value for name, value in before.items())
+        assert repo.proof_reads and not flow.calls and repo.authority == accepted
+        assert (len(repo.checkpoint_appends), repo.append_calls, len(repo.mutations)) == writes
+    finally:
+        scan_runner._SCANS.pop("scan-2", None)
+        scan_runner._VAULT_ACTIVATIONS.discard("scan-2")
