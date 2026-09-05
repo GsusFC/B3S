@@ -62,7 +62,16 @@ def project_vault_authority_publication(application_result: Mapping[str, Any], c
             envelope, projection = _scanner(assessment)
             if not _bound(candidate, wrapper, assessment, projection): raise ValueError
             return {"action": "publish_current", "source_report_id": None, "scanner_payload": _payload(current, envelope, projection)}
-        if status == "authority_retained": return _retain(result, current, accepted_source_report, False)
+        if status == "authority_retained":
+            # Adoption is durable before report persistence. Exact replay of
+            # that same capture may only need to materialize its accepted score.
+            wrapper, candidate, assessment = _authority(result["authority"])
+            if candidate["source_scan_id"] == current and accepted_source_report is None:
+                if wrapper["reopen_review_overlay"] is not None: raise ValueError
+                envelope, projection = _scanner(assessment)
+                if not _bound(candidate, wrapper, assessment, projection): raise ValueError
+                return {"action": "publish_current", "source_report_id": None, "scanner_payload": _payload(current, envelope, projection)}
+            return _retain(result, current, accepted_source_report, False)
         if status == "review_required" and result["evaluation_status"] == "candidate_available" and result["authority"] is not None:
             if _compact_candidate(result["candidate"])["source_scan_id"] != current: raise ValueError
             return _retain(result, current, accepted_source_report, False)
@@ -134,7 +143,11 @@ def _retain(result: Mapping[str, Any], current: str, report: Any, pending: bool)
     envelope, projection = _scanner(assessment)
     if not _bound(candidate, wrapper, assessment, projection): raise ValueError
     source = _mapping(report); projected = assessment_projection_from_report(source, required=True); raw, report_id = source.get("raw"), source.get("id")
-    if type(raw) is not dict or raw.get("schema_version") != "sv9-flow-sv9-shadow-eval-v1" or report_id != raw.get("source_run_id") or report_id != candidate["source_scan_id"] or projected["availability"] != "available" or not _same(projected["assessment"], envelope) or not _number(projected["sv9_score"], wrapper["score"]) or any(not _same(projected.get(name), candidate[name]) for name in ("assessment_fingerprint", "score_fingerprint")): raise ValueError
+    if type(raw) is not dict or raw.get("schema_version") != "sv9-flow-sv9-shadow-eval-v1" or raw.get("source_run_id") != candidate["source_scan_id"] or projected["availability"] != "available" or not _same(projected["assessment"], envelope) or not _number(projected["sv9_score"], wrapper["score"]) or any(not _same(projected.get(name), candidate[name]) for name in ("assessment_fingerprint", "score_fingerprint")): raise ValueError
+    if report_id != candidate["source_scan_id"]:
+        # A resume successor changes report identity, never capture provenance.
+        capture = raw.get("source_capture")
+        if type(report_id) is not str or re.fullmatch(r"exact-resume-[0-9a-f]{64}", report_id) is None or type(capture) is not dict or set(capture) != {"source_scan_id", "observation_hash", "capture_hash"} or capture["source_scan_id"] != candidate["source_scan_id"] or any(_text(capture[key]) is None for key in ("observation_hash", "capture_hash")): raise ValueError
     return {"action": "retain_source", "source_report_id": report_id, "scanner_payload": None}
 
 def _payload(source: str | None, assessment: Mapping[str, Any] | None = None, projection: Mapping[str, Any] | None = None) -> dict[str, Any]:

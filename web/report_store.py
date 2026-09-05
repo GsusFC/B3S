@@ -226,6 +226,7 @@ def save_report(report: dict[str, Any]) -> None:
 
 def load_report(scan_id: str) -> dict[str, Any] | None:
     postgres_report: dict[str, Any] | None = None
+    read_error: Exception | None = None
     repository = _postgres_repository()
     if repository is not None:
         try:
@@ -239,7 +240,8 @@ def load_report(scan_id: str) -> dict[str, Any] | None:
                 postgres_report = report
         except (ReportConflictError, ScannerReportAssessmentError):
             raise
-        except Exception:
+        except Exception as exc:
+            read_error = exc
             _LOG.exception("failed to load report from postgres", extra={"scan_id": str(scan_id)})
     path = report_path(scan_id)
     file_report: dict[str, Any] | None = None
@@ -251,6 +253,13 @@ def load_report(scan_id: str) -> dict[str, Any] | None:
             file_report,
             report_id=str(scan_id),
         )
+    if postgres_report is None and file_report is None:
+        if read_error is not None:
+            raise read_error
+        # A configured backend that could not initialize is also unknown,
+        # not confirmed absence. Keep explicit local-only overrides unchanged.
+        if repository is None and os.environ.get("B3S_DATABASE_URL", "").strip() and os.environ.get("B3S_REPORTS_DIR", "/data/reports") in {"", "/data/reports"}:
+            raise RuntimeError("report history unavailable without a local fallback")
     return postgres_report or file_report
 
 

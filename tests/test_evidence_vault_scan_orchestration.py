@@ -995,6 +995,9 @@ def test_exact_resume_reads_only_the_frozen_pending_operation() -> None:
     action = {"action_id": "action-exact", "scan_id": "scan-exact", "state": "running", "request_payload": {"operation": "exact_resume"}, "status_payload": {"state": "running", "phase": "running"}, "request_fingerprint": canonical_json_hash({"operation": "exact_resume"})}
     resumed = prepare_vault_exact_resume(repository=ExactRepository(), action=action, scan_id="scan-exact")
     assert resumed["canonical_snapshot"] == raw["capture_payload"] and resumed["preparation"]["operation_plan"] == plan
+    assert resumed["preparation"]["report_observation"] == raw
+    assert resumed["preparation"]["report_observation"] is not raw
+    assert resumed["preparation"]["report_observation"]["evidence_records"] is not raw["evidence_records"]
     action["request_fingerprint"] = "0" * 64
     with pytest.raises(VaultExactResumeError, match="invalid_action"): prepare_vault_exact_resume(repository=ExactRepository(), action=action, scan_id="scan-exact")
     action["request_fingerprint"] = canonical_json_hash({"operation": "exact_resume"}); executor = MemoryRepository(plan=plan, rows=raw["evidence_records"])
