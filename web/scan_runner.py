@@ -897,6 +897,7 @@ def _authority_scanner_payload(
     canonical_source_capture: Mapping[str, str] | None,
     gate: Mapping[str, Any],
     exact_report_binding: Mapping[str, Any] | None = None,
+    report_observation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = copy.deepcopy(publication.get("scanner_payload"))
     if not isinstance(payload, dict):
@@ -904,6 +905,22 @@ def _authority_scanner_payload(
     source_capture = canonical_source_capture or canonical_snapshot.get("source_capture")
     if isinstance(source_capture, Mapping):
         payload["source_capture"] = dict(source_capture)
+    if report_observation is not None:
+        from src.history.capture_observation import parse_capture_observation
+
+        capture = parse_capture_observation(dict(report_observation))
+        # Preserve the frozen evidence, not a reconstruction from raw inputs.
+        payload["flow"] = {
+            "candidate": {
+                "evidence_pack": {
+                    "schema_version": "brand-evidence-pack-v1",
+                    "brand_name": capture.brand_name,
+                    "url": capture.canonical_url,
+                    "evidence": [dict(row) for row in capture.evidence_records],
+                    "limitations": list(capture.limitations),
+                }
+            }
+        }
     payload["acquisition_gate"] = dict(canonical_snapshot.get("acquisition_gate") or gate)
     payload["acquisition_artifacts"] = _acquisition_artifacts_from_snapshot(
         dict(canonical_snapshot)
@@ -1024,6 +1041,7 @@ def _run_vault_sv9_authority_scanner(
                 canonical_source_capture=canonical_source_capture,
                 gate=gate,
                 exact_report_binding=exact_report_binding,
+                report_observation=preparation.get("report_observation") if exact else None,
             ),
         )
         _validate_report_sv9_assessment(report, required=True)
