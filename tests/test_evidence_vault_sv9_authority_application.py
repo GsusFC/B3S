@@ -347,3 +347,580 @@ def test_authority_event_readback_is_canonical_and_fails_closed_for_tampering():
         with pytest.raises(ValueError):
             broken = deepcopy(reopen); change(broken); application._authority(broken)
 # fmt: on
+
+
+class _ValidatedCandidateRepository(_ApplicationRepository):
+    def resolve_evidence_vault_sv9_judgment_evidence(self, *args, **kwargs):
+        result = super().resolve_evidence_vault_sv9_judgment_evidence(*args, **kwargs)
+        for row in result["evidence"]:
+            row["content"] = f"Frozen {row['evidence_ref']}"
+        return result
+
+    def append_evidence_vault_sv9_judgment_candidate(self, scan, candidate, **kwargs):
+        context = self.load_evidence_vault_sv9_authoritative_relation_facts(scan)["source"]
+        resolved = self.resolve_evidence_vault_sv9_judgment_evidence(
+            scan, sorted(f"evidence:{number}" for number in self.records)
+        )["evidence"]
+
+        class Connection:
+            def execute(self, query, params):
+                assert "FROM b3s_history.evidence_records" in query
+                self.ids = {str(value) for value in params[1]}
+                return self
+
+            def fetchall(self):
+                return [
+                    {
+                        "id": row["evidence_record_id"],
+                        "evidence_ref": row["evidence_ref"],
+                        "content_hash": row["evidence_fingerprint"],
+                        "content": row["content"],
+                        "content_raw": row["content"].encode(),
+                    }
+                    for row in resolved
+                    if row["evidence_record_id"] in self.ids
+                ]
+
+        # Exercise the real persistence envelope, bindings, packet replay and witness guards.
+        packets = history._sv9_judgment_packets(Connection(), candidate, context)
+        assert history._sv9_judgment_candidate_replay(candidate, packets) == candidate
+        history._sv9_judgment_candidate_witness(candidate, context)
+        return super().append_evidence_vault_sv9_judgment_candidate(scan, candidate, **kwargs)
+
+
+class _CoherenciaRepository(_ValidatedCandidateRepository):
+    def load_evidence_vault_sv9_authoritative_relation_facts(self, scan, **kwargs):
+        facts = super().load_evidence_vault_sv9_authoritative_relation_facts(scan, **kwargs)
+        mission = facts["authority"]["accepted"][0]
+        coherencia = deepcopy(mission)
+        coherencia.update(tile_id="C1", component_key="coherencia")
+        coherencia["basis"] = [deepcopy(next(row for row in mission["basis"] if row["evidence_id"] == _hash(109)))]
+        coherencia["basis"][0]["relation_id"] = _hash(999)
+        facts["authority"]["accepted"].append(coherencia)
+        return facts
+
+
+@pytest.mark.parametrize("recovery", ("none", "checkpoint", "adoption"))
+def test_incremental_coherencia_support_survives_persistence_and_recovery(recovery):
+    repo = _CoherenciaRepository(records=(9,))
+    assert _run(repo, _Flow())["status"] == "authority_established"
+    initial = deepcopy(repo.authority)
+    for tile_id in ("M1", "C1"):
+        assert next(
+            row for row in initial["accepted_partition"]["candidate_tile_judgments"] if row["tile_id"] == tile_id
+        )["supporting_evidence"] == [_identity(9)]
+    repo.adopt_failure = recovery == "adoption"
+    flow = _Flow(fail=2 if recovery == "checkpoint" else None)
+    first = _run(repo, flow, current=(3, 9), source="scan-2")
+    assert [row["component_key"] for row in flow.calls] == ["mission", "coherencia"]
+    c1 = next(row for row in flow.calls[1]["requested_tiles"] if row["tile_id"] == "C1")
+    assert [row["evidence_ref"] for row in c1["evidence"]] == ["evidence:9"]
+    if recovery != "none":
+        assert repo.authority == initial
+        repo.adopt_failure = False
+        retry = _Flow()
+        result = _run(repo, retry, current=(3, 9), source="scan-2")
+        if recovery == "checkpoint":
+            assert retry.calls == [flow.calls[1]]
+        else:
+            assert first["evaluation_status"] == "candidate_available" and not retry.calls
+    else:
+        result = first
+    assert result["status"] == "authority_advanced", result["reason_codes"]
+    candidate = repo.authority["accepted_candidate"]
+    assert candidate["source_scan_id"] == "scan-2"
+    assert {row["tile_id"]: row["evidence_ref"] for row in candidate["evidence_bindings"]} == {
+        "M1": "evidence:3",
+        "C1": "evidence:9",
+    }
+    expected_requests = [row["canonical_request_fingerprint"] for row in flow.calls]
+    assert [row["request_fingerprint"] for row in candidate["component_evaluations"]] == expected_requests
+    for fingerprint in expected_requests:
+        assert (candidate["canonical_plan_fingerprint"], fingerprint) in repo.checkpoints
+    assert (
+        authority_projection.validate_persisted_evidence_vault_sv9_authority_projection(repo.authority)
+        == repo.authority
+    )
+
+
+@pytest.mark.parametrize(("tile", "component"), (("C1", "coherencia"), ("M2", "mission")))
+def test_cross_tile_routing_hint_cannot_become_canonical_evidence(tile, component):
+    class Repository(_ValidatedCandidateRepository):
+        def load_evidence_vault_sv9_authoritative_relation_facts(self, scan, **kwargs):
+            facts = super().load_evidence_vault_sv9_authoritative_relation_facts(scan, **kwargs)
+            facts["evaluation_hint_seeds"] = [
+                {
+                    "hint_id": _uuid(987),
+                    "tile_id": tile,
+                    "component_key": component,
+                    "evidence_record_id": _uuid(9),
+                    "provenance_fingerprint": _hash(987),
+                }
+            ]
+            return facts
+
+    repo, flow = Repository(records=(9,)), _Flow()
+    result = _run(repo, flow)
+    assert repo.authority is None and not repo.mutations and not repo.candidates
+    assert result["candidate"] is None and result["reason_codes"] == ["incomplete_candidate"]
+    assert repo.append_calls == 0
+    requested = next(row for call in flow.calls for row in call["requested_tiles"] if row["tile_id"] == tile)
+    assert [row["evidence_ref"] for row in requested["evidence"]] == ["evidence:9"]
+    assert len(repo.checkpoints) == 10
+    progress = next(
+        row
+        for value in repo.checkpoint_appends
+        for row in value["healthy_workset"]["evaluated_tile_judgments"]
+        if row["tile_id"] == tile
+    )
+    assert progress["assessment_state"] == "ok" and progress["authority_state"] == "pending"
+    checkpoint = next(value for value in repo.checkpoint_appends if tile in value["healthy_workset"]["tile_ids"])
+    assert checkpoint["evaluation_input"]["non_authoritative_hints"][0]["authority"] is False
+    cached, retry = deepcopy(repo.checkpoints), _Flow()
+    repeated = _run(repo, retry)
+    assert not retry.calls and repo.checkpoints == cached
+    assert repeated["candidate"] is None and not repo.mutations and not repo.candidates
+
+
+def test_cross_tile_hint_retains_existing_source_without_reopen(monkeypatch, tmp_path):
+    from src.services import evidence_vault_sv9_authority_report as publication
+    from tests.test_evidence_vault_sv9_authority_report import _report
+    from tests.test_vault_authority_scanner_orchestration import _file_report_store, _status
+    from web import scan_runner
+
+    reopen_attempts = []
+
+    class Repository(_CoherenciaRepository):
+        def load_evidence_vault_sv9_authoritative_relation_facts(self, scan, **kwargs):
+            facts = super().load_evidence_vault_sv9_authoritative_relation_facts(scan, **kwargs)
+            if scan == "scan-2":
+                facts["evaluation_hint_seeds"] = [
+                    {
+                        "hint_id": _uuid(987),
+                        "tile_id": "C2",
+                        "component_key": "coherencia",
+                        "evidence_record_id": _uuid(9),
+                        "provenance_fingerprint": _hash(987),
+                    }
+                ]
+            return facts
+
+        def reopen_evidence_vault_sv9_judgment_authority(self, scan, signed, **kwargs):
+            reopen_attempts.append(scan)
+            history._sv9_authority_partition_reopen_tile_ids(kwargs["workset_partition"], signed)
+            return super().reopen_evidence_vault_sv9_judgment_authority(scan, signed, **kwargs)
+
+    repo = Repository(records=(9,))
+    first = _run(repo, _Flow())
+    store = _file_report_store(monkeypatch, tmp_path)
+    source = _report(publication.project_vault_authority_publication(first, "scan")["scanner_payload"])
+    store.save_report(source)
+    source_bytes = (tmp_path / "scan.json").read_bytes()
+    accepted = deepcopy(repo.authority)
+    flow = _Flow()
+    result = _run(repo, flow, current=(3, 9), source="scan-2")
+    assert result["status"] == "authority_retained" and result["evaluation_status"] == "no_new_score"
+    assert result["reason_codes"] == ["incomplete_candidate"] and not reopen_attempts
+    assert repo.authority == accepted and repo.mutations == ["adopt"] and repo.append_calls == 1
+    assert any(
+        row["tile_id"] == "C2" and row["supporting_evidence"] == [_identity(9)]
+        for value in repo.checkpoint_appends
+        for row in value["healthy_workset"]["evaluated_tile_judgments"]
+    )
+    retry = _Flow()
+    assert _run(repo, retry, current=(3, 9), source="scan-2")["status"] == "authority_retained"
+    assert not retry.calls and not reopen_attempts
+
+    monkeypatch.setattr(application, "run_evidence_vault_sv9_authority_application", lambda **_kwargs: result)
+    monkeypatch.setattr(scan_runner, "_execute_vault_operational_preparation", lambda **_kwargs: "p")
+    monkeypatch.setattr(
+        scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": True}
+    )
+    monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda *_args: None)
+    scan_runner._SCANS["scan-2"] = _status("scan-2")
+    try:
+        assert (
+            scan_runner._run_vault_sv9_authority_scanner(
+                scan_id="scan-2",
+                url="https://example.test",
+                brand_name="Example",
+                repository=repo,
+                preparation={},
+                canonical_snapshot={},
+                canonical_source_capture=None,
+                gate={},
+            )
+            is True
+        )
+        assert scan_runner._SCANS["scan-2"]["report_id"] == "scan"
+        assert (tmp_path / "scan.json").read_bytes() == source_bytes
+        assert not (tmp_path / "scan-2.json").exists()
+    finally:
+        scan_runner._SCANS.pop("scan-2", None)
+        scan_runner._VAULT_ACTIVATIONS.discard("scan-2")
+
+
+class _CheckpointReplayRepository(_CoherenciaRepository):
+    """Application fixture using real checkpoint SQL selection/readback and adoption guard."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.adopted_ids = set()
+        self.proof_reads = []
+        self.proof_fault = None
+        self.fact_change = None
+
+    def load_evidence_vault_sv9_authoritative_relation_facts(self, scan, **kwargs):
+        facts = _ApplicationRepository.load_evidence_vault_sv9_authoritative_relation_facts(self, scan, **kwargs)
+        coherencia = deepcopy(facts["authority"]["accepted"][0])
+        coherencia.update(
+            tile_id="C1",
+            component_key="coherencia",
+            basis=[
+                {
+                    "relation_id": _hash(999),
+                    "evidence_id": _hash(109),
+                    "source_identity_id": _hash(209),
+                    "polarity": "supports",
+                }
+            ],
+        )
+        facts["authority"]["accepted"].append(coherencia)
+        if self.fact_change:
+            self.fact_change(facts)
+        return facts
+
+    def adopt_evidence_vault_sv9_judgment_candidate(self, scan, candidate_id, **kwargs):
+        import ast
+        from pathlib import Path
+
+        tree = ast.parse(Path(history.__file__).read_text())
+        guard = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.If)
+            and len(node.body) == 1
+            and isinstance(node.body[0], ast.Raise)
+            and any(
+                isinstance(child, ast.Constant) and child.value == "SV9 judgment candidate is already adopted."
+                for child in ast.walk(node)
+            )
+        )
+        owner = self
+
+        class Connection:
+            def execute(self, query, parameters):
+                assert "evidence_vault_sv9_judgment_authority_events" in query
+                assert parameters[-1] == candidate_id
+                return self
+
+            def fetchone(self):
+                return {"exists": 1} if candidate_id in owner.adopted_ids else None
+
+        exec(
+            compile(ast.Module(body=[guard], type_ignores=[]), history.__file__, "exec"),
+            vars(history),
+            {
+                "conn": Connection(),
+                "context": self.load_evidence_vault_sv9_authoritative_relation_facts(scan)["source"],
+                "candidate_id": candidate_id,
+            },
+        )
+        result = super().adopt_evidence_vault_sv9_judgment_candidate(scan, candidate_id, **kwargs)
+        self.adopted_ids.add(candidate_id)
+        return result
+
+    def get_evidence_vault_sv9_evaluation_checkpoint_for_request(self, scan, **kwargs):
+        self.proof_reads.append((scan, kwargs))
+        fault = self.proof_fault
+        if fault == "missing":
+            return None
+        context = self.load_evidence_vault_sv9_authoritative_relation_facts(scan)["source"]
+        checkpoints = deepcopy(self.checkpoint_appends)
+        if fault in {"stale_input", "evaluation_mismatch", "snapshot_mismatch", "ambiguous", "provider_failure"}:
+            from src.services import evidence_vault_sv9_evaluation_checkpoint as checkpoints_contract
+            from src.sv9 import incremental_evaluation, judgment_memory
+
+            original = checkpoints[-1]
+            changed = deepcopy(original)
+            if fault == "stale_input":
+                self.witness_seed += 1
+                try:
+                    changed["evaluation_input"] = evaluation_service.project_evidence_vault_sv9_evaluation_input(
+                        repository=self, source_scan_id=scan
+                    )
+                finally:
+                    self.witness_seed -= 1
+            elif fault in {"snapshot_mismatch", "ambiguous"}:
+                changed["prior_authority_snapshot"] = {"state": "bootstrap_absent"}
+            elif fault != "provider_failure":
+                value = changed["healthy_workset"]["component_evaluations"][0]
+                tile = next(row for row in value["tile_results"] if row["supporting_evidence"])
+                tile["assessment_state"] = "no"
+                changed["healthy_workset"]["component_evaluations"] = [
+                    incremental_evaluation.build_component_evaluation(
+                        **{
+                            key: item
+                            for key, item in value.items()
+                            if key not in {"schema_version", "canonical_component_evaluation_fingerprint"}
+                        }
+                    )
+                ]
+                for index, row in enumerate(changed["healthy_workset"]["evaluated_tile_judgments"]):
+                    if row["tile_id"] == tile["tile_id"]:
+                        changed["healthy_workset"]["evaluated_tile_judgments"][index] = (
+                            judgment_memory.build_tile_judgment(
+                                **{
+                                    key: ("no" if key == "assessment_state" else item)
+                                    for key, item in row.items()
+                                    if key
+                                    not in {"schema_version", "series_fingerprint", "canonical_judgment_fingerprint"}
+                                }
+                            )
+                        )
+            changed = checkpoints_contract.build_evidence_vault_sv9_evaluation_checkpoint(
+                evaluation_state="provider_failure" if fault == "provider_failure" else "partial",
+                evaluation_input=changed["evaluation_input"],
+                prior_authority_snapshot=changed["prior_authority_snapshot"],
+                **changed["plan_binding"],
+                healthy_tile_ids=changed["healthy_workset"]["tile_ids"],
+                **{
+                    key: changed["healthy_workset"][key]
+                    for key in ("component_evaluations", "evaluated_tile_judgments", "evaluated_component_sentinels")
+                },
+            )
+            if fault == "ambiguous":
+                checkpoints.append(changed)
+            else:
+                checkpoints[-1] = changed
+        if fault == "last_missing":
+            checkpoints.pop()
+        rows = []
+        for index, value in enumerate(checkpoints):
+            if value["evaluation_input"]["source_identity"] != context:
+                continue
+            plan, snapshot, input_ = value["plan_binding"], value["prior_authority_snapshot"], value["evaluation_input"]
+            rows.append(
+                {
+                    **context,
+                    **plan,
+                    "id": _uuid(700 + index),
+                    "created_at": "2026-09-05T00:00:00+00:00",
+                    "schema_version": value["schema_version"],
+                    "checkpoint_payload": value,
+                    "evaluation_input_fingerprint": input_["evaluation_input_fingerprint"],
+                    "relation_projection_fingerprint": input_["relation_projection_fingerprint"],
+                    "prior_authority_snapshot_fingerprint": snapshot["snapshot_fingerprint"],
+                    "checkpoint_fingerprint": value["checkpoint_fingerprint"],
+                    "evaluation_state": value["evaluation_state"],
+                    "authority": False,
+                    "runtime_effect": "checkpoint_only",
+                    "score_state": "unavailable",
+                }
+            )
+        if fault == "malformed" and rows:
+            rows[-1]["checkpoint_payload"]["evaluation_input_fingerprint"] = _hash(999)
+        owner = self
+
+        class Connection:
+            def execute(self, query, parameters):
+                if "canonical_plan_fingerprint = %s" in query:
+                    assert parameters[:-1] == tuple(
+                        context[key]
+                        for key in (
+                            "workspace_id",
+                            "brand_id",
+                            "scan_run_id",
+                            "source_scan_id",
+                            "capture_id",
+                            "operation_plan_id",
+                        )
+                    )
+                    self.result = [row for row in rows if row["canonical_plan_fingerprint"] == parameters[-1]]
+                else:
+                    assert "evidence_vault_sv9_evaluation_checkpoint_evidence_bindings" in query
+                    row = next(row for row in rows if row["id"] == parameters[0])
+                    self.result = [
+                        {**context, **binding, "durable_evidence_ref": binding["evidence_ref"]}
+                        for binding in row["checkpoint_payload"]["evaluation_input"]["current_identity_bindings"]
+                        if binding["evidence_record_id"] in {_uuid(number) for number in owner.records}
+                    ]
+                return self
+
+            def fetchall(self):
+                return self.result
+
+        kwargs.pop("workspace_slug", None)
+        return history._sv9_checkpoint_for_request(Connection(), context, **kwargs)
+
+
+class _SubsetSupportFlow(_Flow):
+    def evaluate_component(self, request):
+        from src.sv9 import incremental_evaluation as evaluator
+
+        outcome = super().evaluate_component(request)
+        if outcome.evaluation is None:
+            return outcome
+        value = deepcopy(outcome.evaluation)
+        for row in value["tile_results"]:
+            if row["tile_id"] == "M1":
+                row["supporting_evidence"] = row["supporting_evidence"][:1]
+        return evaluator.ComponentEvaluationOutcome.success(
+            evaluator.build_component_evaluation(
+                **{
+                    key: item
+                    for key, item in value.items()
+                    if key not in {"schema_version", "canonical_component_evaluation_fingerprint"}
+                }
+            )
+        )
+
+
+@pytest.mark.parametrize("recovery", ("none", "checkpoint", "adoption"))
+def test_accepted_full_input_replay_stays_stable_after_addition(recovery):
+    repo = _CheckpointReplayRepository(records=(9,))
+    assert _run(repo, _Flow())["status"] == "authority_established"
+    repo.adopt_failure = recovery == "adoption"
+    flow = _Flow(fail=2 if recovery == "checkpoint" else None)
+    result = _run(repo, flow, current=(3, 9), source="scan-2")
+    if recovery != "none":
+        assert repo.authority["current_head"]["sequence"] == 1
+        repo.adopt_failure = False
+        result = _run(repo, _Flow(), current=(3, 9), source="scan-2")
+    assert result["status"] == "authority_advanced"
+    accepted = deepcopy(repo.authority)
+    writes = (len(repo.checkpoint_appends), repo.append_calls, len(repo.mutations))
+    assert next(row for row in accepted["accepted_partition"]["candidate_tile_judgments"] if row["tile_id"] == "M1")[
+        "supporting_evidence"
+    ] == [_identity(3)]
+    for _ in range(4):
+        flow = _Flow()
+        result = _run(repo, flow, current=(3, 9), source="scan-2")
+        assert result["status"] == "authority_retained" and result["reason_codes"] == ["exact_reuse"]
+        assert not flow.calls and repo.authority == accepted
+        assert (len(repo.checkpoint_appends), repo.append_calls, len(repo.mutations)) == writes
+    assert repo.proof_reads
+
+
+def test_accepted_full_input_replay_handles_true_subset_citations():
+    repo = _CheckpointReplayRepository(records=(3, 9))
+    flow = _SubsetSupportFlow()
+    assert _run(repo, flow, current=(3, 9))["status"] == "authority_established"
+    assert next(row for row in flow.calls[0]["requested_tiles"] if row["tile_id"] == "M1")["evidence"] == [
+        {**_identity(number), "content": f"Frozen evidence:{number}"} for number in (3, 9)
+    ]
+    accepted = deepcopy(repo.authority)
+    for _ in range(4):
+        flow = _SubsetSupportFlow()
+        assert _run(repo, flow, current=(3, 9))["status"] == "authority_retained"
+        assert not flow.calls and repo.authority == accepted
+
+
+@pytest.mark.parametrize(
+    "fault",
+    (
+        "missing",
+        "last_missing",
+        "malformed",
+        "ambiguous",
+        "stale_input",
+        "evaluation_mismatch",
+        "snapshot_mismatch",
+        "provider_failure",
+    ),
+)
+def test_accepted_input_reuse_requires_every_original_checkpoint_proof(fault):
+    repo = _CheckpointReplayRepository(records=(9,))
+    _run(repo, _Flow())
+    assert _run(repo, _Flow(), current=(3, 9), source="scan-2")["status"] == "authority_advanced"
+    repo.proof_fault = fault
+    flow = _Flow()
+    result = _run(repo, flow, current=(3, 9), source="scan-2")
+    assert repo.proof_reads and result["reason_codes"] != ["exact_reuse"]
+    assert [row["component_key"] for row in flow.calls] == ["mission", "coherencia"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    (
+        "new_mapped",
+        "new_unmapped",
+        "removed",
+        "changed_hash",
+        "relation",
+        "provenance",
+        "status",
+        "series",
+        "source",
+        "hint",
+        "overlay",
+        "trusted",
+    ),
+)
+def test_accepted_input_reuse_does_not_hide_changed_or_nonauthoritative_work(monkeypatch, change):
+    repo = _CheckpointReplayRepository(records=(9,))
+    _run(repo, _Flow())
+    _run(repo, _Flow(), current=(3, 9), source="scan-2")
+    current, source, trusted = (3, 9), "scan-2", ()
+    if change in {"new_mapped", "new_unmapped", "trusted"}:
+        current = (3, 7, 9)
+        if change != "new_mapped":
+            repo.fact_change = lambda facts: facts["authority"]["accepted"][0].__setitem__(
+                "basis", [row for row in facts["authority"]["accepted"][0]["basis"] if row["evidence_id"] != _hash(107)]
+            )
+        if change == "trusted":
+            trusted = (7,)
+    elif change == "removed":
+        current = (9,)
+    elif change == "changed_hash":
+        repo.fact_change = lambda facts: facts["evidence"][0].__setitem__("evidence_fingerprint", _hash(333))
+        resolve = repo.resolve_evidence_vault_sv9_judgment_evidence
+
+        def changed_resolve(*args, **kwargs):
+            value = resolve(*args, **kwargs)
+            value["evidence"][0]["evidence_fingerprint"] = _hash(333)
+            return value
+
+        monkeypatch.setattr(repo, "resolve_evidence_vault_sv9_judgment_evidence", changed_resolve)
+    elif change == "relation":
+        repo.fact_change = lambda facts: facts["authority"]["accepted"].append(
+            {**deepcopy(facts["authority"]["accepted"][0]), "tile_id": "M2"}
+        )
+    elif change == "provenance":
+        repo.witness_seed += 1
+    elif change == "status":
+        repo.fact_change = lambda facts: facts["source"].__setitem__("operation_status", "superseded")
+    elif change == "series":
+        series = _series()
+        series["model_version"] = "different-model"
+        from src.sv9 import judgment_memory
+
+        series = judgment_memory.build_judgment_series_contract(
+            **{key: value for key, value in series.items() if key not in {"schema_version"}}
+        )
+        monkeypatch.setattr(__import__(__name__, fromlist=["_series"]), "_series", lambda: series)
+    elif change == "source":
+        source = "scan-3"
+    elif change == "hint":
+        repo.fact_change = lambda facts: facts.__setitem__(
+            "evaluation_hint_seeds",
+            [
+                {
+                    "hint_id": _uuid(987),
+                    "tile_id": "C2",
+                    "component_key": "coherencia",
+                    "evidence_record_id": _uuid(9),
+                    "provenance_fingerprint": _hash(987),
+                }
+            ],
+        )
+    elif change == "overlay":
+        assert _run(repo, _Flow(), current=(9,), source="scan-2")["status"] == "review_required"
+    flow = _Flow()
+    result = _run(repo, flow, current=current, source=source, trusted=trusted)
+    assert result["reason_codes"] != ["exact_reuse"] and not repo.proof_reads
+    if change == "new_mapped":
+        assert result["status"] == "authority_advanced" and flow.calls
+    if change == "hint":
+        assert result["status"] == "authority_retained" and result["reason_codes"] == ["incomplete_candidate"]
+        assert any(row["tile_id"] == "C2" and row["evidence"] for call in flow.calls for row in call["requested_tiles"])

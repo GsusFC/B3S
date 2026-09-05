@@ -1010,3 +1010,48 @@ def test_exact_resume_reads_only_the_frozen_pending_operation() -> None:
     drift = deepcopy(plan); context = drift["semantic_context"]; context["evidence_fingerprints"] = [other]; drift["operations"].update(classify_evidence_fingerprints=[other], propose_tile_relations_for_fingerprints=[other], llm_required=True); context["context_fingerprint"] = canonical_fingerprint(context["schema_version"], {key: context[key] for key in ("schema_version", "scope", "evidence_fingerprints", "semantic_analysis_contract")}); drift["operation_plan_fingerprint"] = canonical_fingerprint(drift["schema_version"], {key: value for key, value in drift.items() if key != "operation_plan_fingerprint"}); validate_vault_scan_plan(drift)
     result2 = deepcopy(result); result2["operation_plan_fingerprint"] = drift["operation_plan_fingerprint"]; operation.update(plan=drift, operation_plan_fingerprint=drift["operation_plan_fingerprint"], result_payload=result2, result_fingerprint=canonical_fingerprint("evidence-vault-operation-result-v1", result2))
     with pytest.raises(VaultExactResumeError, match="operation_invalid"): prepare_vault_exact_resume(repository=ExactRepository(), action=action, scan_id="scan-exact")
+
+
+@pytest.mark.parametrize(
+    "urls",
+    (
+        ("https://video.example/watch?v=AbC123", "https://video.example/watch?v=abc123"),
+        ("https://news.example/Story", "https://news.example/story"),
+    ),
+)
+def test_ordinary_capture_preserves_case_distinct_exa_evidence(urls) -> None:
+    from src.history.capture_observation import parse_capture_observation
+
+    snapshot = _snapshot("Owned evidence")
+    results = [
+        {"url": url, "title": "Example proof", "text": f"Example statement {index}"} for index, url in enumerate(urls)
+    ]
+    tracked_url = urls[0] + ("&" if "?" in urls[0] else "?") + "utm_source=news#proof"
+    snapshot["raw_inputs"].append(
+        {
+            "source": "exa",
+            "payload": {
+                "mentions": results,
+                "profiles": [dict(results[0], intent="external_profiles")],
+                "news": [dict(results[0], url=tracked_url, intent="news")],
+            },
+        }
+    )
+    frozen = deepcopy(snapshot)
+    observation = build_capture_observation_from_snapshot(
+        snapshot=snapshot,
+        scan_id="case-distinct-exa",
+        url="https://example.com",
+        brand_name="Example",
+        mode="incremental",
+        observed_at="2026-08-06T11:00:00Z",
+    )
+    capture = parse_capture_observation(observation)
+    evidence = [row for row in capture.evidence_records if row["source"] == "exa"]
+    assert {row["url"] for row in evidence} == set(urls)
+    assert len(evidence) == 2
+    for index, url in enumerate(urls):
+        assert f"Example statement {index}" in next(row for row in evidence if row["url"] == url)["content"]
+    assert all(row["metadata"]["result_group"] == "mentions" for row in evidence)
+    assert snapshot == frozen
+    assert capture.capture_payload["raw_inputs"] == frozen["raw_inputs"]

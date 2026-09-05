@@ -1041,7 +1041,7 @@ def _run_vault_sv9_authority_scanner(
                 canonical_source_capture=canonical_source_capture,
                 gate=gate,
                 exact_report_binding=exact_report_binding,
-                report_observation=preparation.get("report_observation") if exact else None,
+                report_observation=preparation.get("report_observation"),
             ),
         )
         _validate_report_sv9_assessment(report, required=True)
