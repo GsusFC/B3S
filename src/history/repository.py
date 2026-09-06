@@ -493,8 +493,16 @@ class PostgresHistoryRepository:
         self._migrated = True
         return applied
 
-    def verify_migration_head(self) -> None:
-        """Verify the exact packaged migration head without mutating PostgreSQL."""
+    def verify_migration_head(
+        self,
+        *,
+        connection_preflight: Callable[[Any], None] | None = None,
+    ) -> None:
+        """Verify the exact packaged migration head without mutating PostgreSQL.
+
+        A supplied preflight must make only read-only assertions on this exact
+        connection. It runs after the read-only transaction boundary is set.
+        """
 
         manifest = _migration_manifest()
         try:
@@ -502,6 +510,8 @@ class PostgresHistoryRepository:
                 conn.execute(
                     "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
                 )
+                if connection_preflight is not None:
+                    connection_preflight(conn)
                 rows = conn.execute(
                     f"""
                     SELECT version, filename, checksum
