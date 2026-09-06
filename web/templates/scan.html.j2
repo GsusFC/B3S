@@ -22,6 +22,11 @@
 {% set meter_segments = 72 %}
 {% set meter_active = ((progress.done * meter_segments) / (scan.phases|length if scan.phases else 1))|round(0, "ceil")|int %}
 {% block content %}
+{% set result = namespace(unresolved=false, failed=false) %}
+{% for phase in scan.phases %}
+  {% if phase.state in ["blocked", "error"] %}{% set result.unresolved = true %}{% endif %}
+  {% if phase.state == "error" %}{% set result.failed = true %}{% endif %}
+{% endfor %}
 <div class="scan-shell">
   <section class="scan-card" aria-live="polite">
     <div class="scan-identity">
@@ -60,6 +65,11 @@
       </div>
     </section>
 
+    <section class="scan-gate" id="scan-result" role="status" {% if scan.state != "done" or not result.unresolved %}hidden{% endif %}>
+      <h2 id="result-message">{{ "No se pudo completar una evaluación SV9 válida." if result.failed else "La evaluación SV9 requiere revisión." }}</h2>
+      <p id="result-score-message">{{ "Se conserva el score y el informe previamente aceptados." if scan.score_unchanged else "No se generó un score nuevo." }}</p>
+      <a id="result-report" href="/report/{{ scan.report_id or scan.id }}">Ver informe disponible</a>
+    </section>
     <p class="scan-hint" id="hint" hidden></p>
     <p class="error" id="error" role="alert" hidden></p>
   </section>
@@ -177,6 +187,7 @@ async function poll() {
   }
   renderGate(payload.acquisition_gate || null, payload.state);
   if (payload.state === "done") {
+    if (renderCompletedResult(payload)) return;
     const reportId = payload.report_id || scanId;
     window.location.href = `/report/${reportId}`;
     return;
@@ -199,6 +210,23 @@ async function poll() {
   setTimeout(poll, 1500);
 }
 
+function renderCompletedResult(payload) {
+  const phases = payload.phases || [];
+  const unresolved = payload.state === "done" && phases.some(phase => ["blocked", "error"].includes(phase.state));
+  const panel = document.getElementById("scan-result");
+  panel.hidden = !unresolved;
+  if (!unresolved) return false;
+  document.getElementById("result-message").textContent = phases.some(phase => phase.state === "error")
+    ? "No se pudo completar una evaluación SV9 válida."
+    : "La evaluación SV9 requiere revisión.";
+  document.getElementById("result-score-message").textContent = payload.score_unchanged
+    ? "Se conserva el score y el informe previamente aceptados."
+    : "No se generó un score nuevo.";
+  document.getElementById("result-report").href = `/report/${payload.report_id || scanId}`;
+  document.getElementById("gate-actions").hidden = true;
+  return true;
+}
+
 function renderGate(gate, scanState) {
   const panel = document.getElementById("gate");
   const card = document.querySelector(".scan-card");
@@ -209,7 +237,7 @@ function renderGate(gate, scanState) {
   }
   panel.hidden = false;
   if (card) card.classList.add("scan-card--decision");
-  const blocked = gate.state === "blocked";
+  const blocked = gate.state === "blocked" && scanState === "blocked";
   const canContinue = Boolean(gate.can_continue);
   const issues = [...(gate.issues || []), ...(gate.warnings || [])];
   document.getElementById("gate-title").textContent = blocked

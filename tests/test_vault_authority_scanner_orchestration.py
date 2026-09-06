@@ -1014,7 +1014,13 @@ def test_first_baseline_runtime_publishes_frozen_capture_and_validated_memory(mo
         if fail_analysis:
             assert repo.authority is None and not repo.candidates and not repo.mutations
             assert report["score"] is None
+            phases = {row["key"]: row["state"] for row in scan_runner._SCANS[scan_id]["phases"]}
+            assert phases["interpret"] == "error" and phases["score"] == "blocked"
+            assert phases["report"] == "done" and scan_runner._SCANS[scan_id]["state"] == "done"
         else:
+            phases = {row["key"]: row["state"] for row in scan_runner._SCANS[scan_id]["phases"]}
+            assert phases["interpret"] == phases["score"] == phases["report"] == "done"
+            assert scan_runner._SCANS[scan_id]["state"] == "done"
             assert repo.authority["accepted_candidate"]["assessment"]["tile_count"] == 80
             assert report["score"] == repo.authority["score"] > 0
             assert scan_runner._validate_report_sv9_assessment(report, required=True)["availability"] == "available"
@@ -1023,6 +1029,90 @@ def test_first_baseline_runtime_publishes_frozen_capture_and_validated_memory(mo
     finally:
         scan_runner._SCANS.pop(scan_id, None)
         scan_runner._VAULT_ACTIVATIONS.discard(scan_id)
+
+
+@pytest.mark.parametrize("case", ("first_review", "retained_review", "retained_reuse", "validation_failure", "mixed_failure", "unknown_failure", "empty_failure"))
+def test_authority_terminal_phases_preserve_report_access(monkeypatch, tmp_path, case):
+    from src.services import evidence_vault_sv9_authority_application as application
+    from src.services.evidence_vault_sv9_authority_report import project_vault_authority_publication
+    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository, _Flow, _run
+
+    repo = _ApplicationRepository(records=(3, 9))
+    source = None
+    if case == "first_review":
+        from src.history.repository import _sv9_evaluation_hint_seeds
+        from src.services.evidence_vault_canonical_core import build_candidate_tile
+        from src.services.evidence_vault_operational_candidate import build_operational_packet_from_scanner_candidate
+        from tests.test_evidence_vault_operational_candidate import _basis, _candidates, _packet
+        from tests.test_evidence_vault_sv9_evaluation_hint_facts import _operation
+
+        original = repo.load_evidence_vault_sv9_authoritative_relation_facts
+
+        def pending_facts(*args, **kwargs):
+            facts = original(*args, **kwargs)
+            facts["authority"]["accepted"][0]["basis"] = facts["authority"]["accepted"][0]["basis"][:1]
+            record = facts["evidence"][1]
+            basis = _basis("pending-c7", "supports", reviewed=False)
+            basis.update(evidence_id=record["evidence_id"], source_identity_id=record["source_identity_id"])
+            candidates = _candidates()
+            index = next(i for i, tile in enumerate(candidates) if tile["tile_id"] == "C7")
+            candidates[index] = build_candidate_tile(tile_id="C7", basis=[basis])
+            operational = build_operational_packet_from_scanner_candidate(_packet(candidates))
+            pending = next(tile for tile in operational["candidate_overlay"]["candidate_tiles"] if tile["tile_id"] == "C7")
+            assert pending["authority_state"] == "pending" and pending["review_state"] == "required"
+            facts["evaluation_hint_seeds"] = _sv9_evaluation_hint_seeds(
+                _operation(relations=[basis | {"tile_id": "C7"}]), facts["evidence"], facts["authority"],
+            )
+            return facts
+
+        repo.load_evidence_vault_sv9_authoritative_relation_facts = pending_facts
+        outcome = _run(repo, _Flow(), current=(3, 9), source="current")
+        assert outcome["status"] == "first_run_unresolved" and outcome["reason_codes"] == ["unmapped_evidence"]
+    elif case.startswith("retained"):
+        initial = _run(repo, _Flow(), current=(3, 9), source="prior")
+        source = scan_runner._compose_report("prior", "https://example.test", "Example", project_vault_authority_publication(initial, "prior")["scanner_payload"])
+        outcome = _run(repo, _Flow(), current=(9,) if case == "retained_review" else (3, 9), source="current")
+        assert outcome["status"] == ("review_required" if case == "retained_review" else "authority_retained")
+    else:
+        outcome = _run(repo, _Flow(), current=(3, 9), domain="different.test", source="current")
+        assert outcome["status"] == "authority_conflict"
+        if case == "mixed_failure":
+            outcome.update(status="first_run_unresolved", evaluation_status="review_required", reason_codes=["review_set", "invalid_evaluation_input"])
+        elif case in {"unknown_failure", "empty_failure"}:
+            outcome.update(status="first_run_unresolved", evaluation_status="review_required", reason_codes=["unknown_review_reason"] if case == "unknown_failure" else [])
+
+    before = deepcopy(repo.authority)
+    saved_status = []
+    store = _file_report_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(store, "_postgres_repository", lambda: None)
+    if source is not None:
+        store.save_report(source)
+    monkeypatch.setattr(application, "run_evidence_vault_sv9_authority_application", lambda **_kwargs: deepcopy(outcome))
+    monkeypatch.setattr(scan_runner, "_execute_vault_operational_preparation", lambda **_kwargs: "p")
+    monkeypatch.setattr(scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda value: saved_status.append(deepcopy(value)))
+    scan_runner._SCANS["current"] = _status("current")
+    try:
+        assert scan_runner._run_vault_sv9_authority_scanner(
+            scan_id="current", url="https://example.test", brand_name="Example", repository=repo,
+            preparation={}, canonical_snapshot={}, canonical_source_capture=None, gate={},
+        ) is True
+        status = saved_status[-1]
+        phases = {row["key"]: row["state"] for row in status["phases"]}
+        expected = "done" if case == "retained_reuse" else "blocked" if case.endswith("review") else "error"
+        assert phases["interpret"] == expected
+        assert phases["score"] == ("done" if expected == "done" else "blocked")
+        assert phases["report"] == "done" and status["state"] == "done"
+        assert repo.authority == before
+        report = store.load_report(status["report_id"])
+        if source is not None:
+            assert report == source and status["score_unchanged"] is True and status["report_id"] == "prior"
+            assert store.load_report("current") is None
+        else:
+            assert report["score"] is None
+    finally:
+        scan_runner._SCANS.pop("current", None)
+        scan_runner._VAULT_ACTIVATIONS.discard("current")
 
 
 @pytest.mark.parametrize("mode", ("ordinary", "exact"))
