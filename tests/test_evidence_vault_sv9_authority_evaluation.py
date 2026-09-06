@@ -102,6 +102,9 @@ class _Repository:
 
     def evaluation_input(self, scan, workspace):
         facts = _facts(count=len(self.records)); source = facts["source"]; source.update(source_scan_id=scan, workspace_slug=workspace, canonical_domain="example.test"); self.context = {"capture_origin": {key: source[key] for key in ("capture_id", "capture_fingerprint")}, "operation_origin": {"operation_id": source["operation_plan_id"], "operation_fingerprint": source["operation_fingerprint"]}}
+        if getattr(self, "baseline_plan", None):
+            source["operation_fingerprint"] = self.baseline_plan["operation_plan_fingerprint"]
+            self.context["operation_origin"]["operation_fingerprint"] = source["operation_fingerprint"]
         rows = [dict(facts["evidence"][0], source_scan_id=scan, canonical_domain="example.test", evidence_record_id=f"00000000-0000-0000-0000-{number:012d}", **_identity(number), evidence_id=_hash(100 + number), source_identity_id=_hash(200 + number)) for number in self.records]
         facts["evidence"] = rows
         for index, row in enumerate(rows): facts["authority"]["accepted"][index]["basis"][0].update(evidence_id=row["evidence_id"], source_identity_id=row["source_identity_id"])
@@ -139,6 +142,179 @@ def test_first_run_with_exact_operational_projection_persists_witnessed_candidat
     assert candidate["schema_version"] == "evidence-vault-sv9-judgment-candidate-v2" and result["candidate"]["authoritative_relation_witness_fingerprint"] == candidate["authoritative_relation_witness"]["witness_fingerprint"]
     assert "workset_partition" not in result
     repeated = _run(repo, _Flow(), current=(9,)); assert repeated["status"] == "candidate_available" and not repeated["calls_issued"] and repo.append_calls == 1
+
+
+def _first_baseline(repo):
+    from src.services.evidence_vault_incremental_refresh import build_vault_scan_plan
+
+    repo.unmapped = True
+    repo.baseline_plan = build_vault_scan_plan(
+        brand_identity="example.test", subject_url="https://example.test", mode="baseline",
+        current_evidence_records=[
+            {"ref": f"evidence:{number}", "source": "web", "evidence_type": "owned_content", "url": "https://example.test", "content": f"Frozen synthetic evidence {number}", "metadata": {}}
+            for number in repo.records
+        ],
+    )
+
+    def operation(scan, **_kwargs):
+        return {
+            "source_scan_id": scan, "status": "completed", "plan": deepcopy(repo.baseline_plan),
+            "operation_plan_id": repo.context["operation_origin"]["operation_id"],
+            "operation_plan_fingerprint": repo.baseline_plan["operation_plan_fingerprint"],
+            "capture_id": repo.context["capture_origin"]["capture_id"],
+            "capture_hash": repo.context["capture_origin"]["capture_fingerprint"],
+        }
+
+    repo.get_capture_operation_plan = operation
+    return repo
+
+
+class _SelectiveFlow(_Flow):
+    def evaluate_component(self, request):
+        self.calls.append(deepcopy(request))
+        if self.fail == len(self.calls):
+            return evaluation.ComponentEvaluationOutcome.provider_failure()
+        # Frozen synthetic outcomes explicitly cover all requested criteria;
+        # the extra input record need not be cited or forced into support.
+        rows = [
+            {
+                "tile_id": row["tile_id"],
+                "assessment_state": "ok" if row["tile_id"] == "M1" else "sin_evidencia",
+                "supporting_evidence": [_identity(3)] if row["tile_id"] == "M1" else [],
+            }
+            for row in request["requested_tiles"]
+        ]
+        return evaluation.ComponentEvaluationOutcome.success(
+            evaluation.build_component_evaluation(
+                component_key=request["component_key"],
+                series_fingerprint=request["current_series_fingerprint"],
+                request_fingerprint=request["canonical_request_fingerprint"],
+                status="evaluated",
+                tile_results=rows[:-1] if self.malformed else rows,
+            )
+        )
+
+
+def test_first_baseline_assesses_unmapped_input_without_forcing_support_relations():
+    repo = _first_baseline(_Repository(records=(3, 9)))
+    flow = _SelectiveFlow()
+    outcome = _run(repo, flow, current=(3, 9))
+
+    assert outcome["status"] == "candidate_available"
+    assert len(flow.calls) == 10
+    assert all(
+        [item["evidence_ref"] for item in row["evidence"]] == ["evidence:3", "evidence:9"]
+        for request in flow.calls
+        for row in request["requested_tiles"]
+    )
+    assert flow.calls[-1]["component_key"] == "coherencia"
+    assert flow.calls[-1]["upstream_candidate_state"]
+    candidate = next(iter(repo.candidates.values()))
+    assert candidate["assessment"]["tile_count"] == 80
+    assert candidate["assessment"]["sv9_score"] > 0
+    assert len(candidate["candidate_tile_judgments"]) == 80
+    assert all(
+        row["supporting_evidence"] == ([_identity(3)] if row["tile_id"] == "M1" else [])
+        for row in candidate["candidate_tile_judgments"]
+    )
+    assert {row["evidence_ref"] for row in candidate["evidence_bindings"]} == {"evidence:3", "evidence:9"}
+    assert {row["evidence_ref"] for row in candidate["authoritative_relation_witness"]["authoritative_relations"]} == {"evidence:3"}
+    assert outcome["trusted_irrelevant_evidence_count"] == 0
+
+
+def _baseline_application(repo, flow, source="scan"):
+    from src.services.evidence_vault_sv9_authority_application import run_evidence_vault_sv9_authority_application
+
+    return run_evidence_vault_sv9_authority_application(
+        repository=repo, flow=flow, domain_or_url="example.test", source_scan_id=source,
+        current_series_contract=_series(),
+    )
+
+
+def test_first_baseline_adoption_retry_publishes_and_recapture_retains_accepted_state():
+    from src.services.evidence_vault_sv9_authority_report import project_vault_authority_publication
+    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
+    from web import scan_runner
+
+    repo = _first_baseline(_ApplicationRepository(records=(3, 9)))
+    first = _baseline_application(repo, _SelectiveFlow())
+    assert first["status"] == "authority_established"
+    accepted = deepcopy(repo.authority)
+    writes = (repo.append_calls, list(repo.mutations))
+    flow = _SelectiveFlow(fail=1)
+    # Adoption survived, but the report was not written before the retry.
+    retry = _baseline_application(repo, flow)
+    publication = project_vault_authority_publication(retry, "scan")
+    assert publication["action"] == "publish_current"
+    assert not flow.calls and repo.authority == accepted
+    assert (repo.append_calls, repo.mutations) == writes
+    report = scan_runner._compose_report("scan", "https://example.test", "Example", publication["scanner_payload"])
+    assert scan_runner._validate_report_sv9_assessment(report, required=True)["availability"] == "available"
+    assert report["score"] == accepted["score"] > 0
+    before = deepcopy(report)
+
+    recapture = _baseline_application(repo, _SelectiveFlow(), source="scan-2")
+    assert recapture["status"] == "review_required"
+    assert project_vault_authority_publication(recapture, "scan-2", report)["action"] == "retain_source"
+    assert repo.authority["accepted_candidate"] == accepted["accepted_candidate"]
+    assert repo.authority["score"] == accepted["score"] and report == before
+
+
+@pytest.mark.parametrize("failure", ("provider", "omitted_tile", "coherencia", "interrupted", "invalid_witness", "stale_witness"))
+def test_first_baseline_failed_complete_analysis_never_adopts_or_publishes_score(failure):
+    from src.services.evidence_vault_sv9_authority_report import project_vault_authority_publication
+    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
+
+    repo = _first_baseline(_ApplicationRepository(records=(3, 9)))
+    if failure.endswith("witness"): repo.get_evidence_vault_sv9_judgment_candidate = lambda *_args, **_kwargs: (_ for _ in ()).throw((EvidenceVaultSv9AuthoritativeRelationStaleWitnessError if failure == "stale_witness" else EvidenceVaultSv9AuthoritativeRelationWitnessError)("invalid"))
+    flow = _SelectiveFlow(fail=10 if failure == "coherencia" else 2 if failure == "interrupted" else 1 if failure == "provider" else None, malformed=failure == "omitted_tile")
+    result = _baseline_application(repo, flow)
+    assert result["status"] == "first_run_unresolved"
+    if failure.endswith("witness"): assert result["evaluation_status"] == "review_required" and result["reason_codes"] == [failure.replace("_witness", "_authoritative_relation_witness")] and not flow.calls
+    assert not repo.candidates and not repo.mutations and repo.authority is None
+    assert project_vault_authority_publication(result, "scan")["action"] == "record_no_score"
+    if failure == "interrupted":
+        assert len(repo.checkpoint_appends) == 1
+        resumed = _SelectiveFlow(); assert _baseline_application(repo, resumed)["status"] == "authority_established"
+        assert len(resumed.calls) == 9 and len(repo.checkpoint_appends) == 10
+
+
+@pytest.mark.parametrize("review_input", ("hint_only", "reopen"))
+def test_first_baseline_with_unresolved_review_input_cannot_establish_authority(review_input):
+    from src.services.evidence_vault_sv9_authority_report import project_vault_authority_publication
+    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
+
+    repo = _first_baseline(_ApplicationRepository(records=(3, 9)))
+    setattr(repo, review_input, True)
+    for _ in range(2):
+        result = _baseline_application(repo, _SelectiveFlow())
+        assert result["status"] == "first_run_unresolved"
+        assert project_vault_authority_publication(result, "scan")["action"] == "record_no_score"
+        assert repo.authority is None and not repo.candidates and not repo.mutations
+
+
+@pytest.mark.parametrize("invalid", ("witness", "bindings", "evaluation", "source"))
+def test_first_baseline_exact_replay_rejects_unproven_inputs(invalid):
+    from src.services.evidence_vault_sv9_authority_report import project_vault_authority_publication
+    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
+
+    repo = _first_baseline(_ApplicationRepository(records=(3, 9)))
+    assert _baseline_application(repo, _SelectiveFlow())["status"] == "authority_established"
+    writes = (repo.append_calls, list(repo.mutations))
+    if invalid == "witness":
+        repo.witness_seed += 1
+    elif invalid == "bindings":
+        repo.authority["accepted_candidate"]["evidence_bindings"].pop()
+    elif invalid == "evaluation":
+        repo.authority["accepted_candidate"]["component_evaluations"].pop()
+    else:
+        getter = repo.get_capture_operation_plan
+        repo.get_capture_operation_plan = lambda *args, **kwargs: getter(*args, **kwargs) | {"capture_hash": _hash(999)}
+    flow = _SelectiveFlow(fail=1)
+    result = _baseline_application(repo, flow)
+    assert result["status"] == "authority_conflict"
+    assert project_vault_authority_publication(result, "scan")["action"] == "record_no_score"
+    assert not flow.calls and (repo.append_calls, repo.mutations) == writes
 
 @pytest.mark.parametrize(("kind", "status", "reason"), [("v2", "candidate_available", "candidate_already_present"), ("legacy", "review_required", "unwitnessed_legacy_candidate"), ("stale", "review_required", "stale_authoritative_relation_witness")])
 def test_complete_existing_candidate_precedes_checkpoints_and_flow(kind, status, reason):

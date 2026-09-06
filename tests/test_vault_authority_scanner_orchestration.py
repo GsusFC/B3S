@@ -926,6 +926,105 @@ def test_ordinary_publication_imports_frozen_evidence_without_overwriting_report
         scan_runner._VAULT_ACTIVATIONS.discard(scan_id)
 
 
+@pytest.mark.parametrize("fail_analysis", (False, True))
+def test_first_baseline_runtime_publishes_frozen_capture_and_validated_memory(monkeypatch, tmp_path, fail_analysis):
+    import hashlib
+    from uuid import UUID, uuid5
+    from src.history.capture_observation import parse_capture_observation
+    from src.services.evidence_vault_scan_orchestration import prepare_vault_scan_after_capture
+    from src.sv9 import incremental_evaluation as evaluation, incremental_flow_adapter
+    from tests.test_evidence_vault_scan_orchestration import _Repository as CaptureRepository, _snapshot
+    from tests.test_evidence_vault_sv9_authoritative_relations import _facts, _sha
+    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
+
+    scan_id, url = "first-baseline-runtime", "https://example.com"
+    capture_repository = CaptureRepository(memory=None, history=[])
+    snapshot = _snapshot("We help local educators create accessible learning materials.")
+    snapshot["raw_inputs"].append({"source": "web", "payload": {"url": f"{url}/contact", "content": "Office reception opens at nine on weekdays."}})
+    preparation = prepare_vault_scan_after_capture(
+        repository=capture_repository, snapshot=snapshot, scan_id=scan_id, url=url,
+        brand_name="Example", environment="vault", incremental_enabled=True,
+        observed_at="2026-08-06T11:00:00Z",
+    )
+    observation = deepcopy(capture_repository.persisted[0])
+    capture = parse_capture_observation(observation)
+    canonical, binding = scan_runner._canonical_snapshot_from_persisted_vault_capture(
+        scan_id=scan_id, url=url, expected_snapshot=snapshot, report_observation=observation,
+    )
+    facts = _facts()
+    source = facts["source"]
+    source.update(source_scan_id=scan_id, canonical_domain="example.com", capture_fingerprint=capture.capture_hash, operation_fingerprint=preparation["operation_plan"]["operation_plan_fingerprint"])
+    records = [
+        {"evidence_record_id": str(uuid5(UUID(source["capture_id"]), row["ref"])), "evidence_ref": row["ref"], "evidence_fingerprint": hashlib.sha256(row["content"].encode()).hexdigest(), "content": row["content"]}
+        for row in capture.evidence_records
+    ]
+    records.sort(key=lambda row: (row["evidence_ref"], row["evidence_fingerprint"]))
+    assert len(records) > 1
+    facts["evidence"] = [
+        source | {key: row[key] for key in ("evidence_record_id", "evidence_ref", "evidence_fingerprint")}
+        | {"evidence_id": _sha(index), "source_identity_id": _sha(f"source-{index}")}
+        for index, row in enumerate(records)
+    ]
+    facts["authority"]["accepted"][0]["basis"][0].update(evidence_id=_sha(0), source_identity_id=_sha("source-0"))
+    repo = _ApplicationRepository()
+    repo.load_evidence_vault_sv9_authoritative_relation_facts = lambda *_args, **_kwargs: deepcopy(facts)
+    repo.context = {
+        "capture_origin": {key: source[key] for key in ("capture_id", "capture_fingerprint")},
+        "operation_origin": {"operation_id": source["operation_plan_id"], "operation_fingerprint": source["operation_fingerprint"]},
+    }
+    repo.resolve_evidence_vault_sv9_judgment_evidence = lambda *_args, **_kwargs: deepcopy(repo.context | {"evidence": records})
+    repo.get_capture_operation_plan = lambda *_args, **_kwargs: {
+        "source_scan_id": scan_id, "capture_id": source["capture_id"], "capture_hash": capture.capture_hash,
+        "operation_plan_id": source["operation_plan_id"], "operation_plan_fingerprint": source["operation_fingerprint"],
+        "status": "completed", "plan": deepcopy(preparation["operation_plan"]),
+    }
+    requests = []
+
+    class Flow:
+        def evaluate_component(self, request):
+            requests.append(deepcopy(request))
+            if fail_analysis:
+                return evaluation.ComponentEvaluationOutcome.provider_failure()
+            return evaluation.ComponentEvaluationOutcome.success(evaluation.build_component_evaluation(
+                component_key=request["component_key"], series_fingerprint=request["current_series_fingerprint"],
+                request_fingerprint=request["canonical_request_fingerprint"], status="evaluated",
+                tile_results=[
+                    {"tile_id": row["tile_id"], "assessment_state": "ok" if row["tile_id"] == "M1" else "sin_evidencia",
+                     "supporting_evidence": [{key: records[0][key] for key in ("evidence_ref", "evidence_fingerprint")}] if row["tile_id"] == "M1" else []}
+                    for row in request["requested_tiles"]
+                ],
+            ))
+
+    store = _file_report_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(store, "_postgres_repository", lambda: None)
+    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *_args, **_kwargs: Flow())
+    monkeypatch.setattr(scan_runner, "_execute_vault_operational_preparation", lambda **_kwargs: source["operation_fingerprint"])
+    monkeypatch.setattr(scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": True})
+    monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda *_args: None)
+    scan_runner._SCANS[scan_id] = _status(scan_id)
+    try:
+        assert scan_runner._run_vault_sv9_authority_scanner(
+            scan_id=scan_id, url=url, brand_name="Example", repository=repo, preparation=preparation,
+            canonical_snapshot=canonical, canonical_source_capture=binding, gate={},
+        ) is True
+        report = store.load_report(scan_id)
+        assert report["raw"]["flow"]["candidate"]["evidence_pack"]["evidence"] == list(capture.evidence_records)
+        assert report["raw"]["source_capture"] == binding
+        assert capture_repository.persisted == [observation]
+        if fail_analysis:
+            assert repo.authority is None and not repo.candidates and not repo.mutations
+            assert report["score"] is None
+        else:
+            assert repo.authority["accepted_candidate"]["assessment"]["tile_count"] == 80
+            assert report["score"] == repo.authority["score"] > 0
+            assert scan_runner._validate_report_sv9_assessment(report, required=True)["availability"] == "available"
+            assert len(requests) == 10
+            assert all(len(row["evidence"]) == len(records) for request in requests for row in request["requested_tiles"])
+    finally:
+        scan_runner._SCANS.pop(scan_id, None)
+        scan_runner._VAULT_ACTIVATIONS.discard(scan_id)
+
+
 @pytest.mark.parametrize("mode", ("ordinary", "exact"))
 def test_accepted_same_source_replay_publishes_without_changing_immutable_reports(monkeypatch, tmp_path, mode):
     from src import config

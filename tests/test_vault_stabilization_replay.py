@@ -4,6 +4,7 @@ from copy import deepcopy
 import pytest
 
 from src.services import evidence_vault_scan_orchestration as orchestration
+from src.services.evidence_vault_incremental_refresh import build_vault_scan_plan
 from src.sv9 import incremental_flow_adapter
 from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
 from tests.test_evidence_vault_sv9_authority_evaluation import _Flow
@@ -15,6 +16,23 @@ def exact_replay(monkeypatch, tmp_path):
     """Start at an existing completed operation, using the existing test store."""
     scan = "stabilization-replay"
     repo = _ApplicationRepository(records=(9,))
+    operation_plan = build_vault_scan_plan(
+        brand_identity="example.test", subject_url="https://example.test",
+        mode="incremental_refresh", canonical_memory_version=f"{repo.witness_seed:064x}",
+        current_evidence_records=[{
+            "ref": "evidence:9", "source": "web", "evidence_type": "owned_content",
+            "url": "https://example.test", "content": "Frozen checkpoint evidence", "metadata": {},
+        }],
+    )
+    repo.context["operation_origin"]["operation_fingerprint"] = operation_plan["operation_plan_fingerprint"]
+    load_facts = repo.load_evidence_vault_sv9_authoritative_relation_facts
+
+    def operation_facts(*args, **kwargs):
+        facts = load_facts(*args, **kwargs)
+        facts["source"]["operation_fingerprint"] = operation_plan["operation_plan_fingerprint"]
+        return facts
+
+    monkeypatch.setattr(repo, "load_evidence_vault_sv9_authoritative_relation_facts", operation_facts)
     binding = {
         "source_scan_id": scan,
         "source_run_id": "acquisition-run",
@@ -34,7 +52,13 @@ def exact_replay(monkeypatch, tmp_path):
     # Reuse the application fixture; these are the only additional completed-
     # operation methods required by the real scanner orchestration.
     monkeypatch.setattr(repo, "activate_evidence_vault_operational_scanner_result", lambda *a, **k: {"created": False}, raising=False)
-    monkeypatch.setattr(repo, "get_capture_operation_plan", lambda *a, **k: {"status": "completed"}, raising=False)
+    monkeypatch.setattr(repo, "get_capture_operation_plan", lambda source, **kwargs: {
+        "source_scan_id": source, "status": "completed", "plan": deepcopy(operation_plan),
+        "capture_id": repo.context["capture_origin"]["capture_id"],
+        "capture_hash": repo.context["capture_origin"]["capture_fingerprint"],
+        "operation_plan_id": repo.context["operation_origin"]["operation_id"],
+        "operation_plan_fingerprint": operation_plan["operation_plan_fingerprint"],
+    }, raising=False)
     monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
     monkeypatch.setattr(scan_runner, "save_report", report_store.save_report)
     monkeypatch.setattr(scan_runner, "load_report", report_store.load_report)
