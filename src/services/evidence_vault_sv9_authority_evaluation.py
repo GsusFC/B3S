@@ -233,6 +233,7 @@ def _evaluate_first_baseline(repository, flow, scan, workspace, current, context
     packets, bindings = _packets(plan, records, context)
     witness = build_evidence_vault_sv9_authoritative_relation_witness(
         source_scan_id=scan,
+        **context,
         projection={
             "status": "available", "reason_codes": [],
             "authoritative_relations": current["authoritative_relations"],

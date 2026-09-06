@@ -825,10 +825,10 @@ def _project(source: Mapping[str, Any], evidence: Any, authority: Mapping[str, A
     return {"status": "available", "reason_codes": [], "authoritative_relations": relations, "current_identity_bindings": bindings, "authority_continuity": continuity, "authority_coverage_loss": coverage, "reopen_tile_ids": reopen, "operational_witness": witness, "projection_fingerprint": canonical_fingerprint(_VERSION, payload)}
 
 
-def build_evidence_vault_sv9_authoritative_relation_witness(*, source_scan_id: str, projection: Mapping[str, Any]) -> dict[str, Any]:
+def build_evidence_vault_sv9_authoritative_relation_witness(*, source_scan_id: str, projection: Mapping[str, Any], capture_origin: Mapping[str, Any] | None = None, operation_origin: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Bind exact VA1 relations to the operational adoption that authorized them."""
     try:
-        result = _witness_payload(source_scan_id, projection)
+        result = _witness_payload(source_scan_id, projection, capture_origin, operation_origin)
         result["witness_fingerprint"] = canonical_fingerprint(_WITNESS_VERSION, result)
         return result
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
@@ -837,10 +837,10 @@ def build_evidence_vault_sv9_authoritative_relation_witness(*, source_scan_id: s
 
 def validate_evidence_vault_sv9_authoritative_relation_witness(value: Any) -> dict[str, Any]:
     try:
-        if type(value) is not dict or set(value) != _WITNESS_FIELDS or value.get("schema_version") != _WITNESS_VERSION: raise ValueError("witness fields")
+        if type(value) is not dict or set(value) not in (_WITNESS_FIELDS, _WITNESS_FIELDS | {"capture_origin", "operation_origin"}) or value.get("schema_version") != _WITNESS_VERSION: raise ValueError("witness fields")
         operational = value["operational_witness"]
         projection = {"status": "available", "reason_codes": [], "authoritative_relations": value["authoritative_relations"], "operational_witness": operational, "projection_fingerprint": value["projection_fingerprint"]}
-        expected = _witness_payload(value["source_scan_id"], projection)
+        expected = _witness_payload(value["source_scan_id"], projection, value.get("capture_origin"), value.get("operation_origin"))
         expected["witness_fingerprint"] = canonical_fingerprint(_WITNESS_VERSION, expected)
         if value != expected: raise ValueError("witness replay")
         return expected
@@ -848,7 +848,7 @@ def validate_evidence_vault_sv9_authoritative_relation_witness(value: Any) -> di
         raise EvidenceVaultSv9AuthoritativeRelationWitnessError("authoritative relation witness is invalid") from exc
 
 
-def _witness_payload(source_scan_id: Any, projection: Any) -> dict[str, Any]:
+def _witness_payload(source_scan_id: Any, projection: Any, capture_origin=None, operation_origin=None) -> dict[str, Any]:
     source = _text(source_scan_id)
     fields = {"status", "reason_codes", "authoritative_relations", "operational_witness", "projection_fingerprint"}; v2_fields = {"current_identity_bindings", "authority_continuity", "authority_coverage_loss", "reopen_tile_ids"}
     if type(projection) is not dict or set(projection) not in (fields, fields | v2_fields) or projection["status"] != "available" or projection["reason_codes"] != []: raise ValueError("projection")
@@ -862,9 +862,13 @@ def _witness_payload(source_scan_id: Any, projection: Any) -> dict[str, Any]:
     if is_v2:
         bindings = _validate_current_identity_bindings(projection["current_identity_bindings"]); continuity = _validate_authority_continuity(projection["authority_continuity"], bindings); coverage = _validate_authority_coverage_loss(projection["authority_coverage_loss"], continuity); reopen = _validate_reopen_tile_ids(projection["reopen_tile_ids"], continuity); _validate_relation_partition(rows, continuity, coverage, reopen, bindings)
         if coverage or reopen or any(row["continuity_state"] != "stable" for row in continuity): raise ValueError("relations")
-    if not rows: raise ValueError("relations")
     if any(row["disposition"] != "relevant" for row in rows): raise ValueError("operational relation disposition")
-    capture, operation = rows[0]["capture_origin"], rows[0]["operation_origin"]
+    if not rows or capture_origin is not None or operation_origin is not None:
+        if type(capture_origin) is not dict or set(capture_origin) != {"capture_id", "capture_fingerprint"} or type(operation_origin) is not dict or set(operation_origin) != {"operation_id", "operation_fingerprint"}: raise ValueError("witness origins")
+        capture = {"capture_id": _uuid(capture_origin["capture_id"]), "capture_fingerprint": _sha(capture_origin["capture_fingerprint"])}
+        operation = {"operation_id": _uuid(operation_origin["operation_id"]), "operation_fingerprint": _sha(operation_origin["operation_fingerprint"])}
+    else:
+        capture, operation = rows[0]["capture_origin"], rows[0]["operation_origin"]
     if any(row["capture_origin"] != capture or row["operation_origin"] != operation for row in rows): raise ValueError("relation origins")
     order = {str(row["tile_id"]): index for index, row in enumerate(build_tile_contract_registry()["tiles"])}
     keys = [(order[row["tile_id"]], row["evidence_ref"], row["evidence_fingerprint"]) for row in rows]
@@ -875,7 +879,7 @@ def _witness_payload(source_scan_id: Any, projection: Any) -> dict[str, Any]:
         if projection["projection_fingerprint"] != canonical_fingerprint(_VERSION, payload): raise ValueError("projection fingerprint")
     fingerprint = canonical_fingerprint(_LEGACY_PROJECTION_VERSION, {"source_scan_id": source, "capture_origin": capture, "operation_origin": operation, "operational_witness": operational, "authoritative_relations": rows})
     if not is_v2 and projection["projection_fingerprint"] != fingerprint: raise ValueError("projection fingerprint")
-    return {"schema_version": _WITNESS_VERSION, "source_scan_id": source, "operational_witness": operational, "authoritative_relations": rows, "projection_fingerprint": fingerprint}
+    return {"schema_version": _WITNESS_VERSION, "source_scan_id": source, "operational_witness": operational, "authoritative_relations": rows, "projection_fingerprint": fingerprint} | ({"capture_origin": capture, "operation_origin": operation} if not rows else {})
 
 
 def _text(value: Any) -> str:

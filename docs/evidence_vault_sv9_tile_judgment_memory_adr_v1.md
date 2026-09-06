@@ -30,3 +30,15 @@ The typed tile-evidence delta preserves tile/component, disposition, evidence re
 PR5 added the dedicated append-only PostgreSQL candidate relation. PR6 may only run after successful immutable report publication, behind `BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED=true`; it resolves Flow's advisory refs back to the exact persisted Vault capture before an injected strict component call.
 
 Candidates remain `pending`, `shadow_only`, and cross-scan-untrusted. Exact same capture/plan replay is provider-free; missing accepted occurrence bindings force a full safe workset. The hook neither changes report bytes nor enters selector, API, Markdown, history, ranking, or UI paths. SQLite `sv9_scans`, public `report_store`, and legacy operational shadows remain rejected as judgment authority.
+
+## Empty adopted operational basis witness
+
+The authority candidate-v2 path retains the existing nested relation witness.
+When an adopted operational memory has zero relations, that witness carries
+explicit `capture_origin` and `operation_origin` objects so its projection and
+witness fingerprints remain independently replayable. Nonempty witnesses retain
+their exact legacy representation. Repository append/adoption validates both
+origins against the persisted source; an empty basis does not mean missing
+operational adoption, waive review, or create evidence-to-tile relations.
+The first-baseline assessment still requires complete frozen-input evaluation
+through the unchanged SV9 rubric, with unresolved hint and review guards intact.

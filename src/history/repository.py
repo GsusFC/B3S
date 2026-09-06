@@ -11850,7 +11850,7 @@ def _sv9_judgment_candidate_witness(candidate: Mapping[str, Any], context: Mappi
     try:
         if candidate["schema_version"].endswith("v1"): return
         witness = validate_evidence_vault_sv9_authoritative_relation_witness(candidate["authoritative_relation_witness"])
-        relation = witness["authoritative_relations"][0]
+        relation = witness["authoritative_relations"][0] if witness["authoritative_relations"] else witness
         if witness["source_scan_id"] != str(context["source_scan_id"]) or relation["capture_origin"] != {"capture_id": str(context["capture_id"]), "capture_fingerprint": str(context["capture_fingerprint"])} or relation["operation_origin"] != {"operation_id": str(context["operation_plan_id"]), "operation_fingerprint": str(context["operation_fingerprint"])}: raise ValueError("source provenance")
     except EvidenceVaultSv9AuthoritativeRelationWitnessError:
         raise
@@ -11899,7 +11899,7 @@ def _sv9_judgment_current_authoritative_relation_witness(conn: Any, candidate: M
     try:
         facts = _sv9_judgment_authoritative_relation_facts(conn, context, workspace_slug)
         projection = _project_sv9_authoritative_relations(facts["source"], facts["evidence"], facts["authority"])
-        expected = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id=str(context["source_scan_id"]), projection=projection)
+        expected = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id=str(context["source_scan_id"]), projection=projection, capture_origin={"capture_id": str(context["capture_id"]), "capture_fingerprint": str(context["capture_fingerprint"])}, operation_origin={"operation_id": str(context["operation_plan_id"]), "operation_fingerprint": str(context["operation_fingerprint"])})
     except Exception as exc:
         raise EvidenceVaultSv9AuthoritativeRelationStaleWitnessError("SV9 judgment candidate witness is no longer current.") from exc
     if candidate["authoritative_relation_witness"] != expected:
