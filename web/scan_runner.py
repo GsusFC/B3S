@@ -1018,8 +1018,28 @@ def _run_vault_sv9_authority_scanner(
         action = publication.get("action") if isinstance(publication, Mapping) else None
         if exact and source_report is not None and action != "retain_source": raise _ExactResumeFailure("report_invalid")
         if not exact:
-            _set_phase(scan_id, "interpret", "done")
-            _set_phase(scan_id, "score", "done")
+            # Report availability is not proof that this scan produced a score.
+            reasons = application_result.get("reason_codes")
+            reused = (
+                action == "retain_source"
+                and application_result.get("status") == "authority_retained"
+                and application_result.get("evaluation_status") == "no_new_score"
+                and reasons == ["exact_reuse"]
+            )
+            # Only actual review producers qualify; review_required also wraps
+            # invalid inputs. Unknown or mixed failure reasons remain errors.
+            review = (
+                application_result.get("status") in {"first_run_unresolved", "review_required"}
+                and application_result.get("evaluation_status") == "review_required"
+                and isinstance(reasons, list) and bool(reasons)
+                and all(isinstance(reason, str) and reason in {
+                    "review_set", "coverage_loss", "unmapped_evidence",
+                    "series_rollover", "active_review_overlay", "incomplete_review_partition",
+                } for reason in reasons)
+            )
+            scored = action == "publish_current" or reused
+            _set_phase(scan_id, "interpret", "done" if scored else "blocked" if review else "error")
+            _set_phase(scan_id, "score", "done" if scored else "blocked")
             _set_phase(scan_id, "report", "running")
         if action == "retain_source":
             source_report_id = publication.get("source_report_id")

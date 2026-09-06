@@ -2881,6 +2881,104 @@ def test_scan_view_uses_structured_layout(monkeypatch):
     assert 'style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"' not in response.text
 
 
+@pytest.mark.parametrize("phase_state,retained", [("blocked", False), ("error", False), ("blocked", True), ("error", True)])
+def test_completed_scan_keeps_review_or_failure_notice_and_report_link(monkeypatch, phase_state, retained):
+    from web.app import app
+
+    status = {
+        "id": "current", "brand_name": "Example", "url": "https://example.test", "state": "done",
+        "report_id": "prior" if retained else "current", "score_unchanged": retained,
+        "phases": [
+            {"key": key, "label": key, "state": phase_state if key == "interpret" else "blocked" if key == "score" else "done"}
+            for key in ("capture", "interpret", "score", "report")
+        ],
+    }
+    monkeypatch.setattr("web.app.scan_status", lambda _scan: status.copy())
+    client = TestClient(app)
+    page = client.get("/scan/current", follow_redirects=False)
+    assert page.status_code == 200
+    assert f'href="/report/{status["report_id"]}"' in page.text
+    assert "No se pudo completar una evaluación SV9 válida" in page.text if phase_state == "error" else "La evaluación SV9 requiere revisión" in page.text
+    assert "Se conserva el score y el informe previamente aceptados" in page.text if retained else "No se generó un score nuevo" in page.text
+    api = client.get("/api/scan/current").json()
+    assert api["state"] == "done" and api["report_id"] == status["report_id"]
+    assert "if (renderCompletedResult(payload)) return;" in page.text
+
+
+def test_completed_valid_retained_scan_still_redirects(monkeypatch):
+    from web.app import app
+
+    monkeypatch.setattr("web.app.scan_status", lambda _scan: {
+        "id": "current", "state": "done", "report_id": "prior", "score_unchanged": True,
+        "phases": [{"key": key, "state": "done"} for key in ("capture", "interpret", "score", "report")],
+    })
+    response = TestClient(app).get("/scan/current", follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == "/report/prior"
+
+
+@pytest.mark.parametrize("phase_state,retained", [("blocked", False), ("error", False), ("blocked", True), ("error", True), ("done", False), ("done", True)])
+def test_completed_scan_client_executes_notice_or_redirect(monkeypatch, phase_state, retained):
+    import re
+    import shutil
+    import subprocess
+
+    from web.app import app
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required to execute the existing scanner client script")
+    terminal = {
+        "id": "current", "brand_name": "Example", "url": "https://example.test", "state": "done",
+        "report_id": "prior" if retained else "current", "score_unchanged": retained,
+        "phases": [
+            {"key": key, "label": key, "state": phase_state if key == "interpret" else "blocked" if key == "score" and phase_state != "done" else "done"}
+            for key in ("capture", "interpret", "score", "report")
+        ],
+        "acquisition_gate": {"state": "blocked", "can_continue": True, "issues": []},
+    }
+    monkeypatch.setattr("web.app.scan_status", lambda _scan: terminal | {"state": "running"})
+    page = TestClient(app).get("/scan/current")
+    script = next(script for script in re.findall(r"<script>(.*?)</script>", page.text, re.S) if "const scanId =" in script)
+    # Execute the actual rendered polling script with a bounded DOM/network shim.
+    # This proves control flow and DOM updates, not browser layout or certification.
+    harness = r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const [script, payload] = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const elements = new Map();
+function element(id) {
+  if (!elements.has(id)) elements.set(id, {hidden: true, textContent: '', href: '', innerHTML: '', addEventListener() {}});
+  return elements.get(id);
+}
+let fetches = 0;
+const context = {
+  document: {getElementById: element, querySelector: () => null, querySelectorAll: () => [], createElement: () => ({})},
+  window: {location: {href: ''}, requestAnimationFrame() {}},
+  performance: {now: () => 0},
+  fetch: async () => { fetches++; return {json: async () => payload}; },
+  setTimeout: () => { throw new Error('Terminal scan must not schedule another poll'); },
+};
+vm.runInNewContext(script, context);
+setImmediate(() => {
+  assert.equal(fetches, 1);
+  const state = payload.phases.find(phase => phase.key === 'interpret').state;
+  if (state === 'done') {
+    assert.equal(context.window.location.href, `/report/${payload.report_id}`);
+    assert.equal(element('scan-result').hidden, true);
+  } else {
+    assert.equal(context.window.location.href, '');
+    assert.equal(element('scan-result').hidden, false);
+    assert.equal(element('result-report').href, `/report/${payload.report_id}`);
+    assert.match(element('result-message').textContent, state === 'error' ? /No se pudo completar/ : /requiere revisión/);
+    assert.match(element('result-score-message').textContent, payload.score_unchanged ? /previamente aceptados/ : /No se generó un score nuevo/);
+  }
+  assert.equal(element('gate-actions').hidden, true);
+});
+"""
+    result = subprocess.run([node, "-e", harness], input=json.dumps([script, terminal]), text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+
+
 def test_scan_preview_renders_without_live_scan():
     from web.app import app
 

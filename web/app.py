@@ -2164,7 +2164,8 @@ def scan_view(request: Request, scan_id: str):
             return RedirectResponse(f"/report/{scan_id}", status_code=303)
         return RedirectResponse("/?error=Unknown scan", status_code=303)
     published_id = str(status.get("report_id") or "")
-    if status.get("state") == "done" and published_id and published_id != scan_id:
+    unresolved = any(phase.get("state") in {"blocked", "error"} for phase in status.get("phases", []))
+    if status.get("state") == "done" and not unresolved and published_id and published_id != scan_id:
         return RedirectResponse(f"/report/{published_id}", status_code=303)
     return templates.TemplateResponse(request, "scan.html.j2", {"scan": status})
 
