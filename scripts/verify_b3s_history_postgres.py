@@ -20,14 +20,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--database-url",
         help="Runtime PostgreSQL URL for this controlled invocation.",
     )
+    parser.add_argument(
+        "--target-profile",
+        choices=("b3s-production",),
+        help=(
+            "Require the production target profile. The profile only accepts "
+            "B3S_MIGRATION_DATABASE_URL; a URL argument is forbidden."
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    database_url = str(args.database_url or os.environ.get("B3S_DATABASE_URL", "")).strip()
+    if args.target_profile and args.database_url:
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "error": "target profiles require B3S_MIGRATION_DATABASE_URL",
+                }
+            )
+        )
+        return 2
+
+    database_environment = (
+        "B3S_MIGRATION_DATABASE_URL" if args.target_profile else "B3S_DATABASE_URL"
+    )
+    database_url = str(args.database_url or os.environ.get(database_environment, "")).strip()
     if not database_url:
-        print(json.dumps({"status": "error", "error": "B3S_DATABASE_URL is required"}))
+        print(json.dumps({"status": "error", "error": f"{database_environment} is required"}))
         return 2
 
     from src.history.repository import (
@@ -41,7 +63,24 @@ def main(argv: list[str] | None = None) -> int:
             database_url,
             schema_policy="verify_head",
         )
-        repository.verify_migration_head()
+        if args.target_profile == "b3s-production":
+            from scripts.b3s_production_database_target import (
+                b3s_production_migration_target,
+                require_b3s_production_connection,
+                validate_b3s_production_dsn,
+                without_libpq_environment,
+            )
+
+            target = b3s_production_migration_target()
+            validate_b3s_production_dsn(database_url, target=target)
+            with without_libpq_environment():
+                repository.verify_migration_head(
+                    connection_preflight=lambda connection: (
+                        require_b3s_production_connection(connection, target=target)
+                    )
+                )
+        else:
+            repository.verify_migration_head()
     except Exception:
         print(json.dumps({"status": "error", "error": "schema verification failed"}))
         return 1
