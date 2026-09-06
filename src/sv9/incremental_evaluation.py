@@ -233,23 +233,18 @@ def _assessment(plan, workset, judgments, sentinels):
     return result, candidate_judgments, candidate_sentinels
 def _pending(reason, calls=0, avoided=0, reused=0):
     return {"status": "pending", "reason_code": reason, "assessment": None, "candidate_tile_judgments": [], "candidate_component_sentinels": [], "captured_calls": [], "call_count": calls, "calls_avoided": avoided, "reused_tile_count": reused, "evaluated_tile_count": 0}
-def _run(plan, packets, responder):
-    workset = set(plan["tile_workset"])
-    judgments, sentinels, calls = {}, {}, []
-    for index, packet in enumerate(packets):
-        upstream = _upstream(plan, workset, judgments, sentinels) if packet["component_key"] == "coherencia" else []
-        request = _request(plan, packet, upstream)
-        try:
-            outcome = _outcome(responder(_canon(request), index))
-            if outcome is None or outcome.evaluation is None:
-                return None
-            raw = outcome.evaluation
-            _accept(plan, request, raw, workset, judgments, sentinels)
-            calls.append({"request": request, "evaluation": _evaluation(raw, True)})
-        except Exception:
-            return None
-    assessment, candidate_judgments, candidate_sentinels = _assessment(plan, workset, judgments, sentinels)
-    return {"status": "available", "reason_code": None, "assessment": assessment, "candidate_tile_judgments": candidate_judgments, "candidate_component_sentinels": candidate_sentinels, "captured_calls": calls, "call_count": len(calls), "calls_avoided": plan["calls_avoided"], "reused_tile_count": 80 - len(plan["tile_workset"]), "evaluated_tile_count": len(plan["tile_workset"])}
+def _run(plan, packets, responder, lookup_evaluation=None, persist_evaluation=None):
+    calls = [0]
+    def call(request, index):
+        calls[0] += 1
+        return responder(request, index)
+    progress = _run_components(plan, packets, plan["tile_workset"], call, calls, "ready", lookup_evaluation, persist_evaluation)
+    if progress["status"] == "invalid_input": _fail("invalid component request")
+    if progress["status"] != "partial": return None
+    judgments = {row["tile_id"]: row for row in progress["evaluated_tile_judgments"]}
+    sentinels = {row["component_key"]: row for row in progress["evaluated_component_sentinels"]}
+    assessment, candidate_judgments, candidate_sentinels = _assessment(plan, set(plan["tile_workset"]), judgments, sentinels)
+    return {"status": "available", "reason_code": None, "assessment": assessment, "candidate_tile_judgments": candidate_judgments, "candidate_component_sentinels": candidate_sentinels, "captured_calls": progress["captured_calls"], "call_count": calls[0], "calls_avoided": plan["calls_avoided"], "reused_tile_count": 80 - len(plan["tile_workset"]), "evaluated_tile_count": len(plan["tile_workset"])}
 
 
 def _partial_workset(_plan, healthy_tile_ids):
@@ -320,7 +315,7 @@ def _partial_progress(status, reason, workset, judgments, sentinels, calls, call
     }
 
 
-def _run_partial(plan, packets, workset, responder, call_count, coherencia_state, lookup_evaluation=None, persist_evaluation=None, *, structural_status="invalid_input", structural_reason="invalid_input", failure_status="provider_failure", failure_reason="provider_failure"):
+def _run_components(plan, packets, workset, responder, call_count, coherencia_state, lookup_evaluation=None, persist_evaluation=None, *, structural_status="invalid_input", structural_reason="invalid_input", failure_status="provider_failure", failure_reason="provider_failure"):
     workset, judgments, sentinels, calls = set(workset), {}, {}, []
     packets = [packet for packet in packets if packet["component_key"] != "coherencia"] + [packet for packet in packets if packet["component_key"] == "coherencia"]
     for index, packet in enumerate(packets):
@@ -365,7 +360,7 @@ def execute_partial_incremental_evaluation(workset_partition, resolved_evidence,
         calls[0] += 1
         try: return flow.evaluate_component(request)
         except Exception: return ComponentEvaluationOutcome.provider_failure()
-    return _run_partial(plan, packets, workset, call, calls, partition["coherencia_dependency"]["state"], lookup_evaluation, persist_evaluation)
+    return _run_components(plan, packets, workset, call, calls, partition["coherencia_dependency"]["state"], lookup_evaluation, persist_evaluation)
 
 
 def replay_partial_incremental_evaluation(workset_partition, resolved_evidence, captured_calls, evaluation_state="partial"):
@@ -389,7 +384,7 @@ def replay_partial_incremental_evaluation(workset_partition, resolved_evidence, 
             _fields(raw, frozenset({"request", "evaluation"}), "captured call")
             if raw["request"] != request: _fail("captured request does not match replay")
             return ComponentEvaluationOutcome.success(raw["evaluation"])
-        result = _run_partial(plan, replay_packets, workset, call, calls, partition["coherencia_dependency"]["state"], structural_status="invalid_replay", structural_reason="invalid_replay", failure_status="invalid_replay", failure_reason="invalid_replay")
+        result = _run_components(plan, replay_packets, workset, call, calls, partition["coherencia_dependency"]["state"], structural_status="invalid_replay", structural_reason="invalid_replay", failure_status="invalid_replay", failure_reason="invalid_replay")
         if result["status"] == "invalid_replay": return _partial_progress("invalid_replay", "invalid_replay", workset, {}, {}, [], calls[0])
         if evaluation_state == "provider_failure" and result["status"] == "partial":
             try:
@@ -404,17 +399,19 @@ def replay_partial_incremental_evaluation(workset_partition, resolved_evidence, 
     except Exception:
         return _partial_progress("invalid_replay", "invalid_replay", workset, {}, {}, [], calls[0])
 
-def execute_incremental_evaluation(plan, evidence_packets, flow):
+def execute_incremental_evaluation(plan, evidence_packets, flow, *, lookup_evaluation=None, persist_evaluation=None):
     calls, avoided, reused = [0], [0], [0]
     try:
         bound = _plan(plan); avoided[0] = bound["calls_avoided"]; reused[0] = 80 - len(bound["tile_workset"]); packets = _packets(bound, evidence_packets)
+        if lookup_evaluation is not None and not callable(lookup_evaluation): _fail("evaluation lookup is not callable")
+        if persist_evaluation is not None and not callable(persist_evaluation): _fail("evaluation persistence is not callable")
         def call(request, _index):
             calls[0] += 1
             try:
                 return flow.evaluate_component(request)
             except Exception:
                 return ComponentEvaluationOutcome.provider_failure()
-        result = _run(bound, packets, call)
+        result = _run(bound, packets, call, lookup_evaluation, persist_evaluation)
         return result or _pending("provider_failure", calls[0], avoided[0], reused[0])
     except Exception:
         return _pending("invalid_input", calls[0], avoided[0], reused[0])

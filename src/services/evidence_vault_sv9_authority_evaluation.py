@@ -133,12 +133,7 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
             if existing["authoritative_relation_witness"] != witness: return _outcome("review_required", plan, authority_ids, ["stale_authoritative_relation_witness"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id, partition=partition)
             if authority_ids and existing.get("id") == authority_ids["accepted_candidate_id"]: return _outcome("no_new_score", plan, authority_ids, ["exact_reuse"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id, partition=partition)
             return _outcome("candidate_available", plan, authority_ids, ["candidate_already_present"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id, partition=partition)
-    def lookup(request):
-        return repository.get_evidence_vault_sv9_evaluation_checkpoint_component_evaluation(source_scan_id, canonical_plan_fingerprint=request["plan_fingerprint"], canonical_request_fingerprint=request["canonical_request_fingerprint"], workspace_slug=workspace_slug)
-    def persist(_request, accepted, judgments, sentinel):
-        tiles = [row["tile_id"] for row in judgments] if sentinel is None else list(planner._COMPONENT_TILES[sentinel["component_key"]])
-        value = checkpoint.build_evidence_vault_sv9_evaluation_checkpoint(evaluation_input=evaluation_input, prior_authority_snapshot=authority_snapshot, current_series_fingerprint=plan["current_series_fingerprint"], canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], candidate_series_fingerprint=plan["candidate_series_fingerprint"], healthy_tile_ids=tiles, review_tile_ids=partition["review_partition"]["tile_ids"], pending_evidence=[{**row, "reason": "unmapped_evidence"} for row in partition["pending_evidence"]], non_authoritative_hints=evaluation_input["non_authoritative_hints"], component_evaluations=[accepted], evaluated_tile_judgments=judgments, evaluated_component_sentinels=[] if sentinel is None else [sentinel])
-        repository.append_evidence_vault_sv9_evaluation_checkpoint(source_scan_id, value, workspace_slug=workspace_slug)
+    lookup, persist = _checkpoint_callbacks(repository, source_scan_id, workspace_slug, evaluation_input, authority_snapshot, plan, partition["review_partition"]["tile_ids"], partition["pending_evidence"])
     try: result = evaluation.execute_partial_incremental_evaluation(partition, resolved, flow, lookup_evaluation=lookup, persist_evaluation=persist)
     except Exception: return _outcome("no_new_score", plan, authority_ids, ["repository_failure"], ignored, unmapped, signed_delta=signed, partition=partition)
     if result["status"] != "partial": return _outcome("review_required" if review else "no_new_score", plan, authority_ids, review + [str(result.get("reason_code") or "evaluation_incomplete")], ignored, unmapped, result, signed_delta=signed if review else None, partition=partition)
@@ -163,6 +158,16 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
     if stored["authoritative_relation_witness"] != witness: return _outcome("review_required", plan, authority_ids, ["stale_authoritative_relation_witness"], ignored, unmapped, result, stored, source_scan_id=source_scan_id, partition=partition)
     if not _replays(stored, reloaded, candidate, packets): return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, result, partition=partition)
     return _outcome("candidate_available", plan, authority_ids, [] if inserted else ["candidate_already_present"], ignored, unmapped, result, reloaded, source_scan_id=source_scan_id, partition=partition)
+def _checkpoint_callbacks(repository, source_scan_id, workspace_slug, evaluation_input, authority_snapshot, plan, review_tile_ids=(), pending_evidence=()):
+    def lookup(request):
+        return repository.get_evidence_vault_sv9_evaluation_checkpoint_component_evaluation(source_scan_id, canonical_plan_fingerprint=request["plan_fingerprint"], canonical_request_fingerprint=request["canonical_request_fingerprint"], workspace_slug=workspace_slug)
+    def persist(_request, accepted, judgments, sentinel):
+        tiles = [row["tile_id"] for row in judgments] if sentinel is None else list(planner._COMPONENT_TILES[sentinel["component_key"]])
+        value = checkpoint.build_evidence_vault_sv9_evaluation_checkpoint(evaluation_input=evaluation_input, prior_authority_snapshot=authority_snapshot, current_series_fingerprint=plan["current_series_fingerprint"], canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], candidate_series_fingerprint=plan["candidate_series_fingerprint"], healthy_tile_ids=tiles, review_tile_ids=list(review_tile_ids), pending_evidence=[{**row, "reason": "unmapped_evidence"} for row in pending_evidence], non_authoritative_hints=evaluation_input["non_authoritative_hints"], component_evaluations=[accepted], evaluated_tile_judgments=judgments, evaluated_component_sentinels=[] if sentinel is None else [sentinel])
+        repository.append_evidence_vault_sv9_evaluation_checkpoint(source_scan_id, value, workspace_slug=workspace_slug)
+    return lookup, persist
+
+
 def _text(value: Any) -> str:
     if type(value) is not str or not value.strip(): raise EvidenceVaultSv9AuthorityEvaluationError("text is invalid")
     return value.strip()

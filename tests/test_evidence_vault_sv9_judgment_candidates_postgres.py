@@ -277,7 +277,12 @@ def test_candidate_witness_check_rejects_invalid_payloads_and_row_payload_diverg
 def test_repository_fences_witnessed_candidate_append_and_invalid_readback(monkeypatch):
     repository, scan = _reset_repository(), "candidate-v2-base"; current = _operational(repository, scan)
     first, projection, evidence = _captured_candidate(monkeypatch, repository, scan, _series()); second, _, _ = _captured_candidate(monkeypatch, repository, scan, _series(prompt_version="v2")); stored, inserted = repository.append_evidence_vault_sv9_judgment_candidate(scan, first)
-    assert inserted and stored["authoritative_relation_witness"]["authoritative_relations"] == projection["authoritative_relations"] and len(stored["evidence_bindings"]) == 1 and repository.get_evidence_vault_sv9_judgment_candidate(scan, canonical_plan_fingerprint=first["canonical_plan_fingerprint"]) == stored
+    resolved = repository.resolve_evidence_vault_sv9_judgment_evidence(scan, [row["evidence_ref"] for row in evidence])["evidence"]
+    identities = {(row["evidence_ref"], row["evidence_fingerprint"]): row["evidence_record_id"] for row in resolved}
+    expected_bindings = [{"tile_id": item["tile_id"], "evidence_record_id": identities[(row["evidence_ref"], row["evidence_fingerprint"])], **row} for item in first["plan"]["items"] if item["tile_id"] in first["plan"]["tile_workset"] for row in item["evidence"]]
+    assert inserted and stored["evidence_bindings"] == expected_bindings
+    assert stored["authoritative_relation_witness"]["authoritative_relations"] == projection["authoritative_relations"]
+    assert repository.get_evidence_vault_sv9_judgment_candidate(scan, canonical_plan_fingerprint=first["canonical_plan_fingerprint"]) == stored
     current = _operational(repository, "candidate-v2-next", current)
     with pytest.raises(history.EvidenceVaultSv9AuthoritativeRelationStaleWitnessError): repository.append_evidence_vault_sv9_judgment_candidate(scan, second)
     assert repository.get_evidence_vault_sv9_judgment_candidate(scan, canonical_plan_fingerprint=second["canonical_plan_fingerprint"]) is None
