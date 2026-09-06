@@ -111,6 +111,7 @@ class _Repository:
         facts["authority"]["witness"] = {"canonical_memory_version": _hash(self.witness_seed), "adoption_event_id": f"00000000-0000-0000-0000-{self.witness_seed:012d}", "adoption_sequence": 1, "candidate_packet_fingerprint": _hash(self.witness_seed + 1), "request_fingerprint": _hash(self.witness_seed + 2)}
         if self.reopen: facts["authority"]["accepted"][0]["basis"][0].update(evidence_id=_hash(998), source_identity_id=_hash(999))
         if self.unmapped or self.hint_only: facts["authority"]["accepted"] = facts["authority"]["accepted"][:1]
+        if getattr(self, "empty_adopted_basis", False): facts["authority"]["accepted"] = []
         if self.hint_only: facts["evaluation_hint_seeds"] = [{"hint_id": "00000000-0000-0000-0000-000000000987", "tile_id": "M1", "component_key": "mission", "evidence_record_id": rows[1]["evidence_record_id"], "provenance_fingerprint": _hash(987)}]
         return project_evidence_vault_sv9_evaluation_input(repository=_FactsRepository(facts), source_scan_id=scan, workspace_slug=workspace)
 
@@ -195,8 +196,10 @@ class _SelectiveFlow(_Flow):
         )
 
 
-def test_first_baseline_assesses_unmapped_input_without_forcing_support_relations():
+@pytest.mark.parametrize("empty_basis", [False, True])
+def test_first_baseline_assesses_unmapped_input_without_forcing_support_relations(empty_basis):
     repo = _first_baseline(_Repository(records=(3, 9)))
+    repo.empty_adopted_basis = empty_basis
     flow = _SelectiveFlow()
     outcome = _run(repo, flow, current=(3, 9))
 
@@ -218,7 +221,7 @@ def test_first_baseline_assesses_unmapped_input_without_forcing_support_relation
         for row in candidate["candidate_tile_judgments"]
     )
     assert {row["evidence_ref"] for row in candidate["evidence_bindings"]} == {"evidence:3", "evidence:9"}
-    assert {row["evidence_ref"] for row in candidate["authoritative_relation_witness"]["authoritative_relations"]} == {"evidence:3"}
+    assert {row["evidence_ref"] for row in candidate["authoritative_relation_witness"]["authoritative_relations"]} == (set() if empty_basis else {"evidence:3"})
     assert outcome["trusted_irrelevant_evidence_count"] == 0
 
 
@@ -231,12 +234,14 @@ def _baseline_application(repo, flow, source="scan"):
     )
 
 
-def test_first_baseline_adoption_retry_publishes_and_recapture_retains_accepted_state():
+@pytest.mark.parametrize("empty_basis", [False, True])
+def test_first_baseline_adoption_retry_publishes_and_recapture_retains_accepted_state(empty_basis):
     from src.services.evidence_vault_sv9_authority_report import project_vault_authority_publication
     from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
     from web import scan_runner
 
     repo = _first_baseline(_ApplicationRepository(records=(3, 9)))
+    repo.empty_adopted_basis = empty_basis
     first = _baseline_application(repo, _SelectiveFlow())
     assert first["status"] == "authority_established"
     accepted = deepcopy(repo.authority)
@@ -261,11 +266,13 @@ def test_first_baseline_adoption_retry_publishes_and_recapture_retains_accepted_
 
 
 @pytest.mark.parametrize("failure", ("provider", "omitted_tile", "coherencia", "interrupted", "invalid_witness", "stale_witness"))
-def test_first_baseline_failed_complete_analysis_never_adopts_or_publishes_score(failure):
+@pytest.mark.parametrize("empty_basis", [False, True])
+def test_first_baseline_failed_complete_analysis_never_adopts_or_publishes_score(failure, empty_basis):
     from src.services.evidence_vault_sv9_authority_report import project_vault_authority_publication
     from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
 
     repo = _first_baseline(_ApplicationRepository(records=(3, 9)))
+    repo.empty_adopted_basis = empty_basis
     if failure.endswith("witness"): repo.get_evidence_vault_sv9_judgment_candidate = lambda *_args, **_kwargs: (_ for _ in ()).throw((EvidenceVaultSv9AuthoritativeRelationStaleWitnessError if failure == "stale_witness" else EvidenceVaultSv9AuthoritativeRelationWitnessError)("invalid"))
     flow = _SelectiveFlow(fail=10 if failure == "coherencia" else 2 if failure == "interrupted" else 1 if failure == "provider" else None, malformed=failure == "omitted_tile")
     result = _baseline_application(repo, flow)
@@ -279,12 +286,13 @@ def test_first_baseline_failed_complete_analysis_never_adopts_or_publishes_score
         assert len(resumed.calls) == 9 and len(repo.checkpoint_appends) == 10
 
 
-@pytest.mark.parametrize("review_input", ("hint_only", "reopen"))
-def test_first_baseline_with_unresolved_review_input_cannot_establish_authority(review_input):
+@pytest.mark.parametrize(("review_input", "empty_basis"), [("hint_only", False), ("reopen", False), ("hint_only", True)])
+def test_first_baseline_with_unresolved_review_input_cannot_establish_authority(review_input, empty_basis):
     from src.services.evidence_vault_sv9_authority_report import project_vault_authority_publication
     from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
 
     repo = _first_baseline(_ApplicationRepository(records=(3, 9)))
+    repo.empty_adopted_basis = empty_basis
     setattr(repo, review_input, True)
     for _ in range(2):
         result = _baseline_application(repo, _SelectiveFlow())
@@ -294,11 +302,13 @@ def test_first_baseline_with_unresolved_review_input_cannot_establish_authority(
 
 
 @pytest.mark.parametrize("invalid", ("witness", "bindings", "evaluation", "source"))
-def test_first_baseline_exact_replay_rejects_unproven_inputs(invalid):
+@pytest.mark.parametrize("empty_basis", [False, True])
+def test_first_baseline_exact_replay_rejects_unproven_inputs(invalid, empty_basis):
     from src.services.evidence_vault_sv9_authority_report import project_vault_authority_publication
     from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
 
     repo = _first_baseline(_ApplicationRepository(records=(3, 9)))
+    repo.empty_adopted_basis = empty_basis
     assert _baseline_application(repo, _SelectiveFlow())["status"] == "authority_established"
     writes = (repo.append_calls, list(repo.mutations))
     if invalid == "witness":

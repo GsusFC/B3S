@@ -220,6 +220,17 @@ def test_candidate_witness_migration_has_exact_json_types_and_row_alignment():
     assert ") IS TRUE) NOT VALID;" in sql
 
 
+def test_empty_witness_migration_preserves_enforcement_and_binds_all_plan_origins():
+    sql = Path("src/history/migrations/035_evidence_vault_sv9_empty_relation_witness.sql").read_text()
+    assert sql.index("ADD CONSTRAINT") < sql.index("VALIDATE CONSTRAINT") < sql.index("DROP CONSTRAINT") < sql.index("RENAME CONSTRAINT")
+    assert ") IS TRUE) NOT VALID;" in sql
+    assert "strict $[*] ? (@.type() != \"object\")" in sql
+    assert "candidate_payload->'plan'->'delta_projections' <> '[]'::jsonb" in sql
+    for key in ("capture_id", "capture_fingerprint", "operation_id", "operation_fingerprint"):
+        assert f"!= ${key}" in sql
+    assert "= capture_id::text" in sql and "= operation_plan_id::text" in sql
+
+
 # fmt: off
 @pytest.mark.skipif(not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1", reason="requires disposable PostgreSQL")
 def test_candidate_witness_check_rejects_invalid_payloads_and_row_payload_divergence():
@@ -266,6 +277,18 @@ def test_candidate_witness_check_rejects_invalid_payloads_and_row_payload_diverg
         if valid: insert(index, context, source_scan, payload); continue
         payload = payload | {"canonical_plan_fingerprint": f"{index:064x}"}
         rejected(index, context, source_scan, payload)
+    empty = deepcopy(v2); empty["canonical_plan_fingerprint"] = "a" * 64
+    origins = {"capture_origin": capture, "operation_origin": operation}
+    empty["authoritative_relation_witness"] |= origins | {"authoritative_relations": []}
+    empty["plan"]["delta_projections"] = [deepcopy(origins), deepcopy(origins)]
+    for value in (None, [], [[]], [[origins]], [origins, []], [origins, {}]):
+        rejected(200, v2_source, v2_scan, malformed(empty, ("plan", "delta_projections"), value))
+    for origin, fingerprint in (("capture_origin", "capture_fingerprint"), ("operation_origin", "operation_fingerprint")):
+        for value in (None, {}, [], [origins[origin]], origins[origin] | {"extra": True}):
+            rejected(201, v2_source, v2_scan, malformed(empty, ("authoritative_relation_witness", origin), value))
+        rejected(202, v2_source, v2_scan, malformed(empty, ("authoritative_relation_witness", origin, fingerprint), "f" * 64))
+        rejected(203, v2_source, v2_scan, malformed(empty, ("plan", "delta_projections", 1, origin, fingerprint), "f" * 64))
+    insert(204, v2_source, v2_scan, empty)
 # fmt: on
 
 

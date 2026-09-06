@@ -258,6 +258,7 @@ def test_witness_has_exact_v1_shape_and_rejects_relation_or_origin_tampering():
     projection, _ = _project(_facts(count=2)); legacy = {key: projection[key] for key in ("status", "reason_codes", "authoritative_relations", "operational_witness", "projection_fingerprint")}
     legacy["projection_fingerprint"] = canonical_fingerprint("evidence-vault-sv9-authoritative-relation-projection-v1", {"source_scan_id": "scan-1", "capture_origin": projection["authoritative_relations"][0]["capture_origin"], "operation_origin": projection["authoritative_relations"][0]["operation_origin"], "operational_witness": projection["operational_witness"], "authoritative_relations": projection["authoritative_relations"]})
     witness = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id="scan-1", projection=projection); legacy_witness = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id="scan-1", projection=legacy)
+    assert witness == legacy_witness == build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id="scan-1", projection=projection, **{key: projection["authoritative_relations"][0][key] for key in ("capture_origin", "operation_origin")})
     assert validate_evidence_vault_sv9_authoritative_relation_witness(witness) == witness and validate_evidence_vault_sv9_authoritative_relation_witness(legacy_witness) == legacy_witness
     assert set(witness) == {"schema_version", "source_scan_id", "operational_witness", "authoritative_relations", "projection_fingerprint", "witness_fingerprint"}; invalid = deepcopy(projection); invalid["authority_continuity"][0]["continuity_state"] = "changed"; assert pytest.raises(EvidenceVaultSv9AuthoritativeRelationWitnessError, lambda: build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id="scan-1", projection=invalid)); partial = _distinct_facts(); partial["evidence"].pop(); partial_projection, _ = _project(partial); assert pytest.raises(EvidenceVaultSv9AuthoritativeRelationWitnessError, lambda: build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id="scan-1", projection=partial_projection))
     for path in (("authoritative_relations", 0, "evidence_ref"), ("operational_witness", "canonical_memory_version")):
@@ -265,6 +266,30 @@ def test_witness_has_exact_v1_shape_and_rejects_relation_or_origin_tampering():
         for key in path[:-1]: target = target[key]
         target[path[-1]] = "other"
         with pytest.raises(EvidenceVaultSv9AuthoritativeRelationWitnessError): validate_evidence_vault_sv9_authoritative_relation_witness(tampered)
+
+
+def test_empty_adopted_witness_preserves_standalone_provenance_and_context_binding():
+    facts = _facts(); facts["authority"]["accepted"] = []
+    projection, _ = _project(facts)
+    source = facts["source"]
+    origins = {"capture_origin": {key: source[key] for key in ("capture_id", "capture_fingerprint")}, "operation_origin": {"operation_id": source["operation_plan_id"], "operation_fingerprint": source["operation_fingerprint"]}}
+    witness = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id="scan-1", projection=projection, **origins)
+    assert witness["authoritative_relations"] == []
+    assert all(witness[key] == value for key, value in origins.items())
+    assert validate_evidence_vault_sv9_authoritative_relation_witness(witness) == witness
+    candidate = {"schema_version": "evidence-vault-sv9-judgment-candidate-v2", "authoritative_relation_witness": witness}
+    history._sv9_judgment_candidate_witness(candidate, source)
+    with pytest.raises(EvidenceVaultSv9AuthoritativeRelationWitnessError):
+        history._sv9_judgment_candidate_witness(candidate, source | {"capture_id": _id("other")})
+    for path, value in ((["capture_origin", "capture_id"], _id("other")), (["operation_origin", "operation_fingerprint"], _sha("other")), (["capture_origin", "extra"], "extra"), (["operational_witness", "adoption_event_id"], _id("other"))):
+        tampered = deepcopy(witness); tampered[path[0]][path[1]] = value
+        with pytest.raises(EvidenceVaultSv9AuthoritativeRelationWitnessError):
+            validate_evidence_vault_sv9_authoritative_relation_witness(tampered)
+    with pytest.raises(EvidenceVaultSv9AuthoritativeRelationWitnessError):
+        build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id="scan-1", projection=projection)
+    facts["authority"] = None
+    unavailable, _ = _project(facts)
+    assert unavailable["reason_codes"] == ["no_operational_authority"]
 
 
 def test_evaluation_input_loads_one_snapshot_and_binds_full_partition():
