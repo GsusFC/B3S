@@ -231,3 +231,46 @@ def test_partial_executor_detaches_persistence_material_before_coherencia():
     assert flow.calls == expected_flow.calls and result["captured_calls"] == expected["captured_calls"]
     assert result["evaluated_tile_judgments"] == expected["evaluated_tile_judgments"]
     assert result["evaluated_component_sentinels"] == expected["evaluated_component_sentinels"]
+
+
+@pytest.mark.parametrize("mode", ["ok", "not_detected"])
+def test_full_executor_recovers_accepted_components_before_coherencia(mode):
+    plan = ip.build_incremental_plan([], [], _series()); packets = _packets(plan)
+    rows, persist = _persisted(); failed = _Flow("second_failure")
+    result = ie.execute_incremental_evaluation(plan, packets, failed, persist_evaluation=persist)
+    assert result["status"] == "pending" and result["assessment"] is None and len(rows) == 1 and len(failed.calls) == 2
+    if mode == "not_detected":
+        rows.clear(); ie.execute_incremental_evaluation(plan, packets, _Flow(mode), persist_evaluation=persist)
+        rows[:] = rows[:1]
+    clean = ie.execute_incremental_evaluation(plan, packets, _Flow(mode))
+    resumed = _Flow(mode); result = ie.execute_incremental_evaluation(plan, packets, resumed, lookup_evaluation=_lookup(rows), persist_evaluation=persist)
+    assert result["status"] == "available" and result["call_count"] == len(resumed.calls) == 9 and len(rows) == 10
+    assert result["captured_calls"] == clean["captured_calls"] and result["assessment"] == clean["assessment"]
+    assert result["candidate_tile_judgments"] == clean["candidate_tile_judgments"] and result["candidate_component_sentinels"] == clean["candidate_component_sentinels"]
+
+
+def test_full_executor_reaccepts_recovered_output_and_stops_before_invalid_progress():
+    plan = ip.build_incremental_plan([], [], _series()); packets = _packets(plan)
+    rows, persist = _persisted(); ie.execute_incremental_evaluation(plan, packets, _Flow("second_failure"), persist_evaluation=persist)
+    raw = rows[0][1]
+    tampered = ie.build_component_evaluation(component_key=raw["component_key"], series_fingerprint=raw["series_fingerprint"], request_fingerprint=_hash(999), status=raw["status"], tile_results=raw["tile_results"])
+    flow = _Flow(); result = ie.execute_incremental_evaluation(plan, packets, flow, lookup_evaluation=lambda _request: tampered)
+    assert result["status"] == "pending" and result["assessment"] is None and result["captured_calls"] == [] and not flow.calls
+    flow = _Flow(); result = ie.execute_incremental_evaluation(plan, packets, flow, persist_evaluation=lambda *_args: (_ for _ in ()).throw(RuntimeError("persist")))
+    assert result["status"] == "pending" and result["assessment"] is None and result["captured_calls"] == [] and len(flow.calls) == 1
+
+
+def test_full_executor_detaches_checkpoint_material_from_canonical_requests():
+    plan = ip.build_incremental_plan([], [], _series()); packets = _packets(plan)
+    rows, persist = _persisted(); clean = ie.execute_incremental_evaluation(plan, packets, _Flow(), persist_evaluation=persist)
+    def lookup(request):
+        value = _lookup(rows)(request)
+        request["canonical_request_fingerprint"] = _hash(999); request["requested_tiles"].clear()
+        return value
+    flow = _Flow(); result = ie.execute_incremental_evaluation(plan, packets, flow, lookup_evaluation=lookup)
+    assert not flow.calls and result["captured_calls"] == clean["captured_calls"] and result["assessment"] == clean["assessment"]
+    def mutate(request, evaluation, judgments, sentinel):
+        request.clear(); evaluation.clear(); judgments.clear()
+        if sentinel is not None: sentinel.clear()
+    changed = ie.execute_incremental_evaluation(plan, packets, _Flow(), persist_evaluation=mutate)
+    assert changed["captured_calls"] == clean["captured_calls"] and changed["assessment"] == clean["assessment"]
