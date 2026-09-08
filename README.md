@@ -51,6 +51,16 @@ PYTHONPATH=. .venv/bin/python scripts/sv9_flow_snapshot_eval.py \
 
 `http://127.0.0.1:8000` — submit a brand URL, watch the run (phases plus per-source acquisition steps), then read the evidence-first report: score, components, per-block coverage (`evidence / implied / verified absent / insufficient`), cited snippets, absence records, and acquisition attempts. Every stored report lands in the home list. When `B3S_DATABASE_URL` is configured, PostgreSQL serves the historical read model and mirrors completed reports; JSON files under `data/reports/` (`B3S_REPORTS_DIR` overrides) remain the compatibility writer and rollback fallback until the scan lifecycle cutover.
 
+The B3S web runtime admits one heavy scan at a time per process, including exact
+resume. While occupied, web submissions show a busy message; API submissions
+retain the existing `503 scan_start_failed` response and failed-job/idempotency
+behavior (a retry needs a new key). No background queue is created. Admission is
+held until execution actually exits, including after cancellation, and released
+on completion, failure, or startup failure. This bounds the current single-worker
+deployment, not multiple processes or machines. The separate
+`BRAND3_ENVIRONMENT=vault` runtime retains its existing admission behavior.
+
+
 ## Scanner API v1
 
 B3S exposes a versioned asynchronous API for product integrations:

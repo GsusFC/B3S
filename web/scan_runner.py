@@ -59,6 +59,9 @@ _EXACT_RESUME_FAILURE_KINDS = frozenset({"busy", "operation_invalid", "report_in
 def _acquire_scan_owner_locked(scan_id: str, kind: str) -> _ScanOwner | None:
     if kind not in {"ordinary", "exact_resume"}: raise ValueError("scan owner kind is invalid")
     if scan_id in _SCAN_OWNERS: return None
+    # The single-process B3S web runtime cannot safely overlap heavy scans.
+    if os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() != "vault" and _SCAN_OWNERS:
+        return None
     owner = _ScanOwner(scan_id, kind, object())
     _SCAN_OWNERS[scan_id] = owner
     return owner
@@ -110,6 +113,9 @@ def start_scan(
     for _attempt in range(8):
         candidate = str(scan_id if explicit else new_scan_id())
         with _LOCK:
+            if (os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() != "vault"
+                    and _SCAN_OWNERS and candidate not in _SCANS):
+                raise ValueError("A scan is already in progress. Please try again when it finishes.")
             owner = None if candidate in _SCANS else _acquire_scan_owner_locked(candidate, "ordinary")
             if owner is not None:
                 created_status = {"id": candidate, "url": url, "brand_name": brand_name, "state": "running", "phase": "capture", "phases": [{"key": key, "label": label, "state": "pending"} for key, label in _PHASES], "acquisition": [], "acquisition_gate": {"state": "pending", "issues": [], "warnings": [], "fallbacks": []}, "allow_degraded_fallback": bool(allow_degraded_fallback), "error": None, "error_code": None, "started_at": started_at, "completed_at": None}
