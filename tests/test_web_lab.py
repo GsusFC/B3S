@@ -3976,3 +3976,125 @@ def test_report_view_does_not_instantiate_llm_analyzer(monkeypatch):
     assert "Interpretación de la evidencia" in response.text
     assert "Misión detectada." in response.text
     assert '<p class="card-verdict">Misión detectada.</p>' in response.text
+
+
+@pytest.fixture
+def bounded_scan_runner(monkeypatch):
+    from web import scan_runner
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "production")
+    for name in ("_SCANS", "_SCAN_EVENTS", "_SCAN_OWNERS"):
+        monkeypatch.setattr(scan_runner, name, {})
+    monkeypatch.setattr(scan_runner, "_VAULT_ACTIVATIONS", set())
+    monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda *a, **kw: None)
+    monkeypatch.setattr(scan_runner, "threading", SimpleNamespace(Event=scan_runner.threading.Event, Thread=lambda **kw: SimpleNamespace(start=lambda: None)))
+    return scan_runner
+
+
+def test_scan_admission_race(bounded_scan_runner):
+    from threading import Barrier
+    runner = bounded_scan_runner
+    barrier = Barrier(8)
+    def submit(index):
+        barrier.wait(timeout=5)
+        try:
+            return runner.start_scan("https://example.com", scan_id=f"race-{index}")
+        except ValueError as exc:
+            assert "already in progress" in str(exc)
+            return None
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(submit, range(8)))
+    assert len([r for r in results if r]) == 1
+    assert len(runner._SCANS) == len(runner._SCAN_OWNERS) == 1
+
+
+@pytest.mark.parametrize("kind", ["ordinary", "exact_resume"])
+def test_scan_admission_includes_resume(bounded_scan_runner, kind):
+    runner = bounded_scan_runner
+    owner = runner._acquire_scan_owner("held", kind)
+    assert owner is not None
+    assert runner._acquire_scan_owner("resume", "exact_resume") is None
+    with pytest.raises(ValueError, match="already in progress"):
+        runner.start_scan("https://example.com", scan_id="new")
+    assert not runner._SCANS
+    assert runner._release_scan_owner(owner)
+    assert runner.start_scan("https://example.com", scan_id="new") == "new"
+
+
+def test_scan_admission_preserves_vault(bounded_scan_runner, monkeypatch):
+    runner = bounded_scan_runner
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    assert runner._acquire_scan_owner("resume", "exact_resume") is not None
+    assert runner.start_scan("https://example.com", scan_id="one") == "one"
+    assert runner.start_scan("https://example.com", scan_id="two") == "two"
+
+
+@pytest.mark.parametrize("failure", ["persist", "thread"])
+def test_scan_admission_start_rollback(bounded_scan_runner, monkeypatch, failure):
+    runner = bounded_scan_runner
+    def fail(*a, **kw):
+        raise RuntimeError("startup failed")
+    with monkeypatch.context() as patch:
+        if failure == "persist":
+            patch.setattr(runner, "_persist_scan_status", fail)
+        else:
+            patch.setattr(runner.threading, "Thread", lambda **kw: SimpleNamespace(start=fail))
+        with pytest.raises(RuntimeError, match="startup failed"):
+            runner.start_scan("https://example.com", scan_id="failed")
+    assert not runner._SCAN_OWNERS and not runner._SCANS and not runner._SCAN_EVENTS
+    assert runner.start_scan("https://example.com", scan_id="next") == "next"
+
+
+@pytest.mark.parametrize("outcome", ["done", "error", "cancelled"])
+def test_scan_admission_release_after_runner_exit(bounded_scan_runner, monkeypatch, outcome):
+    from src import config
+    runner = bounded_scan_runner
+    runner.start_scan("https://example.com", scan_id="first")
+    owner = runner._SCAN_OWNERS["first"]
+    monkeypatch.setattr(config, "BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SHADOW_ENABLED", False)
+    def capture(*args):
+        if outcome == "error":
+            raise RuntimeError("capture failed")
+        runner._SCANS["first"]["state"] = outcome
+        with pytest.raises(ValueError, match="already in progress"):
+            runner.start_scan("https://example.com", scan_id="too-early")
+        return {}
+    monkeypatch.setattr(runner, "_capture_snapshot", capture)
+    monkeypatch.setattr(runner, "_scan_cancelled", lambda scan_id: True)
+    runner._run("first", "https://example.com", "Example", False, owner)
+    assert runner._SCANS["first"]["state"] == outcome
+    assert not runner._SCAN_OWNERS
+    assert runner.start_scan("https://example.com", scan_id="next") == "next"
+
+
+def test_scan_admission_web_feedback(bounded_scan_runner):
+    from urllib.parse import parse_qs, urlparse
+    from web.app import app
+    bounded_scan_runner.start_scan("https://example.com", scan_id="held")
+    response = TestClient(app).post("/scan", data={"url": "https://example.com"}, follow_redirects=False)
+    assert response.status_code == 303
+    assert "already in progress" in parse_qs(urlparse(response.headers["location"]).query)["error"][0]
+    assert list(bounded_scan_runner._SCANS) == ["held"]
+
+
+def test_scan_admission_api_marks_rejected_job_failed(bounded_scan_runner, monkeypatch, tmp_path):
+    from web.api_v1 import service
+    from web.api_v1.errors import ApiError
+    from src.storage.sqlite_store import SQLiteStore
+
+    runner = bounded_scan_runner
+    runner.start_scan("https://example.com", scan_id="held")
+    database_path = tmp_path / "admission.sqlite"
+    monkeypatch.setattr(service, "BRAND3_DB_PATH", database_path)
+    monkeypatch.setattr(service, "new_scan_id", lambda: "rejected")
+    with pytest.raises(ApiError) as caught:
+        service.create_scan_job({"url": "https://example.com"}, client_id="test", idempotency_key="busy-test")
+    assert caught.value.status_code == 503
+    assert caught.value.code == "scan_start_failed"
+    store = SQLiteStore(database_path)
+    try:
+        status = store.get_scanner_job_status("rejected")
+        assert status["state"] == "error"
+        assert status["error_code"] == "scan_start_failed"
+    finally:
+        store.close()
+    assert list(runner._SCANS) == ["held"]
