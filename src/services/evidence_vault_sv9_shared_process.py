@@ -554,7 +554,10 @@ class CoreFlowSv9StrictComponentAdapter:
             )
 
     def _cumulative_llm_usage(self) -> dict[str, Any]:
-        from scripts.sv9_flow_sv9_shadow_eval import _llm_usage_payload
+        from scripts.sv9_flow_sv9_shadow_eval import (
+            _llm_usage_payload,
+            _llm_usage_summary,
+        )
 
         current = _llm_usage_payload(
             interpretation_llm=self._interpretation_llm,
@@ -562,6 +565,8 @@ class CoreFlowSv9StrictComponentAdapter:
             evaluator_llm=self._evaluator_llm,
             reasoning_llm=self._reasoning_llm,
         )
+        if self._reasoning_llm is None:
+            current["roles"]["sv9_reasoning"] = _llm_usage_summary(None)
         return _merge_cumulative_llm_usage(
             self._restored_llm_usage,
             current,

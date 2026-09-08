@@ -500,6 +500,15 @@ def test_shared_analysis_candidate_append_is_atomic_immutable_and_readable(monke
     _operational(repository, scan)
     candidate, _, _ = _captured_candidate(monkeypatch, repository, scan, _shared_series())
     payload = _shared_analysis(candidate, scan)
+    payload["analysis_payload"]["sv9"]["editorial"] = {
+        "status": "attached",
+        "mode": "v3_1_structured",
+        "requested_components": ["mission"],
+        "message_components": ["mission"],
+        "executive_reading": True,
+        "structured_schema_version": "sv9-editorial-v3.1",
+        "structured_components": ["mission"],
+    }
 
     with pytest.raises(
         history.EvidenceVaultSv9JudgmentCandidateError,
@@ -537,6 +546,30 @@ def test_shared_analysis_candidate_append_is_atomic_immutable_and_readable(monke
         match="shared analysis payload is invalid",
     ):
         repository.append_evidence_vault_sv9_judgment_candidate(scan, candidate, shared_analysis_payload=wrong_brand)
+
+    unexpected_sv9_sibling = deepcopy(payload)
+    unexpected_sv9_sibling["analysis_payload"]["sv9"]["unexpected"] = {}
+    with pytest.raises(
+        history.EvidenceVaultSv9JudgmentCandidateError,
+        match="shared analysis payload is invalid",
+    ):
+        repository.append_evidence_vault_sv9_judgment_candidate(
+            scan,
+            candidate,
+            shared_analysis_payload=unexpected_sv9_sibling,
+        )
+
+    invalid_editorial = deepcopy(payload)
+    invalid_editorial["analysis_payload"]["sv9"]["editorial"] = []
+    with pytest.raises(
+        history.EvidenceVaultSv9JudgmentCandidateError,
+        match="shared analysis payload is invalid",
+    ):
+        repository.append_evidence_vault_sv9_judgment_candidate(
+            scan,
+            candidate,
+            shared_analysis_payload=invalid_editorial,
+        )
 
     missing_owner = deepcopy(payload)
     missing_owner["component_provenance"].pop("mission")

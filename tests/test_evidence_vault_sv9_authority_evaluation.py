@@ -674,6 +674,45 @@ def test_real_core_adapter_resumes_frozen_flow_and_completed_component():
     )
 
 
+def test_real_core_adapter_finalizes_from_all_checkpoints_without_new_providers():
+    repo = _core_repository()
+    first_harness = _CoreHarness()
+    first = _run(
+        repo,
+        _core_adapter(first_harness),
+        current=(9,),
+        series=_core_series(),
+    )
+    assert first["status"] == "candidate_available"
+    assert len(repo.checkpoints) == len(repo.shared_processes) == 10
+    last_usage = deepcopy(
+        max(
+            repo.shared_processes.values(),
+            key=lambda value: value["llm_usage"]["totals"]["provider_calls"],
+        )["llm_usage"]
+    )
+    repo.candidates.clear()
+    repo.shared_analysis_payloads.clear()
+
+    resumed_harness = _CoreHarness()
+    resumed = _run(
+        repo,
+        _core_adapter(resumed_harness),
+        current=(9,),
+        series=_core_series(),
+    )
+
+    assert resumed["status"] == "candidate_available"
+    assert resumed_harness.flow_factory_calls == []
+    assert resumed_harness.tile_factory_calls == []
+    assert resumed_harness.flow_calls == []
+    assert resumed_harness.tile_calls == []
+    assert (
+        repo.shared_analysis_payloads[-1]["analysis_payload"]["llm_usage"]
+        == last_usage
+    )
+
+
 def test_real_core_adapter_projects_source_policy_for_strict_candidate_but_keeps_raw_replay():
     repo = _core_repository()
     harness = _CoreHarness(

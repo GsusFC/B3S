@@ -12379,9 +12379,18 @@ def _prepare_sv9_shared_analysis_snapshot(
             source_run_id=str(context["source_scan_id"]),
         )
         derived_summary = _result_summary(derived.to_dict())
-        stored_summary = {key: value for key, value in sv9.items() if key != "result"}
+        optional_sv9_fields = {"editorial"}
+        required_sv9_fields = set(derived_summary) | {"result"}
+        if "editorial" in sv9 and type(sv9["editorial"]) is not dict:
+            raise ValueError("analysis editorial")
+        stored_summary = {
+            key: value
+            for key, value in sv9.items()
+            if key not in {"result", *optional_sv9_fields}
+        }
         if (
-            set(sv9) != set(derived_summary) | {"result"}
+            not required_sv9_fields <= set(sv9)
+            or not set(sv9) <= required_sv9_fields | optional_sv9_fields
             or stored_summary != derived_summary
             or _result_summary(result) != derived_summary
         ):
