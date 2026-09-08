@@ -50,6 +50,9 @@
           <a href="/report/{{ row.id }}">{{ row.brand_name or row.id }}</a>
           {% endif %}
           <span class="brand-cell-url">{{ row.url }}</span>
+          {% if row.vault_current_status == "unavailable" %}
+          <span class="muted">Vault: autoridad no disponible; no es actual</span>
+          {% endif %}
         </div>
       </td>
       <td class="mono">

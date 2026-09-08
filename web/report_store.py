@@ -400,14 +400,17 @@ def domain_key(value: str) -> str:
     return host.removeprefix("www.")
 
 
-def list_reports_for_domain(domain: str) -> list[dict[str, Any]]:
-    """Return full reports matching a normalized domain, newest first."""
+def _report_history_for_domain(
+    domain: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Load the merged history and its PostgreSQL source once."""
 
     target = domain_key(domain)
     if not target:
-        return []
+        return [], []
 
     matches_by_id: dict[str, dict[str, Any]] = {}
+    postgres_reports: list[dict[str, Any]] = []
     repository = _postgres_repository()
     if repository is not None:
         try:
@@ -416,6 +419,7 @@ def list_reports_for_domain(domain: str) -> list[dict[str, Any]]:
                 report_id = str(report.get("id") or "")
                 if report_id:
                     matches_by_id[report_id] = report
+                    postgres_reports.append(report)
         except (ReportConflictError, ScannerReportAssessmentError):
             raise
         except Exception:
@@ -437,7 +441,107 @@ def list_reports_for_domain(domain: str) -> list[dict[str, Any]]:
                 matches_by_id.setdefault(report_id, report)
     matches = list(matches_by_id.values())
     matches.sort(key=lambda report: str(report.get("created_at") or ""), reverse=True)
-    return matches
+    postgres_reports.sort(
+        key=lambda report: str(report.get("created_at") or ""),
+        reverse=True,
+    )
+    return matches, postgres_reports
+
+
+def list_reports_for_domain(domain: str) -> list[dict[str, Any]]:
+    """Return full reports matching a normalized domain, newest first."""
+
+    return _report_history_for_domain(domain)[0]
+
+
+def brand_navigation_history_for_domain(
+    domain: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return merged history plus its PostgreSQL source for one brand view."""
+
+    return _report_history_for_domain(domain)
+
+
+def vault_accepted_report_for_domain(
+    domain: str,
+    *,
+    reports: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Resolve the report bound to Vault's accepted SV9 authority.
+
+    Vault must not infer its current report from temporal history.  The
+    authority projection is the source of truth; a report is usable only when
+    its immutable scan id, domain, and validated assessment identity all agree
+    with the accepted candidate.  Any unavailable or inconsistent input is a
+    deliberate fail-closed result.
+    """
+
+    target = domain_key(domain)
+    if not target:
+        return None
+    repository = _postgres_repository()
+    if repository is None:
+        return None
+    try:
+        authority = repository.get_evidence_vault_sv9_judgment_authority(
+            target,
+            workspace_slug="b3s",
+        )
+    except Exception:
+        _LOG.exception(
+            "failed to load Vault SV9 authority for report navigation",
+            extra={"domain": target},
+        )
+        return None
+    if not isinstance(authority, Mapping):
+        return None
+    candidate = authority.get("accepted_candidate")
+    authority_assessment = authority.get("assessment")
+    if not isinstance(candidate, Mapping) or not isinstance(
+        authority_assessment, Mapping
+    ):
+        return None
+    source_scan_id = str(candidate.get("source_scan_id") or "")
+    candidate_assessment_fingerprint = str(
+        candidate.get("assessment_fingerprint") or ""
+    )
+    authority_assessment_fingerprint = str(
+        authority_assessment.get("assessment_fingerprint") or ""
+    )
+    if not source_scan_id or not candidate_assessment_fingerprint:
+        return None
+    if candidate_assessment_fingerprint != authority_assessment_fingerprint:
+        return None
+
+    history = reports if reports is not None else list_reports_for_domain(target)
+    report = next(
+        (
+            item
+            for item in history
+            if isinstance(item, Mapping)
+            and str(item.get("id") or "") == source_scan_id
+        ),
+        None,
+    )
+    if report is None or domain_key(str(report.get("url") or "")) != target:
+        return None
+    try:
+        assessment = assessment_projection_from_report(report, required=True)
+    except Exception:
+        _LOG.exception(
+            "accepted Vault report failed assessment validation",
+            extra={"domain": target, "source_scan_id": source_scan_id},
+        )
+        return None
+    if (
+        assessment.get("availability") != "available"
+        or assessment.get("assessment_fingerprint")
+        != candidate_assessment_fingerprint
+        or authority.get("score") != assessment.get("sv9_score")
+        or authority_assessment.get("sv9_score") != assessment.get("sv9_score")
+    ):
+        return None
+    return dict(report)
 
 
 def classified_reports_for_domain(domain: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -594,11 +698,14 @@ def evidence_claim_memory_for_domain(domain: str) -> dict[str, Any]:
 
 def evidence_claim_tile_ledger_for_domain(
     domain: str,
+    *,
+    reports: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return the current persisted mapping projection when fingerprints agree."""
 
     mode = evidence_claim_tile_ledger_mode()
-    reports = list_reports_for_domain(domain)
+    if reports is None:
+        reports = list_reports_for_domain(domain)
     derived = build_evidence_claim_tile_ledger(reports, mode=mode)
     if mode != "shadow":
         return {
@@ -703,15 +810,22 @@ def _unavailable_reviewed_claim_tile_memory(
 
 def evidence_scoring_memory_preview_for_domain(
     domain: str,
+    *,
+    reports: list[dict[str, Any]] | None = None,
+    postgres_reports: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return candidate and reviewed scoring memory from durable history."""
 
     repository = _postgres_repository()
     if repository is not None:
         try:
-            stored = repository.get_evidence_scoring_memory_preview(
-                domain
-            )
+            if postgres_reports is None:
+                stored = repository.get_evidence_scoring_memory_preview(domain)
+            else:
+                stored = repository.get_evidence_scoring_memory_preview(
+                    domain,
+                    reports=postgres_reports,
+                )
             if isinstance(stored, dict):
                 return {
                     **stored,
@@ -726,7 +840,8 @@ def evidence_scoring_memory_preview_for_domain(
                 "failed to load evidence scoring memory preview",
                 extra={"domain": domain_key(domain)},
             )
-    reports = list_reports_for_domain(domain)
+    if reports is None:
+        reports = list_reports_for_domain(domain)
     derived = build_reviewed_scoring_memory_shadow(
         reports,
         claim_tile_ledger=build_evidence_claim_tile_ledger(
@@ -1079,7 +1194,18 @@ def current_report_for_domain(
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any]]:
     """Select the visible canonical/provisional report for one brand."""
 
-    return selected_report_for_display(list_reports_for_domain(domain), mode=mode)
+    reports = list_reports_for_domain(domain)
+    selected, classified, state = selected_report_for_display(reports, mode=mode)
+    if os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault":
+        selected = vault_accepted_report_for_domain(domain, reports=reports)
+        state = dict(state)
+        selected_id = str((selected or {}).get("id") or "")
+        # Keep the historical state shape, but make its selected identity
+        # describe the accepted Vault report rather than the temporal choice.
+        state["selected_report_id"] = selected_id or None
+        state["canonical_report_id"] = selected_id or None
+        state["provisional_report_id"] = None
+    return selected, classified, state
 
 
 def _summary_row(report: dict[str, Any], *, fallback_id: str = "") -> dict[str, Any]:

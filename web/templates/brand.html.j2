@@ -22,7 +22,7 @@
     {% if brand.current %}
     <strong class="brand-profile-score">{{ brand.current.score_publication.raw_value if brand.current.score_publication.raw_value is not none else "—" }}</strong>
     <span class="brand-profile-terminal-value">
-      {{ brand.current.canonical_status or "sin_clasificar" }}
+      {% if brand.vault_current_status == "accepted" %}aceptado por Vault{% else %}{{ brand.current.canonical_status or "sin_clasificar" }}{% endif %}
       · {{ brand.current.reliability_status or "unknown" }}
       {% if not brand.current.score_publication.publishable %} · diagnóstico{% endif %}
       / {{ (brand.current.created_at or "")[:10] }}
@@ -42,12 +42,17 @@
     {% endif %}
     {% else %}
     <strong class="brand-profile-score">—</strong>
+    {% if brand.vault_current_status == "unavailable" and brand.latest_attempt %}
+    <span class="brand-profile-terminal-value is-empty">Vault: autoridad no disponible; ningún informe es actual</span>
+    <a class="source-link" href="/report/{{ brand.latest_attempt.id }}">ver último intento</a>
+    {% else %}
     <span class="brand-profile-terminal-value is-empty">sin scan local</span>
     <form method="post" action="/scan" class="brand-profile-scan-form">
       <input type="hidden" name="url" value="{{ brand.url }}">
       <input type="hidden" name="brand_name" value="{{ brand.display_name }}">
       <button type="submit">escanear</button>
     </form>
+    {% endif %}
     {% endif %}
   </div>
 </section>

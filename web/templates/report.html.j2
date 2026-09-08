@@ -204,7 +204,15 @@
     <a href="/">← Todos los informes</a>
     · <a href="{{ report.export.brand_visual_url }}">Módulo visual</a>
     · <a href="{{ report.export.markdown_url }}">Markdown</a>
-    {% if publication.is_sv9 %}
+    {% if publication.is_vault and publication.vault_authority_status == "unavailable" %}
+    · <span class="chip warn">Vault: autoridad no disponible; ningún informe es actual</span>
+    {% endif %}
+    {% if publication.is_vault and not publication.is_sv9 %}
+    · <span class="chip warn">{% if publication.is_latest_attempt %}último intento · no actual{% else %}histórico · no actual{% endif %}</span>
+    {% if publication.sv9_report_id %}
+    · <a class="source-link" href="/report/{{ publication.sv9_report_id }}">ver SV9</a>
+    {% endif %}
+    {% elif publication.is_sv9 %}
     · <span class="chip ok">SV9</span>
     {% if publication.latest_attempt_id and not publication.is_latest_attempt %}
     · <a class="source-link" href="/report/{{ publication.latest_attempt_id }}">último intento</a>

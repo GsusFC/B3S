@@ -38,6 +38,7 @@ from web.api_v1.models import EvidenceScoringRecoveryReviewCreateRequest
 from web.api_v1.service import create_evidence_scoring_recovery_review
 from web.exact_resume_controller import recover_interrupted_vault_exact_resume_actions
 from web.report_store import (
+    brand_navigation_history_for_domain,
     domain_key,
     evidence_claim_tile_ledger_for_domain,
     evidence_scoring_memory_preview_for_domain,
@@ -45,6 +46,7 @@ from web.report_store import (
     list_reports_for_domain,
     load_report,
     verify_postgres_runtime_ready,
+    vault_accepted_report_for_domain,
     vault_sv9_shadow_diagnostics_enabled,
     vault_sv9_shadow_diagnostics_for_domain,
 )
@@ -381,12 +383,20 @@ def _brand_publication_for_report(report: dict[str, Any]) -> dict[str, Any]:
         "latest_attempt_id": "",
         "is_sv9": False,
         "is_latest_attempt": False,
+        "is_vault": os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault",
+        "vault_authority_status": (
+            "unavailable"
+            if os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault"
+            else "not_applicable"
+        ),
     }
     if not report_id or not domain:
         return empty
-    selected, classified, _state = selected_report_for_display(
-        list_reports_for_domain(domain)
-    )
+    reports = list_reports_for_domain(domain)
+    selected, classified, _state = selected_report_for_display(reports)
+    is_vault = os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault"
+    if is_vault:
+        selected = vault_accepted_report_for_domain(domain, reports=reports)
     selected_id = str((selected or {}).get("id") or "")
     latest_id = str((classified[0].get("id") if classified else "") or "")
     return {
@@ -394,12 +404,17 @@ def _brand_publication_for_report(report: dict[str, Any]) -> dict[str, Any]:
         "latest_attempt_id": latest_id,
         "is_sv9": bool(selected_id and report_id == selected_id),
         "is_latest_attempt": bool(latest_id and report_id == latest_id),
+        "is_vault": is_vault,
+        "vault_authority_status": "accepted" if selected else "unavailable" if is_vault else "not_applicable",
     }
 
 
 def _brand_profile(domain: str) -> dict:
-    raw_reports = list_reports_for_domain(domain)
+    raw_reports, postgres_reports = brand_navigation_history_for_domain(domain)
     selected, classified_reports, history_state = selected_report_for_display(raw_reports)
+    is_vault = os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault"
+    if is_vault:
+        selected = vault_accepted_report_for_domain(domain, reports=raw_reports)
     reports = []
     for source_report in classified_reports:
         report = _sanitize_report_language(source_report)
@@ -428,6 +443,10 @@ def _brand_profile(domain: str) -> dict:
         "url": (current or {}).get("url") or f"https://{normalized_domain}",
         "current": current,
         "latest_attempt": latest_attempt,
+        "vault_current_available": bool(selected) if is_vault else True,
+        "vault_current_status": (
+            "accepted" if selected else "unavailable"
+        ) if is_vault else "not_applicable",
         "reports": reports,
         "history_state": history_state,
         "enforcement_mode": canonical_enforcement_mode(),
@@ -438,18 +457,34 @@ def _brand_profile(domain: str) -> dict:
         "component_count": len(components),
         "not_detected": (current or {}).get("not_detected") or [],
         "visual_module": _moodboard_from_report(current) if current else {"available": False, "images": []},
-        "vault_memory": _vault_tile_memory_profile(normalized_domain),
+        "vault_memory": _vault_tile_memory_profile(
+            normalized_domain,
+            reports=raw_reports,
+            postgres_reports=postgres_reports,
+        ),
     }
 
 
-def _vault_tile_memory_profile(domain: str) -> dict[str, Any]:
+def _vault_tile_memory_profile(
+    domain: str,
+    *,
+    reports: list[dict[str, Any]],
+    postgres_reports: list[dict[str, Any]],
+) -> dict[str, Any]:
     """Build the read-only Vault view from existing durable projections."""
 
     if os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() != "vault":
         return {"enabled": False}
     try:
-        preview = evidence_scoring_memory_preview_for_domain(domain)
-        ledger = evidence_claim_tile_ledger_for_domain(domain)
+        preview = evidence_scoring_memory_preview_for_domain(
+            domain,
+            reports=reports,
+            postgres_reports=postgres_reports,
+        )
+        ledger = evidence_claim_tile_ledger_for_domain(
+            domain,
+            reports=reports,
+        )
     except Exception:
         _LOG.exception(
             "failed to build vault tile memory view",
@@ -1069,13 +1104,23 @@ def _report_rows_for_index() -> list[dict[str, Any]]:
             grouped[domain] = []
         grouped[domain].append(row)
     rows: list[dict[str, Any]] = []
+    is_vault = os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault"
     for domain in domain_order:
-        selected, classified, _state = selected_report_for_display(grouped[domain])
+        reports = grouped[domain]
+        selected, classified, _state = selected_report_for_display(reports)
+        if is_vault:
+            selected = vault_accepted_report_for_domain(domain, reports=reports)
+        # In Vault this is a history row when authority is unavailable, never
+        # a claim that the historical report is the current one.
         source = selected or (classified[0] if classified else None)
         if source is None:
             continue
         enriched = dict(source)
         enriched["brand_domain"] = domain
+        enriched["vault_current_available"] = bool(selected) if is_vault else True
+        enriched["vault_current_status"] = (
+            "accepted" if selected else "unavailable"
+        ) if is_vault else "not_applicable"
         enriched["score_publication"] = score_publication_from_report(enriched)
         rows.append(enriched)
     return rows

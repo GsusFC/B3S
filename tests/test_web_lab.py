@@ -1656,8 +1656,8 @@ def test_brand_view_renders_profile_from_matching_reports(monkeypatch):
     from web.app import app
 
     monkeypatch.setattr(
-        "web.app.list_reports_for_domain",
-        lambda domain: [
+        "web.app.brand_navigation_history_for_domain",
+        lambda domain: ([
             {
                 "id": "report123",
                 "brand_name": "Stabolut",
@@ -1677,7 +1677,7 @@ def test_brand_view_renders_profile_from_matching_reports(monkeypatch):
                     }
                 ],
             }
-        ],
+        ], []),
     )
 
     response = TestClient(app).get("/brand/stabolut.com?lang=es")
@@ -1694,8 +1694,12 @@ def test_brand_view_exposes_persistent_tile_memory_only_in_vault(monkeypatch):
 
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
     monkeypatch.setattr(
-        "web.app.list_reports_for_domain",
-        lambda _domain: [
+        "web.app.vault_accepted_report_for_domain",
+        lambda _domain, *, reports: reports[0],
+    )
+    monkeypatch.setattr(
+        "web.app.brand_navigation_history_for_domain",
+        lambda _domain: ([
             {
                 "id": "latest",
                 "brand_name": "Example",
@@ -1704,11 +1708,11 @@ def test_brand_view_exposes_persistent_tile_memory_only_in_vault(monkeypatch):
                 "score": 64,
                 "components": [],
             }
-        ],
+        ], []),
     )
     monkeypatch.setattr(
         "web.app.evidence_scoring_memory_preview_for_domain",
-        lambda _domain: {
+        lambda _domain, *, reports, postgres_reports: {
             "report_count": 2,
             "memory_version": "a" * 64,
             "persistence": {"stored": True, "backend": "postgres_history_derived"},
@@ -1780,7 +1784,7 @@ def test_brand_view_exposes_persistent_tile_memory_only_in_vault(monkeypatch):
     )
     monkeypatch.setattr(
         "web.app.evidence_claim_tile_ledger_for_domain",
-        lambda _domain: {
+        lambda _domain, *, reports: {
             "persistence": {"stored": True, "backend": "postgres"},
             "summary": {
                 "mapping_count": 3,
@@ -1816,13 +1820,332 @@ def test_brand_view_exposes_persistent_tile_memory_only_in_vault(monkeypatch):
     assert "bloqueada" in response.text
 
 
+def test_brand_view_shares_loaded_history_with_vault_projections(monkeypatch):
+    from web.app import _brand_profile
+
+    reports = [
+        {
+            "id": "latest",
+            "brand_name": "Example",
+            "url": "https://example.com",
+            "created_at": "2026-07-31T12:00:00+00:00",
+            "score": 64,
+            "components": [],
+        }
+    ]
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setattr(
+        "web.app.vault_accepted_report_for_domain",
+        lambda _domain, *, reports: reports[0],
+    )
+
+    def load_history(_domain):
+        calls.append(("history", None))
+        return reports, reports
+
+    def preview(_domain, *, reports, postgres_reports):
+        calls.append(("preview", reports))
+        assert postgres_reports is reports
+        return {
+            "report_count": 1,
+            "summary": {},
+            "tile_evolution": {"summary": {}, "changes": []},
+        }
+
+    def ledger(_domain, *, reports):
+        calls.append(("ledger", reports))
+        return {"summary": {}, "reviewed_memory": {"available": False}}
+
+    monkeypatch.setattr("web.app.brand_navigation_history_for_domain", load_history)
+    monkeypatch.setattr(
+        "web.app.evidence_scoring_memory_preview_for_domain", preview
+    )
+    monkeypatch.setattr("web.app.evidence_claim_tile_ledger_for_domain", ledger)
+
+    profile = _brand_profile("example.com")
+
+    assert profile["current"]["id"] == "latest"
+    assert profile["vault_memory"]["report_count"] == 1
+    assert [name for name, _value in calls] == ["history", "preview", "ledger"]
+    assert calls[1][1] is reports
+    assert calls[2][1] is reports
+
+
+def test_vault_navigation_uses_accepted_authority_report_not_history(monkeypatch):
+    from web import report_store
+
+    accepted_fingerprint = "a" * 64
+    accepted = {
+        "id": "accepted",
+        "brand_name": "Example",
+        "url": "https://example.com",
+        "created_at": "2026-09-08T12:00:00+00:00",
+        "score": 58,
+    }
+    reports = [
+        {**accepted, "id": "latest", "created_at": "2026-09-08T13:00:00+00:00", "score": 68},
+        accepted,
+        {**accepted, "id": "legacy", "created_at": "2026-07-21T12:00:00+00:00", "score": 53},
+    ]
+
+    class Repository:
+        def get_evidence_vault_sv9_judgment_authority(self, _domain, **_kwargs):
+            return {
+                "accepted_candidate": {
+                    "source_scan_id": "accepted",
+                    "assessment_fingerprint": accepted_fingerprint,
+                },
+                "assessment": {
+                    "assessment_fingerprint": accepted_fingerprint,
+                    "sv9_score": 58,
+                },
+                "score": 58,
+            }
+
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: Repository())
+    monkeypatch.setattr(
+        report_store,
+        "assessment_projection_from_report",
+        lambda _report, required=False: {
+            "availability": "available",
+            "assessment_fingerprint": accepted_fingerprint,
+            "sv9_score": 58,
+        },
+    )
+
+    selected = report_store.vault_accepted_report_for_domain(
+        "example.com",
+        reports=reports,
+    )
+
+    assert selected["id"] == "accepted"
+
+
+@pytest.mark.parametrize(
+    "authority",
+    [None, RuntimeError("database unavailable")],
+)
+def test_vault_navigation_fails_closed_without_authority(monkeypatch, authority):
+    from web import report_store
+
+    class Repository:
+        def get_evidence_vault_sv9_judgment_authority(self, _domain, **_kwargs):
+            if isinstance(authority, Exception):
+                raise authority
+            return authority
+
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: Repository())
+
+    assert (
+        report_store.vault_accepted_report_for_domain(
+            "example.com",
+            reports=[{"id": "legacy", "url": "https://example.com"}],
+        )
+        is None
+    )
+
+
+def test_vault_navigation_fails_closed_on_assessment_mismatch(monkeypatch):
+    from web import report_store
+
+    fingerprint = "a" * 64
+
+    class Repository:
+        def get_evidence_vault_sv9_judgment_authority(self, _domain, **_kwargs):
+            return {
+                "accepted_candidate": {
+                    "source_scan_id": "accepted",
+                    "assessment_fingerprint": fingerprint,
+                },
+                "assessment": {
+                    "assessment_fingerprint": fingerprint,
+                    "sv9_score": 58,
+                },
+                "score": 58,
+            }
+
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: Repository())
+    monkeypatch.setattr(
+        report_store,
+        "assessment_projection_from_report",
+        lambda _report, required=False: {
+            "availability": "available",
+            "assessment_fingerprint": "b" * 64,
+            "sv9_score": 58,
+        },
+    )
+
+    assert (
+        report_store.vault_accepted_report_for_domain(
+            "example.com",
+            reports=[{"id": "accepted", "url": "https://example.com"}],
+        )
+        is None
+    )
+
+
+def test_vault_profile_preserves_history_when_authority_is_unavailable(monkeypatch):
+    from web.app import _brand_profile, app
+
+    latest = {
+        "id": "latest",
+        "brand_name": "Example",
+        "url": "https://example.com",
+        "created_at": "2026-09-08T13:00:00+00:00",
+        "score": 68,
+        "components": [],
+    }
+    legacy = {**latest, "id": "legacy", "created_at": "2026-07-21T12:00:00+00:00", "score": 53}
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setattr("web.app.brand_navigation_history_for_domain", lambda _domain: ([latest, legacy], []))
+    monkeypatch.setattr("web.app.vault_accepted_report_for_domain", lambda _domain, *, reports: None)
+
+    profile = _brand_profile("example.com")
+
+    assert profile["current"] is None
+    assert profile["latest_attempt"]["id"] == "latest"
+    assert [row["id"] for row in profile["reports"]] == ["latest", "legacy"]
+    assert profile["vault_current_status"] == "unavailable"
+    response = TestClient(app).get("/brand/example.com?lang=es")
+    assert response.status_code == 200
+    assert "autoridad no disponible" in response.text
+    assert "ningún informe es actual" in response.text
+
+
+def test_vault_index_preserves_latest_history_row_without_calling_it_current(monkeypatch):
+    from web.app import _report_rows_for_index, app
+
+    latest = {
+        "id": "latest",
+        "brand_name": "Example",
+        "url": "https://example.com",
+        "created_at": "2026-09-08T13:00:00+00:00",
+        "score": 68,
+    }
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setattr("web.app.list_report_payloads_for_index", lambda: [latest])
+    monkeypatch.setattr("web.app.vault_accepted_report_for_domain", lambda _domain, *, reports: None)
+
+    rows = _report_rows_for_index()
+
+    assert len(rows) == 1
+    assert rows[0]["id"] == "latest"
+    assert rows[0]["vault_current_available"] is False
+    assert rows[0]["vault_current_status"] == "unavailable"
+    response = TestClient(app).get("/")
+    assert response.status_code == 200
+    assert "Vault: autoridad no disponible; no es actual" in response.text
+
+
+def test_vault_current_report_state_uses_accepted_identity(monkeypatch):
+    from web import report_store
+
+    reports = [
+        {"id": "latest", "url": "https://example.com", "created_at": "2026-09-08T13:00:00+00:00", "score": 68},
+        {"id": "accepted", "url": "https://example.com", "created_at": "2026-09-08T12:00:00+00:00", "score": 58},
+        {"id": "legacy", "url": "https://example.com", "created_at": "2026-07-21T12:00:00+00:00", "score": 53},
+    ]
+    accepted = reports[1]
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setattr(report_store, "list_reports_for_domain", lambda _domain: reports)
+    monkeypatch.setattr(
+        report_store,
+        "vault_accepted_report_for_domain",
+        lambda _domain, *, reports: accepted,
+    )
+
+    selected, _classified, state = report_store.current_report_for_domain("example.com")
+
+    assert selected["id"] == "accepted"
+    assert state["selected_report_id"] == "accepted"
+    assert state["canonical_report_id"] == "accepted"
+    assert state["provisional_report_id"] is None
+
+
+def test_vault_profile_distinguishes_accepted_latest_and_legacy_reports(monkeypatch):
+    from web.app import _brand_profile, app
+
+    legacy = {
+        "id": "legacy",
+        "brand_name": "Example",
+        "url": "https://example.com",
+        "created_at": "2026-07-21T12:00:00+00:00",
+        "score": 53,
+        "components": [],
+    }
+    accepted = {**legacy, "id": "accepted", "created_at": "2026-09-08T12:00:00+00:00", "score": 58}
+    latest = {**legacy, "id": "latest", "created_at": "2026-09-08T13:00:00+00:00", "score": 68}
+    reports = [latest, accepted, legacy]
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setattr("web.app.brand_navigation_history_for_domain", lambda _domain: (reports, []))
+    monkeypatch.setattr("web.app.vault_accepted_report_for_domain", lambda _domain, *, reports: accepted)
+    monkeypatch.setattr(
+        "web.app.evidence_scoring_memory_preview_for_domain",
+        lambda _domain, *, reports, postgres_reports: {"summary": {}, "tile_evolution": {"summary": {}, "changes": []}},
+    )
+    monkeypatch.setattr(
+        "web.app.evidence_claim_tile_ledger_for_domain",
+        lambda _domain, *, reports: {"summary": {}, "reviewed_memory": {"available": False}},
+    )
+
+    profile = _brand_profile("example.com")
+
+    assert profile["current"]["id"] == "accepted"
+    assert profile["latest_attempt"]["id"] == "latest"
+    assert [row["id"] for row in profile["reports"]] == ["latest", "accepted", "legacy"]
+    response = TestClient(app).get("/brand/example.com?lang=es")
+    assert "aceptado por Vault" in response.text
+    assert "último intento" in response.text
+
+
+def test_vault_historical_report_links_to_accepted_report(monkeypatch):
+    from tests.test_vault_sv9_parity import _available_report
+    from web.app import app
+
+    historical = _available_report("legacy")
+    accepted = _available_report("accepted")
+    historical["created_at"] = "2026-07-21T12:00:00+00:00"
+    accepted["created_at"] = "2026-09-08T12:00:00+00:00"
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setattr("web.app.load_report", lambda _scan_id: historical)
+    monkeypatch.setattr("web.app.list_reports_for_domain", lambda _domain: [accepted, historical])
+    monkeypatch.setattr("web.app.vault_accepted_report_for_domain", lambda _domain, *, reports: accepted)
+
+    response = TestClient(app).get("/report/legacy")
+
+    assert response.status_code == 200
+    assert "histórico · no actual" in response.text
+    assert 'href="/report/accepted"' in response.text
+
+
+def test_vault_report_labels_unavailable_authority_without_fallback(monkeypatch):
+    from tests.test_vault_sv9_parity import _available_report
+    from web.app import app
+
+    historical = _available_report("legacy")
+    latest = _available_report("latest")
+    historical["created_at"] = "2026-07-21T12:00:00+00:00"
+    latest["created_at"] = "2026-09-08T13:00:00+00:00"
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setattr("web.app.load_report", lambda _scan_id: historical)
+    monkeypatch.setattr("web.app.list_reports_for_domain", lambda _domain: [latest, historical])
+    monkeypatch.setattr("web.app.vault_accepted_report_for_domain", lambda _domain, *, reports: None)
+
+    response = TestClient(app).get("/report/legacy")
+
+    assert response.status_code == 200
+    assert "Vault: autoridad no disponible; ningún informe es actual" in response.text
+    assert "histórico · no actual" in response.text
+
+
 def test_brand_view_hides_vault_memory_outside_vault(monkeypatch):
     from web.app import app
 
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "production")
     monkeypatch.setattr(
-        "web.app.list_reports_for_domain",
-        lambda _domain: [
+        "web.app.brand_navigation_history_for_domain",
+        lambda _domain: ([
             {
                 "id": "latest",
                 "brand_name": "Example",
@@ -1831,15 +2154,15 @@ def test_brand_view_hides_vault_memory_outside_vault(monkeypatch):
                 "score": 64,
                 "components": [],
             }
-        ],
+        ], []),
     )
     monkeypatch.setattr(
         "web.app.evidence_scoring_memory_preview_for_domain",
-        lambda _domain: pytest.fail("production must not build the Vault preview"),
+        lambda _domain, *, reports, postgres_reports: pytest.fail("production must not build the Vault preview"),
     )
     monkeypatch.setattr(
         "web.app.evidence_claim_tile_ledger_for_domain",
-        lambda _domain: pytest.fail("production must not read the Vault ledger"),
+        lambda _domain, *, reports: pytest.fail("production must not read the Vault ledger"),
     )
 
     response = TestClient(app).get("/brand/example.com?lang=es")
@@ -1854,8 +2177,8 @@ def test_brand_view_counts_unreviewed_vault_mappings_as_pending(monkeypatch):
 
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
     monkeypatch.setattr(
-        "web.app.list_reports_for_domain",
-        lambda _domain: [
+        "web.app.brand_navigation_history_for_domain",
+        lambda _domain: ([
             {
                 "id": "latest",
                 "brand_name": "Example",
@@ -1864,11 +2187,11 @@ def test_brand_view_counts_unreviewed_vault_mappings_as_pending(monkeypatch):
                 "score": 64,
                 "components": [],
             }
-        ],
+        ], []),
     )
     monkeypatch.setattr(
         "web.app.evidence_scoring_memory_preview_for_domain",
-        lambda _domain: {
+        lambda _domain, *, reports, postgres_reports: {
             "report_count": 1,
             "summary": {},
             "tile_evolution": {"summary": {}, "changes": []},
@@ -1876,7 +2199,7 @@ def test_brand_view_counts_unreviewed_vault_mappings_as_pending(monkeypatch):
     )
     monkeypatch.setattr(
         "web.app.evidence_claim_tile_ledger_for_domain",
-        lambda _domain: {
+        lambda _domain, *, reports: {
             "persistence": {"stored": True, "backend": "postgres"},
             "summary": {
                 "mapping_count": 3,
@@ -1996,7 +2319,10 @@ def test_brand_view_repeated_mode_keeps_selected_baseline_visible(monkeypatch):
         "components": [{"key": "value_proposition", "status": "scored", "score": 0}],
     }
     monkeypatch.setenv("B3S_CANONICAL_ENFORCEMENT_MODE", "repeated")
-    monkeypatch.setattr("web.app.list_reports_for_domain", lambda _domain: [newer, older])
+    monkeypatch.setattr(
+        "web.app.brand_navigation_history_for_domain",
+        lambda _domain: ([newer, older], []),
+    )
 
     profile = _brand_profile("example.com")
 
@@ -2012,8 +2338,8 @@ def test_brand_view_prefers_component_editorial_message(monkeypatch):
     from web.app import app
 
     monkeypatch.setattr(
-        "web.app.list_reports_for_domain",
-        lambda domain: [
+        "web.app.brand_navigation_history_for_domain",
+        lambda domain: ([
             {
                 "id": "report123",
                 "brand_name": "Optiak",
@@ -2043,7 +2369,7 @@ def test_brand_view_prefers_component_editorial_message(monkeypatch):
                 "blocks": [],
                 "raw": {},
             }
-        ],
+        ], []),
     )
 
     response = TestClient(app).get("/brand/optiak.com?lang=es")
@@ -2058,8 +2384,8 @@ def test_brand_view_embeds_visual_module_from_latest_report(monkeypatch):
     from web.app import app
 
     monkeypatch.setattr(
-        "web.app.list_reports_for_domain",
-        lambda domain: [
+        "web.app.brand_navigation_history_for_domain",
+        lambda domain: ([
             {
                 "id": "report123",
                 "brand_name": "Stabolut",
@@ -2084,7 +2410,7 @@ def test_brand_view_embeds_visual_module_from_latest_report(monkeypatch):
                     }
                 },
             }
-        ],
+        ], []),
     )
 
     response = TestClient(app).get("/brand/stabolut.com?lang=es")
@@ -2105,8 +2431,8 @@ def test_brand_view_prefers_structured_web_capture_for_visual_module(monkeypatch
     from web.app import app
 
     monkeypatch.setattr(
-        "web.app.list_reports_for_domain",
-        lambda domain: [
+        "web.app.brand_navigation_history_for_domain",
+        lambda domain: ([
             {
                 "id": "report-rich-web",
                 "brand_name": "Acme",
@@ -2149,7 +2475,7 @@ def test_brand_view_prefers_structured_web_capture_for_visual_module(monkeypatch
                     },
                 },
             }
-        ],
+        ], []),
     )
 
     response = TestClient(app).get("/brand/acme.com?lang=es")
@@ -2164,7 +2490,10 @@ def test_brand_view_prefers_structured_web_capture_for_visual_module(monkeypatch
 def test_brand_view_handles_missing_scan(monkeypatch):
     from web.app import app
 
-    monkeypatch.setattr("web.app.list_reports_for_domain", lambda domain: [])
+    monkeypatch.setattr(
+        "web.app.brand_navigation_history_for_domain",
+        lambda _domain: ([], []),
+    )
 
     response = TestClient(app).get("/brand/stabolut.com?lang=es")
 
