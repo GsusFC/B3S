@@ -252,6 +252,15 @@ from src.services.scanner_evidence_comparison import (
 )
 from src.sv9.assessment_kernel import Sv9AssessmentError, validate_sv9_assessment_output
 from src.sv9 import incremental_evaluation as sv9_incremental_evaluation
+from src.services.evidence_vault_sv9_shared_process import (
+    _assessment_output_from_scanner_envelope,
+    _component_provenance_candidates_from_shared_analysis,
+    _component_from_shared_analysis_row,
+    _components_from_shared_analysis,
+    _flow_candidate_from_shared_checkpoint,
+    _validate_llm_usage,
+    is_core_shared_series_contract,
+)
 from src.sv9 import incremental_planner as sv9_incremental_planner
 from src.sv9 import judgment_memory as sv9_judgment_memory
 from src.sv9_flow.contracts import EvidenceRecord
@@ -6030,7 +6039,12 @@ class PostgresHistoryRepository:
             return _sv9_judgment_stored_record(conn, row, context) if row else None
 
     def append_evidence_vault_sv9_judgment_candidate(
-        self, source_scan_id: str, candidate: dict[str, Any], *, workspace_slug: str = "b3s"
+        self,
+        source_scan_id: str,
+        candidate: dict[str, Any],
+        *,
+        workspace_slug: str = "b3s",
+        shared_analysis_payload: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         candidate = _sv9_judgment_candidate_envelope(candidate)
         self._ensure_migrated()
@@ -6039,13 +6053,26 @@ class PostgresHistoryRepository:
             context = _sv9_judgment_context(conn, source_scan_id, workspace_slug, True)
             if context is None:
                 raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment source scan is unavailable.")
-            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_advisory_lock_key(context["brand_id"], "evidence-vault-canonical-promotion"),))
-            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_advisory_lock_key(context["brand_id"], "evidence-vault-sv9-judgment-candidate"),))
-            candidate = _sv9_judgment_candidate_replay(
-                candidate, _sv9_judgment_packets(conn, candidate, context)
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_advisory_lock_key(context["brand_id"], "evidence-vault-canonical-promotion"),),
             )
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (_advisory_lock_key(context["brand_id"], "evidence-vault-sv9-judgment-candidate"),),
+            )
+            candidate = _sv9_judgment_candidate_replay(candidate, _sv9_judgment_packets(conn, candidate, context))
             _sv9_judgment_current_authoritative_relation_witness(conn, candidate, context, workspace_slug)
-            candidate_id = _stable_uuid(context["operation_plan_id"], "evidence-vault-sv9-judgment-candidate", candidate["complete_record_fingerprint"])
+            shared_analysis = _prepare_sv9_shared_analysis_snapshot(
+                shared_analysis_payload,
+                candidate=candidate,
+                context=context,
+            )
+            candidate_id = _stable_uuid(
+                context["operation_plan_id"],
+                "evidence-vault-sv9-judgment-candidate",
+                candidate["complete_record_fingerprint"],
+            )
             row = conn.execute(
                 f"""
                 INSERT INTO {_SCHEMA}.evidence_vault_sv9_judgment_candidates (
@@ -6059,24 +6086,145 @@ class PostgresHistoryRepository:
                 ON CONFLICT (workspace_id, brand_id, capture_id, operation_plan_id, canonical_plan_fingerprint) DO NOTHING
                 RETURNING *
                 """,
-                (candidate_id, context["workspace_id"], context["brand_id"], context["scan_run_id"], context["source_scan_id"], context["capture_id"], context["operation_plan_id"], candidate["schema_version"], candidate["canonical_plan_fingerprint"], candidate["current_series_fingerprint"], candidate["candidate_series_fingerprint"], candidate["evaluation_bundle_fingerprint"], candidate["assessment_fingerprint"], candidate["score_fingerprint"], candidate["complete_record_fingerprint"], _jsonb(candidate)),
+                (
+                    candidate_id,
+                    context["workspace_id"],
+                    context["brand_id"],
+                    context["scan_run_id"],
+                    context["source_scan_id"],
+                    context["capture_id"],
+                    context["operation_plan_id"],
+                    candidate["schema_version"],
+                    candidate["canonical_plan_fingerprint"],
+                    candidate["current_series_fingerprint"],
+                    candidate["candidate_series_fingerprint"],
+                    candidate["evaluation_bundle_fingerprint"],
+                    candidate["assessment_fingerprint"],
+                    candidate["score_fingerprint"],
+                    candidate["complete_record_fingerprint"],
+                    _jsonb(candidate),
+                ),
             ).fetchone()
             inserted = row is not None
             if inserted:
                 for evidence_id, fingerprint in _sv9_judgment_binding_rows(candidate).items():
                     conn.execute(
                         f"INSERT INTO {_SCHEMA}.evidence_vault_sv9_judgment_evidence_bindings (candidate_id, workspace_id, brand_id, scan_run_id, capture_id, operation_plan_id, evidence_record_id, evidence_fingerprint) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                        (candidate_id, context["workspace_id"], context["brand_id"], context["scan_run_id"], context["capture_id"], context["operation_plan_id"], evidence_id, fingerprint),
+                        (
+                            candidate_id,
+                            context["workspace_id"],
+                            context["brand_id"],
+                            context["scan_run_id"],
+                            context["capture_id"],
+                            context["operation_plan_id"],
+                            evidence_id,
+                            fingerprint,
+                        ),
+                    )
+                if shared_analysis is not None:
+                    conn.execute(
+                        f"""
+                        INSERT INTO {_SCHEMA}.evidence_vault_sv9_shared_analysis_snapshots (
+                            candidate_id, workspace_id, brand_id, scan_run_id,
+                            source_scan_id, capture_id, operation_plan_id,
+                            schema_version, candidate_complete_record_fingerprint,
+                            canonical_plan_fingerprint, current_series_fingerprint,
+                            candidate_series_fingerprint, evaluation_bundle_fingerprint,
+                            assessment_fingerprint, score_fingerprint, payload_sha256,
+                            payload, payload_raw
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s,
+                            'evidence-vault-sv9-shared-analysis-snapshot-v1',
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        )
+                        """,
+                        (
+                            candidate_id,
+                            context["workspace_id"],
+                            context["brand_id"],
+                            context["scan_run_id"],
+                            context["source_scan_id"],
+                            context["capture_id"],
+                            context["operation_plan_id"],
+                            candidate["complete_record_fingerprint"],
+                            candidate["canonical_plan_fingerprint"],
+                            candidate["current_series_fingerprint"],
+                            candidate["candidate_series_fingerprint"],
+                            candidate["evaluation_bundle_fingerprint"],
+                            candidate["assessment_fingerprint"],
+                            candidate["score_fingerprint"],
+                            shared_analysis["payload_sha256"],
+                            _jsonb(shared_analysis["payload"]),
+                            shared_analysis["payload_raw"],
+                        ),
                     )
             else:
                 row = conn.execute(
                     f"SELECT * FROM {_SCHEMA}.evidence_vault_sv9_judgment_candidates WHERE workspace_id = %s AND brand_id = %s AND capture_id = %s AND operation_plan_id = %s AND canonical_plan_fingerprint = %s",
-                    (context["workspace_id"], context["brand_id"], context["capture_id"], context["operation_plan_id"], candidate["canonical_plan_fingerprint"]),
+                    (
+                        context["workspace_id"],
+                        context["brand_id"],
+                        context["capture_id"],
+                        context["operation_plan_id"],
+                        candidate["canonical_plan_fingerprint"],
+                    ),
                 ).fetchone()
             stored = _sv9_judgment_stored_record(conn, row, context)
             if stored["complete_record_fingerprint"] != candidate["complete_record_fingerprint"]:
-                raise EvidenceVaultSv9JudgmentCandidateConflictError("SV9 judgment candidate occurrence conflicts with immutable content.")
+                raise EvidenceVaultSv9JudgmentCandidateConflictError(
+                    "SV9 judgment candidate occurrence conflicts with immutable content."
+                )
+            if shared_analysis is not None:
+                persisted = _load_sv9_shared_analysis_snapshot(
+                    conn,
+                    row=row,
+                    candidate=stored,
+                    context=context,
+                )
+                if persisted is None or persisted["payload_raw"] != shared_analysis["payload_raw"]:
+                    raise EvidenceVaultSv9JudgmentCandidateConflictError(
+                        "SV9 shared analysis occurrence conflicts with immutable content."
+                    )
             return stored, inserted
+
+    def get_evidence_vault_sv9_shared_analysis(
+        self,
+        candidate_id: str,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        identifier = _sv9_authority_uuid(candidate_id, "candidate_id")
+        self._ensure_migrated()
+        with self._connect() as conn:
+            _verify_exact_migration_head_under_shared_lock(conn)
+            row = conn.execute(
+                f"""
+                SELECT candidates.*
+                FROM {_SCHEMA}.evidence_vault_sv9_judgment_candidates AS candidates
+                JOIN {_SCHEMA}.workspaces AS workspaces
+                  ON workspaces.id = candidates.workspace_id
+                WHERE candidates.id = %s AND workspaces.slug = %s
+                """,
+                (identifier, workspace_slug),
+            ).fetchone()
+            if row is None:
+                return None
+            context = _sv9_judgment_context(conn, str(row["source_scan_id"]), workspace_slug, False)
+            if context is None:
+                raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment candidate context is unavailable.")
+            candidate = _sv9_judgment_stored_record(
+                conn,
+                row,
+                context,
+                validate_shared_analysis=False,
+            )
+            snapshot = _load_sv9_shared_analysis_snapshot(
+                conn,
+                row=row,
+                candidate=candidate,
+                context=context,
+            )
+            return dict(snapshot["payload"]) if snapshot is not None else None
 
     def get_evidence_vault_sv9_evaluation_checkpoint(
         self, source_scan_id: str, *, checkpoint_fingerprint: str,
@@ -6142,23 +6290,63 @@ class PostgresHistoryRepository:
                 canonical_request_fingerprint=request,
             )
 
+    def get_evidence_vault_sv9_evaluation_checkpoint_shared_process(
+        self,
+        source_scan_id: str,
+        *,
+        canonical_plan_fingerprint: str,
+        canonical_request_fingerprint: str,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        plan_fingerprint = _sv9_checkpoint_fingerprint(canonical_plan_fingerprint)
+        request_fingerprint = _sv9_checkpoint_fingerprint(canonical_request_fingerprint)
+        self._ensure_migrated()
+        with self._connect() as conn:
+            _verify_exact_migration_head_under_shared_lock(conn)
+            context = _sv9_judgment_context(conn, source_scan_id, workspace_slug, False)
+            if context is None:
+                return None
+            return _sv9_checkpoint_shared_process_for_request(
+                conn,
+                context,
+                canonical_plan_fingerprint=plan_fingerprint,
+                canonical_request_fingerprint=request_fingerprint,
+            )
     def append_evidence_vault_sv9_evaluation_checkpoint(
-        self, source_scan_id: str, checkpoint: Mapping[str, Any], *, workspace_slug: str = "b3s"
+        self,
+        source_scan_id: str,
+        checkpoint: Mapping[str, Any],
+        *,
+        workspace_slug: str = "b3s",
+        shared_process_payload: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         checkpoint = _sv9_checkpoint_envelope(checkpoint, source_scan_id, workspace_slug)
+        shared_process = _prepare_sv9_checkpoint_shared_process(
+            shared_process_payload,
+            checkpoint=checkpoint,
+        )
         self._ensure_migrated()
         with self._connect() as conn:
             _verify_exact_migration_head_under_shared_lock(conn)
             context = _sv9_judgment_context(conn, source_scan_id, workspace_slug, True)
             if context is None:
                 raise EvidenceVaultSv9EvaluationCheckpointError("SV9 evaluation checkpoint source scan is unavailable.")
-            for name in ("evidence-vault-canonical-promotion", "evidence-vault-sv9-judgment-authority", "evidence-vault-sv9-evaluation-checkpoint"):
+            for name in (
+                "evidence-vault-canonical-promotion",
+                "evidence-vault-sv9-judgment-authority",
+                "evidence-vault-sv9-evaluation-checkpoint",
+            ):
                 conn.execute("SELECT pg_advisory_xact_lock(%s)", (_advisory_lock_key(context["brand_id"], name),))
             current = _sv9_checkpoint_current_evaluation_input(conn, context, workspace_slug)
             if checkpoint["evaluation_input"] != current:
                 raise EvidenceVaultSv9EvaluationCheckpointStaleWitnessError("SV9 evaluation checkpoint input is stale.")
-            if not _sv9_checkpoint_snapshot_matches(checkpoint["prior_authority_snapshot"], _sv9_checkpoint_authority_snapshot(conn, context, workspace_slug)):
-                raise EvidenceVaultSv9EvaluationCheckpointStaleWitnessError("SV9 evaluation checkpoint authority witness is stale.")
+            if not _sv9_checkpoint_snapshot_matches(
+                checkpoint["prior_authority_snapshot"],
+                _sv9_checkpoint_authority_snapshot(conn, context, workspace_slug),
+            ):
+                raise EvidenceVaultSv9EvaluationCheckpointStaleWitnessError(
+                    "SV9 evaluation checkpoint authority witness is stale."
+                )
             incoming_evaluation = checkpoint["healthy_workset"]["component_evaluations"][0]
             prior_evaluation = _sv9_checkpoint_component_evaluation_for_request(
                 conn,
@@ -6174,7 +6362,11 @@ class PostgresHistoryRepository:
                 raise EvidenceVaultSv9EvaluationCheckpointConflictError(
                     "SV9 evaluation checkpoint logical identity conflicts with immutable content."
                 )
-            checkpoint_id = _stable_uuid(context["operation_plan_id"], "evidence-vault-sv9-evaluation-checkpoint", checkpoint["checkpoint_fingerprint"])
+            checkpoint_id = _stable_uuid(
+                context["operation_plan_id"],
+                "evidence-vault-sv9-evaluation-checkpoint",
+                checkpoint["checkpoint_fingerprint"],
+            )
             row = conn.execute(
                 f"""
                 INSERT INTO {_SCHEMA}.evidence_vault_sv9_evaluation_checkpoints (
@@ -6182,23 +6374,55 @@ class PostgresHistoryRepository:
                     schema_version, evaluation_input_fingerprint, relation_projection_fingerprint,
                     prior_authority_snapshot_fingerprint, canonical_plan_fingerprint,
                     current_series_fingerprint, candidate_series_fingerprint, checkpoint_fingerprint,
-                    evaluation_state, authority, runtime_effect, score_state, checkpoint_payload
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE, 'checkpoint_only', 'unavailable', %s)
+                    evaluation_state, authority, runtime_effect, score_state, checkpoint_payload,
+                    shared_process_payload, shared_process_payload_sha256,
+                    shared_process_payload_raw
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE, 'checkpoint_only', 'unavailable', %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING RETURNING *
                 """,
-                _sv9_checkpoint_insert_values(checkpoint_id, context, checkpoint),
+                _sv9_checkpoint_insert_values(checkpoint_id, context, checkpoint)
+                + (
+                    _jsonb(shared_process["payload"]) if shared_process is not None else None,
+                    shared_process["payload_sha256"] if shared_process is not None else None,
+                    shared_process["payload_raw"] if shared_process is not None else None,
+                ),
             ).fetchone()
             inserted = row is not None
             if inserted:
-                _append_sv9_checkpoint_bindings(conn, checkpoint_id, context, checkpoint["evaluation_input"]["current_identity_bindings"])
+                _append_sv9_checkpoint_bindings(
+                    conn, checkpoint_id, context, checkpoint["evaluation_input"]["current_identity_bindings"]
+                )
             else:
                 row = conn.execute(
                     f"SELECT * FROM {_SCHEMA}.evidence_vault_sv9_evaluation_checkpoints WHERE workspace_id = %s AND brand_id = %s AND capture_id = %s AND operation_plan_id = %s AND checkpoint_fingerprint = %s",
-                    (context["workspace_id"], context["brand_id"], context["capture_id"], context["operation_plan_id"], checkpoint["checkpoint_fingerprint"]),
+                    (
+                        context["workspace_id"],
+                        context["brand_id"],
+                        context["capture_id"],
+                        context["operation_plan_id"],
+                        checkpoint["checkpoint_fingerprint"],
+                    ),
                 ).fetchone()
             stored = _sv9_checkpoint_stored_record(conn, row, context)
-            if stored["checkpoint_fingerprint"] != checkpoint["checkpoint_fingerprint"] or {key: stored[key] for key in checkpoint} != checkpoint:
-                raise EvidenceVaultSv9EvaluationCheckpointConflictError("SV9 evaluation checkpoint occurrence conflicts with immutable content.")
+            if (
+                stored["checkpoint_fingerprint"] != checkpoint["checkpoint_fingerprint"]
+                or {key: stored[key] for key in checkpoint} != checkpoint
+            ):
+                raise EvidenceVaultSv9EvaluationCheckpointConflictError(
+                    "SV9 evaluation checkpoint occurrence conflicts with immutable content."
+                )
+            persisted_process = _sv9_checkpoint_shared_process_from_row(
+                row,
+                checkpoint=stored,
+            )
+            if (
+                (persisted_process is None) != (shared_process is None)
+                or shared_process is not None
+                and persisted_process["payload"] != shared_process["payload"]
+            ):
+                raise EvidenceVaultSv9EvaluationCheckpointConflictError(
+                    "SV9 evaluation checkpoint shared process conflicts with immutable content."
+                )
             return stored, inserted
 
     # fmt: off
@@ -12058,7 +12282,192 @@ def _sv9_judgment_packets(conn: Any, candidate: Mapping[str, Any], context: Mapp
         packets.append(sv9_incremental_evaluation.build_evidence_packet(component_key=component, tiles=tiles, capture_origin=capture_origin, operation_origin=operation_origin, series_fingerprint=plan["current_series_fingerprint"]))
     return packets
 
-def _sv9_judgment_stored_record(conn: Any, row: Mapping[str, Any] | None, context: Mapping[str, Any]) -> dict[str, Any]:
+_SV9_SHARED_ANALYSIS_SCHEMA_VERSION = "evidence-vault-sv9-shared-analysis-payload-v1"
+
+_SV9_SHARED_ANALYSIS_ROW_VERSION = "evidence-vault-sv9-shared-analysis-snapshot-v1"
+
+def _prepare_sv9_shared_analysis_snapshot(
+    value: Mapping[str, Any] | None,
+    *,
+    candidate: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    required = is_core_shared_series_contract(candidate["plan"]["current_series_contract"])
+    if not required:
+        if value is not None:
+            raise EvidenceVaultSv9JudgmentCandidateError(
+                "SV9 shared analysis cannot bind a legacy judgment series."
+            )
+        return None
+    if not isinstance(value, Mapping):
+        raise EvidenceVaultSv9JudgmentCandidateError(
+            "SV9 shared analysis is required for the Core judgment series."
+        )
+    try:
+        payload_raw = canonical_json_bytes(dict(value))
+        payload = json.loads(payload_raw.decode("utf-8"))
+        if type(payload) is not dict or set(payload) != {
+            "schema_version",
+            "analysis_payload",
+            "evaluation_components",
+            "component_provenance",
+        }:
+            raise ValueError("snapshot fields")
+        if payload["schema_version"] != _SV9_SHARED_ANALYSIS_SCHEMA_VERSION:
+            raise ValueError("snapshot schema")
+        analysis = payload["analysis_payload"]
+        components = payload["evaluation_components"]
+        if type(analysis) is not dict or type(components) is not dict:
+            raise ValueError("snapshot payload")
+        if analysis.get("schema_version") != "sv9-flow-sv9-shadow-eval-v1":
+            raise ValueError("analysis schema")
+        if analysis.get("source_run_id") != str(context["source_scan_id"]):
+            raise ValueError("analysis source")
+        flow = analysis.get("flow")
+        sv9 = analysis.get("sv9")
+        result = sv9.get("result") if type(sv9) is dict else None
+        scanner_assessment = sv9.get("assessment") if type(sv9) is dict else None
+        result_scanner_assessment = (
+            result.get("assessment") if type(result) is dict else None
+        )
+        if type(flow) is not dict or type(flow.get("candidate")) is not dict:
+            raise ValueError("flow payload")
+        if type(result) is not dict or type(components) is not dict:
+            raise ValueError("result payload")
+        if (
+            result.get("brand_name") != analysis.get("brand_name")
+            or result.get("url") != analysis.get("url")
+            or str(result.get("source_run_id")) != str(context["source_scan_id"])
+            or normalize_domain(str(analysis.get("url") or ""))
+            != str(context["canonical_domain"])
+        ):
+            raise ValueError("result identity")
+        reusable_components = _components_from_shared_analysis(payload)
+        _component_provenance_candidates_from_shared_analysis(
+            payload,
+            components=reusable_components,
+        )
+        assessment = _assessment_output_from_scanner_envelope(scanner_assessment)
+        result_assessment = _assessment_output_from_scanner_envelope(
+            result_scanner_assessment
+        )
+        if (
+            assessment != candidate["assessment"]
+            or result_assessment != assessment
+            or result_scanner_assessment != scanner_assessment
+        ):
+            raise ValueError("assessment binding")
+        if any(
+            container.get("assessment_fingerprint") != candidate["assessment_fingerprint"]
+            or container.get("score_fingerprint") != candidate["score_fingerprint"]
+            for container in (sv9, result, scanner_assessment)
+        ):
+            raise ValueError("assessment fingerprints")
+        if sv9.get("brand3_score") != assessment["sv9_score"] or result.get(
+            "brand3_score"
+        ) != assessment["sv9_score"]:
+            raise ValueError("score binding")
+        if set(components) != set(sv9_incremental_evaluation._COMPONENTS):
+            raise ValueError("evaluation components")
+        from scripts.sv9_flow_sv9_shadow_eval import _result_summary
+        from src.sv9.aggregator import aggregate
+
+        derived = aggregate(
+            reusable_components,
+            brand_name=str(analysis.get("brand_name") or ""),
+            url=str(analysis.get("url") or ""),
+            source_run_id=str(context["source_scan_id"]),
+        )
+        derived_summary = _result_summary(derived.to_dict())
+        stored_summary = {key: value for key, value in sv9.items() if key != "result"}
+        if (
+            set(sv9) != set(derived_summary) | {"result"}
+            or stored_summary != derived_summary
+            or _result_summary(result) != derived_summary
+        ):
+            raise ValueError("analysis aggregation")
+        return {
+            "payload": payload,
+            "payload_raw": payload_raw,
+            "payload_sha256": hashlib.sha256(payload_raw).hexdigest(),
+        }
+    except EvidenceVaultSv9JudgmentCandidateError:
+        raise
+    except Exception as exc:
+        raise EvidenceVaultSv9JudgmentCandidateError(
+            "SV9 shared analysis payload is invalid."
+        ) from exc
+
+def _load_sv9_shared_analysis_snapshot(
+    conn: Any,
+    *,
+    row: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    required = is_core_shared_series_contract(candidate["plan"]["current_series_contract"])
+    snapshot = conn.execute(
+        f"SELECT * FROM {_SCHEMA}.evidence_vault_sv9_shared_analysis_snapshots WHERE candidate_id = %s",
+        (row["id"],),
+    ).fetchone()
+    if snapshot is None:
+        if required:
+            raise EvidenceVaultSv9JudgmentCandidateError(
+                "SV9 shared analysis snapshot is unavailable."
+            )
+        return None
+    if not required:
+        raise EvidenceVaultSv9JudgmentCandidateError(
+            "SV9 legacy candidate has an invalid shared analysis snapshot."
+        )
+    bindings = {
+        "workspace_id": context["workspace_id"],
+        "brand_id": context["brand_id"],
+        "scan_run_id": context["scan_run_id"],
+        "source_scan_id": str(context["source_scan_id"]),
+        "capture_id": context["capture_id"],
+        "operation_plan_id": context["operation_plan_id"],
+        "candidate_complete_record_fingerprint": candidate["complete_record_fingerprint"],
+        "canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"],
+        "current_series_fingerprint": candidate["current_series_fingerprint"],
+        "candidate_series_fingerprint": candidate["candidate_series_fingerprint"],
+        "evaluation_bundle_fingerprint": candidate["evaluation_bundle_fingerprint"],
+        "assessment_fingerprint": candidate["assessment_fingerprint"],
+        "score_fingerprint": candidate["score_fingerprint"],
+    }
+    if str(snapshot["candidate_id"]) != str(row["id"]) or any(
+        str(snapshot[name]) != str(expected) for name, expected in bindings.items()
+    ):
+        raise EvidenceVaultSv9JudgmentCandidateError(
+            "SV9 shared analysis snapshot binding is inconsistent."
+        )
+    if str(snapshot["schema_version"]) != _SV9_SHARED_ANALYSIS_ROW_VERSION:
+        raise EvidenceVaultSv9JudgmentCandidateError(
+            "SV9 shared analysis snapshot schema is invalid."
+        )
+    prepared = _prepare_sv9_shared_analysis_snapshot(
+        snapshot["payload"],
+        candidate=candidate,
+        context=context,
+    )
+    raw = bytes(snapshot["payload_raw"])
+    if (
+        prepared is None
+        or hashlib.sha256(raw).hexdigest() != str(snapshot["payload_sha256"])
+        or json.loads(raw.decode("utf-8")) != prepared["payload"]
+    ):
+        raise EvidenceVaultSv9JudgmentCandidateError(
+            "SV9 shared analysis snapshot failed integrity validation."
+        )
+    return prepared
+
+def _sv9_judgment_stored_record(
+    conn: Any,
+    row: Mapping[str, Any] | None,
+    context: Mapping[str, Any],
+    *,
+    validate_shared_analysis: bool = True,
+) -> dict[str, Any]:
     if row is None: raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment candidate is unavailable.")
     candidate = dict(row["candidate_payload"] or {})
     candidate = _sv9_judgment_candidate_replay(candidate, _sv9_judgment_packets(conn, candidate, context))
@@ -12067,6 +12476,13 @@ def _sv9_judgment_stored_record(conn: Any, row: Mapping[str, Any] | None, contex
     actual = {str(binding["evidence_record_id"]): str(binding["evidence_fingerprint"]) for binding in conn.execute(f"SELECT evidence_record_id, evidence_fingerprint FROM {_SCHEMA}.evidence_vault_sv9_judgment_evidence_bindings WHERE candidate_id = %s", (row["id"],)).fetchall()}
     columns = ("schema_version", "canonical_plan_fingerprint", "current_series_fingerprint", "candidate_series_fingerprint", "evaluation_bundle_fingerprint", "assessment_fingerprint", "score_fingerprint", "complete_record_fingerprint")
     if expected != actual or any(str(row[name]) != candidate[name] for name in columns) or any(row[name] != context[name] for name in ("workspace_id", "brand_id", "scan_run_id", "capture_id", "operation_plan_id")) or str(row["source_scan_id"]) != str(context["source_scan_id"]) or (row["authority"], row["review_state"], row["lifecycle_state"], row["runtime_effect"]) != ("pending", "none", "active", "shadow_only"): raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment candidate readback is inconsistent.")
+    if validate_shared_analysis:
+        _load_sv9_shared_analysis_snapshot(
+            conn,
+            row=row,
+            candidate=candidate,
+            context=context,
+        )
     return candidate | {"id": str(row["id"]), "source_scan_id": str(row["source_scan_id"]), "created_at": row["created_at"].isoformat()}
 
 
@@ -12187,6 +12603,184 @@ def _sv9_checkpoint_component_evaluation_for_request(
         )
     return json.loads(canonical_json_bytes(next(iter(evaluations.values())))) if evaluations else None
 
+
+def _prepare_sv9_checkpoint_shared_process(
+    value: Mapping[str, Any] | None,
+    *,
+    checkpoint: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    try:
+        evaluation = checkpoint["healthy_workset"]["component_evaluations"][0]
+        source = checkpoint["evaluation_input"]["source_identity"]
+        payload_raw = canonical_json_bytes(dict(value))
+        payload = json.loads(payload_raw.decode("utf-8"))
+        if type(payload) is not dict or set(payload) != {
+            "schema_version",
+            "binding",
+            "flow_context",
+            "component_result",
+            "llm_usage",
+        }:
+            raise ValueError("shared process fields")
+        if (
+            payload["schema_version"]
+            != "evidence-vault-sv9-shared-checkpoint-process-v1"
+        ):
+            raise ValueError("shared process schema")
+        binding = payload["binding"]
+        if type(binding) is not dict or set(binding) != {
+            "source_scan_id",
+            "canonical_plan_fingerprint",
+            "canonical_request_fingerprint",
+            "current_series_fingerprint",
+            "candidate_series_fingerprint",
+            "component_key",
+            "capture_origin",
+            "operation_origin",
+            "snapshot_fingerprint",
+        }:
+            raise ValueError("shared process binding")
+        expected_binding = {
+            "source_scan_id": source["source_scan_id"],
+            "canonical_plan_fingerprint": checkpoint["plan_binding"][
+                "canonical_plan_fingerprint"
+            ],
+            "canonical_request_fingerprint": evaluation["request_fingerprint"],
+            "current_series_fingerprint": checkpoint["plan_binding"][
+                "current_series_fingerprint"
+            ],
+            "candidate_series_fingerprint": checkpoint["plan_binding"][
+                "candidate_series_fingerprint"
+            ],
+            "component_key": evaluation["component_key"],
+            "capture_origin": {
+                key: source[key]
+                for key in ("capture_id", "capture_fingerprint")
+            },
+            "operation_origin": {
+                "operation_id": source["operation_plan_id"],
+                "operation_fingerprint": source["operation_fingerprint"],
+            },
+        }
+        if any(binding.get(key) != child for key, child in expected_binding.items()):
+            raise ValueError("shared process binding mismatch")
+        _sv9_checkpoint_fingerprint(binding["snapshot_fingerprint"])
+        flow_context = payload["flow_context"]
+        if type(flow_context) is not dict or set(flow_context) != {
+            "candidate",
+            "interpretation_debug",
+            "visual_evidence_packet",
+        }:
+            raise ValueError("shared Flow context")
+        candidate = _flow_candidate_from_shared_checkpoint(
+            flow_context["candidate"]
+        )
+        if (
+            normalize_domain(candidate.evidence_pack.url)
+            != source["canonical_domain"]
+            or type(flow_context["interpretation_debug"]) is not dict
+            or flow_context["visual_evidence_packet"] is not None
+            and type(flow_context["visual_evidence_packet"]) is not dict
+        ):
+            raise ValueError("shared Flow context identity")
+        component = _component_from_shared_analysis_row(
+            str(evaluation["component_key"]), payload["component_result"]
+        )
+        _validate_llm_usage(payload["llm_usage"])
+        if evaluation["status"] == "not_detected":
+            if component.status != "not_detected" or evaluation["tile_results"]:
+                raise ValueError("shared component status")
+        else:
+            if component.status != "scored":
+                raise ValueError("shared component status")
+            by_tile = {row.tile_id: row for row in component.tile_profile}
+            if any(
+                by_tile.get(row["tile_id"]) is None
+                or by_tile[row["tile_id"]].estado != row["assessment_state"]
+                for row in evaluation["tile_results"]
+            ):
+                raise ValueError("shared component tile state")
+        return {
+            "payload": payload,
+            "payload_raw": payload_raw,
+            "payload_sha256": hashlib.sha256(payload_raw).hexdigest(),
+        }
+    except Exception as exc:
+        raise EvidenceVaultSv9EvaluationCheckpointError(
+            "SV9 shared checkpoint process is invalid."
+        ) from exc
+
+def _sv9_checkpoint_shared_process_from_row(
+    row: Mapping[str, Any],
+    *,
+    checkpoint: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    payload = row.get("shared_process_payload")
+    digest = row.get("shared_process_payload_sha256")
+    raw_value = row.get("shared_process_payload_raw")
+    if payload is None and digest is None and raw_value is None:
+        return None
+    if payload is None or digest is None or raw_value is None:
+        raise EvidenceVaultSv9EvaluationCheckpointConflictError(
+            "SV9 shared checkpoint process storage is incomplete."
+        )
+    prepared = _prepare_sv9_checkpoint_shared_process(
+        payload,
+        checkpoint=checkpoint,
+    )
+    raw = bytes(raw_value)
+    if (
+        prepared is None
+        or hashlib.sha256(raw).hexdigest() != str(digest)
+        or json.loads(raw.decode("utf-8")) != prepared["payload"]
+    ):
+        raise EvidenceVaultSv9EvaluationCheckpointConflictError(
+            "SV9 shared checkpoint process failed integrity validation."
+        )
+    return prepared
+
+def _sv9_checkpoint_shared_process_for_request(
+    conn: Any,
+    context: Mapping[str, Any],
+    *,
+    canonical_plan_fingerprint: str,
+    canonical_request_fingerprint: str,
+) -> dict[str, Any] | None:
+    rows = conn.execute(
+        f"""SELECT * FROM {_SCHEMA}.evidence_vault_sv9_evaluation_checkpoints
+            WHERE workspace_id = %s AND brand_id = %s AND scan_run_id = %s
+              AND source_scan_id = %s AND capture_id = %s AND operation_plan_id = %s
+              AND canonical_plan_fingerprint = %s""",
+        (
+            context["workspace_id"],
+            context["brand_id"],
+            context["scan_run_id"],
+            context["source_scan_id"],
+            context["capture_id"],
+            context["operation_plan_id"],
+            canonical_plan_fingerprint,
+        ),
+    ).fetchall()
+    results: dict[bytes, dict[str, Any]] = {}
+    for row in rows:
+        checkpoint = _sv9_checkpoint_stored_record(conn, row, context)
+        evaluation = checkpoint["healthy_workset"]["component_evaluations"][0]
+        if evaluation["request_fingerprint"] != canonical_request_fingerprint:
+            continue
+        process = _sv9_checkpoint_shared_process_from_row(
+            row,
+            checkpoint=checkpoint,
+        )
+        if process is not None:
+            canonical = canonical_json_bytes(process["payload"])
+            results[canonical] = process["payload"]
+    if len(results) > 1:
+        raise EvidenceVaultSv9EvaluationCheckpointConflictError(
+            "SV9 shared checkpoint process has contradictory immutable content."
+        )
+    return dict(next(iter(results.values()))) if results else None
 
 def _sv9_checkpoint_insert_values(checkpoint_id: UUID, context: Mapping[str, Any], checkpoint: Mapping[str, Any]) -> tuple[Any, ...]:
     source, plan = checkpoint["evaluation_input"], checkpoint["plan_binding"]

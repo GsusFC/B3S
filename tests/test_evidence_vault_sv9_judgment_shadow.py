@@ -111,3 +111,211 @@ def test_shadow_never_promotes_cross_scan_memory_or_persists_semantic_content():
     assert jm.validate_judgment_series_contract(_series())["rubric_version"] and all(_run(_Repository(), _Provider(), score)["current_score"] is None for score in ("invalid", -1, 101))
 
 # fmt: on
+
+
+def test_core_adapter_matches_real_flow_pipeline_and_reuses_without_llms():
+    from scripts.sv9_flow_sv9_shadow_eval import build_flow_sv9_shadow_eval
+    from src.sv9 import incremental_evaluation as ie
+    from src.sv9 import incremental_planner as ip
+    from src.services.evidence_vault_sv9_shared_process import (
+        CoreFlowSv9StrictComponentAdapter,
+        build_core_shared_series_contract,
+    )
+    from src.sv9.rubric import COMPONENTS, tile_ids
+
+    class FlowLLM:
+        api_key = "test-key"
+        model = "flow-fake"
+        last_failure_reason = None
+        call_failures = []
+
+        def _call_json(self, _system, _user, **_kwargs):
+            return {
+                "detected": True,
+                "content": "Acme helps finance teams close faster.",
+                "confidence": "high",
+                "evidence_refs": ["raw_inputs.0"],
+                "rationale": "The evidence states the audience and outcome.",
+                "limitations": [],
+            }
+
+    class LabelingLLM:
+        api_key = None
+        model = "labeling-fake"
+        last_failure_reason = None
+        call_failures = []
+
+    class TileLLM:
+        api_key = "test-key"
+        model = "tile-fake"
+        last_failure_reason = None
+
+        def __init__(self):
+            self.call_failures = []
+
+        def _call_json(self, _system, _user, **kwargs):
+            schema_name = kwargs.get("schema_name")
+            component = next(
+                (
+                    key
+                    for key in COMPONENTS
+                    if schema_name == f"baldosas_{key}"
+                ),
+                None,
+            )
+            rows = [
+                {
+                    "id": tile_id,
+                    "estado": "no",
+                    "evidencia": "",
+                    "motivo": "The evidence does not satisfy this tile.",
+                }
+                for tile_id in tile_ids(component)
+            ]
+            payload = {"baldosas": rows}
+            if component == "coherencia":
+                payload["veredicto"] = "The brand story is not yet coherent."
+            return payload
+
+    snapshot = {
+        "run": {
+            "id": 42,
+            "brand_name": "Acme",
+            "url": "https://acme.example",
+        },
+        "raw_inputs": [
+            {
+                "source": "homepage",
+                "payload": {
+                    "url": "https://acme.example",
+                    "text": "Acme helps finance teams close faster.",
+                },
+            }
+        ],
+    }
+    direct = build_flow_sv9_shadow_eval(
+        {"source_run_id": 42, "debug": snapshot},
+        include_full=True,
+        interpretation_llm=FlowLLM(),
+        adjudicator_llm=FlowLLM(),
+        labeling_llm=LabelingLLM(),
+        evaluator_llm=TileLLM(),
+        reasoning_llm=TileLLM(),
+        gate_authority="veto_only",
+        visual_evidence_fn=lambda _snapshot: None,
+    )
+    series = build_core_shared_series_contract(
+        interpretation_model="flow-fake",
+        labeling_model="labeling-fake",
+        adjudicator_model="flow-fake",
+        evaluator_model="tile-fake",
+        reasoning_model="tile-fake",
+        editorial_model="editorial-fake",
+        gate_authority="veto_only",
+        editorial_enabled=True,
+    )
+    adapter = CoreFlowSv9StrictComponentAdapter(
+        snapshot=snapshot,
+        source_run_id="42",
+        interpretation_llm_factory=FlowLLM,
+        adjudicator_llm_factory=FlowLLM,
+        labeling_llm_factory=LabelingLLM,
+        evaluator_llm_factory=TileLLM,
+        reasoning_llm_factory=TileLLM,
+        gate_authority="veto_only",
+    )
+    plan = ip.build_incremental_plan([], [], series)
+    evidence = {
+        "evidence_ref": "raw_inputs.0",
+        "evidence_fingerprint": _hash(13),
+        "content": "Acme helps finance teams close faster.",
+    }
+    packets = [
+        ie.build_evidence_packet(
+            component_key=component,
+            tiles=[
+                {"tile_id": tile_id, "evidence": [evidence]}
+                for tile_id in plan["tile_workset"]
+                if ie._BY_TILE[tile_id][1] == component
+            ],
+            capture_origin=_origin("capture", 11),
+            operation_origin=_origin("operation", 12),
+            series_fingerprint=plan["current_series_fingerprint"],
+        )
+        for component in plan["component_workset"]
+    ]
+    incremental = ie.execute_incremental_evaluation(plan, packets, adapter)
+    assert incremental["status"] == "available"
+    shared = adapter.build_shared_analysis_payload(incremental["assessment"])
+    actual = shared["analysis_payload"]
+
+    for payload in (direct, actual):
+        payload["source_run_id"] = str(payload["source_run_id"])
+        payload["sv9"]["result"]["source_run_id"] = str(
+            payload["sv9"]["result"]["source_run_id"]
+        )
+    assert actual == direct
+    assert shared["evaluation_components"] == direct["sv9"]["result"][
+        "components"
+    ]
+    assert actual["flow"]["interpretation_debug"]["evidence_coverage"]
+
+    def forbidden_factory():
+        raise AssertionError("Exact Resume must not initialize an LLM")
+
+    accepted_judgments = [
+        jm.build_tile_judgment(
+            **{
+                key: value
+                for key, value in row.items()
+                if key
+                not in {
+                    "schema_version",
+                    "series_fingerprint",
+                    "canonical_judgment_fingerprint",
+                    "authority_state",
+                }
+            },
+            authority_state="accepted",
+        )
+        for row in incremental["candidate_tile_judgments"]
+    ]
+    accepted_sentinels = [
+        ip.build_component_not_detected_sentinel(
+            **{
+                key: value
+                for key, value in row.items()
+                if key
+                not in {
+                    "schema_version",
+                    "series_fingerprint",
+                    "canonical_component_sentinel_fingerprint",
+                    "authority_state",
+                }
+            },
+            authority_state="accepted",
+        )
+        for row in incremental["candidate_component_sentinels"]
+    ]
+    resume = CoreFlowSv9StrictComponentAdapter(
+        snapshot=snapshot,
+        source_run_id="42",
+        interpretation_llm_factory=forbidden_factory,
+        adjudicator_llm_factory=forbidden_factory,
+        labeling_llm_factory=forbidden_factory,
+        evaluator_llm_factory=forbidden_factory,
+        reasoning_llm_factory=forbidden_factory,
+        gate_authority="veto_only",
+        prior_shared_analysis=shared,
+    )
+    repeat_plan = ip.build_incremental_plan(
+        accepted_judgments,
+        [],
+        series,
+        prior_component_sentinels=accepted_sentinels,
+    )
+    repeated = ie.execute_incremental_evaluation(repeat_plan, [], resume)
+    assert repeated["status"] == "available"
+    assert repeated["call_count"] == 0
+    assert repeated["calls_avoided"] == 10
+    assert repeated["assessment"] == incremental["assessment"]

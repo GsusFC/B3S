@@ -2,6 +2,7 @@ import pytest
 
 from src.sv9.flow_ingress import (
     SV9_FLOW_INGRESS_VERSION,
+    _evidence_snippet_pairs,
     detection_blocks_from_flow_candidate,
     flow_candidate_extra_signals,
 )
@@ -162,6 +163,30 @@ def test_detection_blocks_resolve_refs_to_citable_snippets() -> None:
     }
     assert blocks["vision"]["detected"] is False
     assert blocks["vision"]["evidence"] == []
+
+
+def test_evidence_snippet_pairs_keep_first_ref_after_stable_snippet_dedup() -> None:
+    shared_prefix = "x" * 700
+    evidence = [
+        EvidenceRecord(
+            ref="raw_inputs.0.text",
+            source="homepage",
+            evidence_type="raw_input_text",
+            content=f"{shared_prefix} first",
+        ),
+        EvidenceRecord(
+            ref="raw_inputs.1.text",
+            source="homepage",
+            evidence_type="raw_input_text",
+            content=f"{shared_prefix} second",
+        ),
+    ]
+
+    assert _evidence_snippet_pairs(
+        [record.ref for record in evidence],
+        {record.ref: record for record in evidence},
+        limit=8,
+    ) == [(shared_prefix, "raw_inputs.0.text")]
 
 
 def test_flow_candidate_extra_signals_group_by_component() -> None:

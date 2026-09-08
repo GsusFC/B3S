@@ -20,6 +20,9 @@ from src.services import evidence_vault_sv9_evaluation_checkpoint as checkpoint
 from src.services import evidence_vault_sv9_workset_partition as partitioning
 from src.services.evidence_vault_incremental_refresh import validate_vault_scan_plan
 from src.sv9 import incremental_evaluation as evaluation
+from src.services.evidence_vault_sv9_shared_process import (
+    is_core_shared_series_contract,
+)
 from src.sv9 import incremental_planner as planner
 from src.sv9 import judgment_memory as memory
 
@@ -33,6 +36,7 @@ class EvidenceVaultSv9AuthorityEvaluationRepository(Protocol):
     def append_evidence_vault_sv9_judgment_candidate(self, source_scan_id: str, candidate: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], bool]: ...
     def get_evidence_vault_sv9_evaluation_checkpoint_component_evaluation(self, source_scan_id: str, *, canonical_plan_fingerprint: str, canonical_request_fingerprint: str, **kwargs: Any) -> dict[str, Any] | None: ...
     def get_evidence_vault_sv9_evaluation_checkpoint_for_request(self, source_scan_id: str, *, canonical_plan_fingerprint: str, canonical_request_fingerprint: str, **kwargs: Any) -> dict[str, Any] | None: ...
+    def get_evidence_vault_sv9_evaluation_checkpoint_shared_process(self, source_scan_id: str, *, canonical_plan_fingerprint: str, canonical_request_fingerprint: str, **kwargs: Any) -> dict[str, Any] | None: ...
     def append_evidence_vault_sv9_evaluation_checkpoint(self, source_scan_id: str, checkpoint: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], bool]: ...
 class EvidenceVaultSv9AuthorityEvaluationError(ValueError): pass
 class EvidenceVaultSv9AuthoritySourceIdentityError(EvidenceVaultSv9AuthorityEvaluationError): pass
@@ -146,7 +150,18 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
             if existing["authoritative_relation_witness"] != witness: return _outcome("review_required", plan, authority_ids, ["stale_authoritative_relation_witness"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id, partition=partition)
             if authority_ids and existing.get("id") == authority_ids["accepted_candidate_id"]: return _outcome("no_new_score", plan, authority_ids, ["exact_reuse"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id, partition=partition)
             return _outcome("candidate_available", plan, authority_ids, ["candidate_already_present"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id, partition=partition)
-    lookup, persist = _checkpoint_callbacks(repository, source_scan_id, workspace_slug, evaluation_input, authority_snapshot, plan, partition["review_partition"]["tile_ids"], partition["pending_evidence"])
+    shared_series = is_core_shared_series_contract(plan["current_series_contract"])
+    lookup, persist = _checkpoint_callbacks(
+        repository,
+        source_scan_id,
+        workspace_slug,
+        evaluation_input,
+        authority_snapshot,
+        plan,
+        partition["review_partition"]["tile_ids"],
+        partition["pending_evidence"],
+        flow=flow,
+    )
     try: result = evaluation.execute_partial_incremental_evaluation(partition, resolved, flow, lookup_evaluation=lookup, persist_evaluation=persist)
     except Exception: return _outcome("no_new_score", plan, authority_ids, ["repository_failure"], ignored, unmapped, signed_delta=signed, partition=partition)
     if result["status"] != "partial": return _outcome("review_required" if review else "no_new_score", plan, authority_ids, review + [str(result.get("reason_code") or "evaluation_incomplete")], ignored, unmapped, result, signed_delta=signed if review else None, partition=partition)
@@ -154,10 +169,26 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
     try: replay = evaluation.replay_incremental_evaluations(plan, packets, [row["evaluation"] for row in result["captured_calls"]])
     except Exception: return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, result, partition=partition)
     if replay["status"] != "available" or not _complete(replay, plan): return _outcome("no_new_score", plan, authority_ids, ["incomplete_candidate"], ignored, unmapped, result, partition=partition)
+    shared_analysis_payload = None
+    if shared_series:
+        try:
+            build_shared_analysis = getattr(flow, "build_shared_analysis_payload")
+            if not callable(build_shared_analysis):
+                raise TypeError("shared analysis finalizer is unavailable")
+            shared_analysis_payload = build_shared_analysis(replay["assessment"])
+            if type(shared_analysis_payload) is not dict:
+                raise TypeError("shared analysis payload is invalid")
+        except Exception:
+            return _outcome("no_new_score", plan, authority_ids, ["shared_analysis_failure"], ignored, unmapped, result, partition=partition)
     candidate = _candidate(plan, replay, bindings, witness)
     if not _replays(candidate, candidate, candidate, packets): return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, result, partition=partition)
     try:
-        stored, inserted = repository.append_evidence_vault_sv9_judgment_candidate(source_scan_id, candidate, workspace_slug=workspace_slug)
+        stored, inserted = repository.append_evidence_vault_sv9_judgment_candidate(
+            source_scan_id,
+            candidate,
+            workspace_slug=workspace_slug,
+            shared_analysis_payload=shared_analysis_payload,
+        )
         reloaded = repository.get_evidence_vault_sv9_judgment_candidate(source_scan_id, canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], workspace_slug=workspace_slug)
     except EvidenceVaultSv9AuthoritativeRelationStaleWitnessError: return _outcome("review_required", plan, authority_ids, ["stale_authoritative_relation_witness"], ignored, unmapped, result, partition=partition)
     except EvidenceVaultSv9AuthoritativeRelationWitnessError: return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped, result, partition=partition)
@@ -173,13 +204,28 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
     return _outcome("candidate_available", plan, authority_ids, [] if inserted else ["candidate_already_present"], ignored, unmapped, result, reloaded, source_scan_id=source_scan_id, partition=partition)
 
 
-def _checkpoint_callbacks(repository, source_scan_id, workspace_slug, evaluation_input, authority_snapshot, plan, review_tile_ids=(), pending_evidence=()):
+def _checkpoint_callbacks(repository, source_scan_id, workspace_slug, evaluation_input, authority_snapshot, plan, review_tile_ids=(), pending_evidence=(), *, flow):
+    shared_series = is_core_shared_series_contract(plan["current_series_contract"])
     def lookup(request):
-        return repository.get_evidence_vault_sv9_evaluation_checkpoint_component_evaluation(source_scan_id, canonical_plan_fingerprint=request["plan_fingerprint"], canonical_request_fingerprint=request["canonical_request_fingerprint"], workspace_slug=workspace_slug)
-    def persist(_request, accepted, judgments, sentinel):
+        accepted = repository.get_evidence_vault_sv9_evaluation_checkpoint_component_evaluation(source_scan_id, canonical_plan_fingerprint=request["plan_fingerprint"], canonical_request_fingerprint=request["canonical_request_fingerprint"], workspace_slug=workspace_slug)
+        if accepted is not None and shared_series:
+            load = getattr(repository, "get_evidence_vault_sv9_evaluation_checkpoint_shared_process", None)
+            restore = getattr(flow, "restore_shared_checkpoint_process", None)
+            if not callable(load) or not callable(restore): raise EvidenceVaultSv9AuthorityEvaluationError("shared checkpoint recovery is unavailable")
+            process = load(source_scan_id, canonical_plan_fingerprint=request["plan_fingerprint"], canonical_request_fingerprint=request["canonical_request_fingerprint"], workspace_slug=workspace_slug)
+            if not isinstance(process, Mapping): raise EvidenceVaultSv9AuthorityEvaluationError("shared checkpoint process is unavailable")
+            restore(request, accepted, process)
+        return accepted
+    def persist(request, accepted, judgments, sentinel):
         tiles = [row["tile_id"] for row in judgments] if sentinel is None else list(planner._COMPONENT_TILES[sentinel["component_key"]])
         value = checkpoint.build_evidence_vault_sv9_evaluation_checkpoint(evaluation_input=evaluation_input, prior_authority_snapshot=authority_snapshot, current_series_fingerprint=plan["current_series_fingerprint"], canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], candidate_series_fingerprint=plan["candidate_series_fingerprint"], healthy_tile_ids=tiles, review_tile_ids=list(review_tile_ids), pending_evidence=[{**row, "reason": "unmapped_evidence"} for row in pending_evidence], non_authoritative_hints=evaluation_input["non_authoritative_hints"], component_evaluations=[accepted], evaluated_tile_judgments=judgments, evaluated_component_sentinels=[] if sentinel is None else [sentinel])
-        repository.append_evidence_vault_sv9_evaluation_checkpoint(source_scan_id, value, workspace_slug=workspace_slug)
+        shared_process = None
+        if shared_series:
+            get_process = getattr(flow, "get_shared_checkpoint_process", None)
+            if not callable(get_process): raise EvidenceVaultSv9AuthorityEvaluationError("shared checkpoint persistence is unavailable")
+            shared_process = get_process(request)
+            if not isinstance(shared_process, Mapping): raise EvidenceVaultSv9AuthorityEvaluationError("shared checkpoint process is invalid")
+        repository.append_evidence_vault_sv9_evaluation_checkpoint(source_scan_id, value, workspace_slug=workspace_slug, shared_process_payload=shared_process)
     return lookup, persist
 
 
@@ -245,21 +291,42 @@ def _evaluate_first_baseline(repository, flow, scan, workspace, current, context
     if authority is not None:
         accepted = authority["accepted_candidate"]
         if not current["non_authoritative_hints"] and accepted["plan"] == plan and accepted["evidence_bindings"] == bindings and accepted.get("authoritative_relation_witness") == witness and _replays(accepted, accepted, accepted, packets):
-            return _outcome("no_new_score", plan, authority_ids, ["exact_reuse"])
+            return _outcome(
+                "no_new_score",
+                plan,
+                authority_ids,
+                ["exact_reuse"],
+                result={
+                    "calls_avoided": len(planner._COMPONENT_TILES),
+                    "reused_tile_count": len(planner._REGISTRY),
+                },
+            )
         return _outcome("no_new_score", plan, authority_ids, ["invalid_input"])
     existing = repository.get_evidence_vault_sv9_judgment_candidate(scan, canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], workspace_slug=workspace)
     if existing is not None:
         if existing["plan"] != plan or existing["evidence_bindings"] != bindings or existing.get("authoritative_relation_witness") != witness or not _replays(existing, existing, existing, packets):
             return _outcome("no_new_score", plan, reasons=["invalid_input"])
         return _outcome("candidate_available", plan, reasons=["candidate_already_present"], candidate=existing, source_scan_id=scan)
-    lookup, persist = _checkpoint_callbacks(repository, scan, workspace, current, {"state": "bootstrap_absent"}, plan)
+    lookup, persist = _checkpoint_callbacks(repository, scan, workspace, current, {"state": "bootstrap_absent"}, plan, flow=flow)
     result = evaluation.execute_incremental_evaluation(plan, packets, flow, lookup_evaluation=lookup, persist_evaluation=persist)
     if result["status"] != "available" or not _complete(result, plan):
         return _outcome("no_new_score", plan, reasons=[result.get("reason_code") or "incomplete_candidate"], result=result)
-    candidate = _candidate(plan, evaluation.replay_incremental_evaluations(plan, packets, [row["evaluation"] for row in result["captured_calls"]]), bindings, witness)
+    replay = evaluation.replay_incremental_evaluations(plan, packets, [row["evaluation"] for row in result["captured_calls"]])
+    shared_analysis_payload = None
+    if is_core_shared_series_contract(plan["current_series_contract"]):
+        try:
+            build_shared_analysis = getattr(flow, "build_shared_analysis_payload")
+            if not callable(build_shared_analysis):
+                raise TypeError("shared analysis finalizer is unavailable")
+            shared_analysis_payload = build_shared_analysis(replay["assessment"])
+            if type(shared_analysis_payload) is not dict:
+                raise TypeError("shared analysis payload is invalid")
+        except Exception:
+            return _outcome("no_new_score", plan, reasons=["shared_analysis_failure"], result=result)
+    candidate = _candidate(plan, replay, bindings, witness)
     if not _replays(candidate, candidate, candidate, packets):
         return _outcome("no_new_score", plan, reasons=["invalid_replay"], result=result)
-    stored, inserted = repository.append_evidence_vault_sv9_judgment_candidate(scan, candidate, workspace_slug=workspace)
+    stored, inserted = repository.append_evidence_vault_sv9_judgment_candidate(scan, candidate, workspace_slug=workspace, shared_analysis_payload=shared_analysis_payload)
     reloaded = repository.get_evidence_vault_sv9_judgment_candidate(scan, canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], workspace_slug=workspace)
     if not _replays(stored, reloaded, candidate, packets):
         return _outcome("no_new_score", plan, reasons=["invalid_replay"], result=result)

@@ -54,6 +54,85 @@ def _assessment_report(
     return report
 
 
+def _shared_analysis_payload(scan_id: str) -> dict:
+    from src.sv9.aggregator import aggregate
+    from src.sv9_flow.contracts import (
+        BrandEvidencePack,
+        BrandInterpretation,
+        Sv9FlowCandidate,
+    )
+    from tests.test_vault_sv9_parity import _components, _flow_payload
+
+    components = _components()
+    analysis = _flow_payload(
+        aggregate(
+            deepcopy(components),
+            brand_name="Example",
+            url="https://example.com",
+            source_run_id=scan_id,
+        ).to_dict()
+    )
+    analysis["source_run_id"] = scan_id
+    analysis["shared_replay_marker"] = "persisted-full-core-output"
+    flow_candidate = Sv9FlowCandidate(
+        evidence_pack=BrandEvidencePack(
+            brand_name="Example",
+            url="https://example.com",
+        ),
+        interpretation=BrandInterpretation(
+            brand_name="Example",
+            url="https://example.com",
+            blocks={},
+            evidence_refs={},
+        ),
+    ).to_dict()
+    analysis["flow"]["candidate"] = flow_candidate
+    return {
+        "schema_version": "evidence-vault-sv9-shared-analysis-payload-v1",
+        "analysis_payload": analysis,
+        "evaluation_components": {key: value.to_dict() for key, value in sorted(components.items())},
+        "component_provenance": {
+            key: deepcopy(flow_candidate)
+            for key in sorted(components)
+            if key != "coherencia"
+        },
+    }
+
+def _configure_shared_models(monkeypatch: pytest.MonkeyPatch) -> dict:
+    from src import config
+    from src.services.evidence_vault_sv9_shared_process import (
+        build_core_shared_series_contract,
+    )
+
+    values = {
+        "SV9_FLOW_MODEL": "flow-fake",
+        "SV9_FLOW_LABELING_MODEL": "labeling-fake",
+        "SV9_ADJUDICATOR_MODEL": "adjudicator-fake",
+        "SV9_REASONING_MODEL": "reasoning-fake",
+        "SV9_EDITORIAL_MODEL": "editorial-fake",
+        "SV9_FLOW_GATE_AUTHORITY": "veto_only",
+    }
+    for name, value in values.items():
+        monkeypatch.setattr(config, name, value)
+    for name in (
+        "BRAND3_FLOW_INTERPRETATION_MODEL",
+        "BRAND3_FLOW_LABELING_MODEL",
+        "BRAND3_FLOW_ADJUDICATOR_MODEL",
+        "BRAND3_FLOW_EVALUATOR_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("B3S_SV9_EDITORIAL_ENABLED", "false")
+    return build_core_shared_series_contract(
+        interpretation_model="flow-fake",
+        labeling_model="labeling-fake",
+        adjudicator_model="adjudicator-fake",
+        evaluator_model="flow-fake",
+        reasoning_model="reasoning-fake",
+        editorial_model="editorial-fake",
+        gate_authority="veto_only",
+        editorial_enabled=False,
+    )
+
 def _exact_action(scan_id: str, action_id: str = "durable-action-1") -> dict:
     from src.history.report_parser import canonical_json_hash
 
@@ -84,30 +163,252 @@ def test_authority_scanner_gate_requires_both_exact_flags(monkeypatch) -> None:
     monkeypatch.setenv("BRAND3_ENVIRONMENT", "production"); assert scan_runner._vault_sv9_authority_scanner_enabled() is False
 
 
+def test_scanner_shared_flow_default_restores_accepted_full_core_output_without_llm(
+    monkeypatch,
+) -> None:
+    from src.features import llm_analyzer
+    from src.sv9.rubric import COMPONENTS
+
+    series = _configure_shared_models(monkeypatch)
+    shared = _shared_analysis_payload("scan-shared-default")
+    accepted = {
+        "id": "candidate-shared-default",
+        "plan": {"current_series_contract": series},
+    }
+    loads = []
+
+    class Repository:
+        def get_evidence_vault_sv9_judgment_authority(self, *_args, **_kwargs):
+            return {"accepted_candidate": accepted}
+
+        def get_evidence_vault_sv9_shared_analysis(self, candidate_id, **_kwargs):
+            loads.append(candidate_id)
+            return deepcopy(shared)
+
+    monkeypatch.setattr(
+        llm_analyzer,
+        "LLMAnalyzer",
+        lambda **_kwargs: pytest.fail("lazy shared replay constructed an LLM"),
+    )
+    flow, actual_series = scan_runner._vault_core_shared_flow(
+        repository=Repository(),
+        domain_or_url="https://example.com",
+        source_scan_id="scan-shared-default",
+        canonical_snapshot={"run": {"id": "scan-shared-default"}, "raw_inputs": []},
+    )
+
+    assert actual_series == series
+    assert loads == ["candidate-shared-default"]
+    assert set(flow._components) == set(COMPONENTS)
+    assert flow._interpretation_llm is flow._evaluator_llm is None
+
+def test_exact_resume_scanner_uses_real_shared_flow_and_persisted_full_output(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from src.features import llm_analyzer
+    from src.services import evidence_vault_scan_orchestration as orchestration
+    from src.services import evidence_vault_sv9_authority_application as application
+    from src.services import evidence_vault_sv9_authority_report as publication
+
+    scan_id = "exact-shared-replay"
+    binding = _exact_binding(scan_id)
+    action = _exact_action(scan_id, "durable-action-shared-replay")
+    series = _configure_shared_models(monkeypatch)
+    shared = _shared_analysis_payload(scan_id)
+    accepted = {
+        "id": "candidate-shared-replay",
+        "source_scan_id": scan_id,
+        "plan": {"current_series_contract": series},
+    }
+    loads = []
+
+    class Repository:
+        def activate_evidence_vault_operational_scanner_result(self, *_args, **_kwargs):
+            return {"created": True}
+
+        def get_capture_operation_plan(self, *_args, **_kwargs):
+            return {"status": "completed"}
+
+        def get_evidence_vault_sv9_judgment_authority(self, *_args, **_kwargs):
+            return {"accepted_candidate": accepted}
+
+        def get_evidence_vault_sv9_shared_analysis(self, candidate_id, **_kwargs):
+            loads.append(candidate_id)
+            return deepcopy(shared)
+
+    repository = Repository()
+    prepared = {
+        "url": "https://example.com",
+        "brand_name": "Example",
+        "preparation": {
+            "resume": {
+                "analysis_status": "completed",
+                "operation_plan_fingerprint": "operation-plan",
+            }
+        },
+        "canonical_snapshot": {
+            "run": {"id": scan_id},
+            "raw_inputs": [],
+            "acquisition_gate": {"state": "pass"},
+        },
+        "report_binding": binding,
+    }
+    _file_report_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        orchestration,
+        "prepare_vault_exact_resume",
+        lambda **_kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        llm_analyzer,
+        "LLMAnalyzer",
+        lambda **_kwargs: pytest.fail("Exact Resume constructed an LLM"),
+    )
+    observed = {}
+
+    def apply(**kwargs):
+        observed["flow"] = kwargs["flow"]
+        observed["series"] = kwargs["current_series_contract"]
+        return {"authority": {"accepted_candidate": accepted}}
+
+    monkeypatch.setattr(application, "run_evidence_vault_sv9_authority_application", apply)
+    monkeypatch.setattr(
+        publication,
+        "project_vault_authority_publication",
+        lambda *_args: {
+            "action": "publish_current",
+            "source_report_id": None,
+            "scanner_payload": {"shared_replay_marker": "projection-must-not-win"},
+        },
+    )
+
+    result = scan_runner._run_vault_exact_resume(
+        scan_id=scan_id,
+        action=action,
+        repository=repository,
+    )
+
+    successor = scan_runner.load_report(result.report_id)
+    assert result.action == "publish_current"
+    assert successor["raw"]["shared_replay_marker"] == "persisted-full-core-output"
+    assert "component_provenance" not in successor["raw"]
+    assert successor["raw"]["source_run_id"] == scan_id
+    assert observed["series"] == series
+    assert observed["flow"]._interpretation_llm is None
+    assert loads == ["candidate-shared-replay", "candidate-shared-replay"]
+
 def test_authority_terminal_actions_and_completed_non_llm_resume_are_guarded(monkeypatch) -> None:
     from src import config
-    from src.services import evidence_vault_incremental_executor as executor, evidence_vault_sv9_authority_application as application, evidence_vault_sv9_authority_report as publication, evidence_vault_sv9_authoritative_relations as relations
-    monkeypatch.setattr(config, "SV9_FLOW_MODEL", "test-model"); monkeypatch.setattr(executor, "execute_vault_operation_plan", lambda **_k: {"execution_status": "completed"})
-    monkeypatch.setattr(relations, "project_evidence_vault_sv9_authoritative_relations", lambda **_k: pytest.fail("legacy relation projector called"))
-    monkeypatch.setattr(relations, "project_evidence_vault_sv9_capture_current", lambda **_k: pytest.fail("legacy capture projector called"))
+    from src.services import (
+        evidence_vault_incremental_executor as executor,
+        evidence_vault_sv9_authority_application as application,
+        evidence_vault_sv9_authority_report as publication,
+        evidence_vault_sv9_authoritative_relations as relations,
+    )
+
+    monkeypatch.setattr(config, "SV9_FLOW_MODEL", "test-model")
+    monkeypatch.setattr(executor, "execute_vault_operation_plan", lambda **_k: {"execution_status": "completed"})
+    monkeypatch.setattr(scan_runner, "_vault_core_shared_flow", lambda **_k: (object(), {"series": "shared"}))
+    monkeypatch.setattr(
+        relations,
+        "project_evidence_vault_sv9_authoritative_relations",
+        lambda **_k: pytest.fail("legacy relation projector called"),
+    )
+    monkeypatch.setattr(
+        relations,
+        "project_evidence_vault_sv9_capture_current",
+        lambda **_k: pytest.fail("legacy capture projector called"),
+    )
     for action in ("publish_current", "retain_source", "record_no_score"):
-        scan_id, saved, validated, sources, source, activations = f"scan-{action}", [], [], [], {"id": "prior"}, []; scan_runner._SCANS[scan_id] = _status(scan_id); scan_runner._SCAN_EVENTS[scan_id] = scan_runner.threading.Event()
+        scan_id, saved, validated, sources, source, activations = f"scan-{action}", [], [], [], {"id": "prior"}, []
+        scan_runner._SCANS[scan_id] = _status(scan_id)
+        scan_runner._SCAN_EVENTS[scan_id] = scan_runner.threading.Event()
+
         class Repo:
-            def activate_evidence_vault_operational_scanner_result(self, *_a, **_k): activations.append(_k["operation_plan_fingerprint"]); return {"created": True}
-        monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda value: assert_terminal(scan_id) if value["state"] == "done" else assert_guard(scan_id))
-        monkeypatch.setattr(scan_runner, "save_report", saved.append); monkeypatch.setattr(scan_runner, "load_report", lambda value: source if value == "prior" else None)
-        monkeypatch.setattr(scan_runner, "_compose_report", lambda identity, _url, _name, payload: {"id": identity, "raw": payload}); monkeypatch.setattr(scan_runner, "_validate_report_sv9_assessment", lambda *_a, **_k: validated.append(True))
-        def assert_guard(identity): assert identity in scan_runner._VAULT_ACTIVATIONS
-        def assert_terminal(identity): assert identity not in scan_runner._VAULT_ACTIVATIONS and scan_runner._SCANS[identity]["state"] == "done"
+            def activate_evidence_vault_operational_scanner_result(self, *_a, **_k):
+                activations.append(_k["operation_plan_fingerprint"])
+                return {"created": True}
+
+        monkeypatch.setattr(
+            scan_runner,
+            "_persist_scan_status",
+            lambda value: assert_terminal(scan_id) if value["state"] == "done" else assert_guard(scan_id),
+        )
+        monkeypatch.setattr(scan_runner, "save_report", saved.append)
+        monkeypatch.setattr(scan_runner, "load_report", lambda value: source if value == "prior" else None)
+        monkeypatch.setattr(
+            scan_runner, "_compose_report", lambda identity, _url, _name, payload: {"id": identity, "raw": payload}
+        )
+        monkeypatch.setattr(scan_runner, "_validate_report_sv9_assessment", lambda *_a, **_k: validated.append(True))
+
+        def assert_guard(identity):
+            assert identity in scan_runner._VAULT_ACTIVATIONS
+
+        def assert_terminal(identity):
+            assert identity not in scan_runner._VAULT_ACTIVATIONS and scan_runner._SCANS[identity]["state"] == "done"
+
         def apply(**kwargs):
-            assert "current_evidence" not in kwargs and "authoritative_relations" not in kwargs and kwargs["trusted_irrelevant_evidence"] == [] and activations == ["p"]
+            assert (
+                "current_evidence" not in kwargs
+                and "authoritative_relations" not in kwargs
+                and kwargs["trusted_irrelevant_evidence"] == []
+                and activations == ["p"]
+            )
             assert scan_runner.cancel_scan(scan_id)["reason"] == "vault_activation_in_progress"
-            return {"authority": {"accepted_candidate": {"source_scan_id": "prior" if action == "retain_source" else scan_id}}}
+            return {
+                "authority": {
+                    "accepted_candidate": {"source_scan_id": "prior" if action == "retain_source" else scan_id}
+                }
+            }
+
         monkeypatch.setattr(application, "run_evidence_vault_sv9_authority_application", apply)
-        monkeypatch.setattr(publication, "project_vault_authority_publication", lambda _app, _current, resolved: sources.append(resolved) or {"action": action, "source_report_id": "prior" if action == "retain_source" else None, "scanner_payload": None if action == "retain_source" else {"sv9": {"brand3_score": None if action == "record_no_score" else 7}}})
-        assert scan_runner._run_vault_sv9_authority_scanner(scan_id=scan_id, url="https://example.test", brand_name="Example", repository=Repo(), preparation={"operation_plan": {"operation_plan_fingerprint": "p", "operations": {"llm_required": False}}} if action != "record_no_score" else {"resume": {"analysis_status": "completed", "operation_plan_fingerprint": "p", "semantic_work_completed": False}}, canonical_snapshot={"raw_inputs": [], "acquisition_gate": {"state": "pass"}}, canonical_source_capture=None, gate={"state": "pass"}) is True
-        assert scan_runner._SCANS[scan_id]["report_id"] == ("prior" if action == "retain_source" else scan_id) and (saved == [] if action == "retain_source" else len(saved) == 1) and validated == ([] if action == "retain_source" else [True]) and sources == ([source] if action == "retain_source" else [None]) and scan_id not in scan_runner._VAULT_ACTIVATIONS
-        scan_runner._SCANS.pop(scan_id, None); scan_runner._SCAN_EVENTS.pop(scan_id, None)
+        monkeypatch.setattr(
+            publication,
+            "project_vault_authority_publication",
+            lambda _app, _current, resolved: (
+                sources.append(resolved)
+                or {
+                    "action": action,
+                    "source_report_id": "prior" if action == "retain_source" else None,
+                    "scanner_payload": None
+                    if action == "retain_source"
+                    else {"sv9": {"brand3_score": None if action == "record_no_score" else 7}},
+                }
+            ),
+        )
+        assert (
+            scan_runner._run_vault_sv9_authority_scanner(
+                scan_id=scan_id,
+                url="https://example.test",
+                brand_name="Example",
+                repository=Repo(),
+                preparation={
+                    "operation_plan": {"operation_plan_fingerprint": "p", "operations": {"llm_required": False}}
+                }
+                if action != "record_no_score"
+                else {
+                    "resume": {
+                        "analysis_status": "completed",
+                        "operation_plan_fingerprint": "p",
+                        "semantic_work_completed": False,
+                    }
+                },
+                canonical_snapshot={"raw_inputs": [], "acquisition_gate": {"state": "pass"}},
+                canonical_source_capture=None,
+                gate={"state": "pass"},
+            )
+            is True
+        )
+        assert (
+            scan_runner._SCANS[scan_id]["report_id"] == ("prior" if action == "retain_source" else scan_id)
+            and (saved == [] if action == "retain_source" else len(saved) == 1)
+            and validated == ([] if action == "retain_source" else [True])
+            and sources == ([source] if action == "retain_source" else [None])
+            and scan_id not in scan_runner._VAULT_ACTIVATIONS
+        )
+        scan_runner._SCANS.pop(scan_id, None)
+        scan_runner._SCAN_EVENTS.pop(scan_id, None)
 
 
 def test_authority_scanner_delegates_capture_partition_failure_to_application(monkeypatch) -> None:
@@ -119,11 +420,36 @@ def test_authority_scanner_delegates_capture_partition_failure_to_application(mo
     scan_runner._SCANS[scan_id] = _status(scan_id)
     scan_runner._SCAN_EVENTS[scan_id] = scan_runner.threading.Event()
     monkeypatch.setattr(scan_runner, "_execute_vault_operational_preparation", lambda **_kwargs: "p")
-    monkeypatch.setattr(scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": True})
-    monkeypatch.setattr(relations, "project_evidence_vault_sv9_authoritative_relations", lambda **_kwargs: pytest.fail("legacy relation projector called"))
-    monkeypatch.setattr(relations, "project_evidence_vault_sv9_capture_current", lambda **_kwargs: pytest.fail("legacy capture projector called"))
+    monkeypatch.setattr(
+        scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": True}
+    )
+    monkeypatch.setattr(scan_runner, "_vault_core_shared_flow", lambda **_kwargs: (object(), {"series": "shared"}))
+    monkeypatch.setattr(
+        relations,
+        "project_evidence_vault_sv9_authoritative_relations",
+        lambda **_kwargs: pytest.fail("legacy relation projector called"),
+    )
+    monkeypatch.setattr(
+        relations,
+        "project_evidence_vault_sv9_capture_current",
+        lambda **_kwargs: pytest.fail("legacy capture projector called"),
+    )
     calls = []
-    monkeypatch.setattr(application, "run_evidence_vault_sv9_authority_application", lambda **kwargs: calls.append(kwargs) or {"status": "no_new_score", "reason_codes": ["invalid_capture_current"], "evaluation_status": "review_required", "candidate": None, "signed_delta": None, "authority": None})
+    monkeypatch.setattr(
+        application,
+        "run_evidence_vault_sv9_authority_application",
+        lambda **kwargs: (
+            calls.append(kwargs)
+            or {
+                "status": "no_new_score",
+                "reason_codes": ["invalid_capture_current"],
+                "evaluation_status": "review_required",
+                "candidate": None,
+                "signed_delta": None,
+                "authority": None,
+            }
+        ),
+    )
     monkeypatch.setattr(
         publication,
         "project_vault_authority_publication",
@@ -137,16 +463,21 @@ def test_authority_scanner_delegates_capture_partition_failure_to_application(mo
     monkeypatch.setattr(scan_runner, "_validate_report_sv9_assessment", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(scan_runner, "_publish_completed_report", lambda *_args: True)
     try:
-        assert scan_runner._run_vault_sv9_authority_scanner(
-            scan_id=scan_id,
-            url="https://example.test",
-            brand_name="Example",
-            repository=object(),
-            preparation={"operation_plan": {"operation_plan_fingerprint": "p", "operations": {"llm_required": False}}},
-            canonical_snapshot={"raw_inputs": [], "acquisition_gate": {"state": "pass"}},
-            canonical_source_capture=None,
-            gate={"state": "pass"},
-        ) is True
+        assert (
+            scan_runner._run_vault_sv9_authority_scanner(
+                scan_id=scan_id,
+                url="https://example.test",
+                brand_name="Example",
+                repository=object(),
+                preparation={
+                    "operation_plan": {"operation_plan_fingerprint": "p", "operations": {"llm_required": False}}
+                },
+                canonical_snapshot={"raw_inputs": [], "acquisition_gate": {"state": "pass"}},
+                canonical_source_capture=None,
+                gate={"state": "pass"},
+            )
+            is True
+        )
         assert calls and "current_evidence" not in calls[0] and "authoritative_relations" not in calls[0]
     finally:
         scan_runner._VAULT_ACTIVATIONS.discard(scan_id)
@@ -883,6 +1214,7 @@ def test_ordinary_publication_imports_frozen_evidence_without_overwriting_report
     payload = _assessment_report(scan_id, binding, unavailable=action == "record_no_score")["raw"]
     payload.pop("flow", None)
     monkeypatch.setattr(application, "run_evidence_vault_sv9_authority_application", lambda **_kwargs: {})
+    monkeypatch.setattr(scan_runner, "_vault_core_shared_flow", lambda **_kwargs: (object(), {}))
     monkeypatch.setattr(
         publication,
         "project_vault_authority_publication",
@@ -935,7 +1267,7 @@ def test_first_baseline_runtime_publishes_frozen_capture_and_validated_memory(mo
     from src.sv9 import incremental_evaluation as evaluation, incremental_flow_adapter
     from tests.test_evidence_vault_scan_orchestration import _Repository as CaptureRepository, _snapshot
     from tests.test_evidence_vault_sv9_authoritative_relations import _facts, _sha
-    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
+    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository, _series
 
     scan_id, url = "first-baseline-runtime", "https://example.com"
     capture_repository = CaptureRepository(memory=None, history=[])
@@ -998,6 +1330,7 @@ def test_first_baseline_runtime_publishes_frozen_capture_and_validated_memory(mo
     store = _file_report_store(monkeypatch, tmp_path)
     monkeypatch.setattr(store, "_postgres_repository", lambda: None)
     monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *_args, **_kwargs: Flow())
+    monkeypatch.setattr(scan_runner, "_vault_core_shared_flow", lambda **_kwargs: (Flow(), _series()))
     monkeypatch.setattr(scan_runner, "_execute_vault_operational_preparation", lambda **_kwargs: source["operation_fingerprint"])
     monkeypatch.setattr(scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": True})
     monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda *_args: None)
@@ -1155,6 +1488,7 @@ def test_accepted_same_source_replay_publishes_without_changing_immutable_report
     source_capture = {key: binding[key] for key in ("source_scan_id", "observation_hash", "capture_hash")}
     flow = authority_tests._Flow()
     monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *_args, **_kwargs: flow)
+    monkeypatch.setattr(scan_runner, "_vault_core_shared_flow", lambda **_kwargs: (flow, authority_tests._series()))
     monkeypatch.setattr(scan_runner, "_execute_vault_operational_preparation", lambda **_kwargs: "operation")
     monkeypatch.setattr(
         scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": False}

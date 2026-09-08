@@ -4,11 +4,89 @@ from copy import deepcopy
 import pytest
 
 from src.services import evidence_vault_scan_orchestration as orchestration
+from src.services import evidence_vault_sv9_shared_process as shared_process
 from src.services.evidence_vault_incremental_refresh import build_vault_scan_plan
 from src.sv9 import incremental_flow_adapter
 from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
 from tests.test_evidence_vault_sv9_authority_evaluation import _Flow
 from web import report_store, scan_runner
+
+
+def _shared_series():
+    return shared_process.build_core_shared_series_contract(
+        interpretation_model="interpretation-fake",
+        labeling_model="labeling-fake",
+        adjudicator_model="adjudicator-fake",
+        evaluator_model="evaluator-fake",
+        reasoning_model="reasoning-fake",
+        editorial_model="editorial-fake",
+        gate_authority="veto_only",
+        editorial_enabled=True,
+    )
+
+
+def _as_shared_flow(flow, scan):
+    from scripts.sv9_flow_sv9_shadow_eval import (
+        SV9_FLOW_SV9_SHADOW_EVAL_VERSION,
+        _result_summary,
+    )
+    from src.sv9.service import _aggregate_sv9_analysis
+    from src.services.evidence_vault_sv9_shared_process import (
+        _component_from_shared_analysis_row,
+    )
+    from src.sv9_flow.contracts import (
+        BrandEvidencePack,
+        BrandInterpretation,
+        Sv9FlowCandidate,
+    )
+
+    flow.shared_analysis = {}
+    flow_candidate = Sv9FlowCandidate(
+        evidence_pack=BrandEvidencePack(
+            brand_name="Example",
+            url="https://example.test",
+        ),
+        interpretation=BrandInterpretation(
+            brand_name="Example",
+            url="https://example.test",
+            blocks={},
+            evidence_refs={},
+        ),
+    ).to_dict()
+
+    def build(assessment):
+        result = _aggregate_sv9_analysis(
+            {
+                key: _component_from_shared_analysis_row(key, value)
+                for key, value in flow.shared_components.items()
+            },
+            brand_name="Example",
+            url="https://example.test",
+            source_run_id=scan,
+            evaluator_llm=None,
+        )
+        assert result.assessment["sv9_score"] == assessment["sv9_score"]
+        return {
+            "schema_version": "evidence-vault-sv9-shared-analysis-payload-v1",
+            "analysis_payload": {
+                "schema_version": SV9_FLOW_SV9_SHADOW_EVAL_VERSION,
+                "source_run_id": scan,
+                "brand_name": "Example",
+                "url": "https://example.test",
+                "flow": {"candidate": deepcopy(flow_candidate)},
+                "sv9": _result_summary(result.to_dict())
+                | {"result": result.to_dict()},
+            },
+            "evaluation_components": deepcopy(flow.shared_components),
+            "component_provenance": {
+                key: deepcopy(flow_candidate)
+                for key in sorted(flow.shared_components)
+                if key != "coherencia"
+            },
+        }
+
+    flow.build_shared_analysis_payload = build
+    return flow
 
 
 @pytest.fixture
@@ -59,13 +137,24 @@ def exact_replay(monkeypatch, tmp_path):
         "operation_plan_id": repo.context["operation_origin"]["operation_id"],
         "operation_plan_fingerprint": operation_plan["operation_plan_fingerprint"],
     }, raising=False)
+    monkeypatch.setattr(
+        repo,
+        "get_evidence_vault_sv9_shared_analysis",
+        lambda *_args, **_kwargs: deepcopy(repo.shared_analysis_payloads[-1]),
+        raising=False,
+    )
     monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
     monkeypatch.setattr(scan_runner, "save_report", report_store.save_report)
     monkeypatch.setattr(scan_runner, "load_report", report_store.load_report)
     action = {"action_id": "stabilization-action", "scan_id": scan, "state": "running"}
+    series = _shared_series()
 
     def run(flow):
-        monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *a, **k: flow)
+        monkeypatch.setattr(
+            scan_runner,
+            "_vault_core_shared_flow",
+            lambda **_kwargs: (_as_shared_flow(flow, scan), series),
+        )
         return scan_runner._run_vault_exact_resume(scan_id=scan, action=action, repository=repo)
 
     return scan, repo, run, tmp_path
@@ -294,7 +383,11 @@ def test_resume_successor_is_readable_through_api_and_public_report(exact_replay
         ),
     )
     flow = _Flow()
-    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *a, **k: flow)
+    monkeypatch.setattr(
+        scan_runner,
+        "_vault_core_shared_flow",
+        lambda **_kwargs: (_as_shared_flow(flow, scan), _shared_series()),
+    )
     client = TestClient(app)
     original = client.get(f"/api/v1/scans/{scan}/result", headers=AUTH)
     assert original.status_code == 200
@@ -334,7 +427,11 @@ def test_resume_successor_is_readable_through_api_and_public_report(exact_replay
     assert (directory / f"{scan}.json").read_bytes() == original_bytes
     assert len(flow.calls) == 9 and len(repository.checkpoints) == 10
     no_call = _Flow(fail=1)
-    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *a, **k: no_call)
+    monkeypatch.setattr(
+        scan_runner,
+        "_vault_core_shared_flow",
+        lambda **_kwargs: (_as_shared_flow(no_call, scan), _shared_series()),
+    )
     repeated = reader.post(f"/api/v1/scans/{scan}/resume", headers=headers)
     assert repeated.status_code == 202 and repeated.headers["idempotent-replayed"] == "true"
     assert repeated.json()["action_id"] == payload["action_id"]
@@ -364,7 +461,11 @@ def test_api_report_survives_action_finalization_failure(exact_replay, monkeypat
         ),
     )
     flow = _Flow()
-    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *a, **k: flow)
+    monkeypatch.setattr(
+        scan_runner,
+        "_vault_core_shared_flow",
+        lambda **_kwargs: (_as_shared_flow(flow, scan), _shared_series()),
+    )
     finalize = SQLiteStore.finalize_scanner_resume_action
 
     def unavailable(store, **kwargs):
@@ -394,7 +495,11 @@ def test_api_report_survives_action_finalization_failure(exact_replay, monkeypat
     assert status["state"] == ("interrupted" if all_finalization_writes_fail else "failed")
     assert status["result"] is None and status["failure"]["retryable"] is True
     no_call = _Flow(fail=1)
-    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *a, **k: no_call)
+    monkeypatch.setattr(
+        scan_runner,
+        "_vault_core_shared_flow",
+        lambda **_kwargs: (_as_shared_flow(no_call, scan), _shared_series()),
+    )
     same_request = client.post(f"/api/v1/scans/{scan}/resume", headers=headers)
     assert same_request.headers["idempotent-replayed"] == "true"
     assert same_request.json()["state"] == status["state"] and not no_call.calls

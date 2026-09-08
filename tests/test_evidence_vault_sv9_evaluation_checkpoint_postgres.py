@@ -83,7 +83,7 @@ def _checkpoint_readback_repository(monkeypatch, *, rows, records, checkpoint_ro
 
 def test_checkpoint_migration_contract_is_forward_only_and_non_authoritative():
     sql = Path("src/history/migrations/034_evidence_vault_sv9_evaluation_checkpoints.sql").read_text(); columns = sql.split("checkpoint_payload", 1)[0]
-    assert history._migration_files()[-1][0] == "035_evidence_vault_sv9_empty_relation_witness.sql"
+    assert history._migration_files()[-1][0] == "036_evidence_vault_sv9_shared_analysis_snapshots.sql"
     assert all(value in sql for value in ("PRIMARY KEY (checkpoint_id, evidence_record_id)", "FOREIGN KEY (capture_id, evidence_record_id, evidence_fingerprint)", "BEFORE UPDATE OR DELETE OR TRUNCATE", "GRANT SELECT, INSERT", "authority IS FALSE", "runtime_effect = 'checkpoint_only'", "score_state = 'unavailable'", "REVOKE ALL"))
     assert all(value not in columns for value in ("assessment", "adoptable", "publishable", "complete_record")) and "$.**" in sql
 

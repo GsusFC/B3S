@@ -910,22 +910,173 @@ def _authority_scanner_payload(
 
         capture = parse_capture_observation(dict(report_observation))
         # Preserve the frozen evidence, not a reconstruction from raw inputs.
-        payload["flow"] = {
-            "candidate": {
-                "evidence_pack": {
-                    "schema_version": "brand-evidence-pack-v1",
-                    "brand_name": capture.brand_name,
-                    "url": capture.canonical_url,
-                    "evidence": [dict(row) for row in capture.evidence_records],
-                    "limitations": list(capture.limitations),
-                }
-            }
+        flow_payload = (
+            dict(payload.get("flow"))
+            if isinstance(payload.get("flow"), Mapping)
+            else {}
+        )
+        candidate_payload = (
+            dict(flow_payload.get("candidate"))
+            if isinstance(flow_payload.get("candidate"), Mapping)
+            else {}
+        )
+        candidate_payload["evidence_pack"] = {
+            "schema_version": "brand-evidence-pack-v1",
+            "brand_name": capture.brand_name,
+            "url": capture.canonical_url,
+            "evidence": [dict(row) for row in capture.evidence_records],
+            "limitations": list(capture.limitations),
         }
+        flow_payload["candidate"] = candidate_payload
+        payload["flow"] = flow_payload
     payload["acquisition_gate"] = dict(canonical_snapshot.get("acquisition_gate") or gate)
     payload["acquisition_artifacts"] = _acquisition_artifacts_from_snapshot(
         dict(canonical_snapshot)
     )
     return payload
+
+
+def _shared_analysis_publication_payload(
+    *,
+    repository: Any,
+    application_result: Mapping[str, Any],
+    publication: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Use immutable full Core analysis for a shared-series publication."""
+
+    payload = copy.deepcopy(publication.get("scanner_payload"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("vault_authority_payload_invalid")
+    if publication.get("action") != "publish_current":
+        return payload
+    authority = application_result.get("authority")
+    candidate = (
+        authority.get("accepted_candidate")
+        if isinstance(authority, Mapping)
+        else None
+    )
+    plan = candidate.get("plan") if isinstance(candidate, Mapping) else None
+    series = (
+        plan.get("current_series_contract")
+        if isinstance(plan, Mapping)
+        else None
+    )
+    from src.services.evidence_vault_sv9_shared_process import (
+        is_core_shared_series_contract,
+    )
+
+    if not is_core_shared_series_contract(series):
+        return payload
+    candidate_id = candidate.get("id") if isinstance(candidate, Mapping) else None
+    load = getattr(repository, "get_evidence_vault_sv9_shared_analysis", None)
+    if not isinstance(candidate_id, str) or not callable(load):
+        raise RuntimeError("vault_shared_analysis_unavailable")
+    snapshot = load(candidate_id, workspace_slug="b3s")
+    if (
+        not isinstance(snapshot, Mapping)
+        or snapshot.get("schema_version")
+        != "evidence-vault-sv9-shared-analysis-payload-v1"
+        or not isinstance(snapshot.get("analysis_payload"), Mapping)
+    ):
+        raise RuntimeError("vault_shared_analysis_invalid")
+    return copy.deepcopy(dict(snapshot["analysis_payload"]))
+
+
+def _vault_core_shared_flow(
+    *,
+    repository: Any,
+    domain_or_url: str,
+    source_scan_id: str,
+    canonical_snapshot: Mapping[str, Any],
+) -> tuple[Any, dict[str, Any]]:
+    """Create a lazy shared Core evaluator and its exact judgment series."""
+
+    from src.config import (
+        SV9_ADJUDICATOR_MODEL,
+        SV9_EDITORIAL_MODEL,
+        SV9_FLOW_GATE_AUTHORITY,
+        SV9_FLOW_LABELING_MODEL,
+        SV9_FLOW_MODEL,
+        SV9_REASONING_MODEL,
+    )
+    from src.features.llm_analyzer import LLMAnalyzer
+    from src.services.evidence_vault_sv9_shared_process import (
+        CoreFlowSv9StrictComponentAdapter,
+        build_core_shared_series_contract,
+    )
+
+    models = {
+        "interpretation": os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL")
+        or SV9_FLOW_MODEL,
+        "labeling": os.environ.get("BRAND3_FLOW_LABELING_MODEL")
+        or SV9_FLOW_LABELING_MODEL,
+        "adjudicator": os.environ.get("BRAND3_FLOW_ADJUDICATOR_MODEL")
+        or SV9_ADJUDICATOR_MODEL,
+        "evaluator": os.environ.get("BRAND3_FLOW_EVALUATOR_MODEL")
+        or SV9_FLOW_MODEL,
+        "reasoning": SV9_REASONING_MODEL,
+        "editorial": SV9_EDITORIAL_MODEL,
+    }
+    editorial_enabled = _sv9_editorial_enabled()
+    series = build_core_shared_series_contract(
+        interpretation_model=models["interpretation"],
+        labeling_model=models["labeling"],
+        adjudicator_model=models["adjudicator"],
+        evaluator_model=models["evaluator"],
+        reasoning_model=models["reasoning"],
+        editorial_model=models["editorial"],
+        gate_authority=SV9_FLOW_GATE_AUTHORITY,
+        editorial_enabled=editorial_enabled,
+    )
+    prior_shared_analysis = None
+    authority = repository.get_evidence_vault_sv9_judgment_authority(
+        domain_or_url,
+        workspace_slug="b3s",
+    )
+    accepted = (
+        authority.get("accepted_candidate")
+        if isinstance(authority, Mapping)
+        else None
+    )
+    accepted_plan = accepted.get("plan") if isinstance(accepted, Mapping) else None
+    if (
+        isinstance(accepted_plan, Mapping)
+        and accepted_plan.get("current_series_contract") == series
+    ):
+        candidate_id = accepted.get("id")
+        if not isinstance(candidate_id, str):
+            raise RuntimeError("vault_shared_analysis_unavailable")
+        prior_shared_analysis = repository.get_evidence_vault_sv9_shared_analysis(
+            candidate_id,
+            workspace_slug="b3s",
+        )
+        if not isinstance(prior_shared_analysis, Mapping):
+            raise RuntimeError("vault_shared_analysis_unavailable")
+
+    def analyzer_factory(model: str):
+        return lambda: LLMAnalyzer(model=model)
+
+    def finalize(payload: dict[str, Any]) -> dict[str, Any]:
+        if not editorial_enabled:
+            return payload
+        return _attach_sv9_editorial(
+            payload,
+            llm=LLMAnalyzer(model=models["editorial"]),
+        )
+
+    flow = CoreFlowSv9StrictComponentAdapter(
+        snapshot=canonical_snapshot,
+        source_run_id=source_scan_id,
+        interpretation_llm_factory=analyzer_factory(models["interpretation"]),
+        adjudicator_llm_factory=analyzer_factory(models["adjudicator"]),
+        labeling_llm_factory=analyzer_factory(models["labeling"]),
+        evaluator_llm_factory=analyzer_factory(models["evaluator"]),
+        reasoning_llm_factory=analyzer_factory(models["reasoning"]),
+        gate_authority=SV9_FLOW_GATE_AUTHORITY,
+        prior_shared_analysis=prior_shared_analysis,
+        payload_finalizer=finalize,
+    )
+    return flow, series
 
 
 def _run_vault_sv9_authority_scanner(
@@ -975,37 +1126,24 @@ def _run_vault_sv9_authority_scanner(
                 scan_id, repository, url, operation_plan_fingerprint=fingerprint
             ) is None:
                 return False
-        from src.config import SV9_FLOW_MODEL
         from src.services.evidence_vault_sv9_authority_application import (
             run_evidence_vault_sv9_authority_application,
         )
         from src.services.evidence_vault_sv9_authority_report import (
             project_vault_authority_publication,
         )
-        from src.sv9.incremental_flow_adapter import FlowSv9StrictComponentAdapter
-        from src.sv9.judgment_memory import build_judgment_series_contract
-        from src.sv9.shadow_component_provider import (
-            FlowSv9ShadowJsonProvider,
-            shadow_provider_environment_snapshot,
-        )
-
-        model = os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL") or SV9_FLOW_MODEL
-        application_result = run_evidence_vault_sv9_authority_application(
+        shared_flow, shared_series = _vault_core_shared_flow(
             repository=repository,
-            flow=FlowSv9StrictComponentAdapter(
-                FlowSv9ShadowJsonProvider(),
-                environ=shadow_provider_environment_snapshot(os.environ),
-                model=model,
-            ),
             domain_or_url=url,
             source_scan_id=scan_id,
-            current_series_contract=build_judgment_series_contract(
-                evaluator_version="evidence-vault-sv9-judgment-authority-v1",
-                prompt_version="sv9-strict-component-v1",
-                model_version=model,
-                flow_version="sv9-flow-strict-component-v1",
-                normalization_version="vault-capture-v1",
-            ),
+            canonical_snapshot=canonical_snapshot,
+        )
+        application_result = run_evidence_vault_sv9_authority_application(
+            repository=repository,
+            flow=shared_flow,
+            domain_or_url=url,
+            source_scan_id=scan_id,
+            current_series_contract=shared_series,
             workspace_slug="b3s",
             trusted_irrelevant_evidence=[],
         )
@@ -1051,6 +1189,12 @@ def _run_vault_sv9_authority_scanner(
             return _finish_scan_without_new_score(scan_id, source_report_id)
         if action not in {"publish_current", "record_no_score"}:
             raise RuntimeError("vault_authority_publication_invalid")
+        publication = dict(publication)
+        publication["scanner_payload"] = _shared_analysis_publication_payload(
+            repository=repository,
+            application_result=application_result,
+            publication=publication,
+        )
         report = _compose_report(
             scan_id,
             url,
