@@ -3250,6 +3250,20 @@ def test_diagnostic_detail_returns_not_found_for_unknown_scan(monkeypatch):
     assert response.status_code == 404
 
 
+def test_diagnostic_detail_legacy_identity_is_safe_and_keeps_self_link():
+    from web.api_v1.presenters import diagnostic_detail_payload
+
+    legacy = diagnostic_detail_payload({"id": "scan123", "state": "error"})
+    assert legacy["available"] is False
+    assert legacy["scan_id"] == "scan123"
+    assert legacy["links"]["self"] == "/api/v1/scans/scan123/diagnostic-detail"
+    assert len(__import__("json").dumps(legacy).encode("utf-8")) <= 32 * 1024
+
+    hostile = diagnostic_detail_payload({"id": "../private", "state": "error"})
+    assert hostile["scan_id"] == "unknown"
+    assert hostile["links"]["self"] == "/api/v1/scans/unknown/diagnostic-detail"
+
+
 def test_diagnostic_operation_ledger_bounds_and_redacts_exception_text():
     status = {"id": "scan123", "state": "running"}
     for _ in range(26):

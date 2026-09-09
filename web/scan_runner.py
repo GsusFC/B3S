@@ -672,13 +672,13 @@ def _coverage_is_partial(value: Any) -> bool:
 
 def scan_diagnostic_dossier_from_status(status: Mapping[str, Any]) -> dict[str, Any]:
     """Return the protected rich dossier; compact status deliberately omits it."""
-    ledger = status.get(_DIAGNOSTIC_LEDGER_KEY)
-    if not isinstance(ledger, Mapping):
-        return {"available": False, "reason": "diagnostic_ledger_not_recorded", "exact_resume": {"supported": False, "reason": "exact_resume_action_trace_unsupported"}}
-    raw_events = ledger.get("events") if isinstance(ledger.get("events"), list) else []
-    events = [event for raw in raw_events if (event := _safe_diagnostic_event(raw)) is not None][-_DIAGNOSTIC_LEDGER_MAX_EVENTS:]
     scan_id = status.get("id")
     safe_scan_id = scan_id if isinstance(scan_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", scan_id) else "unknown"
+    ledger = status.get(_DIAGNOSTIC_LEDGER_KEY)
+    if not isinstance(ledger, Mapping):
+        return {"available": False, "reason": "diagnostic_ledger_not_recorded", "scan_id": safe_scan_id, "exact_resume": {"supported": False, "reason": "exact_resume_action_trace_unsupported"}}
+    raw_events = ledger.get("events") if isinstance(ledger.get("events"), list) else []
+    events = [event for raw in raw_events if (event := _safe_diagnostic_event(raw)) is not None][-_DIAGNOSTIC_LEDGER_MAX_EVENTS:]
     failed = next((event for event in reversed(events) if event.get("outcome") == "failed"), None)
     context = _safe_detail_context(status.get("_diagnostic_detail_context"))
     dependency: dict[str, Any] = {}
