@@ -12,9 +12,12 @@ from __future__ import annotations
 import dataclasses
 import copy
 import hashlib
+import json
 import logging
 import os
+import re
 import threading
+import time
 import traceback
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -22,6 +25,7 @@ from urllib.parse import urlparse
 
 from src.build_info import current_build_sha
 from src.history.report_parser import canonical_json_hash, normalize_domain
+from src.sv9.rubric import COMPONENTS, PRESENTATION_ORDER
 from src.services.evidence_vault_scan_orchestration import VaultExactResumeError, vault_exact_resume_error
 from src.services.scanner_report_assessment import (
     validate_report_sv9_assessment as _validate_report_sv9_assessment,
@@ -44,6 +48,811 @@ _SCAN_EVENTS: dict[str, threading.Event] = {}
 _VAULT_ACTIVATIONS: set[str] = set()
 _LOCK = threading.Lock()
 _LOG = logging.getLogger(__name__)
+
+_DIAGNOSTIC_REASON_CODES = frozenset(
+    {
+        "active_review_overlay",
+        "candidate_already_present",
+        "canonical_capture_run_identity_unavailable",
+        "components_not_mapping",
+        "coverage_loss",
+        "evaluation_failure",
+        "evaluation_incomplete",
+        "exact_reuse",
+        "incomplete_candidate",
+        "incomplete_review_partition",
+        "invalid_authoritative_relation_witness",
+        "invalid_evaluation_input",
+        "invalid_evaluation_outcome",
+        "invalid_input",
+        "invalid_replay",
+        "invalid_source_identity",
+        "process_restarted",
+        "provider_failure",
+        "repository_failure",
+        "review_set",
+        "scan_execution_failed",
+        "scan_start_failed",
+        "series_rollover",
+        "shared_analysis_failure",
+        "stale_authoritative_relation_witness",
+        "unmapped_evidence",
+        "unwitnessed_legacy_candidate",
+        "vault_authority_capture_persist_failed",
+        "vault_authority_capture_history_read_failed",
+        "vault_authority_capture_observation_failed",
+        "vault_authority_exact_operation_lookup_failed",
+        "vault_authority_operational_memory_read_failed",
+        "vault_authority_operation_plan_failed",
+        "vault_authority_preparation_failed",
+        "vault_authority_preparation_unavailable",
+        "vault_authority_publication_invalid",
+        "vault_authority_source_report_unavailable",
+        "vault_completed_operation_missing_plan_fingerprint",
+        "vault_persisted_capture_readback_failed",
+        "vault_persisted_capture_unavailable",
+        "vault_persistence_repository_unavailable",
+        "vault_sidecar_failed",
+    }
+)
+_DIAGNOSTIC_STAGES = frozenset(
+    {"capture", "interpret", "score", "report", "vault_preparation", "vault_authority", "vault_sidecar", "unknown"}
+)
+_SHA40 = re.compile(r"[0-9a-f]{40}\Z")
+_SAFE_SQLSTATE = re.compile(r"[0-9A-Z]{5}\Z")
+_SAFE_COMPONENT_NOT_SCORED = re.compile(
+    r"component_not_scored:([a-z_]+):(not_evaluated|unknown)\Z"
+)
+_DIAGNOSTIC_ASSESSMENT_UNSET = object()
+_DIAGNOSTIC_LEDGER_KEY = "diagnostic_operation_ledger"
+_DIAGNOSTIC_LEDGER_MAX_BYTES = 32 * 1024
+_DIAGNOSTIC_LEDGER_MAX_EVENTS = 24
+_DIAGNOSTIC_CAUSE_DEPTH = 4
+_DIAGNOSTIC_TRACE_FRAMES = 12
+_DIAGNOSTIC_REPO_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_UUID4 = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\Z", re.I)
+_DIAGNOSTIC_TILE_IDS = frozenset(
+    tile["id"] for component in COMPONENTS.values() for tile in component["tiles"]
+)
+_DIAGNOSTIC_REASON_STATES = frozenset({
+    "accepted", "active", "blocked", "coverage_loss", "invalid", "missing",
+    "historical_basis_changed", "historical_basis_missing", "no_new_score",
+    "pending", "review_required", "stale", "unavailable",
+})
+_DIAGNOSTIC_OPERATION_OUTCOMES = frozenset(
+    {"started", "completed", "failed", "unavailable", "observed"}
+)
+_DIAGNOSTIC_SCAN_STATES = frozenset(
+    {"accepted", "running", "blocked", "done", "error", "cancelled", "unknown"}
+)
+_DIAGNOSTIC_AUTHORITY_STATES = frozenset(
+    {"no_new_score", "review_required", "published", "unknown"}
+)
+_DIAGNOSTIC_PATH = re.compile(r"(?:src|web)/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.py\Z")
+_SAFE_DB_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}\Z")
+
+
+def _safe_build_sha(value: Any) -> str:
+    return value if isinstance(value, str) and _SHA40.fullmatch(value) else "unknown"
+
+
+def _safe_timestamp(value: Any) -> str:
+    if not isinstance(value, str) or len(value) > 40:
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return "unknown"
+    return value if parsed.tzinfo is not None else "unknown"
+
+
+def _safe_scan_state(value: Any) -> str:
+    return value if isinstance(value, str) and value in _DIAGNOSTIC_SCAN_STATES else "unknown"
+
+
+def _safe_reason_codes(value: Any) -> list[str]:
+    values = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+    safe: list[str] = []
+    for code in values:
+        if not isinstance(code, str):
+            continue
+        component = _SAFE_COMPONENT_NOT_SCORED.fullmatch(code)
+        if code in _DIAGNOSTIC_REASON_CODES or (
+            component is not None and component.group(1) in PRESENTATION_ORDER
+        ):
+            safe.append(code)
+    return list(dict.fromkeys(safe))[:24]
+
+
+def _safe_exception_origin(exc: BaseException) -> dict[str, str] | None:
+    """Return the tiny, observed origin contract; never exception text."""
+
+    observed = getattr(exc, "_b3s_diagnostic_origin", None)
+    if isinstance(observed, Mapping):
+        return _safe_origin_mapping(observed)
+    try:
+        sqlstate = getattr(exc, "sqlstate", None)
+    except Exception:
+        sqlstate = None
+    return _safe_origin_mapping(
+        {"exception_type": type(exc).__name__, "sqlstate": sqlstate}
+    )
+
+
+def _safe_exception_resource(exc: BaseException | None) -> dict[str, Any] | None:
+    """Expose only directly supplied DB identifiers, never diagnostic text."""
+    if exc is None:
+        return None
+    try:
+        diagnostic = getattr(exc, "diag", None)
+    except Exception:
+        diagnostic = None
+    fields: dict[str, str] = {}
+    for source, target in (
+        ("schema_name", "schema"),
+        ("table_name", "table"),
+        ("constraint_name", "constraint"),
+        ("column_name", "column"),
+    ):
+        try:
+            value = getattr(diagnostic, source, None)
+        except Exception:
+            value = None
+        if isinstance(value, str) and _SAFE_DB_IDENTIFIER.fullmatch(value):
+            fields[target] = value
+    return {"availability": "observed", **fields} if fields else {"availability": "unknown"}
+
+
+def _safe_origin_mapping(value: Mapping[str, Any]) -> dict[str, str] | None:
+    origin: dict[str, str] = {}
+    try:
+        exception_type = value.get("exception_type")
+        sqlstate = value.get("sqlstate")
+    except Exception:
+        return None
+    if isinstance(exception_type, str) and exception_type.isascii() and exception_type.isidentifier() and len(exception_type) <= 80:
+        origin["exception_type"] = exception_type
+    if isinstance(sqlstate, str) and _SAFE_SQLSTATE.fullmatch(sqlstate):
+        origin["sqlstate"] = sqlstate
+    return origin or None
+
+
+def _capture_state(status: Mapping[str, Any]) -> str:
+    phases = status.get("phases")
+    if not isinstance(phases, list):
+        return "unknown"
+    capture = next((item for item in phases if isinstance(item, Mapping) and item.get("key") == "capture"), None)
+    if not isinstance(capture, Mapping):
+        return "unknown"
+    return "completed" if capture.get("state") == "done" else "not_completed"
+
+
+def _diagnostic(
+    *,
+    kind: str,
+    stage: Any,
+    capture_state: str,
+    reason_codes: Any,
+    build_sha: Any,
+    origin: dict[str, str] | None = None,
+    unknowns: list[str] | None = None,
+) -> dict[str, Any]:
+    safe_stage = stage if isinstance(stage, str) and stage in _DIAGNOSTIC_STAGES else "unknown"
+    safe_kind = kind if isinstance(kind, str) and kind in {"execution_failed", "assessment_unavailable", "secondary_failure"} else "execution_failed"
+    summary = {
+        "execution_failed": "The scan stopped before completion.",
+        "assessment_unavailable": "The scan completed, but no authoritative assessment is available.",
+        "secondary_failure": "A non-authoritative Vault sidecar failed after scan processing.",
+    }[safe_kind]
+    result: dict[str, Any] = {
+        "kind": safe_kind,
+        "stage": safe_stage,
+        "capture_state": capture_state if isinstance(capture_state, str) and capture_state in {"completed", "not_completed", "unknown"} else "unknown",
+        "reason_codes": _safe_reason_codes(reason_codes),
+        "summary": summary,
+        "build_sha": _safe_build_sha(build_sha),
+    }
+    safe_origin = _safe_origin_mapping(origin) if isinstance(origin, Mapping) else None
+    if safe_origin:
+        result["origin"] = safe_origin
+    if isinstance(unknowns, (list, tuple, set, frozenset)):
+        safe_unknowns = [
+            item
+            for item in unknowns
+            if isinstance(item, str)
+            and item in {"assessment_reason_not_available", "legacy_status_without_diagnostic"}
+        ][:4]
+        if safe_unknowns:
+            result["unknowns"] = safe_unknowns
+    return result
+
+
+def _safe_cause_chain(exc: BaseException | None) -> list[dict[str, str]]:
+    """Return exception classes and SQLSTATE only; messages and args never escape."""
+    chain: list[dict[str, str]] = []
+    seen: set[int] = set()
+    current = exc
+    while current is not None and len(chain) < _DIAGNOSTIC_CAUSE_DEPTH and id(current) not in seen:
+        seen.add(id(current))
+        origin = _safe_exception_origin(current)
+        if origin:
+            chain.append(origin)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def _safe_trace_frames(exc: BaseException | None) -> list[dict[str, Any]]:
+    if exc is None or exc.__traceback__ is None:
+        return []
+    frames: list[dict[str, Any]] = []
+    for frame in traceback.extract_tb(exc.__traceback__)[-_DIAGNOSTIC_TRACE_FRAMES:]:
+        # A substring such as /src/ is not a provenance check: an exception can
+        # carry an arbitrary filename.  Only expose an actual path under this
+        # checkout, and never open source files, locals, or source lines.
+        try:
+            path = os.path.realpath(frame.filename)
+            if os.path.commonpath((_DIAGNOSTIC_REPO_ROOT, path)) != _DIAGNOSTIC_REPO_ROOT:
+                continue
+            relative = os.path.relpath(path, _DIAGNOSTIC_REPO_ROOT).replace("\\", "/")
+        except (TypeError, ValueError, OSError):
+            continue
+        if not _safe_trace_path(relative):
+            continue
+        function = frame.name if isinstance(frame.name, str) else "unknown"
+        if not function.isidentifier() or len(function) > 100:
+            function = "unknown"
+        frames.append({"path": relative, "line": max(1, int(frame.lineno)), "function": function})
+    return frames
+
+
+def _safe_trace_path(value: Any) -> bool:
+    if not isinstance(value, str) or not _DIAGNOSTIC_PATH.fullmatch(value):
+        return False
+    return all(segment not in {"", ".", ".."} for segment in value.split("/"))
+
+
+def _safe_fingerprint(value: Any) -> str | None:
+    return value if isinstance(value, str) and _SHA256.fullmatch(value) else None
+
+
+def _safe_uuid(value: Any) -> str | None:
+    return value if isinstance(value, str) and _UUID4.fullmatch(value) else None
+
+
+def _safe_nonnegative_int(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _safe_tile_ids(value: Any) -> tuple[list[str], int]:
+    rows = value if isinstance(value, list) else []
+    valid = [row for row in rows if isinstance(row, str) and row in _DIAGNOSTIC_TILE_IDS]
+    kept = list(dict.fromkeys(valid))[:24]
+    return kept, max(0, len(rows) - len(kept))
+
+
+def _safe_coverage_row(row: Any, *, delta: bool) -> dict[str, Any] | None:
+    if not isinstance(row, Mapping):
+        return None
+    tile_id = row.get("tile_id")
+    component_key = row.get("component_key")
+    if (
+        not isinstance(tile_id, str)
+        or tile_id not in _DIAGNOSTIC_TILE_IDS
+        or not isinstance(component_key, str)
+        or component_key not in PRESENTATION_ORDER
+    ):
+        return None
+    item: dict[str, Any] = {"tile_id": tile_id, "component_key": component_key}
+    reason = row.get("reason")
+    if isinstance(reason, str) and reason in _DIAGNOSTIC_REASON_STATES:
+        item["reason"] = reason
+    if delta:
+        raw_fingerprints = row.get("evidence_fingerprints") if isinstance(row.get("evidence_fingerprints"), list) else []
+        fingerprints = [
+            fingerprint for value in raw_fingerprints
+            if (fingerprint := _safe_fingerprint(value)) is not None
+        ][:24]
+        if fingerprints:
+            item["evidence_fingerprints"] = fingerprints
+        dropped = _safe_nonnegative_int(row.get("evidence_fingerprints_truncated_count")) + max(0, len(raw_fingerprints) - len(fingerprints))
+        if dropped:
+            item["evidence_fingerprints_truncated_count"] = dropped
+    else:
+        facts: list[dict[str, Any]] = []
+        raw_facts = row.get("basis_facts") if isinstance(row.get("basis_facts"), list) else []
+        for fact in raw_facts:
+            if not isinstance(fact, Mapping):
+                continue
+            safe_fact = {
+                key: identifier for key in ("relation_id", "evidence_id", "source_identity_id")
+                # Authority coverage uses content-addressed identities in the
+                # evaluator flow, while persisted relations may use UUIDs.
+                # Both are opaque safe identifiers; discarding the former
+                # would make a real coverage-loss event uninspectable.
+                if (identifier := (_safe_uuid(fact.get(key)) or _safe_fingerprint(fact.get(key)))) is not None
+            }
+            continuity_state = fact.get("continuity_state")
+            if isinstance(continuity_state, str) and continuity_state in {"missing", "changed"}:
+                safe_fact["continuity_state"] = continuity_state
+            if safe_fact:
+                facts.append(safe_fact)
+            if len(facts) == 24:
+                break
+        if facts:
+            item["basis_facts"] = facts
+        dropped = _safe_nonnegative_int(row.get("basis_facts_truncated_count")) + max(0, len(raw_facts) - len(facts))
+        if dropped:
+            item["basis_facts_truncated_count"] = dropped
+    return item
+
+
+def _safe_authority_result(value: Any) -> dict[str, Any] | None:
+    """Keep the evaluator's business outcome separate from operation success."""
+    if not isinstance(value, Mapping):
+        return None
+    status = value.get("status")
+    if not isinstance(status, str) or status not in _DIAGNOSTIC_AUTHORITY_STATES:
+        return None
+    result: dict[str, Any] = {"status": status}
+    reasons = _safe_reason_codes(value.get("reason_codes"))
+    if reasons:
+        result["reason_codes"] = reasons
+    return result
+
+
+def _safe_capture_facts(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    facts: dict[str, Any] = {}
+    source_scan_id = value.get("source_scan_id")
+    if isinstance(source_scan_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", source_scan_id):
+        facts["source_scan_id"] = source_scan_id
+    for key in ("observation_hash", "capture_hash"):
+        if (fingerprint := _safe_fingerprint(value.get(key))) is not None:
+            facts[key] = fingerprint
+    return facts or None
+
+
+def _safe_operation_coverage(value: Any) -> dict[str, Any] | None:
+    """Treat observer/persisted coverage as hostile, bounded identifier data."""
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        safe: dict[str, Any] = {}
+        plan = value.get("plan")
+        if isinstance(plan, Mapping):
+            fingerprints = {
+                key: fingerprint for key in ("canonical_plan_fingerprint", "current_series_fingerprint")
+                if (fingerprint := _safe_fingerprint(plan.get(key))) is not None
+            }
+            if fingerprints:
+                safe["plan"] = fingerprints
+        for key in ("canonical_delta_fingerprint", "partition_fingerprint"):
+            if (fingerprint := _safe_fingerprint(value.get(key))) is not None:
+                safe[key] = fingerprint
+        if (capture := _safe_capture_facts(value.get("capture"))) is not None:
+            safe["capture"] = capture
+        review = value.get("review_partition")
+        if isinstance(review, Mapping):
+            safe_review: dict[str, Any] = {}
+            for key in ("tile_ids", "evaluation_input_reopened_tile_ids", "operational_authority_coverage_loss_tile_ids", "judgment_delta_coverage_loss_tile_ids", "planner_review_tile_ids", "coherencia_blocked_tile_ids"):
+                ids, dropped = _safe_tile_ids(review.get(key))
+                if ids:
+                    safe_review[key] = ids
+                total_dropped = dropped + _safe_nonnegative_int(review.get(f"{key}_truncated_count"))
+                if total_dropped:
+                    safe_review[f"{key}_truncated_count"] = total_dropped
+            if safe_review:
+                safe["review_partition"] = safe_review
+        for key, delta in (("operational_authority_coverage_loss", False), ("judgment_delta_coverage_loss", True)):
+            rows = value.get(key)
+            raw_rows = rows if isinstance(rows, list) else []
+            kept = [item for row in raw_rows if (item := _safe_coverage_row(row, delta=delta)) is not None][:24]
+            if kept:
+                safe[key] = kept
+            upstream_count = _safe_nonnegative_int(value.get(f"{key}_truncated_count"))
+            local_count = max(0, len(raw_rows) - len(kept))
+            if upstream_count or local_count:
+                safe[f"{key}_truncated_count"] = upstream_count + local_count
+        for key in (
+            "operational_authority_coverage_loss_truncated_count",
+            "judgment_delta_coverage_loss_truncated_count",
+        ):
+            if (count := _safe_nonnegative_int(value.get(key))):
+                safe[key] = max(_safe_nonnegative_int(safe.get(key)), count)
+        if not safe:
+            return {"available": False, "unknown": "coverage_projection_invalid"}
+        encoded = json.dumps(safe, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return safe if len(encoded) <= 8192 else {"available": True, "truncated": True}
+    except Exception:
+        return {"available": False, "unknown": "coverage_projection_invalid"}
+
+
+def _diagnostic_operation(
+    *, operation: str, stage: str, outcome: str, exc: BaseException | None = None,
+    coverage: Mapping[str, Any] | None = None, started_monotonic: float | None = None,
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()
+    authority_result = _safe_authority_result(coverage)
+    projected_coverage = _safe_operation_coverage(
+        coverage.get("coverage") if isinstance(coverage, Mapping) and "coverage" in coverage else coverage
+    )
+    item: dict[str, Any] = {
+        "operation": operation if isinstance(operation, str) and operation.isidentifier() else "unknown",
+        "stage": stage if isinstance(stage, str) and stage in _DIAGNOSTIC_STAGES else "unknown",
+        "outcome": outcome if isinstance(outcome, str) and outcome in _DIAGNOSTIC_OPERATION_OUTCOMES else "unavailable",
+        "observed_at": now,
+        "durability": "observed_best_effort",
+    }
+    if started_monotonic is not None:
+        item["duration_ms"] = max(0, round((time.monotonic() - started_monotonic) * 1000, 3))
+    origin = _safe_exception_origin(exc) if exc is not None else None
+    if origin:
+        item["origin"] = origin
+    if (resource := _safe_exception_resource(exc)) is not None:
+        item["resource"] = resource
+    causes = _safe_cause_chain(exc)
+    if causes:
+        item["causes"] = causes
+    frames = _safe_trace_frames(exc)
+    if frames:
+        item["trace"] = frames
+    if projected_coverage is not None:
+        item["coverage"] = projected_coverage
+    if authority_result is not None:
+        item["authority_result"] = authority_result
+    return item
+
+
+def _append_diagnostic_operation_locked(status: dict[str, Any], item: dict[str, Any]) -> None:
+    ledger = status.get(_DIAGNOSTIC_LEDGER_KEY)
+    if not isinstance(ledger, dict):
+        ledger = {"version": "scan-diagnostic-ledger-v1", "events": [], "dropped_event_count": 0, "truncated_event_count": 0, "additional_status_write_count": 0, "additional_status_bytes": 0}
+        status[_DIAGNOSTIC_LEDGER_KEY] = ledger
+    events = ledger.get("events") if isinstance(ledger.get("events"), list) else []
+    events = [event for event in events if isinstance(event, dict)][-_DIAGNOSTIC_LEDGER_MAX_EVENTS:]
+    if len(events) >= _DIAGNOSTIC_LEDGER_MAX_EVENTS:
+        events.pop(0)
+        ledger["dropped_event_count"] = int(ledger.get("dropped_event_count") or 0) + 1
+    candidate = [*events, item]
+    try:
+        # The cap applies to the complete persisted ledger, not merely the
+        # latest event.  Drop oldest history first; preserve the newest exact
+        # operation that explains the current outcome.
+        while candidate and len(json.dumps({**ledger, "events": candidate}, sort_keys=True, separators=(",", ":")).encode("utf-8")) > _DIAGNOSTIC_LEDGER_MAX_BYTES:
+            candidate.pop(0)
+            ledger["dropped_event_count"] = int(ledger.get("dropped_event_count") or 0) + 1
+        if not candidate:
+            candidate = [{key: item[key] for key in ("operation", "stage", "outcome", "observed_at", "durability") if key in item}]
+            ledger["truncated_event_count"] = int(ledger.get("truncated_event_count") or 0) + 1
+        ledger["events"] = candidate
+    except Exception:
+        # Diagnostics are sidecar evidence; never let serialization change the
+        # scanner's business result or cancellation path.
+        ledger["truncated_event_count"] = int(ledger.get("truncated_event_count") or 0) + 1
+
+
+def _safe_diagnostic_event(value: Any) -> dict[str, Any] | None:
+    """Closed read-time projection for persisted/in-memory ledger entries."""
+    if not isinstance(value, Mapping):
+        return None
+    operation = value.get("operation")
+    outcome = value.get("outcome")
+    stage = value.get("stage")
+    observed_at = value.get("observed_at")
+    if not (isinstance(operation, str) and operation.isidentifier() and len(operation) <= 100):
+        return None
+    if not isinstance(outcome, str) or outcome not in _DIAGNOSTIC_OPERATION_OUTCOMES:
+        return None
+    item: dict[str, Any] = {
+        "operation": operation,
+        "stage": stage if isinstance(stage, str) and stage in _DIAGNOSTIC_STAGES else "unknown",
+        "outcome": outcome,
+        "observed_at": _safe_timestamp(observed_at),
+        "durability": "observed_best_effort",
+    }
+    duration = value.get("duration_ms")
+    if isinstance(duration, (int, float)) and not isinstance(duration, bool) and 0 <= duration <= 86_400_000:
+        item["duration_ms"] = round(float(duration), 3)
+    origin = _safe_origin_mapping(value.get("origin")) if isinstance(value.get("origin"), Mapping) else None
+    if origin:
+        item["origin"] = origin
+    if isinstance(value.get("causes"), list):
+        causes = [_safe_origin_mapping(cause) for cause in value["causes"] if isinstance(cause, Mapping)]
+        causes = [cause for cause in causes if cause][:_DIAGNOSTIC_CAUSE_DEPTH]
+        if causes:
+            item["causes"] = causes
+    if isinstance(value.get("trace"), list):
+        trace: list[dict[str, Any]] = []
+        for frame in value["trace"][:_DIAGNOSTIC_TRACE_FRAMES]:
+            if not isinstance(frame, Mapping):
+                continue
+            path, line, function = frame.get("path"), frame.get("line"), frame.get("function")
+            if not _safe_trace_path(path):
+                continue
+            if not (isinstance(line, int) and not isinstance(line, bool) and line > 0):
+                continue
+            if not (isinstance(function, str) and function.isidentifier() and len(function) <= 100):
+                continue
+            trace.append({"path": path, "line": line, "function": function})
+        if trace:
+            item["trace"] = trace
+    coverage = _safe_operation_coverage(value.get("coverage"))
+    if coverage:
+        item["coverage"] = coverage
+    authority_result = _safe_authority_result(value.get("authority_result"))
+    if authority_result:
+        item["authority_result"] = authority_result
+    resource = value.get("resource")
+    if isinstance(resource, Mapping):
+        availability = resource.get("availability")
+        safe_resource = {
+            "availability": (
+                availability
+                if isinstance(availability, str) and availability in {"observed", "unknown"}
+                else "unknown"
+            )
+        }
+        for key in ("schema", "table", "constraint", "column"):
+            if isinstance(resource.get(key), str) and _SAFE_DB_IDENTIFIER.fullmatch(resource[key]):
+                safe_resource[key] = resource[key]
+        item["resource"] = safe_resource
+    return item
+
+
+def _record_diagnostic_operation(
+    scan_id: str, *, operation: str, stage: str, outcome: str,
+    exc: BaseException | None = None, coverage: Mapping[str, Any] | None = None,
+    started_monotonic: float | None = None,
+) -> None:
+    """Best-effort private diagnostic write; it must never change scan outcome."""
+    try:
+        with _LOCK:
+            status = _SCANS.get(scan_id)
+            if status is None:
+                return
+            _append_diagnostic_operation_locked(status, _diagnostic_operation(operation=operation, stage=stage, outcome=outcome, exc=exc, coverage=coverage, started_monotonic=started_monotonic))
+    except Exception:
+        _LOG.warning("diagnostic operation was not recorded", extra={"scan_id": scan_id, "operation": operation})
+
+
+def _safe_operation_readout(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    status = value.get("status")
+    if not isinstance(status, str) or status not in {"pending", "not_required", "claimed", "running", "result_persisted", "completed", "failed_retryable", "superseded"}:
+        return None
+    result: dict[str, Any] = {"status": status}
+    for key in ("observation_hash", "operation_plan_fingerprint", "result_fingerprint", "candidate_packet_fingerprint"):
+        if (fingerprint := _safe_fingerprint(value.get(key))) is not None:
+            result[key] = fingerprint
+    if isinstance(value.get("plan"), Mapping):
+        if (fingerprint := _safe_fingerprint(value["plan"].get("operation_plan_fingerprint"))) is not None:
+            result["plan_fingerprint"] = fingerprint
+    if isinstance(value.get("mode"), str) and value["mode"] in {"incremental", "full", "not_required", "unknown"}:
+        result["mode"] = value["mode"]
+    if (attempt_count := _safe_nonnegative_int(value.get("attempt_count"))) or value.get("attempt_count") == 0:
+        result["attempt_count"] = attempt_count
+    if isinstance(value.get("lease_active"), bool):
+        result["lease_active"] = value["lease_active"]
+    return result
+
+
+def _safe_detail_context(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    safe: dict[str, Any] = {}
+    status_readback = value.get("status_readback")
+    if isinstance(status_readback, str) and status_readback in {
+        "observed_ledger", "observed_without_ledger", "missing", "unavailable", "divergent",
+    }:
+        safe["status_readback"] = status_readback
+    operation = _safe_operation_readout(value.get("operation"))
+    if operation:
+        safe["operation"] = operation
+    else:
+        operation_lookup = value.get("operation_lookup")
+        if isinstance(operation_lookup, str) and operation_lookup in {"not_applicable", "missing", "unavailable"}:
+            safe["operation_lookup"] = operation_lookup
+    return safe
+
+
+def _coverage_is_partial(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return any(
+            (isinstance(key, str) and key.endswith("_truncated_count") and _safe_nonnegative_int(item) > 0)
+            or _coverage_is_partial(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_coverage_is_partial(item) for item in value)
+    return False
+
+
+def scan_diagnostic_dossier_from_status(status: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the protected rich dossier; compact status deliberately omits it."""
+    ledger = status.get(_DIAGNOSTIC_LEDGER_KEY)
+    if not isinstance(ledger, Mapping):
+        return {"available": False, "reason": "diagnostic_ledger_not_recorded", "exact_resume": {"supported": False, "reason": "exact_resume_action_trace_unsupported"}}
+    raw_events = ledger.get("events") if isinstance(ledger.get("events"), list) else []
+    events = [event for raw in raw_events if (event := _safe_diagnostic_event(raw)) is not None][-_DIAGNOSTIC_LEDGER_MAX_EVENTS:]
+    scan_id = status.get("id")
+    safe_scan_id = scan_id if isinstance(scan_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", scan_id) else "unknown"
+    failed = next((event for event in reversed(events) if event.get("outcome") == "failed"), None)
+    context = _safe_detail_context(status.get("_diagnostic_detail_context"))
+    dependency: dict[str, Any] = {}
+    artifacts: dict[str, Any] = {}
+    for event in events:
+        coverage = event.get("coverage")
+        if not isinstance(coverage, Mapping):
+            continue
+        if isinstance(coverage.get("plan"), Mapping):
+            dependency["authority_plan"] = dict(coverage["plan"])
+        for key in ("canonical_delta_fingerprint", "partition_fingerprint"):
+            if key in coverage:
+                artifacts[key] = coverage[key]
+        if isinstance(coverage.get("capture"), Mapping):
+            artifacts["capture"] = dict(coverage["capture"])
+    operation = context.get("operation")
+    if isinstance(operation, Mapping):
+        dependency["operation"] = dict(operation)
+        artifacts["operation"] = {
+            key: value for key, value in operation.items()
+            if key.endswith("fingerprint") or key == "observation_hash"
+        }
+    report_id = status.get("report_id")
+    if isinstance(report_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", report_id):
+        artifacts["report_id"] = report_id
+    safe_state = _safe_scan_state(status.get("state"))
+    authority_results = [
+        event["authority_result"] for event in events
+        if isinstance(event.get("authority_result"), Mapping)
+    ]
+    latest_authority = authority_results[-1] if authority_results else None
+    affected_count = sum(
+        len((event.get("coverage") or {}).get("operational_authority_coverage_loss") or [])
+        + len((event.get("coverage") or {}).get("judgment_delta_coverage_loss") or [])
+        for event in events
+        if isinstance(event.get("coverage"), Mapping)
+    )
+    coverage_partial = any(
+        _coverage_is_partial(coverage)
+        for event in events
+        if isinstance((coverage := event.get("coverage")), Mapping)
+    )
+    observed = failed.get("outcome") if failed else (events[-1].get("outcome") if events else "unknown")
+    conditions: dict[str, Any] = {
+        "expected": "operation records a completed, failed, unavailable, or observed outcome",
+        "observed": observed,
+    }
+    if latest_authority:
+        conditions["authority_application"] = dict(latest_authority)
+        if latest_authority.get("status") == "review_required":
+            conditions["review_partition"] = {
+                "expected_blocked_tile_count": 0,
+                "observed_affected_tile_count": affected_count,
+            }
+    if isinstance(operation, Mapping):
+        conditions["repository_operation"] = {
+            "expected": "completed",
+            "observed": operation.get("status", "unknown"),
+        }
+    result = {
+        "available": True,
+        "state": safe_state,
+        "scan_id": safe_scan_id,
+        "identity": {"scan_id": safe_scan_id, "build_sha": _safe_build_sha(status.get("scan_build_sha"))},
+        "conditions": conditions,
+        "events": events,
+        "dropped_event_count": _safe_nonnegative_int(ledger.get("dropped_event_count")) + max(0, len(raw_events) - len(events)),
+        "truncated_event_count": _safe_nonnegative_int(ledger.get("truncated_event_count")),
+        "additional_status_write_count": _safe_nonnegative_int(ledger.get("additional_status_write_count")),
+        "additional_status_bytes": _safe_nonnegative_int(ledger.get("additional_status_bytes")),
+        "durability": "observed_best_effort",
+        "persistence": {"ledger": "observed_best_effort", "readback": context.get("status_readback", "unknown"), "restart": "unknown"},
+        "dependency": dependency or {"observed": False},
+        "artifacts": artifacts or {"observed": False},
+        "impact": {"scan_state": safe_state, "score_or_publication_changed": "unknown", "coverage_partial": coverage_partial},
+        "recovery": {"retry_advice": "not_provided", "exact_resume": "unsupported"},
+        "exact_resume": {"supported": False, "reason": "exact_resume_action_trace_unsupported"},
+    }
+    while events and len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8")) > _DIAGNOSTIC_LEDGER_MAX_BYTES:
+        events.pop(0)
+        result["dropped_event_count"] += 1
+    # Persisted inputs may be malformed.  Fail closed to a small valid dossier,
+    # never an endpoint 500 and never raw persisted content.
+    if len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8")) > _DIAGNOSTIC_LEDGER_MAX_BYTES:
+        result["events"] = []
+        result["truncated_event_count"] += 1
+    return result
+
+
+def scan_diagnostic_from_status(status: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Project persisted scanner state into the closed public diagnostic shape."""
+
+    current = status.get("diagnostic")
+    is_current = isinstance(current, Mapping)
+    state = status.get("state")
+    if state == "error":
+        code = status.get("error_code")
+        if code == "process_restarted":
+            return _diagnostic(
+                kind="execution_failed",
+                stage="unknown",
+                capture_state=_capture_state(status),
+                reason_codes="process_restarted",
+                build_sha=status.get("scan_build_sha"),
+                unknowns=["legacy_status_without_diagnostic"],
+            )
+        if is_current and current.get("kind") == "execution_failed":
+            origin = current.get("origin") if isinstance(current.get("origin"), Mapping) else None
+            return _diagnostic(
+                kind="execution_failed",
+                stage=current.get("stage"),
+                capture_state=current.get("capture_state"),
+                reason_codes=current.get("reason_codes"),
+                build_sha=current.get("build_sha"),
+                origin=origin,
+                unknowns=current.get("unknowns"),
+            )
+        safe_codes = _safe_reason_codes(code)
+        return _diagnostic(
+            kind="execution_failed",
+            stage=status.get("execution_stage"),
+            capture_state=_capture_state(status),
+            reason_codes=safe_codes or "scan_execution_failed",
+            build_sha=status.get("scan_build_sha"),
+            unknowns=["legacy_status_without_diagnostic"],
+        )
+    if isinstance(current, Mapping):
+        kind = current.get("kind")
+        if isinstance(kind, str) and kind in {"execution_failed", "assessment_unavailable", "secondary_failure"}:
+            origin = current.get("origin") if isinstance(current.get("origin"), Mapping) else None
+            return _diagnostic(
+                kind=kind,
+                stage=current.get("stage"),
+                capture_state=current.get("capture_state"),
+                reason_codes=current.get("reason_codes"),
+                build_sha=current.get("build_sha"),
+                origin=origin,
+                unknowns=current.get("unknowns"),
+            )
+    vault = status.get("vault")
+    if isinstance(vault, Mapping) and vault.get("state") == "failed":
+        return _diagnostic(
+            kind="secondary_failure", stage="vault_sidecar", capture_state=_capture_state(status),
+            reason_codes="vault_sidecar_failed", build_sha=status.get("scan_build_sha"),
+        )
+    return None
+
+
+def scan_diagnostic_from_report(
+    report: Mapping[str, Any],
+    *,
+    assessment: Any = _DIAGNOSTIC_ASSESSMENT_UNSET,
+) -> dict[str, Any] | None:
+    """Expose the authoritative no-score outcome without inventing a failure."""
+
+    if assessment is _DIAGNOSTIC_ASSESSMENT_UNSET:
+        try:
+            assessment = _validate_report_sv9_assessment(report, required=False)
+        except ScannerReportAssessmentError:
+            return None
+    if not isinstance(assessment, Mapping):
+        return None
+    if assessment.get("availability") != "unavailable":
+        return None
+    raw = report.get("raw") if isinstance(report.get("raw"), Mapping) else {}
+    source_capture = raw.get("source_capture")
+    capture_state = "completed" if isinstance(source_capture, Mapping) else "unknown"
+    envelope = assessment.get("assessment") if isinstance(assessment.get("assessment"), Mapping) else {}
+    reason_codes = _safe_reason_codes(envelope.get("reason_codes"))
+    return _diagnostic(
+        kind="assessment_unavailable", stage="vault_authority", capture_state=capture_state,
+        reason_codes=reason_codes, build_sha=report.get("pipeline_commit_sha"),
+        unknowns=[] if reason_codes else ["assessment_reason_not_available"],
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -112,7 +921,8 @@ def start_scan(
         with _LOCK:
             owner = None if candidate in _SCANS else _acquire_scan_owner_locked(candidate, "ordinary")
             if owner is not None:
-                created_status = {"id": candidate, "url": url, "brand_name": brand_name, "state": "running", "phase": "capture", "phases": [{"key": key, "label": label, "state": "pending"} for key, label in _PHASES], "acquisition": [], "acquisition_gate": {"state": "pending", "issues": [], "warnings": [], "fallbacks": []}, "allow_degraded_fallback": bool(allow_degraded_fallback), "error": None, "error_code": None, "started_at": started_at, "completed_at": None}
+                created_status = {"id": candidate, "url": url, "brand_name": brand_name, "state": "running", "phase": "capture", "execution_stage": "capture", "scan_build_sha": _safe_build_sha(current_build_sha()), "phases": [{"key": key, "label": label, "state": "pending"} for key, label in _PHASES], "acquisition": [], "acquisition_gate": {"state": "pending", "issues": [], "warnings": [], "fallbacks": []}, "allow_degraded_fallback": bool(allow_degraded_fallback), "error": None, "error_code": None, "started_at": started_at, "completed_at": None}
+                _append_diagnostic_operation_locked(created_status, _diagnostic_operation(operation="scan_created", stage="capture", outcome="started"))
                 _SCANS[candidate] = created_status
                 _SCAN_EVENTS[candidate] = threading.Event()
                 persisted_status = _status_copy_locked(created_status)
@@ -234,6 +1044,7 @@ def _set_phase(scan_id: str, key: str, state: str) -> None:
             return
         if state == "running":
             status["phase"] = key
+            status["execution_stage"] = key
         _set_phase_locked(status, key, state)
         persisted_status = _status_copy_locked(status)
     _persist_scan_status(persisted_status)
@@ -253,6 +1064,23 @@ def _set_phase_locked(status: dict[str, Any], key: str, state: str) -> None:
     for phase in status["phases"]:
         if phase["key"] == key:
             phase["state"] = state
+
+
+def _set_execution_stage(scan_id: str, stage: str) -> None:
+    """Track the active internal stage; terminal persistence captures it once."""
+
+    if stage not in _DIAGNOSTIC_STAGES:
+        return
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        if status is not None and status.get("state") not in {"cancelled", "error", "done"}:
+            status["execution_stage"] = stage
+
+
+def _scan_build_sha(scan_id: str) -> str:
+    with _LOCK:
+        status = _SCANS.get(scan_id)
+        return _safe_build_sha((status or {}).get("scan_build_sha"))
 
 
 def _mark_pending_phases_locked(status: dict[str, Any], state: str) -> None:
@@ -345,18 +1173,54 @@ def _finish_scan_without_new_score(scan_id: str, report_id: str) -> bool:
     return True
 
 
-def _publish_completed_report(scan_id: str, report: dict[str, Any]) -> bool:
+def _publish_completed_report(
+    scan_id: str,
+    report: dict[str, Any],
+    *,
+    assessment: Any = _DIAGNOSTIC_ASSESSMENT_UNSET,
+) -> bool:
     """Publish one immutable report with the same cancellation boundary."""
 
+    diagnostic = scan_diagnostic_from_report(report, assessment=assessment)
+    operation_started = time.monotonic()
     with _LOCK:
         status = _SCANS.get(scan_id)
         if status is None or status.get("state") == "cancelled":
             return False
-        save_report(report)
+        # Keep diagnostic timeline entries in the same existing final status
+        # snapshot; a post-persist side write could race cancellation.
+        _append_diagnostic_operation_locked(
+            status,
+            _diagnostic_operation(
+                operation="report_save", stage="report", outcome="started",
+            ),
+        )
+        try:
+            save_report(report)
+        except Exception as exc:
+            _append_diagnostic_operation_locked(
+                status,
+                _diagnostic_operation(
+                    operation="report_save", stage="report", outcome="failed",
+                    exc=exc, started_monotonic=operation_started,
+                ),
+            )
+            raise
+        _append_diagnostic_operation_locked(
+            status,
+            _diagnostic_operation(
+                operation="report_save", stage="report", outcome="completed",
+                started_monotonic=operation_started,
+            ),
+        )
         _set_phase_locked(status, "report", "done")
         status["state"] = "done"
         status["phase"] = "done"
         status["report_id"] = str(report.get("id") or scan_id)
+        if diagnostic is not None:
+            status["diagnostic"] = diagnostic
+        else:
+            status.pop("diagnostic", None)
         status["completed_at"] = datetime.now(timezone.utc).isoformat()
         _SCAN_EVENTS.pop(scan_id, None)
         _VAULT_ACTIVATIONS.discard(scan_id)
@@ -844,6 +1708,13 @@ def _run_vault_operational_sidecar(
                 "state": "failed",
                 "error_type": type(exc).__name__,
                 "error": str(exc),
+                "diagnostic": _diagnostic(
+                    kind="secondary_failure",
+                    stage="vault_sidecar",
+                    capture_state="completed",
+                    reason_codes="vault_sidecar_failed",
+                    build_sha=_scan_build_sha(scan_id),
+                ),
             }
         )
     _record_vault_sidecar_status(scan_id, detail)
@@ -952,12 +1823,25 @@ def _run_vault_sv9_authority_scanner(
         return False
     authority_boundary_entered = False
     release_guard = True
+    active_operation = "vault_authority_boundary"
+    active_stage = "vault_authority"
+    active_started: float | None = None
+    capture_facts = _safe_capture_facts(
+        canonical_source_capture or canonical_snapshot.get("source_capture")
+    )
+    operation_coverage = {"capture": capture_facts} if capture_facts else None
     try:
+        preparation_started = time.monotonic()
+        active_operation, active_stage, active_started = "vault_preparation_execution", "vault_preparation", preparation_started
+        if not exact:
+            _record_diagnostic_operation(scan_id, operation=active_operation, stage="vault_preparation", outcome="started", coverage=operation_coverage)
         fingerprint = _execute_vault_operational_preparation(
             scan_id=scan_id,
             repository=repository,
             preparation=preparation,
         )
+        if not exact:
+            _record_diagnostic_operation(scan_id, operation="vault_preparation_execution", stage="vault_preparation", outcome="completed", coverage=operation_coverage, started_monotonic=preparation_started)
         if exact and not _current_scan_owner(exact_owner): raise _ExactResumeFailure("busy")
         if not exact and _scan_cancelled(scan_id):
             return False
@@ -982,6 +1866,9 @@ def _run_vault_sv9_authority_scanner(
         from src.services.evidence_vault_sv9_authority_report import (
             project_vault_authority_publication,
         )
+        from src.services.evidence_vault_sv9_authority_evaluation import (
+            observe_evidence_vault_sv9_authority_evaluation_diagnostics,
+        )
         from src.sv9.incremental_flow_adapter import FlowSv9StrictComponentAdapter
         from src.sv9.judgment_memory import build_judgment_series_contract
         from src.sv9.shadow_component_provider import (
@@ -990,31 +1877,58 @@ def _run_vault_sv9_authority_scanner(
         )
 
         model = os.environ.get("BRAND3_FLOW_INTERPRETATION_MODEL") or SV9_FLOW_MODEL
-        application_result = run_evidence_vault_sv9_authority_application(
-            repository=repository,
-            flow=FlowSv9StrictComponentAdapter(
-                FlowSv9ShadowJsonProvider(),
-                environ=shadow_provider_environment_snapshot(os.environ),
-                model=model,
-            ),
-            domain_or_url=url,
-            source_scan_id=scan_id,
-            current_series_contract=build_judgment_series_contract(
-                evaluator_version="evidence-vault-sv9-judgment-authority-v1",
-                prompt_version="sv9-strict-component-v1",
-                model_version=model,
-                flow_version="sv9-flow-strict-component-v1",
-                normalization_version="vault-capture-v1",
-            ),
-            workspace_slug="b3s",
-            trusted_irrelevant_evidence=[],
-        )
+        application_started = time.monotonic()
+        active_operation, active_stage, active_started = "vault_authority_application", "vault_authority", application_started
+        if not exact:
+            _record_diagnostic_operation(scan_id, operation=active_operation, stage="vault_authority", outcome="started", coverage=operation_coverage)
+
+        def observe_authority(event: dict[str, Any], exc: BaseException | None) -> None:
+            if not exact:
+                authority_result = _safe_authority_result(event)
+                observed_outcome = (
+                    "failed" if exc is not None else
+                    "observed" if authority_result is not None else "completed"
+                )
+                _record_diagnostic_operation(
+                    scan_id, operation="vault_authority_evaluation",
+                    stage="vault_authority", outcome=observed_outcome, exc=exc,
+                    coverage=event, started_monotonic=application_started,
+                )
+
+        with observe_evidence_vault_sv9_authority_evaluation_diagnostics(observe_authority):
+            application_result = run_evidence_vault_sv9_authority_application(
+                repository=repository,
+                flow=FlowSv9StrictComponentAdapter(
+                    FlowSv9ShadowJsonProvider(),
+                    environ=shadow_provider_environment_snapshot(os.environ),
+                    model=model,
+                ),
+                domain_or_url=url,
+                source_scan_id=scan_id,
+                current_series_contract=build_judgment_series_contract(
+                    evaluator_version="evidence-vault-sv9-judgment-authority-v1",
+                    prompt_version="sv9-strict-component-v1",
+                    model_version=model,
+                    flow_version="sv9-flow-strict-component-v1",
+                    normalization_version="vault-capture-v1",
+                ),
+                workspace_slug="b3s",
+                trusted_irrelevant_evidence=[],
+            )
+        if not exact:
+            _record_diagnostic_operation(scan_id, operation="vault_authority_application", stage="vault_authority", outcome="completed", coverage=operation_coverage, started_monotonic=application_started)
         source_report = _accepted_authority_source_report(application_result, scan_id, exact_owner, domain_or_url=url)
+        projection_started = time.monotonic()
+        active_operation, active_stage, active_started = "vault_authority_projection", "vault_authority", projection_started
+        if not exact:
+            _record_diagnostic_operation(scan_id, operation=active_operation, stage="vault_authority", outcome="started", coverage=operation_coverage)
         publication = project_vault_authority_publication(
             application_result,
             scan_id,
             source_report,
         )
+        if not exact:
+            _record_diagnostic_operation(scan_id, operation="vault_authority_projection", stage="vault_authority", outcome="completed", coverage=operation_coverage, started_monotonic=projection_started)
         action = publication.get("action") if isinstance(publication, Mapping) else None
         if exact and source_report is not None and action != "retain_source": raise _ExactResumeFailure("report_invalid")
         if not exact:
@@ -1064,14 +1978,18 @@ def _run_vault_sv9_authority_scanner(
                 report_observation=preparation.get("report_observation"),
             ),
         )
-        _validate_report_sv9_assessment(report, required=True)
+        assessment = _validate_report_sv9_assessment(report, required=True)
         if exact: return _publish_exact_report(scan_id, exact_owner, report, exact_report_binding or {}, str(action), action_identity=exact_action, initial_source=exact_initial_source)
-        return _publish_completed_report(scan_id, report)
+        return _publish_completed_report(scan_id, report, assessment=assessment)
     except _ExactResumeFailure:
         raise
-    except Exception:
+    except Exception as exc:
         if exact:
             raise
+        _record_diagnostic_operation(
+            scan_id, operation=active_operation, stage=active_stage,
+            outcome="failed", exc=exc, coverage=operation_coverage, started_monotonic=active_started,
+        )
         # The outer runner marks the error terminal and releases this guard
         # under the same lock; releasing here opens a cancellation window.
         release_guard = not authority_boundary_entered
@@ -1083,6 +2001,8 @@ def _run_vault_sv9_authority_scanner(
 
 
 def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool, owner: _ScanOwner | None = None) -> None:
+    execution_started = time.monotonic()
+    _record_diagnostic_operation(scan_id, operation="scan_execution", stage="capture", outcome="started", started_monotonic=execution_started)
     try:
         vault_repository = None
         vault_preparation: dict[str, Any] | None = None
@@ -1135,6 +2055,7 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool,
         canonical_snapshot = snapshot
         canonical_source_capture: dict[str, str] | None = None
         if vault_enabled:
+            _set_execution_stage(scan_id, "vault_preparation")
             from src.services.evidence_vault_scan_orchestration import (
                 public_vault_authority_reason_code,
                 prepare_vault_scan_after_capture,
@@ -1148,7 +2069,13 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool,
                     if authority_scanner_enabled
                     else "vault_persistence_repository_unavailable"
                 )
+            preparation_started: float | None = None
             try:
+                preparation_started = time.monotonic()
+                _record_diagnostic_operation(
+                    scan_id, operation="vault_capture_preparation",
+                    stage="vault_preparation", outcome="started",
+                )
                 vault_preparation = prepare_vault_scan_after_capture(
                     repository=vault_repository,
                     snapshot=snapshot,
@@ -1196,6 +2123,8 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool,
                     raise RuntimeError(
                         "vault_persisted_capture_unavailable"
                     ) from readback_exc
+                with _LOCK:
+                    status_for_diagnostic = _status_copy_locked(_SCANS.get(scan_id) or {})
                 _record_vault_sidecar_status(
                     scan_id,
                     {
@@ -1203,6 +2132,13 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool,
                         "state": "failed",
                         "error_type": type(exc).__name__,
                         "error": str(exc),
+                        "diagnostic": _diagnostic(
+                            kind="secondary_failure",
+                            stage="vault_sidecar",
+                            capture_state=_capture_state(status_for_diagnostic),
+                            reason_codes="vault_sidecar_failed",
+                            build_sha=status_for_diagnostic.get("scan_build_sha"),
+                        ),
                     },
                 )
                 vault_preparation = None
@@ -1225,6 +2161,7 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool,
         if authority_scanner_enabled:
             if vault_repository is None or not isinstance(vault_preparation, Mapping):
                 raise RuntimeError("vault_authority_preparation_unavailable")
+            _set_execution_stage(scan_id, "vault_authority")
             _run_vault_sv9_authority_scanner(
                 scan_id=scan_id,
                 url=url,
@@ -1289,7 +2226,7 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool,
         _set_phase(scan_id, "score", "done")
         report = _compose_report(scan_id, url, brand_name, payload)
         report = _attach_evidence_stability(report)
-        _validate_report_sv9_assessment(
+        assessment = _validate_report_sv9_assessment(
             report,
             required=vault_enabled,
         )
@@ -1304,11 +2241,12 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool,
                     preparation=vault_preparation,
                 ):
                     return
-            _validate_report_sv9_assessment(report, required=True)
+            assessment = _validate_report_sv9_assessment(report, required=True)
         if _scan_cancelled(scan_id):
             return
         _set_phase(scan_id, "report", "running")
-        if not _publish_completed_report(scan_id, report):
+        published = _publish_completed_report(scan_id, report, assessment=assessment)
+        if not published:
             return
         _run_vault_sv9_judgment_shadow_after_publication(
             scan_id=scan_id, repository=vault_repository, payload=payload, report=report
@@ -1323,6 +2261,19 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool,
                 status["phase"] = "error"
                 status["error"] = f"{type(exc).__name__}: {exc}"
                 status["error_code"] = "scan_execution_failed"
+                status["diagnostic"] = _diagnostic(
+                    kind="execution_failed",
+                    stage=status.get("execution_stage"),
+                    capture_state=_capture_state(status),
+                    reason_codes=(
+                        str(exc)
+                        if isinstance(exc, RuntimeError)
+                        and str(exc) in _DIAGNOSTIC_REASON_CODES
+                        else "scan_execution_failed"
+                    ),
+                    build_sha=status.get("scan_build_sha"),
+                    origin=_safe_exception_origin(exc),
+                )
                 status["completed_at"] = datetime.now(timezone.utc).isoformat()
                 _mark_pending_phases_locked(status, "error")
                 persisted_status = _status_copy_locked(status)
@@ -1333,6 +2284,7 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool,
                 _persist_scan_status(persisted_status)
             except Exception:
                 _LOG.exception("failed to persist terminal scanner error", extra={"scan_id": scan_id})
+        _record_diagnostic_operation(scan_id, operation="scan_execution", stage="unknown", outcome="failed", exc=exc, started_monotonic=execution_started)
     finally:
         if owner is not None:
             _release_scan_owner(owner)

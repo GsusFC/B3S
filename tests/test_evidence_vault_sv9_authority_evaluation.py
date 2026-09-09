@@ -465,3 +465,51 @@ def test_invalid_persisted_event_audit_metadata_stops_all_evaluation_effects(nam
     assert (result["status"], result["reason_codes"], result["accepted_authority"], result["candidate"], result["signed_delta"]) == ("no_new_score", ["invalid_input"], None, None, None)
     assert (repo.authority_calls, repo.projection_calls, repo.context_calls, repo.evidence_calls, repo.get_calls, repo.append_calls, flow.calls) == (1, 0, 0, 0, 0, 0, [])
 # fmt: on
+
+
+def test_authority_diagnostic_observer_is_scoped_inert_and_projects_safe_coverage():
+    baseline_repo, baseline_flow = _Repository(_authority(), (3, 9)), _Flow()
+    baseline_repo.reopen = True
+    baseline = _run(baseline_repo, baseline_flow, current=(3, 9))
+
+    events = []
+    observed_repo, observed_flow = _Repository(_authority(), (3, 9)), _Flow()
+    observed_repo.reopen = True
+    with service.observe_evidence_vault_sv9_authority_evaluation_diagnostics(
+        lambda event, exc: events.append((event, exc))
+    ):
+        observed = _run(observed_repo, observed_flow, current=(3, 9))
+
+    assert observed == baseline
+    assert len(events) == 1 and events[0][1] is None
+    event = events[0][0]
+    assert event["boundary"] == "sv9_authority_evaluation"
+    assert event["status"] == "review_required"
+    assert event["coverage"]["review_partition"]["operational_authority_coverage_loss_tile_ids"] == ["M1"]
+    loss = event["coverage"]["operational_authority_coverage_loss"]
+    assert loss[0]["tile_id"] == "M1" and loss[0]["basis_facts"][0]["relation_id"]
+    assert "evidence_ref" not in str(event)
+
+    _run(_Repository(_authority(), (3, 9)), _Flow(), current=(3, 9))
+    assert len(events) == 1
+
+    failing_repo, failing_flow = _Repository(records=(9,)), _Flow()
+    failing_repo.fail_checkpoint_append = True
+    with service.observe_evidence_vault_sv9_authority_evaluation_diagnostics(
+        lambda _event, _exc: (_ for _ in ()).throw(RuntimeError("observer failure"))
+    ):
+        failed = _run(failing_repo, failing_flow, current=(9,))
+    assert failed["status"] == "no_new_score" and failed["reason_codes"] == ["repository_failure"]
+
+
+def test_authority_diagnostic_observer_receives_only_explicitly_caught_exception():
+    observed = []
+    repo, flow = _Repository(records=(9,)), _Flow()
+    repo.fail_checkpoint_append = True
+    with service.observe_evidence_vault_sv9_authority_evaluation_diagnostics(
+        lambda event, exc: observed.append((event, exc))
+    ):
+        outcome = _run(repo, flow, current=(9,))
+
+    assert outcome["reason_codes"] == ["repository_failure"]
+    assert len(observed) == 1 and type(observed[0][1]) is RuntimeError

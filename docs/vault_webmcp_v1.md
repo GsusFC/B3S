@@ -17,12 +17,19 @@ Entry point: the authenticated Vault index at `/`.
 | `b3s_list_brand_analyses` | `GET /` | Reads the visible brand-analysis index | Read-only |
 | `b3s_get_brand_analysis` | `GET /brand/{domain}` | Reads score, status, evidence links, history, and Vault memory | Read-only |
 | `b3s_read_report_markdown` | `GET /report/{report_id}.md` | Reads one persisted report with a bounded output | Read-only |
-| `b3s_get_scan_status` | `GET /api/scan/{scan_id}` | Reads current scan phases, acquisition, and gate state | Read-only |
+| `b3s_get_scan_status` | `GET /api/scan/{scan_id}` | Reads current scan phases, acquisition, gate state, and bounded safe diagnostic | Read-only |
+| `b3s_get_scan_diagnostic_detail` | `GET /api/scan/{scan_id}/diagnostic-detail` | Reads the bounded protected operation dossier; never starts or retries a scan | Read-only |
 | `b3s_prepare_scan` | Visible `POST /scan` form | Fills URL, brand name, and degraded-fallback choice without submitting | Reversible browser state; human submit required |
 | `b3s_continue_degraded_scan` | `POST /api/scan/{scan_id}/continue` | Continues a blocked scan after re-reading its gate | Consequential; requires `confirm=true` |
 | `b3s_cancel_scan` | `POST /api/scan/{scan_id}/cancel` | Cancels a running or blocked scan after re-reading its state | Consequential; requires `confirm=true` |
 
 Read results containing captured, page, provider, or user-controlled text are marked as untrusted content.
+
+The scan-status diagnostic is a safe projection shared with the existing
+browser route. It can expose fixed reason codes, lifecycle context, scan-time
+build SHA, and directly observed safe origin metadata. Raw exceptions, Vault
+sidecar error fields, provider payloads, and credentials are removed before the
+browser/WebMCP response.
 
 `b3s_prepare_scan` deliberately does not submit the scan. The ordinary browser `POST /scan` path creates a fresh scan ID for every request and has no durable idempotency key. Allowing an agent to call it directly would make transport or model retries capable of starting duplicate acquisitions and spending provider credits twice. A direct WebMCP launch must wait for a session-authenticated, request-bound, durable idempotency boundary; client-side deduplication is not sufficient.
 

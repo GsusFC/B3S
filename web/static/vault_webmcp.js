@@ -144,7 +144,10 @@
   }
 
   function bounded(value, depth = 0) {
-    if (depth > 7) return null;
+    // Diagnostic dossiers legitimately reach eight levels at a safe
+    // relation/evidence identifier. Keep that leaf while retaining a bounded
+    // traversal for arbitrary browser responses.
+    if (depth > 12) return null;
     if (
       value == null ||
       typeof value === "number" ||
@@ -452,6 +455,15 @@
       "scanId"
     );
     return bounded(await rawScanStatus(scanId, context.signal));
+  }
+
+  async function getScanDiagnosticDetail(rawInput, context = {}) {
+    const input = closedInput(rawInput, ["scanId"], ["scanId"]);
+    const scanId = safeIdentifier(
+      stringArg(input, "scanId", { required: true, minLength: 1, maxLength: 180 }),
+      "scanId"
+    );
+    return bounded(await fetchJson(`/api/scan/${encodeURIComponent(scanId)}/diagnostic-detail`, { signal: context.signal }));
   }
 
   function prepareScan(rawInput) {
@@ -782,6 +794,18 @@
       },
       annotations: readOnlyAnnotations,
       execute: getScanStatus,
+    },
+    {
+      name: "b3s_get_scan_diagnostic_detail",
+      description: "Lee el dossier diagnóstico acotado de un scan existente. No inicia ni reintenta operaciones.",
+      inputSchema: {
+        type: "object",
+        properties: { scanId: { type: "string", minLength: 1, maxLength: 180 } },
+        required: ["scanId"],
+        additionalProperties: false,
+      },
+      annotations: readOnlyAnnotations,
+      execute: getScanDiagnosticDetail,
     },
     {
       name: "b3s_prepare_scan",

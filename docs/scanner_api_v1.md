@@ -114,6 +114,42 @@ Public statuses are:
 `continue` is only valid for a continuable blocked scan. `cancel` rejects scans
 already in a terminal state.
 
+Failed status responses may include an additive `diagnostic` object. It is a
+closed, bounded projection: lifecycle stage, capture completion state,
+allowlisted reason codes, scan-time build SHA, and (when directly observed) an
+exception type or SQLSTATE. It never contains exception messages, provider
+payloads, URLs, credentials, or raw Vault sidecar fields. Completed results may
+use the same object with `kind="assessment_unavailable"`; that means no
+authoritative assessment is available, not that the capture or score was
+silently rewritten.
+
+This diagnostic scope covers ordinary scanner jobs only. Exact-resume actions
+do not use this status envelope. A scan-start failure and legacy status can
+provide only a generic safe fallback because their original execution context
+is not reconstructible. Restart recovery always reports an unknown stage. The
+diagnostic never infers a retry, root cause, or provenance that was not safely
+observed; retaining a prior score likewise does not create a fresh diagnostic.
+
+### Protected rich diagnostic dossier
+
+`GET /api/v1/scans/{scan_id}/diagnostic-detail` requires the existing
+`scans:read` permission and returns the bounded operation dossier for an
+ordinary scan. Compact status and result responses deliberately omit this
+private ledger. The dossier has at most 24 events and 32 KiB of serialized
+event data; `dropped_event_count` and `truncated_event_count` make any limit
+visible. It contains only operation names, safe reason codes, exception class/
+SQLSTATE, bounded causal classes and repository-relative frames, strict IDs or
+fingerprints, and explicitly projected coverage. It never returns exception
+messages, args, SQL, secrets, raw evidence, source URLs, or provider text.
+
+`identity`, `conditions`, `dependency`, `artifacts`, `impact`, `persistence`,
+and `recovery` distinguish observed facts from unknowns. Ledger observations
+remain `observed_best_effort`; a terminal in-memory status is never presented
+as a durable diagnostic readback. A persisted terminal status is only a
+last-known snapshot, not proof of an exact crash cause. Exact-resume actions
+intentionally report trace support as unavailable and the dossier provides no
+automatic retry advice.
+
 ## Read result and evidence
 
 ```text
@@ -134,6 +170,7 @@ The result contract (`b3s-scanner-result-v1`) contains:
 - Acquisition coverage, limitations, and gate state.
 - Scan-time evidence-stability classification and reason codes.
 - Pipeline, rubric, prompt, and evaluator metadata.
+- A safe diagnostic when the persisted authoritative assessment is unavailable.
 
 When acquisition did not cover a component sufficiently, the result exposes
 that state explicitly in `insufficient_evidence` (for example,

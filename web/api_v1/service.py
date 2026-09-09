@@ -61,6 +61,7 @@ from web.scan_runner import (
     _load_persisted_scan_status,
     default_brand_name,
     normalize_url,
+    scan_diagnostic_dossier_from_status,
     scan_status,
     start_scan,
 )
@@ -362,6 +363,73 @@ def get_scan(scan_id: str) -> dict[str, Any] | None:
     if active is not None:
         return active
     return None
+
+
+def get_scan_diagnostic_status(scan_id: str) -> dict[str, Any] | None:
+    """Detail-only bounded enrichment; compact polling never calls this."""
+    normalized_id = str(scan_id)
+    status = scan_status(normalized_id)
+    if status is None or status.get("id") != normalized_id:
+        return None
+    enriched = dict(status)
+    context: dict[str, Any] = {"operation_lookup": "not_applicable"}
+    try:
+        persisted = _load_persisted_scan_status(normalized_id)
+    except Exception:
+        context["status_readback"] = "unavailable"
+    else:
+        if isinstance(persisted, dict) and persisted.get("id") == normalized_id:
+            if isinstance(persisted.get("diagnostic_operation_ledger"), dict):
+                active_detail = scan_diagnostic_dossier_from_status(enriched)
+                persisted_detail = scan_diagnostic_dossier_from_status(persisted)
+                same_ledger = (
+                    active_detail.get("events") == persisted_detail.get("events")
+                    and active_detail.get("dropped_event_count") == persisted_detail.get("dropped_event_count")
+                    and active_detail.get("truncated_event_count") == persisted_detail.get("truncated_event_count")
+                )
+                context["status_readback"] = (
+                    "observed_ledger" if same_ledger else "divergent"
+                )
+            else:
+                context["status_readback"] = "observed_without_ledger"
+        else:
+            context["status_readback"] = "missing"
+    if _known_vault_scan_for_detail(enriched):
+        try:
+            repository = _postgres_repository()
+            operation = (
+                repository.get_capture_operation_plan(normalized_id, workspace_slug="b3s")
+                if repository is not None
+                else None
+            )
+        except Exception:
+            context["operation_lookup"] = "unavailable"
+        else:
+            if isinstance(operation, dict) and operation.get("source_scan_id") == normalized_id:
+                context["operation"] = operation
+            else:
+                context["operation_lookup"] = "missing"
+    enriched["_diagnostic_detail_context"] = context
+    return enriched
+
+
+def _known_vault_scan_for_detail(status: dict[str, Any]) -> bool:
+    """Require an existing Vault binding before the on-demand repository read."""
+    if not _vault_operational_pipeline_enabled():
+        return False
+    stage = status.get("execution_stage")
+    if isinstance(stage, str) and stage.startswith("vault_"):
+        return True
+    ledger = status.get("diagnostic_operation_ledger")
+    events = ledger.get("events") if isinstance(ledger, dict) else []
+    if not isinstance(events, list):
+        return False
+    return any(
+        isinstance(event, dict)
+        and isinstance(event.get("operation"), str)
+        and event["operation"].startswith("vault_")
+        for event in events
+    )
 
 
 def get_completed_report(scan_id: str) -> dict[str, Any]:

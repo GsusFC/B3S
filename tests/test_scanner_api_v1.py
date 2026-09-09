@@ -3220,3 +3220,454 @@ def test_vault_resume_api_binds_action_to_scan_and_projects_all_states(monkeypat
     monkeypatch.setattr("web.api_v1.service._read_resume_action", lambda _: {"action_id": "bad-action", "scan_id": "bad-scan", "state": "completed", "created_at": "2026-07-20T10:00:00+00:00", "updated_at": "2026-07-20T10:00:00+00:00", "completed_at": None, "status_payload": {"publication_action": "retain_source", "report_id": "safe-report"}, **mutation})
     malformed = client.get("/api/v1/scans/bad-scan/resume-actions/bad-action", headers=AUTH)
     assert malformed.status_code == 503 and malformed.json()["error"]["code"] == "scanner_resume_action_store_unavailable" and injected not in malformed.text
+
+
+def test_diagnostic_detail_requires_existing_read_scope_and_keeps_ledger_private(monkeypatch):
+    _configure_evidence_reviewer(monkeypatch)
+    status = _running_scan()
+    status["diagnostic_operation_ledger"] = {
+        "version": "scan-diagnostic-ledger-v1",
+        "events": [{"operation": "scan_execution", "stage": "capture", "outcome": "failed", "observed_at": "2026-07-20T10:00:01+00:00", "durability": "observed_best_effort"}],
+        "dropped_event_count": 1,
+        "truncated_event_count": 0,
+        "additional_status_write_count": 1,
+        "additional_status_bytes": 123,
+    }
+    monkeypatch.setattr("web.api_v1.router.get_scan_diagnostic_status", lambda _scan_id: status)
+    client = TestClient(app)
+
+    assert client.get("/api/v1/scans/scan123/diagnostic-detail").status_code == 401
+    response = client.get("/api/v1/scans/scan123/diagnostic-detail", headers=AUTH)
+    assert response.status_code == 200
+    assert response.json()["events"][0]["operation"] == "scan_execution"
+    assert response.json()["exact_resume"] == {"supported": False, "reason": "exact_resume_action_trace_unsupported"}
+
+
+def test_diagnostic_detail_returns_not_found_for_unknown_scan(monkeypatch):
+    _configure_evidence_reviewer(monkeypatch)
+    monkeypatch.setattr("web.api_v1.router.get_scan_diagnostic_status", lambda _scan_id: None)
+    response = TestClient(app).get("/api/v1/scans/missing/diagnostic-detail", headers=AUTH)
+    assert response.status_code == 404
+
+
+def test_diagnostic_operation_ledger_bounds_and_redacts_exception_text():
+    status = {"id": "scan123", "state": "running"}
+    for _ in range(26):
+        scan_runner._append_diagnostic_operation_locked(
+            status,
+            scan_runner._diagnostic_operation(
+                operation="scan_execution",
+                stage="capture",
+                outcome="failed",
+                exc=RuntimeError("secret-token-must-not-appear"),
+                coverage={"payload": "x" * 10000},
+            ),
+        )
+    dossier = scan_runner.scan_diagnostic_dossier_from_status(status)
+    assert len(dossier["events"]) == 24 and dossier["dropped_event_count"] == 2
+    assert "secret-token-must-not-appear" not in str(dossier)
+    assert all("payload" not in str(event.get("coverage") or {}) for event in dossier["events"])
+
+
+def test_diagnostic_dossier_treats_persisted_events_as_hostile_and_stays_bounded():
+    status = {
+        "id": "scan123",
+        "state": "error",
+        "scan_build_sha": "a" * 40,
+        "diagnostic_operation_ledger": {
+            "events": [
+                {
+                    "operation": "vault_authority_application",
+                    "stage": "vault_authority",
+                    "outcome": "failed",
+                    "observed_at": "2026-07-20T10:00:01+00:00",
+                    "durability": "persisted-definitely-not",
+                    "trace": [{"path": "/private/secret.py", "line": 1, "function": "leak"}],
+                    "coverage": {"payload": "secret-token-must-not-appear"},
+                }
+                for _ in range(200)
+            ],
+            "dropped_event_count": 0,
+            "truncated_event_count": 0,
+        },
+    }
+    dossier = scan_runner.scan_diagnostic_dossier_from_status(status)
+    encoded = __import__("json").dumps(dossier, sort_keys=True).encode("utf-8")
+    assert len(encoded) <= 32 * 1024
+    assert len(dossier["events"]) == 24
+    assert "secret-token-must-not-appear" not in str(dossier)
+    assert all(event["durability"] == "observed_best_effort" for event in dossier["events"])
+    assert all("trace" not in event for event in dossier["events"])
+
+
+def test_diagnostic_dossier_keeps_only_closed_authority_identifiers():
+    relation_id = "a" * 64
+    fingerprint = "b" * 64
+    status = {"id": "scan123", "state": "running"}
+    event = scan_runner._diagnostic_operation(
+        operation="vault_authority_evaluation",
+        stage="vault_authority",
+        outcome="failed",
+        coverage={
+            "plan": {"canonical_plan_fingerprint": fingerprint, "private": "no"},
+            "review_partition": {"tile_ids": ["M1", "not-a-real-tile"]},
+            "operational_authority_coverage_loss": [
+                {
+                    "tile_id": "M1",
+                    "component_key": "mission",
+                    "reason": "historical_basis_missing",
+                    "basis_facts": [{
+                        "relation_id": relation_id,
+                        "continuity_state": "missing",
+                        "provider_text": "do-not-copy",
+                    }],
+                }
+            ],
+        },
+    )
+    scan_runner._append_diagnostic_operation_locked(status, event)
+    coverage = scan_runner.scan_diagnostic_dossier_from_status(status)["events"][0]["coverage"]
+    assert coverage["plan"] == {"canonical_plan_fingerprint": fingerprint}
+    assert coverage["review_partition"]["tile_ids"] == ["M1"]
+    loss = coverage["operational_authority_coverage_loss"][0]
+    assert loss["reason"] == "historical_basis_missing"
+    assert loss["basis_facts"] == [{"relation_id": relation_id, "continuity_state": "missing"}]
+    assert "provider_text" not in str(coverage)
+
+
+def test_diagnostic_detail_context_is_closed_for_malformed_and_divergent_readback():
+    assert scan_runner._safe_detail_context({"status_readback": [], "operation_lookup": []}) == {}
+    dossier = scan_runner.scan_diagnostic_dossier_from_status({
+        "id": "scan123",
+        "state": "running",
+        "diagnostic_operation_ledger": {"events": []},
+        "_diagnostic_detail_context": {"status_readback": "divergent"},
+    })
+    assert dossier["persistence"]["readback"] == "divergent"
+
+
+def test_diagnostic_detail_keeps_safe_db_identity_not_exception_text():
+    class Diagnostic:
+        schema_name = "public"
+        table_name = "capture_operations"
+        constraint_name = "capture_operations_source_scan_id_key"
+        column_name = "source_scan_id"
+
+    class DatabaseFailure(RuntimeError):
+        sqlstate = "23505"
+        diag = Diagnostic()
+
+    status = {"id": "scan123", "state": "error"}
+    event = scan_runner._diagnostic_operation(
+        operation="vault_capture_preparation",
+        stage="vault_preparation",
+        outcome="failed",
+        exc=DatabaseFailure("postgres://secret message must never escape"),
+    )
+    scan_runner._append_diagnostic_operation_locked(status, event)
+    detail = scan_runner.scan_diagnostic_dossier_from_status(status)["events"][0]
+    assert detail["origin"] == {"exception_type": "DatabaseFailure", "sqlstate": "23505"}
+    assert detail["resource"] == {
+        "availability": "observed",
+        "schema": "public",
+        "table": "capture_operations",
+        "constraint": "capture_operations_source_scan_id_key",
+        "column": "source_scan_id",
+    }
+    assert "secret" not in str(detail)
+
+
+def test_diagnostic_coverage_preserves_upstream_and_local_truncation_counts():
+    fingerprint = "c" * 64
+    relation_ids = [f"00000000-0000-0000-0000-{index:012d}" for index in range(30)]
+    projection = scan_runner._safe_operation_coverage(
+        {
+            "review_partition": {
+                "tile_ids": ["M1"] * 30,
+                "tile_ids_truncated_count": 5,
+            },
+            "operational_authority_coverage_loss": [
+                {
+                    "tile_id": "M1",
+                    "component_key": "mission",
+                    "basis_facts": (
+                        [{"relation_id": value} for value in relation_ids]
+                        if index == 0
+                        else []
+                    ),
+                    "basis_facts_truncated_count": 7 if index == 0 else 0,
+                }
+                for index in range(30)
+            ],
+            "operational_authority_coverage_loss_truncated_count": 11,
+            "judgment_delta_coverage_loss": [
+                {
+                    "tile_id": "M1",
+                    "component_key": "mission",
+                    "evidence_fingerprints": [fingerprint] * 30,
+                    "evidence_fingerprints_truncated_count": 3,
+                }
+            ],
+        }
+    )
+    assert projection["review_partition"]["tile_ids_truncated_count"] == 34
+    assert projection["operational_authority_coverage_loss_truncated_count"] == 17
+    assert projection["operational_authority_coverage_loss"][0]["basis_facts_truncated_count"] == 13
+    assert projection["judgment_delta_coverage_loss"][0]["evidence_fingerprints_truncated_count"] == 9
+
+
+def test_diagnostic_detail_rejects_malformed_resource_and_trace_traversal():
+    detail = scan_runner.scan_diagnostic_dossier_from_status(
+        {
+            "id": "scan123",
+            "state": "done",
+            "diagnostic_operation_ledger": {
+                "events": [
+                    {
+                        "operation": "vault_authority_evaluation",
+                        "outcome": "failed",
+                        "resource": {"availability": []},
+                        "trace": [
+                            {
+                                "path": "src/../../secret.py",
+                                "line": 1,
+                                "function": "leak",
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+    )
+    event = detail["events"][0]
+    assert event["resource"] == {"availability": "unknown"}
+    assert "trace" not in event
+
+
+def test_diagnostic_detail_actual_response_model_stays_under_wire_cap():
+    from web.api_v1.models import ScanDiagnosticDetailResponse
+    from web.api_v1.presenters import diagnostic_detail_payload
+
+    status = {
+        "id": "scan123",
+        "state": "done",
+        "diagnostic_operation_ledger": {
+            "events": [
+                {
+                    "operation": "x",
+                    "outcome": "failed",
+                    "trace": [{"path": "src/a.py", "line": 1, "function": "f"}],
+                }
+            ]
+        },
+    }
+    base = diagnostic_detail_payload(status)
+    size = len(__import__("json").dumps(base, separators=(",", ":")).encode())
+    status["diagnostic_operation_ledger"]["events"][0]["trace"][0]["path"] = "src/" + "a" * (32760 - size + 1) + ".py"
+    payload = diagnostic_detail_payload(status)
+    app = __import__("fastapi").FastAPI()
+
+    @app.get("/", response_model=ScanDiagnosticDetailResponse)
+    def get_detail():
+        return payload
+
+    assert len(TestClient(app).get("/").content) <= 32 * 1024
+
+
+def test_report_save_event_is_in_existing_final_status_snapshot(monkeypatch):
+    scan_id = "diagnostic-report-save"
+    status = _running_scan(scan_id)
+    status["state"] = "running"
+    persisted = []
+    with scan_runner._LOCK:
+        scan_runner._SCANS[scan_id] = status
+        scan_runner._SCAN_EVENTS[scan_id] = __import__("threading").Event()
+    monkeypatch.setattr(scan_runner, "save_report", lambda _report: None)
+    monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda snapshot: persisted.append(snapshot))
+    try:
+        assert scan_runner._publish_completed_report(scan_id, {"id": scan_id}) is True
+    finally:
+        with scan_runner._LOCK:
+            scan_runner._SCANS.pop(scan_id, None)
+            scan_runner._SCAN_EVENTS.pop(scan_id, None)
+    assert persisted
+    events = persisted[0]["diagnostic_operation_ledger"]["events"]
+    assert [event["outcome"] for event in events if event["operation"] == "report_save"] == ["started", "completed"]
+
+
+def test_status_diagnostic_is_closed_and_preserves_scan_time_context():
+    status = _running_scan()
+    status.update(
+        state="error",
+        execution_stage="vault_preparation",
+        scan_build_sha="b" * 40,
+        phases=[{"key": "capture", "label": "Capture", "state": "done"}],
+        diagnostic={
+            "kind": "execution_failed",
+            "stage": "vault_preparation",
+            "capture_state": "completed",
+            "reason_codes": ["vault_authority_capture_persist_failed", "postgres://secret"],
+            "summary": "private exception text",
+            "build_sha": "b" * 40,
+            "origin": {"exception_type": "RuntimeError", "sqlstate": "23505", "message": "secret"},
+        },
+    )
+
+    public = status_payload(status)
+
+    assert public["diagnostic"] == {
+        "kind": "execution_failed",
+        "stage": "vault_preparation",
+        "capture_state": "completed",
+        "reason_codes": ["vault_authority_capture_persist_failed"],
+        "summary": "The scan stopped before completion.",
+        "build_sha": "b" * 40,
+        "origin": {"exception_type": "RuntimeError", "sqlstate": "23505"},
+    }
+    assert "secret" not in str(public)
+
+
+def test_restarted_legacy_status_derives_safe_diagnostic_without_error_text():
+    status = _running_scan()
+    status.update(
+        state="error",
+        phase="error",
+        error_code="process_restarted",
+        error="worker restart at /private/token",
+    )
+
+    public = status_payload(status)
+
+    assert public["diagnostic"] == {
+        "kind": "execution_failed",
+        "stage": "unknown",
+        "capture_state": "not_completed",
+        "reason_codes": ["process_restarted"],
+        "summary": "The scan stopped before completion.",
+        "build_sha": "unknown",
+        "unknowns": ["legacy_status_without_diagnostic"],
+    }
+    assert "private" not in str(public)
+
+
+def test_completed_unavailable_result_has_no_score_and_safe_diagnostic():
+    report = _assessment_report("no-score", unavailable=True)
+    original_score = report["score"]
+
+    public = result_payload(report)
+
+    assert public["score"]["value"] is None
+    assert report["score"] == original_score
+    assert public["diagnostic"] == {
+        "kind": "assessment_unavailable",
+        "stage": "vault_authority",
+        "capture_state": "unknown",
+        "reason_codes": ["component_not_scored:vision:not_evaluated"],
+        "summary": "The scan completed, but no authoritative assessment is available.",
+        "build_sha": "unknown",
+    }
+
+
+def test_assessment_diagnostic_keeps_only_closed_kernel_reason_codes():
+    diagnostic = scan_runner.scan_diagnostic_from_report(
+        {"pipeline_commit_sha": "d" * 40, "raw": {"source_capture": {}}},
+        assessment={
+            "availability": "unavailable",
+            "assessment": {
+                "reason_codes": [
+                    "components_not_mapping",
+                    "component_not_scored:vision:not_evaluated",
+                    "component_not_scored:vision:private:payload",
+                    "component_not_scored:private_component:not_evaluated",
+                ]
+            },
+        },
+    )
+
+    assert diagnostic == {
+        "kind": "assessment_unavailable",
+        "stage": "vault_authority",
+        "capture_state": "completed",
+        "reason_codes": [
+            "components_not_mapping",
+            "component_not_scored:vision:not_evaluated",
+        ],
+        "summary": "The scan completed, but no authoritative assessment is available.",
+        "build_sha": "d" * 40,
+    }
+
+
+def test_malformed_persisted_diagnostic_never_breaks_status_projection():
+    status = _running_scan()
+    status.update(
+        state="error",
+        error_code="scan_execution_failed",
+        diagnostic={
+            "kind": [],
+            "capture_state": {},
+            "unknowns": [{}, {}, {}, {}, {}],
+        },
+    )
+
+    public = status_payload(status)
+
+    assert public["diagnostic"] == {
+        "kind": "execution_failed",
+        "stage": "unknown",
+        "capture_state": "not_completed",
+        "reason_codes": ["scan_execution_failed"],
+        "summary": "The scan stopped before completion.",
+        "build_sha": "unknown",
+        "unknowns": ["legacy_status_without_diagnostic"],
+    }
+
+    status.update(
+        state="done",
+        diagnostic={
+            "kind": "assessment_unavailable",
+            "stage": "vault_authority",
+            "capture_state": {},
+            "reason_codes": ["components_not_mapping"],
+            "build_sha": "a" * 40,
+            "unknowns": 5,
+        },
+    )
+    public = status_payload(status)
+
+    assert public["diagnostic"] == {
+        "kind": "assessment_unavailable",
+        "stage": "vault_authority",
+        "capture_state": "unknown",
+        "reason_codes": ["components_not_mapping"],
+        "summary": "The scan completed, but no authoritative assessment is available.",
+        "build_sha": "a" * 40,
+    }
+
+
+def test_primary_restart_outweighs_stale_secondary_diagnostic():
+    status = _running_scan()
+    status.update(
+        state="error",
+        error_code="process_restarted",
+        execution_stage="capture",
+        diagnostic={
+            "kind": "assessment_unavailable",
+            "stage": "vault_authority",
+            "capture_state": "completed",
+            "reason_codes": ["components_not_mapping"],
+            "build_sha": "d" * 40,
+        },
+        vault={"state": "failed", "error": "private"},
+    )
+
+    public = status_payload(status)
+
+    assert public["diagnostic"] == {
+        "kind": "execution_failed",
+        "stage": "unknown",
+        "capture_state": "not_completed",
+        "reason_codes": ["process_restarted"],
+        "summary": "The scan stopped before completion.",
+        "build_sha": "unknown",
+        "unknowns": ["legacy_status_without_diagnostic"],
+    }
