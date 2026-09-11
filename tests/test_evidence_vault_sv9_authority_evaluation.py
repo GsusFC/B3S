@@ -363,15 +363,15 @@ def test_exact_reuse_and_explicit_irrelevant_evidence_skip_flow(current, trusted
     assert (result["status"], result["reason_codes"], flow.calls, repo.append_calls) == ("no_new_score", [reason], [], 0)
     assert result["accepted_authority"]["accepted_candidate_id"] == _ID and result["trusted_irrelevant_evidence_count"] == len(trusted)
 
-def test_hint_only_healthy_workset_runs_when_canonical_component_workset_is_empty():
+def test_hint_routing_keeps_signed_unmapped_evidence_pending_review():
     repo, flow = _Repository(_authority(), (3, 9)), _Flow(); repo.hint_only = True; outcome = _run(repo, flow, current=(3, 9))
     assert outcome["signed_delta"]["plan"]["component_workset"] == [] and [row["component_key"] for row in flow.calls] == ["mission", "coherencia"]
-    assert outcome["status"] == "review_required" and outcome["reason_codes"] == ["incomplete_candidate"] and outcome["candidate"] is None and len(repo.checkpoint_appends) == 2 and repo.get_calls == repo.append_calls == 0
+    assert outcome["status"] == "review_required" and outcome["reason_codes"] == ["unmapped_evidence"] and outcome["candidate"] is None and len(repo.checkpoint_appends) == 2 and repo.get_calls == repo.append_calls == 0
     assert outcome["unmapped_evidence_count"] == outcome["trusted_irrelevant_evidence_count"] == 0
     assert (outcome["calls_avoided"], outcome["reused_tiles"], outcome["review_tile_count"]) == (8, 69, 0)
 
 
-def test_bootstrap_hint_routing_persists_empty_relation_witness_with_exact_origins():
+def test_bootstrap_hint_routing_keeps_unmapped_evidence_pending_review():
     repo, flow = _Repository(records=(9,)), _Flow()
     repo.bootstrap_hint_only = True
     series = shared_process.build_core_shared_series_contract(
@@ -388,12 +388,9 @@ def test_bootstrap_hint_routing_persists_empty_relation_witness_with_exact_origi
 
     outcome = _run(repo, flow, current=(9,), series=series)
 
-    assert outcome["status"] == "candidate_available"
-    assert outcome["reason_codes"] == []
-    witness = next(iter(repo.candidates.values()))["authoritative_relation_witness"]
-    assert witness["authoritative_relations"] == []
-    assert witness["capture_origin"] == repo.context["capture_origin"]
-    assert witness["operation_origin"] == repo.context["operation_origin"]
+    assert outcome["status"] == "review_required"
+    assert outcome["reason_codes"] == ["unmapped_evidence"]
+    assert not repo.candidates
 
 def test_continuity_review_outcome_uses_partition_telemetry():
     repo, flow = _Repository(_authority(), (3, 9)), _Flow(); repo.reopen = True; outcome = _run(repo, flow, current=(3, 9))
@@ -402,14 +399,14 @@ def test_continuity_review_outcome_uses_partition_telemetry():
 
 def test_provider_failure_outcome_uses_partition_telemetry():
     repo, flow = _Repository(_authority(), (3, 9)), _Flow(fail=1); repo.hint_only = True; outcome = _run(repo, flow, current=(3, 9))
-    assert outcome["status"] == "no_new_score" and outcome["reason_codes"] == ["provider_failure"]
+    assert outcome["status"] == "review_required" and outcome["reason_codes"] == ["unmapped_evidence", "provider_failure"]
     assert outcome["unmapped_evidence_count"] == 0
     assert (outcome["calls_avoided"], outcome["reused_tiles"], outcome["review_tile_count"]) == (8, 69, 0)
 
 def test_resumed_partial_outcome_keeps_partition_telemetry():
     repo = _Repository(_authority(), (3, 9)); repo.hint_only = True
     first = _run(repo, _Flow(fail=2), current=(3, 9)); resumed = _run(repo, _Flow(fail=1), current=(3, 9))
-    assert first["status"] == resumed["status"] == "no_new_score" and first["reason_codes"] == resumed["reason_codes"] == ["provider_failure"]
+    assert first["status"] == resumed["status"] == "review_required" and first["reason_codes"] == resumed["reason_codes"] == ["unmapped_evidence", "provider_failure"]
     assert first["unmapped_evidence_count"] == resumed["unmapped_evidence_count"] == 0
     assert tuple(first[key] for key in ("calls_avoided", "reused_tiles", "review_tile_count")) == (8, 69, 0)
     assert tuple(resumed[key] for key in ("calls_avoided", "reused_tiles", "review_tile_count")) == (8, 69, 0)
@@ -465,6 +462,48 @@ def test_processing_complete_unmapped_evidence_can_produce_candidate_without_inf
     assert outcome["reason_codes"] == []
     assert outcome["unmapped_evidence_count"] == 0
     assert outcome["trusted_irrelevant_evidence_count"] == 0
+
+
+def test_partition_reasons_keeps_routing_only_unmapped_evidence_pending_review():
+    evidence = _identity(9)
+    partition = {
+        "review_partition": {
+            "operational_authority_coverage_loss_tile_ids": [],
+            "judgment_delta_coverage_loss_tile_ids": [],
+            "evaluation_input_reopened_tile_ids": [],
+            "planner_review_tile_ids": [],
+            "coherencia_blocked_tile_ids": [],
+        },
+        "judgment_delta": {"unmapped_evidence": [evidence]},
+        "trusted_irrelevant_evidence": [],
+        "processing_complete_evidence": [],
+        # A routing-only hint can remove a row from the execution workset; it
+        # cannot certify the signed unmapped evidence as complete.
+        "pending_evidence": [],
+    }
+
+    assert service._partition_reasons(partition, ["unmapped_evidence"]) == [
+        "unmapped_evidence"
+    ]
+
+
+def test_partition_reasons_allows_explicit_processing_complete_unmapped_evidence():
+    evidence = _identity(9)
+    partition = {
+        "review_partition": {
+            "operational_authority_coverage_loss_tile_ids": [],
+            "judgment_delta_coverage_loss_tile_ids": [],
+            "evaluation_input_reopened_tile_ids": [],
+            "planner_review_tile_ids": [],
+            "coherencia_blocked_tile_ids": [],
+        },
+        "judgment_delta": {"unmapped_evidence": [evidence]},
+        "trusted_irrelevant_evidence": [],
+        "processing_complete_evidence": [evidence],
+        "pending_evidence": [],
+    }
+
+    assert service._partition_reasons(partition, ["unmapped_evidence"]) == []
 
 
 def test_bootstrap_reopen_coverage_loss_uses_partition_reasons_without_candidate_io():

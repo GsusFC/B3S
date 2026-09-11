@@ -574,7 +574,16 @@ def _partition_reasons(partition: Mapping[str, Any], legacy: list[str]) -> list[
     if any(review[key] for key in ("operational_authority_coverage_loss_tile_ids", "judgment_delta_coverage_loss_tile_ids", "evaluation_input_reopened_tile_ids")): codes.append("coverage_loss")
     if review["planner_review_tile_ids"]: codes.append("review_set")
     if review["coherencia_blocked_tile_ids"]: codes.append("incomplete_review_partition")
-    if partition["pending_evidence"]:
+    cleared_unmapped = {
+        (row["evidence_ref"], row["evidence_fingerprint"])
+        for key in ("trusted_irrelevant_evidence", "processing_complete_evidence")
+        for row in partition[key]
+    }
+    unresolved_unmapped = {
+        (row["evidence_ref"], row["evidence_fingerprint"])
+        for row in partition["judgment_delta"]["unmapped_evidence"]
+    } - cleared_unmapped
+    if unresolved_unmapped:
         codes.insert(min(unmapped_index, len(codes)), "unmapped_evidence")
     return list(dict.fromkeys(codes))
 def _unresolved(plan: Mapping[str, Any], prior: Sequence[Mapping[str, Any]], sentinels: Sequence[Mapping[str, Any]]) -> bool:

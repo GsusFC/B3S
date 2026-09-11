@@ -865,6 +865,8 @@ def test_accepted_input_reuse_does_not_hide_changed_or_nonauthoritative_work(mon
     current, source, trusted = (3, 9), "scan-2", ()
     if change in {"new_mapped", "new_unmapped", "trusted"}:
         current = (3, 7, 9)
+        if change == "new_mapped":
+            source = "scan-3"
         if change != "new_mapped":
             repo.fact_change = lambda facts: facts["authority"]["accepted"][0].__setitem__(
                 "basis", [row for row in facts["authority"]["accepted"][0]["basis"] if row["evidence_id"] != _hash(107)]
@@ -916,7 +918,8 @@ def test_accepted_input_reuse_does_not_hide_changed_or_nonauthoritative_work(mon
             ],
         )
     elif change == "overlay":
-        assert _run(repo, _Flow(), current=(9,), source="scan-2")["status"] == "review_required"
+        assert _run(repo, _Flow(), current=(9,), source="scan-3")["status"] == "review_required"
+        source = "scan-4"
     flow = _Flow()
     result = _run(repo, flow, current=current, source=source, trusted=trusted)
     assert result["reason_codes"] != ["exact_reuse"] and not repo.proof_reads

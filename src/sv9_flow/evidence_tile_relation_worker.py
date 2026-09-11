@@ -119,6 +119,12 @@ def propose_evidence_tile_relations(
             else:
                 seen.add(key)
                 relations.append(relation)
+    # Passage-level decisions are intentionally conservative, but a retained
+    # relation is itself deterministic support.  Do not let a later passage
+    # downgrade that evidence fingerprint below the contract required by the
+    # downstream operation-result validator.
+    for relation in relations:
+        analysis_states[relation["evidence_fingerprint"]] = "supported"
     return {
         "schema_version": EVIDENCE_TILE_RELATION_PROPOSAL_VERSION,
         "relations": sorted(relations, key=lambda row: (

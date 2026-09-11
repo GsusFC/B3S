@@ -89,6 +89,48 @@ class FailingRelationLLM(ExecutorLLM):
         return super()._call_json(system, user, **kwargs)
 
 
+class CrossPassageRelationExecutorLLM(ExecutorLLM):
+    def __init__(self):
+        super().__init__()
+        self.relation_calls = 0
+
+    def _call_json(self, system, user, **kwargs):
+        if kwargs["schema_name"] != "evidence_tile_relation_proposals":
+            return super()._call_json(system, user, **kwargs)
+        self.calls.append(kwargs["schema_name"])
+        payload = json.loads(user.split(":\n", 1)[1])
+        self.relation_payloads.append(payload)
+        self.relation_calls += 1
+        fingerprint = payload[0]["evidence_fingerprint"]
+        if self.relation_calls == 1:
+            return {
+                "relations": [
+                    {
+                        "evidence_fingerprint": fingerprint,
+                        "tile_id": "M1",
+                        "polarity": "supports",
+                        "literal_quote": "help teams ship better products",
+                        "rationale": "This is an explicit organizational contribution.",
+                    }
+                ],
+                "analysis": [
+                    {
+                        "evidence_fingerprint": fingerprint,
+                        "decision": "supported",
+                    }
+                ],
+            }
+        return {
+            "relations": [],
+            "analysis": [
+                {
+                    "evidence_fingerprint": fingerprint,
+                    "decision": "analyzed_without_sufficient_support",
+                }
+            ],
+        }
+
+
 class SchemaFailureLabelExecutorLLM(ExecutorLLM):
     def _call_json(self, system, user, **kwargs):
         if kwargs["schema_name"] == "sv9_flow_evidence_labeling":
@@ -277,6 +319,32 @@ def test_executor_builds_pending_overlay_without_authority_or_score() -> None:
     assert operational["has_accepted_change"] is False
     assert operational["accepted_memory"]["accepted_tiles"] == []
     assert repository.source_packets and repository.operational_packets
+
+
+def test_executor_validates_retained_cross_passage_relation_state() -> None:
+    rows = [
+        _row(
+            "We help teams ship better products. " + ("filler sentence. " * 5000)
+        )
+    ]
+    repository = MemoryRepository(plan=_baseline_plan(rows), rows=rows)
+    llm = CrossPassageRelationExecutorLLM()
+
+    execution = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="scan-1",
+        worker_id="worker-a",
+        llm=llm,
+    )
+
+    assert execution["execution_status"] == "completed"
+    assert llm.relation_calls == 2
+    result = repository.operation["result_payload"]
+    fingerprint = result["selected_evidence_fingerprints"][0]
+    assert result["relation_proposal"]["analysis_states"] == {
+        fingerprint: "supported"
+    }
+    validate_vault_operation_result(result)
 
 
 
