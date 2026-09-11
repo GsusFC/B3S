@@ -149,17 +149,28 @@ def _plan(value):
     if plan["component_workset"] != [component for component in _COMPONENTS if component in plan["component_workset"]]: _fail("plan components are not canonical")
     _frozen(plan, set(plan["tile_workset"]))
     return plan
-def _packets(plan, values):
+def _complete_capture_plan(plan):
+    from src.services.evidence_vault_sv9_shared_process import is_core_shared_series_contract
+    return not plan["prior_judgments"] and not plan["prior_component_sentinels"] and is_core_shared_series_contract(plan["current_series_contract"])
+def _packets(plan, values, *, complete_capture=False):
     _json(values)
     if type(values) is not list or len(values) != len(plan["component_workset"]): _fail("evidence packets do not match workset")
+    eligible_complete_capture = _complete_capture_plan(plan)
+    if complete_capture and not eligible_complete_capture: _fail("complete capture is not a first Core-shared evaluation")
+    complete_capture = eligible_complete_capture
     delta, output = {row["tile_id"]: row for row in plan["delta_projections"]}, []
+    complete_evidence = None
     for component, raw in zip(plan["component_workset"], values):
         packet = _packet(raw, True)
         expected = [tile for tile in plan["tile_workset"] if _BY_TILE[tile][1] == component]
         if packet["component_key"] != component or [row["tile_id"] for row in packet["tiles"]] != expected or packet["series_fingerprint"] != plan["current_series_fingerprint"]: _fail("packet does not bind component workset")
         for tile in packet["tiles"]:
             bound = delta.get(tile["tile_id"])
-            if bound and (packet["capture_origin"] != bound["capture_origin"] or packet["operation_origin"] != bound["operation_origin"] or [{key: row[key] for key in ("evidence_ref", "evidence_fingerprint")} for row in tile["evidence"]] != bound["evidence"]): _fail("packet does not bind delta evidence")
+            evidence = [{key: row[key] for key in ("evidence_ref", "evidence_fingerprint")} for row in tile["evidence"]]
+            if complete_capture:
+                if complete_evidence is None: complete_evidence = evidence
+                if evidence != complete_evidence or (bound and any(row not in evidence for row in bound["evidence"])): _fail("packet does not bind complete capture")
+            if bound and (packet["capture_origin"] != bound["capture_origin"] or packet["operation_origin"] != bound["operation_origin"] or (not complete_capture and evidence != bound["evidence"])): _fail("packet does not bind delta evidence")
         output.append(packet)
     return output
 def _request(plan, packet, upstream):
@@ -266,14 +277,15 @@ def _partial_evidence(rows):
     return [{key: row[key] for key in ("evidence_ref", "evidence_fingerprint", "content")} for _pair, row in sorted(pairs.items())]
 
 
-def _partial_packets(partition, values):
-    plan, rows = _plan(partition["judgment_delta"]["plan"]), partition["healthy_workset"]["tiles"]
-    workset = _partial_workset(plan, [row["tile_id"] for row in rows])
+def _prepare_partial_evidence(partition, values, *, complete_capture=False):
+    rows = partition["healthy_workset"]["tiles"]
     expected = {}
-    for tile in rows:
-        for binding in tile["current_evidence_bindings"]:
-            identity = {key: binding[key] for key in ("evidence_record_id", "evidence_ref", "evidence_fingerprint")}
-            if expected.setdefault(identity["evidence_record_id"], identity) != identity: _fail("signed evidence conflicts")
+    bindings = partition["evaluation_input"]["current_identity_bindings"] if complete_capture else [binding for tile in rows for binding in tile["current_evidence_bindings"]]
+    plan = partition["judgment_delta"]["plan"]
+    if complete_capture and not _complete_capture_plan(plan): _fail("complete capture is not a first Core-shared evaluation")
+    for binding in bindings:
+        identity = {key: binding[key] for key in ("evidence_record_id", "evidence_ref", "evidence_fingerprint")}
+        if expected.setdefault(identity["evidence_record_id"], identity) != identity: _fail("signed evidence conflicts")
     if type(values) is not list: _fail("resolved evidence must be an array")
     resolved, pairs = {}, set()
     for raw in values:
@@ -284,6 +296,13 @@ def _partial_packets(partition, values):
         if expected.get(identity["evidence_record_id"]) != identity or identity["evidence_record_id"] in resolved or pair in pairs: _fail("resolved evidence does not match bindings")
         resolved[identity["evidence_record_id"]], pairs = record, pairs | {pair}
     if set(resolved) != set(expected): _fail("resolved evidence does not match bindings")
+    return resolved
+
+
+def _partial_packets(partition, values, *, complete_capture=False):
+    plan, rows = _plan(partition["judgment_delta"]["plan"]), partition["healthy_workset"]["tiles"]
+    workset = _partial_workset(plan, [row["tile_id"] for row in rows])
+    resolved = _prepare_partial_evidence(partition, values, complete_capture=complete_capture)
     hints = {}
     for hint in partition["evaluation_input"]["non_authoritative_hints"]:
         hints.setdefault(hint["component_key"], []).append(hint["evidence_record_id"])
@@ -296,8 +315,8 @@ def _partial_packets(partition, values):
         if tiles:
             materialized = []
             for tile in tiles:
-                records = [resolved[row["evidence_record_id"]] for row in tile["current_evidence_bindings"]]
-                if tile["route_source"] == "signed_hint_component_expansion" and not records:
+                records = list(resolved.values()) if complete_capture else [resolved[row["evidence_record_id"]] for row in tile["current_evidence_bindings"]]
+                if not complete_capture and tile["route_source"] == "signed_hint_component_expansion" and not records:
                     records = [resolved[record] for record in hints.get(component, ()) if record in resolved]
                     if not records: _fail("signed hint expansion has no component evidence")
                 materialized.append({"tile_id": tile["tile_id"], "evidence": _partial_evidence(records)})
@@ -346,12 +365,12 @@ def _run_components(plan, packets, workset, responder, call_count, coherencia_st
     return _partial_progress("partial", None, workset, judgments, sentinels, calls, call_count[0])
 
 
-def execute_partial_incremental_evaluation(workset_partition, resolved_evidence, flow, *, lookup_evaluation=None, persist_evaluation=None):
+def execute_partial_incremental_evaluation(workset_partition, resolved_evidence, flow, *, lookup_evaluation=None, persist_evaluation=None, complete_capture=False):
     """Evaluate the validated partition's scoreless healthy workset."""
     calls, workset = [0], []
     try:
         partition = validate_evidence_vault_sv9_workset_partition(workset_partition)
-        plan, workset, packets = _partial_packets(partition, resolved_evidence)
+        plan, workset, packets = _partial_packets(partition, resolved_evidence, complete_capture=complete_capture)
         if lookup_evaluation is not None and not callable(lookup_evaluation): _fail("evaluation lookup is not callable")
         if persist_evaluation is not None and not callable(persist_evaluation): _fail("evaluation persistence is not callable")
     except Exception:
@@ -363,12 +382,12 @@ def execute_partial_incremental_evaluation(workset_partition, resolved_evidence,
     return _run_components(plan, packets, workset, call, calls, partition["coherencia_dependency"]["state"], lookup_evaluation, persist_evaluation)
 
 
-def replay_partial_incremental_evaluation(workset_partition, resolved_evidence, captured_calls, evaluation_state="partial"):
+def replay_partial_incremental_evaluation(workset_partition, resolved_evidence, captured_calls, evaluation_state="partial", *, complete_capture=False):
     """Replay exact strict partial calls without invoking Flow."""
     calls, workset = [0], []
     try:
         partition = validate_evidence_vault_sv9_workset_partition(workset_partition)
-        plan, workset, packets = _partial_packets(partition, resolved_evidence)
+        plan, workset, packets = _partial_packets(partition, resolved_evidence, complete_capture=complete_capture)
         if type(evaluation_state) is not str or evaluation_state not in {"partial", "provider_failure"}: _fail("invalid replay state")
         _json(captured_calls)
         if type(captured_calls) is not list: _fail("captured calls do not match healthy workset")
@@ -415,9 +434,9 @@ def execute_incremental_evaluation(plan, evidence_packets, flow, *, lookup_evalu
         return result or _pending("provider_failure", calls[0], avoided[0], reused[0])
     except Exception:
         return _pending("invalid_input", calls[0], avoided[0], reused[0])
-def replay_incremental_evaluation(plan, evidence_packets, captured_calls):
+def replay_incremental_evaluation(plan, evidence_packets, captured_calls, *, complete_capture=False):
     try:
-        bound, packets = _plan(plan), _packets(_plan(plan), evidence_packets)
+        bound, packets = _plan(plan), _packets(_plan(plan), evidence_packets, complete_capture=complete_capture)
         _json(captured_calls)
         if type(captured_calls) is not list or len(captured_calls) != len(packets): _fail("captured calls do not match workset")
         def call(request, index):
@@ -429,10 +448,10 @@ def replay_incremental_evaluation(plan, evidence_packets, captured_calls):
         return result or _pending("invalid_replay")
     except Exception:
         return _pending("invalid_replay")
-def replay_incremental_evaluations(plan, evidence_packets, evaluations):
+def replay_incremental_evaluations(plan, evidence_packets, evaluations, *, complete_capture=False):
     """Replay stored signed evaluations after deterministically rebuilding requests."""
     try:
-        bound, packets = _plan(plan), _packets(_plan(plan), evidence_packets)
+        bound, packets = _plan(plan), _packets(_plan(plan), evidence_packets, complete_capture=complete_capture)
         _json(evaluations)
         if type(evaluations) is not list or len(evaluations) != len(packets): _fail("evaluations do not match workset")
         result = _run(

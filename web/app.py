@@ -35,7 +35,10 @@ from src.services.scanner_score_publication import score_publication_from_report
 from web.api_v1 import install_scanner_api
 from web.api_v1.errors import ApiError
 from web.api_v1.models import EvidenceScoringRecoveryReviewCreateRequest
-from web.api_v1.service import create_evidence_scoring_recovery_review
+from web.api_v1.service import (
+    create_evidence_scoring_recovery_review,
+    get_scan_diagnostic_status,
+)
 from web.exact_resume_controller import recover_interrupted_vault_exact_resume_actions
 from web.report_store import (
     domain_key,
@@ -49,7 +52,16 @@ from web.report_store import (
     vault_sv9_shadow_diagnostics_for_domain,
 )
 from web.report_view_model import build_report_view_model
-from web.scan_runner import approve_degraded_scan, cancel_scan, recover_interrupted_scans, scan_status, start_scan
+from web.scan_runner import (
+    approve_degraded_scan,
+    cancel_scan,
+    recover_interrupted_scans,
+    scan_diagnostic_dossier_from_status,
+    scan_diagnostic_from_report,
+    scan_diagnostic_from_status,
+    scan_status,
+    start_scan,
+)
 from web.scoring_store import backfill_reports, dashboard as scoring_dashboard
 from web.site_google_auth import (
     begin_google_login,
@@ -2174,11 +2186,36 @@ def scan_view(request: Request, scan_id: str):
 def scan_api(scan_id: str):
     status = scan_status(scan_id)
     if status is None:
-        if load_report(scan_id) is not None:
-            return JSONResponse({"state": "done", "id": scan_id, "report_id": scan_id})
+        report = load_report(scan_id)
+        if report is not None:
+            payload = {"state": "done", "id": scan_id, "report_id": scan_id}
+            diagnostic = scan_diagnostic_from_report(report)
+            if diagnostic is not None:
+                payload["diagnostic"] = diagnostic
+            return JSONResponse(payload)
         return JSONResponse({"state": "unknown", "id": scan_id}, status_code=404)
-    status.pop("raw", None)
-    return JSONResponse(status)
+    payload = dict(status)
+    payload.pop("raw", None)
+    payload.pop("error", None)
+    payload.pop("error_code", None)
+    payload.pop("execution_stage", None)
+    payload.pop("vault", None)
+    payload.pop("diagnostic_operation_ledger", None)
+    payload.pop("_diagnostic_detail_context", None)
+    diagnostic = scan_diagnostic_from_status(status)
+    if diagnostic is not None:
+        payload["diagnostic"] = diagnostic
+    else:
+        payload.pop("diagnostic", None)
+    return JSONResponse(payload)
+
+
+@app.get("/api/scan/{scan_id}/diagnostic-detail")
+def scan_diagnostic_detail_api(scan_id: str):
+    status = get_scan_diagnostic_status(scan_id)
+    if status is None:
+        return JSONResponse({"state": "unknown", "id": scan_id}, status_code=404, headers={"Cache-Control": "no-store", "Vary": "Cookie"})
+    return JSONResponse(scan_diagnostic_dossier_from_status(status), headers={"Cache-Control": "no-store", "Vary": "Cookie"})
 
 
 @app.post("/api/scan/{scan_id}/continue")

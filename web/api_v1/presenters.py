@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from src.services.scanner_analysis_contract import analysis_contract_from_report
 from src.services.scanner_report_assessment import assessment_projection_from_report
 from src.services.scanner_score_publication import score_publication_from_report
+from web.scan_runner import _safe_reason_codes, scan_diagnostic_from_report, scan_diagnostic_from_status, scan_diagnostic_dossier_from_status
 
 
 _STATE_MAP = {
@@ -32,6 +33,7 @@ def scan_links(scan_id: str) -> dict[str, str]:
         "cancel": f"{root}/cancel",
         "report": f"/report/{scan_id}",
         "report_markdown": f"/report/{scan_id}.md",
+        "diagnostic_detail": f"{root}/diagnostic-detail",
     }
 
 
@@ -47,7 +49,7 @@ def status_payload(status: dict[str, Any], *, language: str = "es") -> dict[str,
         progress = 1.0
     failure = None
     if public_state == "failed":
-        failure_code = str(status.get("error_code") or "scan_execution_failed")
+        failure_code = (_safe_reason_codes(status.get("error_code")) or ["scan_execution_failed"])[0]
         failure = {
             "code": failure_code,
             "message": _public_failure_message(failure_code),
@@ -71,11 +73,51 @@ def status_payload(status: dict[str, Any], *, language: str = "es") -> dict[str,
             dict(status.get("acquisition_gate")) if isinstance(status.get("acquisition_gate"), dict) else {}
         ),
         "failure": failure,
+        "diagnostic": scan_diagnostic_from_status(status),
         "result_available": public_state == "completed",
         "durable_status": True,
         "resumable_after_restart": False,
         "links": scan_links(scan_id),
     }
+
+
+def diagnostic_detail_payload(status: dict[str, Any]) -> dict[str, Any]:
+    dossier = scan_diagnostic_dossier_from_status(status)
+    scan_id = dossier.get("scan_id") if isinstance(dossier.get("scan_id"), str) else "unknown"
+    links = {"self": f"/api/v1/scans/{scan_id}/diagnostic-detail"}
+    report_id = status.get("report_id")
+    if isinstance(report_id, str) and report_id == scan_id:
+        links.update({
+            "result": f"/api/v1/scans/{scan_id}/result",
+            "evidence": f"/api/v1/scans/{scan_id}/evidence",
+            "report": f"/report/{scan_id}",
+            "report_markdown": f"/report/{scan_id}.md",
+        })
+    payload = {
+        "object": "scan_diagnostic_detail",
+        "api_version": "v1",
+        "scan_id": scan_id,
+        **dossier,
+        "links": links,
+    }
+    # FastAPI response-model serialization inserts optional defaults (for
+    # example ``reason: null``). Canonicalize before enforcing the wire cap so
+    # the returned object—not merely an internal approximation—fits 32 KiB.
+    from .models import ScanDiagnosticDetailResponse
+
+    payload = ScanDiagnosticDetailResponse.model_validate(payload).model_dump(
+        mode="json"
+    )
+    # Links and framework serialization are part of the protected response
+    # budget too, not merely the internal ledger budget.
+    events = payload.get("events") if isinstance(payload.get("events"), list) else []
+    while events and len(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")) > 32 * 1024:
+        events.pop(0)
+        payload["dropped_event_count"] = int(payload.get("dropped_event_count") or 0) + 1
+    if len(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")) > 32 * 1024:
+        payload["events"] = []
+        payload["truncated_event_count"] = int(payload.get("truncated_event_count") or 0) + 1
+    return payload
 
 
 def completed_status_from_report(report: dict[str, Any]) -> dict[str, Any]:
@@ -91,6 +133,7 @@ def completed_status_from_report(report: dict[str, Any]) -> dict[str, Any]:
         "acquisition": [],
         "acquisition_gate": report.get("acquisition_gate") or {},
         "error": None,
+        "diagnostic": scan_diagnostic_from_report(report),
     }
 
 
@@ -146,6 +189,7 @@ def result_payload(report: dict[str, Any]) -> dict[str, Any]:
         "api_version": "v1",
         "id": scan_id,
         "status": "completed",
+        "diagnostic": scan_diagnostic_from_report(report, assessment=assessment),
         "brand": _brand_payload(report),
         "score": {
             "value": raw_score if score_publishable else None,

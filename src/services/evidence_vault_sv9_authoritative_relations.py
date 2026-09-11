@@ -20,6 +20,7 @@ EVIDENCE_VAULT_SV9_AUTHORITATIVE_RELATION_PROJECTION_VERSION = "evidence-vault-s
 _VERSION = EVIDENCE_VAULT_SV9_AUTHORITATIVE_RELATION_PROJECTION_VERSION
 EVIDENCE_VAULT_SV9_EVALUATION_INPUT_VERSION = "evidence-vault-sv9-evaluation-input-v2"
 _EVALUATION_INPUT_VERSION = EVIDENCE_VAULT_SV9_EVALUATION_INPUT_VERSION
+_EVALUATION_INPUT_COMPLETION_VERSION = "evidence-vault-sv9-evaluation-input-v4"
 _WITNESS_VERSION = "evidence-vault-sv9-authoritative-relation-witness-v1"
 _POLARITIES = frozenset({"supports", "contradicts", "demonstrates_absence"})
 _ASSESSMENT_STATES = frozenset({"ok", "no", "sin_evidencia"})
@@ -43,6 +44,8 @@ _EVALUATION_INPUT_FIELDS = frozenset(
     "relation_projection_fingerprint projection_version non_authoritative_hints "
     "evaluation_input_fingerprint".split()
 )
+_PROCESSING_COMPLETION_FIELD = "processing_complete_evidence"
+_EVALUATION_INPUT_COMPLETION_FIELDS = _EVALUATION_INPUT_FIELDS | frozenset({_PROCESSING_COMPLETION_FIELD})
 _EVALUATION_HINT_SEED_FIELDS = frozenset(
     "hint_id tile_id component_key evidence_record_id provenance_fingerprint".split()
 )
@@ -74,6 +77,23 @@ def project_evidence_vault_sv9_evaluation_input(
         )
     except Exception:
         return _evaluation_review("source_unavailable")
+    if facts is None:
+        return _evaluation_review("source_unavailable")
+    return _project_evidence_vault_sv9_evaluation_input_from_facts(
+        facts,
+        source_scan_id=source_scan_id,
+        workspace_slug=workspace_slug,
+    )
+
+
+def _project_evidence_vault_sv9_evaluation_input_from_facts(
+    facts: Mapping[str, Any] | None,
+    *,
+    source_scan_id: str,
+    workspace_slug: str = "b3s",
+) -> dict[str, Any]:
+    """Build the canonical evaluation input from one locked facts snapshot."""
+
     if facts is None:
         return _evaluation_review("source_unavailable")
 
@@ -138,6 +158,15 @@ def project_evidence_vault_sv9_evaluation_input(
             source=source_identity,
             bindings=projection["current_identity_bindings"],
         )
+        non_authoritative_hints = _exclude_authoritative_evaluation_hints(
+            non_authoritative_hints,
+            relations=relations,
+            bindings=projection["current_identity_bindings"],
+        )
+        processing_complete = _validate_processing_complete(
+            facts.get(_PROCESSING_COMPLETION_FIELD, []),
+            bindings=projection["current_identity_bindings"],
+        )
         projection_version = _text(_VERSION)
         payload = {
             "source_identity": source_identity,
@@ -152,14 +181,17 @@ def project_evidence_vault_sv9_evaluation_input(
             "projection_version": projection_version,
             "non_authoritative_hints": non_authoritative_hints,
         }
+        if processing_complete:
+            payload[_PROCESSING_COMPLETION_FIELD] = processing_complete
+        input_version = _EVALUATION_INPUT_COMPLETION_VERSION if processing_complete else _EVALUATION_INPUT_VERSION
         result = {
             "status": "available",
             "reason_codes": [],
-            "schema_version": _EVALUATION_INPUT_VERSION,
+            "schema_version": input_version,
             **payload,
         }
         result["evaluation_input_fingerprint"] = canonical_fingerprint(
-            _EVALUATION_INPUT_VERSION, payload
+            input_version, payload
         )
         return result
     except Exception:
@@ -177,12 +209,16 @@ def validate_evidence_vault_sv9_evaluation_input(
     """
 
     try:
-        if type(value) is not dict or set(value) != _EVALUATION_INPUT_FIELDS:
+        allowed_fields = {_EVALUATION_INPUT_FIELDS, _EVALUATION_INPUT_COMPLETION_FIELDS}
+        if type(value) is not dict or set(value) not in allowed_fields:
             raise ValueError("evaluation input fields")
         if (
             value["status"] != "available"
             or value["reason_codes"] != []
-            or value["schema_version"] != _EVALUATION_INPUT_VERSION
+            or value["schema_version"] not in {
+                _EVALUATION_INPUT_VERSION,
+                _EVALUATION_INPUT_COMPLETION_VERSION,
+            }
             or value["projection_version"] != _VERSION
         ):
             raise ValueError("evaluation input envelope")
@@ -199,6 +235,14 @@ def validate_evidence_vault_sv9_evaluation_input(
             (row["evidence_ref"], row["evidence_fingerprint"]) for row in current["evidence"]
         ]:
             raise ValueError("evaluation input evidence bindings")
+        has_completion = _PROCESSING_COMPLETION_FIELD in value
+        processing_complete = _validate_processing_complete(
+            value.get(_PROCESSING_COMPLETION_FIELD, []), bindings=bindings
+        )
+        if has_completion and not processing_complete:
+            raise ValueError("processing completion evidence")
+        if has_completion != (value["schema_version"] == _EVALUATION_INPUT_COMPLETION_VERSION):
+            raise ValueError("evaluation input completion schema")
         non_authoritative_hints = _validate_evaluation_hints(
             value["non_authoritative_hints"], source=source, bindings=bindings
         )
@@ -249,13 +293,20 @@ def validate_evidence_vault_sv9_evaluation_input(
             "projection_version": _VERSION,
             "non_authoritative_hints": non_authoritative_hints,
         }
+        if has_completion:
+            payload[_PROCESSING_COMPLETION_FIELD] = processing_complete
+        input_version = (
+            _EVALUATION_INPUT_COMPLETION_VERSION
+            if has_completion
+            else _EVALUATION_INPUT_VERSION
+        )
         expected = {
             "status": "available",
             "reason_codes": [],
-            "schema_version": _EVALUATION_INPUT_VERSION,
+            "schema_version": input_version,
             **payload,
             "evaluation_input_fingerprint": canonical_fingerprint(
-                _EVALUATION_INPUT_VERSION, payload
+                input_version, payload
             ),
         }
         if value != expected:
@@ -373,6 +424,34 @@ def _validate_current_identity_bindings(value: Any) -> list[dict[str, Any]]:
     return rows
 
 
+def _validate_processing_complete(
+    value: Any, *, bindings: list[Mapping[str, Any]]
+) -> list[dict[str, str]]:
+    if type(value) is not list:
+        raise ValueError("processing completion evidence")
+    current = {
+        (row["evidence_ref"], row["evidence_fingerprint"])
+        for row in bindings
+    }
+    rows = []
+    seen = set()
+    for raw in value:
+        if type(raw) is not dict or set(raw) != {"evidence_ref", "evidence_fingerprint"}:
+            raise ValueError("processing completion evidence")
+        row = {
+            "evidence_ref": _text(raw["evidence_ref"]),
+            "evidence_fingerprint": _sha(raw["evidence_fingerprint"]),
+        }
+        pair = (row["evidence_ref"], row["evidence_fingerprint"])
+        if pair not in current or pair in seen:
+            raise ValueError("processing completion evidence")
+        seen.add(pair)
+        rows.append(row)
+    if rows != sorted(rows, key=lambda row: (row["evidence_ref"], row["evidence_fingerprint"])):
+        raise ValueError("processing completion evidence")
+    return rows
+
+
 def _build_evaluation_hints(
     value: Any, *, source: Mapping[str, Any], bindings: list[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -414,6 +493,33 @@ def _build_evaluation_hints(
         seen_hint_ids.add(hint_id); seen_provenance.add(provenance_fingerprint)
         seen_pairs.add((tile_id, evidence_record_id)); seen_fingerprints.add(hint_fingerprint)
     return sorted(rows, key=lambda row: (registry[row["tile_id"]], row["evidence_record_id"], row["provenance_fingerprint"]))
+
+
+def _exclude_authoritative_evaluation_hints(
+    hints: list[dict[str, Any]],
+    *,
+    relations: list[Mapping[str, Any]],
+    bindings: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Remove only hints redundant with successfully projected current authority."""
+
+    authoritative_pairs = {
+        (relation["tile_id"], relation["evidence_ref"], relation["evidence_fingerprint"])
+        for relation in relations
+    }
+    binding_pairs = {
+        row["evidence_record_id"]: (row["evidence_ref"], row["evidence_fingerprint"])
+        for row in bindings
+    }
+    return [
+        hint
+        for hint in hints
+        if (
+            hint["tile_id"],
+            *binding_pairs[hint["evidence_record_id"]],
+        )
+        not in authoritative_pairs
+    ]
 
 
 def _validate_evaluation_hints(

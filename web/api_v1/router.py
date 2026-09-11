@@ -51,13 +51,14 @@ from .models import (
     EvidenceScoringRecoveryReviewCreateResponse,
     EvidenceScoringRecoveryReviewJournalResponse,
     ScanCreateRequest,
+    ScanDiagnosticDetailResponse,
     ScanEvidenceResponse,
     ScanResultResponse,
     ScanResumeActionResponse,
     ScanStatusResponse,
     VaultSv9ShadowDiagnosticsResponse,
 )
-from .presenters import evidence_payload, report_etag, result_payload, status_payload
+from .presenters import diagnostic_detail_payload, evidence_payload, report_etag, result_payload, status_payload
 from .service import (
     create_evidence_claim_reconciliation,
     create_evidence_claim_tile_review,
@@ -72,6 +73,7 @@ from .service import (
     get_evidence_memory_adjudications,
     get_evidence_scoring_recovery_reviews,
     get_scan,
+    get_scan_diagnostic_status,
     get_vault_exact_resume_action,
     register_evidence_claim_tile_review_packet,
     create_vault_exact_resume_action,
@@ -201,6 +203,23 @@ def read_scan(scan_id: str, response: Response, _principal: ReadPrincipal) -> di
     if public["status"] in {"running", "blocked"}:
         response.headers["Retry-After"] = "5"
     return public
+
+
+@router.get(
+    "/scans/{scan_id}/diagnostic-detail",
+    response_model=ScanDiagnosticDetailResponse,
+    operation_id="getScanDiagnosticDetail",
+    responses=_ERRORS,
+)
+def read_scan_diagnostic_detail(
+    scan_id: str, response: Response, _principal: ReadPrincipal
+) -> dict[str, Any]:
+    status = get_scan_diagnostic_status(scan_id)
+    if status is None:
+        raise ApiError(404, "scan_not_found", f"Scan {scan_id} was not found.")
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Vary"] = "Authorization"
+    return diagnostic_detail_payload(status)
 
 
 @router.post(

@@ -18,6 +18,7 @@ FLOC_TOOLS = {
     "b3s_get_brand_analysis",
     "b3s_read_report_markdown",
     "b3s_get_scan_status",
+    "b3s_get_scan_diagnostic_detail",
     "b3s_prepare_scan",
     "b3s_continue_degraded_scan",
     "b3s_cancel_scan",

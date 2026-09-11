@@ -1,7 +1,9 @@
 """Repository-backed, pending-only SV9 authority evaluation."""
 
 from __future__ import annotations
-from typing import Any, Mapping, Protocol, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 from uuid import UUID
 from src.history.report_parser import normalize_domain
 from src.services.evidence_vault_sv9_authoritative_relations import (
@@ -20,6 +22,9 @@ from src.services import evidence_vault_sv9_evaluation_checkpoint as checkpoint
 from src.services import evidence_vault_sv9_workset_partition as partitioning
 from src.services.evidence_vault_incremental_refresh import validate_vault_scan_plan
 from src.sv9 import incremental_evaluation as evaluation
+from src.services.evidence_vault_sv9_shared_process import (
+    is_core_shared_series_contract,
+)
 from src.sv9 import incremental_planner as planner
 from src.sv9 import judgment_memory as memory
 
@@ -33,9 +38,55 @@ class EvidenceVaultSv9AuthorityEvaluationRepository(Protocol):
     def append_evidence_vault_sv9_judgment_candidate(self, source_scan_id: str, candidate: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], bool]: ...
     def get_evidence_vault_sv9_evaluation_checkpoint_component_evaluation(self, source_scan_id: str, *, canonical_plan_fingerprint: str, canonical_request_fingerprint: str, **kwargs: Any) -> dict[str, Any] | None: ...
     def get_evidence_vault_sv9_evaluation_checkpoint_for_request(self, source_scan_id: str, *, canonical_plan_fingerprint: str, canonical_request_fingerprint: str, **kwargs: Any) -> dict[str, Any] | None: ...
+    def get_evidence_vault_sv9_evaluation_checkpoint_shared_process(self, source_scan_id: str, *, canonical_plan_fingerprint: str, canonical_request_fingerprint: str, **kwargs: Any) -> dict[str, Any] | None: ...
     def append_evidence_vault_sv9_evaluation_checkpoint(self, source_scan_id: str, checkpoint: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], bool]: ...
 class EvidenceVaultSv9AuthorityEvaluationError(ValueError): pass
 class EvidenceVaultSv9AuthoritySourceIdentityError(EvidenceVaultSv9AuthorityEvaluationError): pass
+AuthorityEvaluationDiagnosticObserver = Callable[[dict[str, Any], BaseException | None], None]
+_DIAGNOSTIC_OBSERVER: ContextVar[AuthorityEvaluationDiagnosticObserver | None] = ContextVar(
+    "evidence_vault_sv9_authority_evaluation_diagnostic_observer", default=None
+)
+
+
+@contextmanager
+def observe_evidence_vault_sv9_authority_evaluation_diagnostics(
+    observer: AuthorityEvaluationDiagnosticObserver,
+) -> Iterator[None]:
+    """Scope an optional inert diagnostic observer to one evaluation."""
+    if not callable(observer):
+        raise TypeError("diagnostic observer must be callable")
+    token = _DIAGNOSTIC_OBSERVER.set(observer)
+    try:
+        yield
+    finally:
+        _DIAGNOSTIC_OBSERVER.reset(token)
+
+
+def emit_evidence_vault_sv9_component_evaluation_diagnostic(
+    *,
+    component: Any,
+    suboperation: Any,
+    reason_codes: Sequence[str] = ("provider_failure",),
+    exception: BaseException | None = None,
+) -> None:
+    """Report a swallowed component failure without changing its outcome."""
+    observer = _DIAGNOSTIC_OBSERVER.get()
+    if observer is None:
+        return
+    try:
+        observer(
+            {
+                "boundary": "sv9_component_evaluation",
+                "component": component if isinstance(component, str) else "unknown",
+                "suboperation": suboperation if isinstance(suboperation, str) else "unknown",
+                "reason_codes": list(reason_codes),
+            },
+            exception,
+        )
+    except Exception:
+        pass
+
+
 def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9AuthorityEvaluationRepository, flow: evaluation.Sv9StrictComponentFlowPort, domain_or_url: str, source_scan_id: str, current_series_contract: Mapping[str, Any], workspace_slug: str = "b3s", trusted_irrelevant_evidence: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
     """Evaluate exact trusted deltas without adopting, reopening, or superseding authority."""
     try:
@@ -97,9 +148,9 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
                 reasons=["invalid_evaluation_input"],
             )
         signed = delta.build_evidence_vault_sv9_judgment_delta(current_evidence=current, prior_judgments=prior, prior_component_sentinels=sentinels, authoritative_relations=relations, current_series_contract=dict(current_series_contract))
-    except EvidenceVaultSv9AuthoritySourceIdentityError: return _outcome("no_new_score", reasons=["invalid_source_identity"])
-    except EvidenceVaultSv9AuthorityEvaluationError: return _outcome("no_new_score", reasons=["invalid_input"])
-    except Exception: return _outcome("no_new_score", reasons=["repository_failure"])
+    except EvidenceVaultSv9AuthoritySourceIdentityError as exc: return _outcome("no_new_score", reasons=["invalid_source_identity"], diagnostic_exception=exc)
+    except EvidenceVaultSv9AuthorityEvaluationError as exc: return _outcome("no_new_score", reasons=["invalid_input"], diagnostic_exception=exc)
+    except Exception as exc: return _outcome("no_new_score", reasons=["repository_failure"], diagnostic_exception=exc)
     try:
         initial = authority is None or (
             authority["accepted_candidate"]["source_scan_id"] == source_scan_id
@@ -108,11 +159,40 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
         if initial and not evaluation_input["non_authoritative_hints"] and _first_baseline(repository, evaluation_input, workspace_slug):
             if not overlay and not signed["plan"]["review_set"] and not evaluation_input["authority_coverage_loss"] and not evaluation_input["reopen_tile_ids"]:
                 return _evaluate_first_baseline(repository, flow, source_scan_id, workspace_slug, evaluation_input, context, records, current_series_contract, authority, authority_ids)
-    except EvidenceVaultSv9AuthoritativeRelationStaleWitnessError: return _outcome("review_required", authority=authority_ids, reasons=["stale_authoritative_relation_witness"])
-    except EvidenceVaultSv9AuthoritativeRelationWitnessError: return _outcome("review_required", authority=authority_ids, reasons=["invalid_authoritative_relation_witness"])
-    except Exception:
-        return _outcome("no_new_score", authority=authority_ids, reasons=["invalid_input"])
-    plan = signed["plan"]; review, ignored, unmapped = _review(signed, bool(authority), overlay, trusted)
+    except EvidenceVaultSv9AuthoritativeRelationStaleWitnessError as exc: return _outcome("review_required", authority=authority_ids, reasons=["stale_authoritative_relation_witness"], diagnostic_exception=exc)
+    except EvidenceVaultSv9AuthoritativeRelationWitnessError as exc: return _outcome("review_required", authority=authority_ids, reasons=["invalid_authoritative_relation_witness"], diagnostic_exception=exc)
+    except Exception as exc:
+        return _outcome("no_new_score", authority=authority_ids, reasons=["invalid_input"], diagnostic_exception=exc)
+    plan = signed["plan"]; review, ignored, unmapped = _review(
+        signed,
+        bool(authority),
+        overlay,
+        trusted,
+    )
+    identity_mismatch_tiles = _accepted_support_identity_mismatches(
+        repository,
+        authority,
+        prior,
+        evaluation_input["current_identity_bindings"],
+        source_scan_id=source_scan_id,
+        workspace_slug=workspace_slug,
+    )
+    if identity_mismatch_tiles:
+        # The signed delta has no canonical-identity fields by design.  Keep
+        # the existing ref/hash coverage contract intact and fail closed before
+        # any provider call when historical accepted support cannot be matched
+        # to the exact current canonical identity.
+        if "coverage_loss" not in review:
+            review.append("coverage_loss")
+        return _outcome(
+            "review_required",
+            plan,
+            authority_ids,
+            review,
+            ignored,
+            unmapped,
+            signed_delta=signed,
+        )
     try:
         trusted_rows = [row for row in evaluation_input["current_identity_bindings"] if (row["evidence_ref"], row["evidence_fingerprint"]) in trusted]
         partition = partitioning.validate_evidence_vault_sv9_workset_partition(
@@ -123,63 +203,112 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
             )
         )
         review = _partition_reasons(partition, review)
-        resolved = _resolved(partition, records)
-    except Exception: return _outcome("no_new_score", plan, authority_ids, ["invalid_input"], ignored, unmapped, signed_delta=signed)
+        unmapped = len(partition["pending_evidence"])
+        complete_capture = _first_core_shared_evaluation(authority, plan)
+        resolved = _resolved(partition, records, complete_capture=complete_capture)
+    except Exception as exc: return _outcome("no_new_score", plan, authority_ids, ["invalid_input"], ignored, unmapped, signed_delta=signed, diagnostic_exception=exc)
     complete = not review and _complete_partition(partition, plan)
     if not partition["healthy_workset"]["tiles"]: return _outcome("review_required" if review else "no_new_score", plan, authority_ids, review or ["exact_reuse"], ignored, unmapped, signed_delta=signed if review else None, partition=partition)
+    if _bootstrap_partial_workset_without_authority(partition, authority):
+        return _outcome("review_required", plan, authority_ids, review or ["incomplete_candidate"], ignored, unmapped, signed_delta=signed, partition=partition)
     if complete:
-        try: packets, bindings = _packets(plan, records, context)
-        except EvidenceVaultSv9AuthorityEvaluationError: return _outcome("no_new_score", plan, authority_ids, ["invalid_input"], ignored, unmapped, partition=partition)
         try:
-            witness = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id=source_scan_id, projection={"status": "available", "reason_codes": [], "authoritative_relations": relations, "operational_witness": evaluation_input["operational_witness"], "projection_fingerprint": evaluation_input["relation_projection_fingerprint"], **{key: evaluation_input[key] for key in ("current_identity_bindings", "authority_continuity", "authority_coverage_loss", "reopen_tile_ids")}})
+            packets, bindings = _packets(plan, records, context, complete_capture=complete_capture)
+        except EvidenceVaultSv9AuthorityEvaluationError as exc: return _outcome("no_new_score", plan, authority_ids, ["invalid_input"], ignored, unmapped, partition=partition, diagnostic_exception=exc)
+        try:
+            witness = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id=source_scan_id, **context, projection={"status": "available", "reason_codes": [], "authoritative_relations": relations, "operational_witness": evaluation_input["operational_witness"], "projection_fingerprint": evaluation_input["relation_projection_fingerprint"], **{key: evaluation_input[key] for key in ("current_identity_bindings", "authority_continuity", "authority_coverage_loss", "reopen_tile_ids")}})
             if authority and not trusted and _accepted_input_replays(repository, authority, evaluation_input, plan, witness, records, context, workspace_slug):
                 return _outcome("no_new_score", plan, authority_ids, ["exact_reuse"], ignored, unmapped, partition=partition)
             existing = repository.get_evidence_vault_sv9_judgment_candidate(source_scan_id, canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], workspace_slug=workspace_slug)
-        except EvidenceVaultSv9AuthoritativeRelationWitnessError: return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped, partition=partition)
-        except Exception: return _outcome("no_new_score", plan, authority_ids, ["repository_failure"], ignored, unmapped, partition=partition)
+        except EvidenceVaultSv9AuthoritativeRelationWitnessError as exc: return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped, partition=partition, diagnostic_exception=exc)
+        except Exception as exc: return _outcome("no_new_score", plan, authority_ids, ["repository_failure"], ignored, unmapped, partition=partition, diagnostic_exception=exc)
         if existing is not None:
             try:
                 if existing.get("schema_version") == "evidence-vault-sv9-judgment-candidate-v2": validate_evidence_vault_sv9_authoritative_relation_witness(existing["authoritative_relation_witness"])
-            except (AttributeError, KeyError, TypeError, ValueError): return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped, partition=partition)
-            if not _replays(existing, existing, existing, packets): return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, partition=partition)
+            except (AttributeError, KeyError, TypeError, ValueError) as exc: return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped, partition=partition, diagnostic_exception=exc)
+            if not _replays(existing, existing, existing, packets, complete_capture=complete_capture): return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, partition=partition)
             if existing["schema_version"].endswith("v1"): return _outcome("review_required", plan, authority_ids, ["unwitnessed_legacy_candidate"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id, partition=partition)
             if existing["authoritative_relation_witness"] != witness: return _outcome("review_required", plan, authority_ids, ["stale_authoritative_relation_witness"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id, partition=partition)
             if authority_ids and existing.get("id") == authority_ids["accepted_candidate_id"]: return _outcome("no_new_score", plan, authority_ids, ["exact_reuse"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id, partition=partition)
             return _outcome("candidate_available", plan, authority_ids, ["candidate_already_present"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id, partition=partition)
-    lookup, persist = _checkpoint_callbacks(repository, source_scan_id, workspace_slug, evaluation_input, authority_snapshot, plan, partition["review_partition"]["tile_ids"], partition["pending_evidence"])
-    try: result = evaluation.execute_partial_incremental_evaluation(partition, resolved, flow, lookup_evaluation=lookup, persist_evaluation=persist)
-    except Exception: return _outcome("no_new_score", plan, authority_ids, ["repository_failure"], ignored, unmapped, signed_delta=signed, partition=partition)
+    shared_series = is_core_shared_series_contract(plan["current_series_contract"])
+    lookup, persist = _checkpoint_callbacks(
+        repository,
+        source_scan_id,
+        workspace_slug,
+        evaluation_input,
+        authority_snapshot,
+        plan,
+        partition["review_partition"]["tile_ids"],
+        partition["pending_evidence"],
+        flow=flow,
+    )
+    partial_options = {"complete_capture": True} if complete_capture else {}
+    try: result = evaluation.execute_partial_incremental_evaluation(partition, resolved, flow, lookup_evaluation=lookup, persist_evaluation=persist, **partial_options)
+    except Exception as exc: return _outcome("no_new_score", plan, authority_ids, ["repository_failure"], ignored, unmapped, signed_delta=signed, partition=partition, diagnostic_exception=exc)
     if result["status"] != "partial": return _outcome("review_required" if review else "no_new_score", plan, authority_ids, review + [str(result.get("reason_code") or "evaluation_incomplete")], ignored, unmapped, result, signed_delta=signed if review else None, partition=partition)
     if not complete: return _outcome("review_required", plan, authority_ids, review or ["incomplete_candidate"], ignored, unmapped, result, signed_delta=signed, partition=partition)
-    try: replay = evaluation.replay_incremental_evaluations(plan, packets, [row["evaluation"] for row in result["captured_calls"]])
-    except Exception: return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, result, partition=partition)
+    replay_options = {"complete_capture": True} if complete_capture else {}
+    try: replay = evaluation.replay_incremental_evaluations(plan, packets, [row["evaluation"] for row in result["captured_calls"]], **replay_options)
+    except Exception as exc: return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, result, partition=partition, diagnostic_exception=exc)
     if replay["status"] != "available" or not _complete(replay, plan): return _outcome("no_new_score", plan, authority_ids, ["incomplete_candidate"], ignored, unmapped, result, partition=partition)
+    shared_analysis_payload = None
+    if shared_series:
+        try:
+            build_shared_analysis = getattr(flow, "build_shared_analysis_payload")
+            if not callable(build_shared_analysis):
+                raise TypeError("shared analysis finalizer is unavailable")
+            shared_analysis_payload = build_shared_analysis(replay["assessment"])
+            if type(shared_analysis_payload) is not dict:
+                raise TypeError("shared analysis payload is invalid")
+        except Exception as exc:
+            return _outcome("no_new_score", plan, authority_ids, ["shared_analysis_failure"], ignored, unmapped, result, partition=partition, diagnostic_exception=exc)
     candidate = _candidate(plan, replay, bindings, witness)
-    if not _replays(candidate, candidate, candidate, packets): return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, result, partition=partition)
+    if not _replays(candidate, candidate, candidate, packets, complete_capture=complete_capture): return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, result, partition=partition)
     try:
-        stored, inserted = repository.append_evidence_vault_sv9_judgment_candidate(source_scan_id, candidate, workspace_slug=workspace_slug)
+        stored, inserted = repository.append_evidence_vault_sv9_judgment_candidate(
+            source_scan_id,
+            candidate,
+            workspace_slug=workspace_slug,
+            shared_analysis_payload=shared_analysis_payload,
+        )
         reloaded = repository.get_evidence_vault_sv9_judgment_candidate(source_scan_id, canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], workspace_slug=workspace_slug)
-    except EvidenceVaultSv9AuthoritativeRelationStaleWitnessError: return _outcome("review_required", plan, authority_ids, ["stale_authoritative_relation_witness"], ignored, unmapped, result, partition=partition)
-    except EvidenceVaultSv9AuthoritativeRelationWitnessError: return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped, result, partition=partition)
-    except Exception: return _outcome("no_new_score", plan, authority_ids, ["repository_failure"], ignored, unmapped, result, partition=partition)
+    except EvidenceVaultSv9AuthoritativeRelationStaleWitnessError as exc: return _outcome("review_required", plan, authority_ids, ["stale_authoritative_relation_witness"], ignored, unmapped, result, partition=partition, diagnostic_exception=exc)
+    except EvidenceVaultSv9AuthoritativeRelationWitnessError as exc: return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped, result, partition=partition, diagnostic_exception=exc)
+    except Exception as exc: return _outcome("no_new_score", plan, authority_ids, ["repository_failure"], ignored, unmapped, result, partition=partition, diagnostic_exception=exc)
     try:
         for value in (stored, reloaded):
             if value.get("schema_version") == "evidence-vault-sv9-judgment-candidate-v2": validate_evidence_vault_sv9_authoritative_relation_witness(value["authoritative_relation_witness"])
-    except (AttributeError, KeyError, TypeError, ValueError): return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped, result, partition=partition)
-    if not _replays(stored, reloaded, stored, packets): return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, result, partition=partition)
+    except (AttributeError, KeyError, TypeError, ValueError) as exc: return _outcome("review_required", plan, authority_ids, ["invalid_authoritative_relation_witness"], ignored, unmapped, result, partition=partition, diagnostic_exception=exc)
+    if not _replays(stored, reloaded, stored, packets, complete_capture=complete_capture): return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, result, partition=partition)
     if stored["schema_version"].endswith("v1"): return _outcome("review_required", plan, authority_ids, ["unwitnessed_legacy_candidate"], ignored, unmapped, result, stored, source_scan_id=source_scan_id, partition=partition)
     if stored["authoritative_relation_witness"] != witness: return _outcome("review_required", plan, authority_ids, ["stale_authoritative_relation_witness"], ignored, unmapped, result, stored, source_scan_id=source_scan_id, partition=partition)
-    if not _replays(stored, reloaded, candidate, packets): return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, result, partition=partition)
+    if not _replays(stored, reloaded, candidate, packets, complete_capture=complete_capture): return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, result, partition=partition)
     return _outcome("candidate_available", plan, authority_ids, [] if inserted else ["candidate_already_present"], ignored, unmapped, result, reloaded, source_scan_id=source_scan_id, partition=partition)
 
 
-def _checkpoint_callbacks(repository, source_scan_id, workspace_slug, evaluation_input, authority_snapshot, plan, review_tile_ids=(), pending_evidence=()):
+def _checkpoint_callbacks(repository, source_scan_id, workspace_slug, evaluation_input, authority_snapshot, plan, review_tile_ids=(), pending_evidence=(), *, flow):
+    shared_series = is_core_shared_series_contract(plan["current_series_contract"])
     def lookup(request):
-        return repository.get_evidence_vault_sv9_evaluation_checkpoint_component_evaluation(source_scan_id, canonical_plan_fingerprint=request["plan_fingerprint"], canonical_request_fingerprint=request["canonical_request_fingerprint"], workspace_slug=workspace_slug)
-    def persist(_request, accepted, judgments, sentinel):
+        accepted = repository.get_evidence_vault_sv9_evaluation_checkpoint_component_evaluation(source_scan_id, canonical_plan_fingerprint=request["plan_fingerprint"], canonical_request_fingerprint=request["canonical_request_fingerprint"], workspace_slug=workspace_slug)
+        if accepted is not None and shared_series:
+            load = getattr(repository, "get_evidence_vault_sv9_evaluation_checkpoint_shared_process", None)
+            restore = getattr(flow, "restore_shared_checkpoint_process", None)
+            if not callable(load) or not callable(restore): raise EvidenceVaultSv9AuthorityEvaluationError("shared checkpoint recovery is unavailable")
+            process = load(source_scan_id, canonical_plan_fingerprint=request["plan_fingerprint"], canonical_request_fingerprint=request["canonical_request_fingerprint"], workspace_slug=workspace_slug)
+            if not isinstance(process, Mapping): raise EvidenceVaultSv9AuthorityEvaluationError("shared checkpoint process is unavailable")
+            restore(request, accepted, process)
+        return accepted
+    def persist(request, accepted, judgments, sentinel):
         tiles = [row["tile_id"] for row in judgments] if sentinel is None else list(planner._COMPONENT_TILES[sentinel["component_key"]])
         value = checkpoint.build_evidence_vault_sv9_evaluation_checkpoint(evaluation_input=evaluation_input, prior_authority_snapshot=authority_snapshot, current_series_fingerprint=plan["current_series_fingerprint"], canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], candidate_series_fingerprint=plan["candidate_series_fingerprint"], healthy_tile_ids=tiles, review_tile_ids=list(review_tile_ids), pending_evidence=[{**row, "reason": "unmapped_evidence"} for row in pending_evidence], non_authoritative_hints=evaluation_input["non_authoritative_hints"], component_evaluations=[accepted], evaluated_tile_judgments=judgments, evaluated_component_sentinels=[] if sentinel is None else [sentinel])
-        repository.append_evidence_vault_sv9_evaluation_checkpoint(source_scan_id, value, workspace_slug=workspace_slug)
+        shared_process = None
+        if shared_series:
+            get_process = getattr(flow, "get_shared_checkpoint_process", None)
+            if not callable(get_process): raise EvidenceVaultSv9AuthorityEvaluationError("shared checkpoint persistence is unavailable")
+            shared_process = get_process(request)
+            if not isinstance(shared_process, Mapping): raise EvidenceVaultSv9AuthorityEvaluationError("shared checkpoint process is invalid")
+        repository.append_evidence_vault_sv9_evaluation_checkpoint(source_scan_id, value, workspace_slug=workspace_slug, shared_process_payload=shared_process)
     return lookup, persist
 
 
@@ -245,21 +374,42 @@ def _evaluate_first_baseline(repository, flow, scan, workspace, current, context
     if authority is not None:
         accepted = authority["accepted_candidate"]
         if not current["non_authoritative_hints"] and accepted["plan"] == plan and accepted["evidence_bindings"] == bindings and accepted.get("authoritative_relation_witness") == witness and _replays(accepted, accepted, accepted, packets):
-            return _outcome("no_new_score", plan, authority_ids, ["exact_reuse"])
+            return _outcome(
+                "no_new_score",
+                plan,
+                authority_ids,
+                ["exact_reuse"],
+                result={
+                    "calls_avoided": len(planner._COMPONENT_TILES),
+                    "reused_tile_count": len(planner._REGISTRY),
+                },
+            )
         return _outcome("no_new_score", plan, authority_ids, ["invalid_input"])
     existing = repository.get_evidence_vault_sv9_judgment_candidate(scan, canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], workspace_slug=workspace)
     if existing is not None:
         if existing["plan"] != plan or existing["evidence_bindings"] != bindings or existing.get("authoritative_relation_witness") != witness or not _replays(existing, existing, existing, packets):
             return _outcome("no_new_score", plan, reasons=["invalid_input"])
         return _outcome("candidate_available", plan, reasons=["candidate_already_present"], candidate=existing, source_scan_id=scan)
-    lookup, persist = _checkpoint_callbacks(repository, scan, workspace, current, {"state": "bootstrap_absent"}, plan)
+    lookup, persist = _checkpoint_callbacks(repository, scan, workspace, current, {"state": "bootstrap_absent"}, plan, flow=flow)
     result = evaluation.execute_incremental_evaluation(plan, packets, flow, lookup_evaluation=lookup, persist_evaluation=persist)
     if result["status"] != "available" or not _complete(result, plan):
         return _outcome("no_new_score", plan, reasons=[result.get("reason_code") or "incomplete_candidate"], result=result)
-    candidate = _candidate(plan, evaluation.replay_incremental_evaluations(plan, packets, [row["evaluation"] for row in result["captured_calls"]]), bindings, witness)
+    replay = evaluation.replay_incremental_evaluations(plan, packets, [row["evaluation"] for row in result["captured_calls"]])
+    shared_analysis_payload = None
+    if is_core_shared_series_contract(plan["current_series_contract"]):
+        try:
+            build_shared_analysis = getattr(flow, "build_shared_analysis_payload")
+            if not callable(build_shared_analysis):
+                raise TypeError("shared analysis finalizer is unavailable")
+            shared_analysis_payload = build_shared_analysis(replay["assessment"])
+            if type(shared_analysis_payload) is not dict:
+                raise TypeError("shared analysis payload is invalid")
+        except Exception:
+            return _outcome("no_new_score", plan, reasons=["shared_analysis_failure"], result=result)
+    candidate = _candidate(plan, replay, bindings, witness)
     if not _replays(candidate, candidate, candidate, packets):
         return _outcome("no_new_score", plan, reasons=["invalid_replay"], result=result)
-    stored, inserted = repository.append_evidence_vault_sv9_judgment_candidate(scan, candidate, workspace_slug=workspace)
+    stored, inserted = repository.append_evidence_vault_sv9_judgment_candidate(scan, candidate, workspace_slug=workspace, shared_analysis_payload=shared_analysis_payload)
     reloaded = repository.get_evidence_vault_sv9_judgment_candidate(scan, canonical_plan_fingerprint=plan["canonical_plan_fingerprint"], workspace_slug=workspace)
     if not _replays(stored, reloaded, candidate, packets):
         return _outcome("no_new_score", plan, reasons=["invalid_replay"], result=result)
@@ -284,6 +434,74 @@ def _authority(value: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]], 
         snapshot = {"state": "accepted_authority", **ids, "candidate_complete_record_fingerprint": candidate["complete_record_fingerprint"], "canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"], "current_series_fingerprint": candidate["current_series_fingerprint"]}
         return tiles, sentinels, ids, value["reopen_review_overlay"] is not None, snapshot
     except (AttributeError, KeyError, TypeError, ValueError, memory.JudgmentMemoryContractError, planner.IncrementalPlannerError) as exc: raise EvidenceVaultSv9AuthorityEvaluationError("authority is invalid") from exc
+
+
+def _accepted_support_identity_mismatches(
+    repository: EvidenceVaultSv9AuthorityEvaluationRepository,
+    authority: Mapping[str, Any] | None,
+    prior: Sequence[Mapping[str, Any]],
+    current_bindings: Sequence[Mapping[str, Any]],
+    *,
+    source_scan_id: str,
+    workspace_slug: str,
+) -> set[str]:
+    """Compare accepted support against its immutable historical capture.
+
+    Judgment support stores only the evidence ref/hash pair.  The accepted
+    candidate's source scan is the existing historical capture boundary from
+    which canonical evidence/source identities can be recomputed; relation IDs
+    are intentionally not involved in this continuity check.
+    """
+    if authority is None:
+        return set()
+    support = {
+        (row["tile_id"], item["evidence_ref"], item["evidence_fingerprint"])
+        for row in prior
+        for item in row["supporting_evidence"]
+    }
+    if not support:
+        return set()
+    try:
+        candidate = authority["accepted_candidate"]
+        historical_scan_id = _text(candidate["source_scan_id"])
+        loader = getattr(repository, "load_evidence_vault_sv9_authoritative_relation_facts")
+        facts = loader(historical_scan_id, workspace_slug=workspace_slug)
+        historical_rows = facts["evidence"]
+        if type(historical_rows) is not list:
+            raise ValueError("historical evidence is invalid")
+        historical_by_pair: dict[tuple[str, str], list[tuple[Any, Any]]] = {}
+        for row in historical_rows:
+            pair = (row["evidence_ref"], row["evidence_fingerprint"])
+            historical_by_pair.setdefault(pair, []).append(
+                (row.get("evidence_id"), row.get("source_identity_id"))
+            )
+        current_by_pair: dict[tuple[str, str], list[tuple[Any, Any]]] = {}
+        for row in current_bindings:
+            pair = (row["evidence_ref"], row["evidence_fingerprint"])
+            current_by_pair.setdefault(pair, []).append(
+                (row.get("evidence_id"), row.get("source_identity_id"))
+            )
+        mismatches = set()
+        for tile_id, ref, fingerprint in support:
+            pair = ref, fingerprint
+            historical = historical_by_pair.get(pair, [])
+            current = current_by_pair.get(pair, [])
+            if len(historical) != 1:
+                mismatches.add(tile_id)
+                continue
+            if not current:
+                # The accepted support disappeared from the current capture.
+                # The signed delta and partition own that coverage-loss path.
+                continue
+            if len(current) != 1 or historical[0] != current[0]:
+                mismatches.add(tile_id)
+        return mismatches
+    except (AttributeError, KeyError, TypeError, ValueError):
+        # Existing authority with unverifiable historical support must never
+        # become reusable merely because its ref/hash pair survived.
+        return {tile_id for tile_id, _ref, _fingerprint in support}
+
+
 def _trusted(value: Sequence[Mapping[str, Any]], current: Mapping[str, Any]) -> set[tuple[str, str]]:
     if type(value) not in {list, tuple}: raise EvidenceVaultSv9AuthorityEvaluationError("trusted irrelevant evidence is invalid")
     pairs = {(row["evidence_ref"], row["evidence_fingerprint"]) for row in delta.build_evidence_identity_set(list(value))["evidence"]}
@@ -331,42 +549,96 @@ def _relations(value: Any, context: Mapping[str, Any], trusted: set[tuple[str, s
         return rows
     except (AttributeError, TypeError, ValueError, delta.EvidenceVaultSV9JudgmentDeltaError) as exc: raise EvidenceVaultSv9AuthorityEvaluationError("relations are invalid") from exc
 def _review(signed: Mapping[str, Any], has_authority: bool, overlay: bool, trusted: set[tuple[str, str]]) -> tuple[list[str], int, int]:
-    plan = signed["plan"]; unmapped = [row for row in signed["unmapped_evidence"] if (row["evidence_ref"], row["evidence_fingerprint"]) not in trusted]; codes = ["review_set"] if plan["review_set"] else []
+    plan = signed["plan"]
+    raw_unmapped = signed["unmapped_evidence"]
+    trusted_count = sum(
+        (row["evidence_ref"], row["evidence_fingerprint"]) in trusted
+        for row in raw_unmapped
+    )
+    unmapped = [
+        row
+        for row in raw_unmapped
+        if (row["evidence_ref"], row["evidence_fingerprint"])
+        not in trusted
+    ]
+    codes = ["review_set"] if plan["review_set"] else []
     if has_authority and signed["coverage_loss"]: codes.append("coverage_loss")
     if unmapped: codes.append("unmapped_evidence")
     if has_authority and any(row["action"] == "reopen_contract_change" for row in plan["items"]): codes.append("series_rollover")
     if overlay: codes.append("active_review_overlay")
-    return codes, len(signed["unmapped_evidence"]) - len(unmapped), len(unmapped)
+    return codes, trusted_count, len(unmapped)
 def _partition_reasons(partition: Mapping[str, Any], legacy: list[str]) -> list[str]:
-    review = partition["review_partition"]; codes = list(legacy)
+    review = partition["review_partition"]
+    unmapped_index = next((index for index, code in enumerate(legacy) if code == "unmapped_evidence"), len(legacy))
+    codes = [code for code in legacy if code != "unmapped_evidence"]
     if any(review[key] for key in ("operational_authority_coverage_loss_tile_ids", "judgment_delta_coverage_loss_tile_ids", "evaluation_input_reopened_tile_ids")): codes.append("coverage_loss")
     if review["planner_review_tile_ids"]: codes.append("review_set")
     if review["coherencia_blocked_tile_ids"]: codes.append("incomplete_review_partition")
-    if partition["pending_evidence"]: codes.append("unmapped_evidence")
+    cleared_unmapped = {
+        (row["evidence_ref"], row["evidence_fingerprint"])
+        for key in ("trusted_irrelevant_evidence", "processing_complete_evidence")
+        for row in partition[key]
+    }
+    unresolved_unmapped = {
+        (row["evidence_ref"], row["evidence_fingerprint"])
+        for row in partition["judgment_delta"]["unmapped_evidence"]
+    } - cleared_unmapped
+    if unresolved_unmapped:
+        codes.insert(min(unmapped_index, len(codes)), "unmapped_evidence")
     return list(dict.fromkeys(codes))
 def _unresolved(plan: Mapping[str, Any], prior: Sequence[Mapping[str, Any]], sentinels: Sequence[Mapping[str, Any]]) -> bool:
     covered = {row["tile_id"] for row in prior}
     for row in sentinels: covered.update(planner._COMPONENT_TILES[row["component_key"]])
     return any(tile not in covered for tile in plan["review_set"])
+def _bootstrap_partial_workset_without_authority(
+    partition: Mapping[str, Any], authority: Mapping[str, Any] | None
+) -> bool:
+    if authority is not None:
+        return False
+    healthy = {row["tile_id"] for row in partition["healthy_workset"]["tiles"]}
+    return any(
+        healthy & set(tiles) and not set(tiles) <= healthy
+        for tiles in planner._COMPONENT_TILES.values()
+    )
+
+
 def _complete_partition(partition: Mapping[str, Any], plan: Mapping[str, Any]) -> bool:
     healthy = partition["healthy_workset"]["tiles"]
     return not partition["review_partition"]["tile_ids"] and not partition["pending_evidence"] and {row["tile_id"] for row in healthy} == set(plan["tile_workset"])
-def _resolved(partition: Mapping[str, Any], records: Mapping[tuple[str, str], Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _first_core_shared_evaluation(authority: Mapping[str, Any] | None, plan: Mapping[str, Any]) -> bool:
+    return (
+        authority is None
+        and is_core_shared_series_contract(plan["current_series_contract"])
+        and plan["prior_judgments"] == []
+        and plan["prior_component_sentinels"] == []
+    )
+
+
+def _resolved(partition: Mapping[str, Any], records: Mapping[tuple[str, str], Mapping[str, Any]], *, complete_capture: bool = False) -> list[dict[str, Any]]:
     expected = {row["evidence_record_id"]: (row["evidence_ref"], row["evidence_fingerprint"]) for tile in partition["healthy_workset"]["tiles"] for row in tile["current_evidence_bindings"]}
     rows = []
     for identifier, pair in sorted(expected.items()):
         record = records.get(pair)
         if record is None or record["evidence_record_id"] != identifier: raise EvidenceVaultSv9AuthorityEvaluationError("resolved evidence is invalid")
         rows.append(record)
-    return rows
-def _packets(plan: Mapping[str, Any], records: Mapping[tuple[str, str], Mapping[str, Any]], context: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    if complete_capture:
+        rows = [dict(record) for _pair, record in sorted(records.items())]
+    return list(evaluation._prepare_partial_evidence(partition, rows, complete_capture=complete_capture).values())
+def _packets(plan: Mapping[str, Any], records: Mapping[tuple[str, str], Mapping[str, Any]], context: Mapping[str, Any], *, complete_capture: bool = False) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     # Canonical packets retain authorized plan support, never routing-only hints.
     items = {row["tile_id"]: row for row in plan["items"]}; packets, bindings = [], []
     for component in plan["component_workset"]:
         tiles = []
         for tile in [tile for tile in plan["tile_workset"] if evaluation._BY_TILE[tile][1] == component]:
             evidence = []
-            for identity in items[tile]["evidence"]:
+            identities = (
+                [
+                    {key: record[key] for key in ("evidence_ref", "evidence_fingerprint")}
+                    for _pair, record in sorted(records.items())
+                ]
+                if complete_capture else items[tile]["evidence"]
+            )
+            for identity in identities:
                 record = records.get((identity["evidence_ref"], identity["evidence_fingerprint"]))
                 if record is None: raise EvidenceVaultSv9AuthorityEvaluationError("packet evidence is unavailable")
                 evidence.append({key: record[key] for key in ("evidence_ref", "evidence_fingerprint", "content")}); bindings.append({"tile_id": tile, "evidence_record_id": record["evidence_record_id"], **{key: record[key] for key in ("evidence_ref", "evidence_fingerprint")}})
@@ -385,13 +657,14 @@ def _candidate(plan: Mapping[str, Any], result: Mapping[str, Any], bindings: lis
     candidate = {"schema_version": "evidence-vault-sv9-judgment-candidate-v2", "plan": plan, "canonical_plan_fingerprint": plan["canonical_plan_fingerprint"], "current_series_fingerprint": plan["current_series_fingerprint"], "candidate_series_fingerprint": plan["candidate_series_fingerprint"], "component_evaluations": [row["evaluation"] for row in result["captured_calls"]], "evidence_bindings": bindings, "candidate_tile_judgments": result["candidate_tile_judgments"], "candidate_component_sentinels": result["candidate_component_sentinels"], "assessment": result["assessment"], "telemetry": {key: result[key] for key in ("call_count", "calls_avoided", "reused_tile_count", "evaluated_tile_count")}, "authoritative_relation_witness": dict(witness)}
     candidate["evaluation_bundle_fingerprint"] = memory.canonical_fingerprint("sv9-judgment-evaluation-bundle-v1", {"canonical_plan_fingerprint": plan["canonical_plan_fingerprint"], "evaluations": candidate["component_evaluations"]}); candidate["assessment_fingerprint"], candidate["score_fingerprint"] = result["assessment"]["assessment_fingerprint"], result["assessment"]["score_fingerprint"]; candidate["complete_record_fingerprint"] = memory.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v2", candidate)
     return candidate
-def _replays(stored: Any, reloaded: Any, candidate: Mapping[str, Any], packets: list[dict[str, Any]]) -> bool:
+def _replays(stored: Any, reloaded: Any, candidate: Mapping[str, Any], packets: list[dict[str, Any]], *, complete_capture: bool = False) -> bool:
     try:
         keys = "schema_version plan canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint component_evaluations evidence_bindings candidate_tile_judgments candidate_component_sentinels assessment telemetry evaluation_bundle_fingerprint assessment_fingerprint score_fingerprint complete_record_fingerprint".split()
         if candidate.get("schema_version") == "evidence-vault-sv9-judgment-candidate-v2": keys.append("authoritative_relation_witness"); validate_evidence_vault_sv9_authoritative_relation_witness(candidate["authoritative_relation_witness"])
         elif candidate.get("schema_version") != "evidence-vault-sv9-judgment-candidate-v1": return False
         if type(stored) is not dict or type(reloaded) is not dict or any(stored[key] != candidate[key] or reloaded[key] != candidate[key] for key in keys): return False
-        replay = evaluation.replay_incremental_evaluations(reloaded["plan"], packets, reloaded["component_evaluations"])
+        replay_options = {"complete_capture": True} if complete_capture else {}
+        replay = evaluation.replay_incremental_evaluations(reloaded["plan"], packets, reloaded["component_evaluations"], **replay_options)
         record = {key: reloaded[key] for key in reloaded if key not in {"id", "source_scan_id", "created_at", "complete_record_fingerprint"}}
         return replay["status"] == "available" and all(reloaded[key] == replay[key] for key in ("candidate_tile_judgments", "candidate_component_sentinels", "assessment")) and reloaded["assessment_fingerprint"] == replay["assessment"]["assessment_fingerprint"] and reloaded["score_fingerprint"] == replay["assessment"]["score_fingerprint"] and reloaded["evaluation_bundle_fingerprint"] == memory.canonical_fingerprint("sv9-judgment-evaluation-bundle-v1", {"canonical_plan_fingerprint": reloaded["canonical_plan_fingerprint"], "evaluations": reloaded["component_evaluations"]}) and reloaded["complete_record_fingerprint"] == memory.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v2" if reloaded["schema_version"].endswith("v2") else "evidence-vault-sv9-judgment-candidate-record-v1", record)
     except (AttributeError, KeyError, TypeError, ValueError): return False
@@ -401,7 +674,142 @@ def _partition_telemetry(partition: Mapping[str, Any]) -> tuple[int, int, int]:
     reused_tiles = len(partition["allowed_reuse_tile_ids"])
     review_tiles = len(partition["review_partition"]["tile_ids"])
     return calls_avoided, reused_tiles, review_tiles
-def _outcome(status: str, plan: Mapping[str, Any] | None = None, authority: Mapping[str, str] | None = None, reasons: list[str] | None = None, ignored: int = 0, unmapped: int = 0, result: Mapping[str, Any] | None = None, candidate: Mapping[str, Any] | None = None, signed_delta: Mapping[str, Any] | None = None, source_scan_id: str | None = None, partition: Mapping[str, Any] | None = None) -> dict[str, Any]:
+_DIAGNOSTIC_DETAIL_LIMIT = 24
+
+
+def _bounded_diagnostic_rows(rows: Any) -> tuple[list[Any], int]:
+    values = list(rows) if type(rows) is list else []
+    return values[:_DIAGNOSTIC_DETAIL_LIMIT], max(0, len(values) - _DIAGNOSTIC_DETAIL_LIMIT)
+
+
+def _safe_diagnostic_token(value: Any) -> str | None:
+    if type(value) is not str or not value or len(value) > 128:
+        return None
+    return value
+
+
+def _operational_coverage_diagnostic_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    basis_facts, dropped = _bounded_diagnostic_rows(row.get("basis_facts"))
+    return {
+        "tile_id": row.get("tile_id"),
+        "component_key": row.get("component_key"),
+        "reason": row.get("reason"),
+        "basis_facts": [
+            {
+                key: fact.get(key)
+                for key in (
+                    "relation_id",
+                    "evidence_id",
+                    "source_identity_id",
+                    "continuity_state",
+                    "matched_current_record_ids",
+                )
+            }
+            for fact in basis_facts
+            if type(fact) is dict
+        ],
+        "basis_facts_truncated_count": dropped,
+    }
+
+
+def _delta_coverage_diagnostic_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    missing, dropped = _bounded_diagnostic_rows(row.get("missing_evidence"))
+    return {
+        "tile_id": row.get("tile_id"),
+        "component_key": row.get("component_key"),
+        "reason": row.get("reason"),
+        "evidence_fingerprints": [
+            evidence.get("evidence_fingerprint")
+            for evidence in missing
+            if type(evidence) is dict
+            and _safe_diagnostic_token(evidence.get("evidence_fingerprint")) is not None
+        ],
+        "evidence_fingerprints_truncated_count": dropped,
+    }
+
+
+def _coverage_diagnostic_projection(
+    plan: Mapping[str, Any], signed_delta: Mapping[str, Any] | None, partition: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Project signed authority coverage into bounded identifiers and fingerprints only."""
+    projected: dict[str, Any] = {}
+    plan_values = {
+        key: _safe_diagnostic_token(plan.get(key))
+        for key in ("canonical_plan_fingerprint", "current_series_fingerprint")
+        if _safe_diagnostic_token(plan.get(key)) is not None
+    }
+    if plan_values:
+        projected["plan"] = plan_values
+    if signed_delta is not None:
+        fingerprint = _safe_diagnostic_token(signed_delta.get("canonical_delta_fingerprint"))
+        if fingerprint is not None:
+            projected["canonical_delta_fingerprint"] = fingerprint
+    if partition is None:
+        return projected
+    try:
+        partition_fingerprint = _safe_diagnostic_token(partition.get("partition_fingerprint"))
+        if partition_fingerprint is not None:
+            projected["partition_fingerprint"] = partition_fingerprint
+        review = partition["review_partition"]
+        review_rows = {}
+        for key in (
+            "tile_ids",
+            "evaluation_input_reopened_tile_ids",
+            "operational_authority_coverage_loss_tile_ids",
+            "judgment_delta_coverage_loss_tile_ids",
+            "planner_review_tile_ids",
+            "coherencia_blocked_tile_ids",
+        ):
+            rows, dropped = _bounded_diagnostic_rows(review.get(key))
+            review_rows[key] = rows
+            review_rows[f"{key}_truncated_count"] = dropped
+        projected["review_partition"] = review_rows
+        source_coverage, source_dropped = _bounded_diagnostic_rows(
+            partition["evaluation_input"].get("authority_coverage_loss")
+        )
+        projected["operational_authority_coverage_loss"] = [
+            _operational_coverage_diagnostic_row(row)
+            for row in source_coverage
+            if type(row) is dict
+        ]
+        projected["operational_authority_coverage_loss_truncated_count"] = source_dropped
+        delta_coverage, delta_dropped = _bounded_diagnostic_rows(
+            partition["judgment_delta"].get("coverage_loss")
+        )
+        projected["judgment_delta_coverage_loss"] = [
+            _delta_coverage_diagnostic_row(row)
+            for row in delta_coverage
+            if type(row) is dict
+        ]
+        projected["judgment_delta_coverage_loss_truncated_count"] = delta_dropped
+        projected["pending_evidence_count"] = len(partition["pending_evidence"])
+    except (AttributeError, KeyError, TypeError):
+        projected["coverage_projection_unavailable"] = True
+    return projected
+
+
+def _emit_outcome_diagnostic(
+    *, status: str, reason_codes: list[str], plan: Mapping[str, Any], signed_delta: Mapping[str, Any] | None,
+    partition: Mapping[str, Any] | None, diagnostic_exception: BaseException | None,
+) -> None:
+    observer = _DIAGNOSTIC_OBSERVER.get()
+    if observer is None:
+        return
+    try:
+        observer(
+            {
+                "boundary": "sv9_authority_evaluation",
+                "status": status,
+                "reason_codes": list(reason_codes),
+                "coverage": _coverage_diagnostic_projection(plan, signed_delta, partition),
+            },
+            diagnostic_exception,
+        )
+    except Exception:
+        pass
+
+
+def _outcome(status: str, plan: Mapping[str, Any] | None = None, authority: Mapping[str, str] | None = None, reasons: list[str] | None = None, ignored: int = 0, unmapped: int = 0, result: Mapping[str, Any] | None = None, candidate: Mapping[str, Any] | None = None, signed_delta: Mapping[str, Any] | None = None, source_scan_id: str | None = None, partition: Mapping[str, Any] | None = None, *, diagnostic_exception: BaseException | None = None) -> dict[str, Any]:
     values, bound = result or {}, plan or {}
     if partition is None:
         calls_avoided = int(values.get("calls_avoided", bound.get("calls_avoided", 0)))
@@ -413,6 +821,14 @@ def _outcome(status: str, plan: Mapping[str, Any] | None = None, authority: Mapp
     if status == "review_required" and signed_delta is not None and partition is not None:
         output["workset_partition"] = dict(partition)
     if candidate is not None: output["candidate"] = {key: candidate[key] for key in ("id", "canonical_plan_fingerprint", "complete_record_fingerprint", "assessment_fingerprint", "score_fingerprint")} | {"source_scan_id": str(candidate.get("source_scan_id") or source_scan_id or ""), "schema_version": str(candidate["schema_version"])} | ({"authoritative_relation_witness_fingerprint": candidate["authoritative_relation_witness"]["witness_fingerprint"]} if candidate["schema_version"].endswith("v2") else {})
+    _emit_outcome_diagnostic(
+        status=status,
+        reason_codes=output["reason_codes"],
+        plan=bound,
+        signed_delta=signed_delta,
+        partition=partition,
+        diagnostic_exception=diagnostic_exception,
+    )
     return output
 # fmt: on
 
