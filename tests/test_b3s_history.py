@@ -716,6 +716,7 @@ def test_vault_operational_migrations_are_versioned_and_vault_scoped() -> None:
         "034_evidence_vault_sv9_evaluation_checkpoints.sql",
         "035_evidence_vault_sv9_empty_relation_witness.sql",
         "036_evidence_vault_sv9_shared_analysis_snapshots.sql",
+        "037_evidence_vault_sv9_empty_witness_plan_relaxation.sql",
     ]
     assert "packet_kind" in operational_memory_sql
     assert "operational_source_v2" in operational_memory_sql
@@ -1026,7 +1027,7 @@ def test_concurrent_release_migration_is_database_serialized() -> None:
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(lambda _index: migrate_concurrently(), range(2)))
-        assert sorted(len(result) for result in results) == [0, 36]
+        assert sorted(len(result) for result in results) == [0, 37]
         assert sorted({filename for result in results for filename in result}) == [
             f"{index:03d}_" + name
             for index, name in enumerate(
@@ -1136,6 +1137,7 @@ def test_postgres_history_import_is_idempotent_and_selects_latest_capture(
             "034_evidence_vault_sv9_evaluation_checkpoints.sql",
             "035_evidence_vault_sv9_empty_relation_witness.sql",
             "036_evidence_vault_sv9_shared_analysis_snapshots.sql",
+            "037_evidence_vault_sv9_empty_witness_plan_relaxation.sql",
         ]
         assert repository.migrate() == []
 
@@ -2084,6 +2086,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
             "034_evidence_vault_sv9_evaluation_checkpoints.sql",
             "035_evidence_vault_sv9_empty_relation_witness.sql",
             "036_evidence_vault_sv9_shared_analysis_snapshots.sql",
+            "037_evidence_vault_sv9_empty_witness_plan_relaxation.sql",
         ]
 
         assert import_b3s_reports_postgres.main(command) == 0
@@ -2152,7 +2155,7 @@ def test_release_migrate_only_cli_is_complete_and_idempotent(
         assert stored[8] == (
             "b3s_history.evidence_vault_operational_relation_reviews"
         )
-        assert stored[9] == 36
+        assert stored[9] == 37
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
