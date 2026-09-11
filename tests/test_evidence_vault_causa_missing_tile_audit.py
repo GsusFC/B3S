@@ -275,8 +275,25 @@ class _PersistedRelationLLM:
         self._relations = relations
 
     def _call_json(self, system, user, **kwargs):
-        del system, user, kwargs
-        return {"relations": self._relations}
+        del system, kwargs
+        evidence_rows = json.loads(user.split(":\n", 1)[1])
+        supported = {
+            relation["evidence_fingerprint"] for relation in self._relations
+        }
+        return {
+            "relations": self._relations,
+            "analysis": [
+                {
+                    "evidence_fingerprint": row["evidence_fingerprint"],
+                    "decision": (
+                        "supported"
+                        if row["evidence_fingerprint"] in supported
+                        else "analyzed_without_sufficient_support"
+                    ),
+                }
+                for row in evidence_rows
+            ],
+        }
 
 
 def test_coverage_supplement_projects_only_exact_relations_pending() -> None:

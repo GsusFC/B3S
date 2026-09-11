@@ -202,7 +202,7 @@ async function poll() {
   }
   if (payload.state === "error") {
     const box = document.getElementById("error");
-    box.textContent = `Scan failed: ${payload.error || "unknown error"}. Check provider keys in .env and retry from the home page.`;
+    box.textContent = payload.diagnostic?.summary || "Scan failed before completion.";
     box.hidden = false;
     document.getElementById("hint").hidden = true;
     return;

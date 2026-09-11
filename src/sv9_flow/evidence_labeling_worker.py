@@ -9,6 +9,7 @@ deterministic identity gate.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Iterable
 
 from src.sv9_flow.calibration_terms import block_evidence_policy
@@ -64,6 +65,59 @@ _LABEL_SCHEMA = {
     },
     "required": ["labels"],
 }
+
+_SAFE_LABEL_SCHEMA_PATH = re.compile(
+    r"^\$(?:\.labels(?:\[(\d{1,4})\](?:\.(ref|stance|identity_match|specificity)|\.relevant_blocks(?:\[(\d{1,4})\])?)?)?)?$"
+)
+_SAFE_LABEL_SCHEMA_TYPES = frozenset({"object", "array", "string"})
+
+
+def _safe_schema_validation_detail(
+    llm: Any, *, failure_start: int | None = None
+) -> str:
+    """Project the latest label-schema failure into a non-sensitive hint."""
+
+    if str(getattr(llm, "last_failure_reason", None) or "") != "schema_validation_error":
+        return ""
+    failures = getattr(llm, "call_failures", None)
+    if not isinstance(failures, list) or not failures:
+        return ""
+    if failure_start is not None and len(failures) <= failure_start:
+        return ""
+    latest = failures[-1]
+    if not isinstance(latest, dict) or latest.get("reason") != "schema_validation_error":
+        return ""
+    detail = latest.get("error")
+    if not isinstance(detail, str) or len(detail) > 300:
+        return ""
+    match = re.fullmatch(r"(?P<path>\$[^:]{0,180}): (?P<message>.+)", detail.strip())
+    if match is None:
+        return ""
+    path = match.group("path")
+    path_match = _SAFE_LABEL_SCHEMA_PATH.fullmatch(path)
+    safe_path = path if path_match is not None else ""
+    message = match.group("message")
+    if message.startswith("expected ") and message.removeprefix("expected ") in _SAFE_LABEL_SCHEMA_TYPES:
+        category = "expected_type"
+    elif message.startswith("missing required field(s):"):
+        category = "missing_required"
+    elif message.startswith("unexpected field(s):"):
+        category = "unexpected_fields"
+    else:
+        return ""
+    if safe_path:
+        return f"schema_path={safe_path};schema_category={category}"
+    return f"schema_category={category}"
+
+
+def _provider_failure_reason(llm: Any, *, failure_start: int | None = None) -> str:
+    reason = str(getattr(llm, "last_failure_reason", None) or "").strip()
+    if not reason:
+        return ""
+    detail = _safe_schema_validation_detail(llm, failure_start=failure_start)
+    if detail:
+        return f"evidence_labeling_provider_failed:{reason}:{detail}"
+    return f"evidence_labeling_provider_failed:{reason}"
 
 
 def label_evidence_pack(
@@ -175,9 +229,9 @@ def _labels_with_artifact_cache(
             records=missing,
             llm=llm,
         )
-        failure_reason = str(getattr(llm, "last_failure_reason", None) or "").strip()
+        failure_reason = _provider_failure_reason(llm)
         if failure_reason:
-            raise RuntimeError(f"evidence_labeling_provider_failed:{failure_reason}")
+            raise RuntimeError(failure_reason)
         returned_by_id: dict[str, dict[str, Any]] = {}
         for label in returned:
             record = evidence_record_for_ref(label.get("ref") or "", evidence_pack)
@@ -233,6 +287,8 @@ def _call_labeler(
         metadata = record.metadata if isinstance(record.metadata, dict) else {}
         for content in semantic_passages(record.content):
             call_count += 1
+            failures = getattr(llm, "call_failures", None)
+            failure_start = len(failures) if isinstance(failures, list) else None
             row = {
                 "ref": parent,
                 "source_class": metadata.get("source_class") or source_class_for_record(record),
@@ -249,9 +305,9 @@ def _call_labeler(
                 schema_name="sv9_flow_evidence_labeling",
                 temperature=0.0,
             )
-            failure = str(getattr(llm, "last_failure_reason", None) or "").strip()
+            failure = _provider_failure_reason(llm, failure_start=failure_start)
             if failure:
-                raise RuntimeError(f"evidence_labeling_provider_failed:{failure}")
+                raise RuntimeError(failure)
             items = raw.get("labels", []) if isinstance(raw, dict) else []
             normalized = [
                 _normalize_label(item) for item in items if isinstance(item, dict)

@@ -117,12 +117,36 @@ def test_authoritative_evidence_can_feed_a_hint_for_another_tile():
     assert m2["current_evidence_bindings"] == [source["current_identity_bindings"][0]]
 
 
-def test_hint_reusing_the_same_authoritative_tile_relation_fails_closed():
+def test_hint_reusing_the_same_authoritative_tile_relation_is_filtered_before_partition():
     source = _input(hints=(("same-tile-hint", "M1", "1"),))
     signed_delta = _delta(source, prior=[])
 
+    assert source["non_authoritative_hints"] == []
+    value = _build(source, signed_delta)
+    assert value["healthy_workset"]["state"] == "evaluable"
+
+
+def test_workset_partition_still_rejects_tampered_authoritative_overlap():
+    source = _input(extras=("hinted",), hints=(("hint", "M1", "hinted"),))
+    tampered = deepcopy(source)
+    hint = tampered["non_authoritative_hints"][0]
+    hint["evidence_record_id"] = source["current_identity_bindings"][0]["evidence_record_id"]
+    unsigned = {key: value for key, value in hint.items() if key != "hint_fingerprint"}
+    hint["hint_fingerprint"] = canonical_fingerprint(
+        "evidence-vault-sv9-evaluation-hint-fingerprint-v1", unsigned
+    )
+    payload = {key: tampered[key] for key in (
+        "source_identity", "current_evidence", "current_identity_bindings",
+        "authoritative_relations", "authority_continuity", "authority_coverage_loss",
+        "reopen_tile_ids", "operational_witness", "relation_projection_fingerprint",
+        "projection_version", "non_authoritative_hints",
+    )}
+    tampered["evaluation_input_fingerprint"] = canonical_fingerprint(
+        "evidence-vault-sv9-evaluation-input-v2", payload
+    )
+
     with pytest.raises(partition.EvidenceVaultSv9WorksetPartitionError):
-        _build(source, signed_delta)
+        _build(tampered, _delta(tampered, prior=[]))
 
 
 def test_reusable_component_sentinel_expands_from_signed_hint_and_blocks_coherencia():

@@ -1044,7 +1044,7 @@ def test_vault_report_uses_fresh_persisted_capture_not_public_history_or_sidecar
     monkeypatch.setattr(
         scan_runner,
         "_publish_completed_report",
-        lambda _scan_id, report: published.append(deepcopy(report)) or True,
+        lambda _scan_id, report, **_kwargs: published.append(deepcopy(report)) or True,
     )
     def prior_history(_url: str) -> list[dict]:
         nonlocal history_reads
@@ -1166,7 +1166,7 @@ def test_vault_operational_planning_failure_does_not_gate_persisted_readback(
     monkeypatch.setattr(
         scan_runner,
         "_publish_completed_report",
-        lambda _scan_id, report: published.append(deepcopy(report)) or True,
+        lambda _scan_id, report, **_kwargs: published.append(deepcopy(report)) or True,
     )
 
     try:
@@ -1184,6 +1184,14 @@ def test_vault_operational_planning_failure_does_not_gate_persisted_readback(
         "state": "failed",
         "error_type": "RuntimeError",
         "error": "planner unavailable",
+        "diagnostic": {
+            "kind": "secondary_failure",
+            "stage": "vault_sidecar",
+            "capture_state": "completed",
+            "reason_codes": ["vault_sidecar_failed"],
+            "summary": "A non-authoritative Vault sidecar failed after scan processing.",
+            "build_sha": "unknown",
+        },
     }
 
 
@@ -1410,7 +1418,7 @@ def test_vault_trusted_capture_projects_verified_documents_into_flow(
 
     monkeypatch.setattr(flow_eval, "build_flow_sv9_shadow_eval", canonical_flow)
     monkeypatch.setattr(scan_runner, "_attach_evidence_stability", lambda report: report)
-    monkeypatch.setattr(scan_runner, "_publish_completed_report", lambda _scan_id, report: published.append(deepcopy(report)) or True)
+    monkeypatch.setattr(scan_runner, "_publish_completed_report", lambda _scan_id, report, **_kwargs: published.append(deepcopy(report)) or True)
 
     try:
         scan_runner._run(scan_id, parsed.canonical_url, parsed.brand_name, False)

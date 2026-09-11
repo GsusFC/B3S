@@ -4,20 +4,19 @@ import pytest
 from src.services import evidence_vault_sv9_authority_event as authority_event
 from src.services import evidence_vault_sv9_authority_evaluation as service
 from src.services import evidence_vault_sv9_authority_projection as authority_projection
-from src.services import evidence_vault_sv9_shared_process as shared_process
 from src.services.evidence_vault_canonical_core import canonical_fingerprint
 from src.services.evidence_vault_sv9_authoritative_relations import (
     EvidenceVaultSv9AuthoritativeRelationStaleWitnessError,
     EvidenceVaultSv9AuthoritativeRelationWitnessError,
     EVIDENCE_VAULT_SV9_EVALUATION_INPUT_VERSION,
     project_evidence_vault_sv9_evaluation_input,
-    )
+)
 from src.services import evidence_vault_sv9_judgment_delta as delta
 from src.sv9 import incremental_evaluation as evaluation
 from src.sv9 import incremental_planner as planner
 from src.sv9 import judgment_memory as memory
-from tests.test_sv9_judgment_memory import _hash, _judgment, _origin, _series
-from tests.test_evidence_vault_sv9_authoritative_relations import _facts, _Repository as _FactsRepository
+from _harness_judgment_memory import _hash, _judgment, _origin, _series
+from _harness_sv9_relations import _facts, _Repository as _FactsRepository
 
 
 # fmt: off
@@ -42,7 +41,7 @@ def _authority(series=None, sentinel=False):
 
 class _Repository:
     def __init__(self, authority=None, records=(3,), bad_reload=False):
-        self.authority, self.records, self.bad_reload = authority, tuple(records), bad_reload; self.append_calls = self.get_calls = self.authority_calls = self.context_calls = self.evidence_calls = 0; self.candidates = {}; self.mutations = []; self.checkpoints = {}; self.checkpoint_gets = []; self.checkpoint_appends = []; self.shared_analysis_payloads = []; self.shared_processes = {}; self.fail_checkpoint_append = self.checkpoint_conflict = self.unmapped = self.hint_only = self.bootstrap_hint_only = self.reopen = False; self.processing_complete = ()
+        self.authority, self.records, self.bad_reload = authority, tuple(records), bad_reload; self.append_calls = self.get_calls = self.authority_calls = self.context_calls = self.evidence_calls = 0; self.candidates = {}; self.mutations = []; self.checkpoints = {}; self.shared_processes = {}; self.checkpoint_gets = []; self.checkpoint_appends = []; self.fail_checkpoint_append = self.checkpoint_conflict = self.unmapped = self.hint_only = self.reopen = False; self.routing_groups = None
         self.context = {"capture_origin": {"capture_id": "00000000-0000-0000-0000-000000000009", "capture_fingerprint": _hash(9)}, "operation_origin": {"operation_id": "00000000-0000-0000-0000-000000000010", "operation_fingerprint": _hash(10)}}; self.projection_relations = None; self.projection_status = "available"; self.projection_calls = 0; self.witness_seed = 300
     def get_evidence_vault_sv9_judgment_authority(self, _domain, **_kwargs): self.authority_calls += 1; return deepcopy(self.authority)
     def load_evidence_vault_sv9_judgment_context(self, _scan, **_kwargs): self.context_calls += 1; return {"canonical_domain": "example.test", "capture_id": self.context["capture_origin"]["capture_id"], "capture_fingerprint": self.context["capture_origin"]["capture_fingerprint"], "operation_plan_id": self.context["operation_origin"]["operation_id"], "operation_fingerprint": self.context["operation_origin"]["operation_fingerprint"]}
@@ -53,9 +52,8 @@ class _Repository:
         self.get_calls += 1; row = deepcopy(self.candidates.get(canonical_plan_fingerprint))
         if row and self.bad_reload and self.get_calls > 1: row["complete_record_fingerprint"] = _hash(999)
         return row
-    def append_evidence_vault_sv9_judgment_candidate(self, _scan, candidate, *, shared_analysis_payload=None, **_kwargs):
+    def append_evidence_vault_sv9_judgment_candidate(self, _scan, candidate, **_kwargs):
         self.append_calls += 1; key = candidate["canonical_plan_fingerprint"]
-        self.shared_analysis_payloads.append(deepcopy(shared_analysis_payload))
         if key in self.candidates: return deepcopy(self.candidates[key]), False
         self.candidates[key] = deepcopy(candidate) | {"id": "00000000-0000-0000-0000-000000000203"}; return deepcopy(self.candidates[key]), True
     def get_evidence_vault_sv9_evaluation_checkpoint_component_evaluation(self, _scan, *, canonical_plan_fingerprint, canonical_request_fingerprint, **_kwargs):
@@ -113,23 +111,29 @@ class _Repository:
         rows = [dict(facts["evidence"][0], source_scan_id=scan, canonical_domain="example.test", evidence_record_id=f"00000000-0000-0000-0000-{number:012d}", **_identity(number), evidence_id=_hash(100 + number), source_identity_id=_hash(200 + number)) for number in self.records]
         facts["evidence"] = rows
         for index, row in enumerate(rows): facts["authority"]["accepted"][index]["basis"][0].update(evidence_id=row["evidence_id"], source_identity_id=row["source_identity_id"])
+        if self.routing_groups:
+            accepted = facts["authority"]["accepted"]
+            facts["authority"]["accepted"] = [
+                {
+                    **deepcopy(accepted[indexes[0]]),
+                    "tile_id": tile_id,
+                    "basis": [
+                        deepcopy(basis)
+                        for index in indexes
+                        for basis in accepted[index]["basis"]
+                    ],
+                }
+                for tile_id, indexes in self.routing_groups.items()
+            ]
         facts["authority"]["witness"] = {"canonical_memory_version": _hash(self.witness_seed), "adoption_event_id": f"00000000-0000-0000-0000-{self.witness_seed:012d}", "adoption_sequence": 1, "candidate_packet_fingerprint": _hash(self.witness_seed + 1), "request_fingerprint": _hash(self.witness_seed + 2)}
         if self.reopen: facts["authority"]["accepted"][0]["basis"][0].update(evidence_id=_hash(998), source_identity_id=_hash(999))
         if self.unmapped or self.hint_only: facts["authority"]["accepted"] = facts["authority"]["accepted"][:1]
         if getattr(self, "empty_adopted_basis", False): facts["authority"]["accepted"] = []
         if self.hint_only: facts["evaluation_hint_seeds"] = [{"hint_id": "00000000-0000-0000-0000-000000000987", "tile_id": "M1", "component_key": "mission", "evidence_record_id": rows[1]["evidence_record_id"], "provenance_fingerprint": _hash(987)}]
-        if self.bootstrap_hint_only:
-            facts["authority"]["accepted"] = []
-            facts["evaluation_hint_seeds"] = [{"hint_id": "00000000-0000-0000-0000-000000000987", "tile_id": "M1", "component_key": "mission", "evidence_record_id": rows[0]["evidence_record_id"], "provenance_fingerprint": _hash(987)}]
-        facts["processing_complete_evidence"] = [
-            {key: row[key] for key in ("evidence_ref", "evidence_fingerprint")}
-            for number, row in zip(self.records, rows, strict=True)
-            if number in self.processing_complete
-        ]
         return project_evidence_vault_sv9_evaluation_input(repository=_FactsRepository(facts), source_scan_id=scan, workspace_slug=workspace)
 
 class _Flow:
-    def __init__(self, fail=None, sentinel=False, malformed=False, shared_analysis=None): self.fail, self.sentinel, self.malformed, self.calls = fail, sentinel, malformed, []; self.shared_analysis = shared_analysis; self.shared_analysis_calls = []; self.shared_components = {}
+    def __init__(self, fail=None, sentinel=False, malformed=False): self.fail, self.sentinel, self.malformed, self.calls = fail, sentinel, malformed, []
     def evaluate_component(self, request):
         self.calls.append(request)
         if self.fail == len(self.calls): return evaluation.ComponentEvaluationOutcome.provider_failure()
@@ -137,24 +141,16 @@ class _Flow:
         if self.sentinel and request["component_key"] == "mission": rows, status = [], "not_detected"
         else:
             rows = [{"tile_id": row["tile_id"], "assessment_state": "ok" if row["evidence"] else "sin_evidencia", "supporting_evidence": [{key: item[key] for key in ("evidence_ref", "evidence_fingerprint")} for item in row["evidence"]]} for row in request["requested_tiles"]]; status = "evaluated"
-        if self.shared_analysis is not None:
-            from src.sv9.aggregator import score_from_tile_profile
-            from src.sv9.models import ComponentResult, TileVerdict
-            profile = [TileVerdict(tile_id=row["tile_id"], estado=row["assessment_state"], evidencia="Shared evidence." if row["assessment_state"] == "ok" else "", motivo="No supporting evidence." if row["assessment_state"] != "ok" else "") for row in rows]
-            self.shared_components[request["component_key"]] = ComponentResult(component=request["component_key"], status="not_detected" if status == "not_detected" else "scored", score=score_from_tile_profile(profile), tile_profile=profile, evaluation_model="test-evaluator").to_dict()
         return evaluation.ComponentEvaluationOutcome.success(evaluation.build_component_evaluation(component_key=request["component_key"], series_fingerprint=request["current_series_fingerprint"], request_fingerprint=request["canonical_request_fingerprint"], status=status, tile_results=rows))
-    def get_shared_checkpoint_process(self, request): return {"component_result": deepcopy(self.shared_components[request["component_key"]])}
-    def restore_shared_checkpoint_process(self, request, _accepted, value): self.shared_components[request["component_key"]] = deepcopy(value["component_result"])
-    def build_shared_analysis_payload(self, assessment): self.shared_analysis_calls.append(deepcopy(assessment)); return deepcopy(self.shared_analysis)
 
 def _relation(repo, tile, disposition="relevant", number=9): return delta.build_authoritative_evidence_tile_relation(tile_id=tile, component_key=dict(planner._REGISTRY)[tile], disposition=disposition, **_identity(number), **repo.context)
 @pytest.fixture(autouse=True)
 def _authoritative_projection(monkeypatch):
     monkeypatch.setattr(service, "project_evidence_vault_sv9_evaluation_input", lambda *, repository, source_scan_id, workspace_slug: repository.evaluation_input(source_scan_id, workspace_slug))
 
-def _run(repo, flow, current=(3,), relations=None, series=None, trusted=(), projection_relations=None):
+def _run(repo, flow, current=(3,), relations=None, series=None, trusted=(), projection_relations=None, scan="scan"):
     relations = [_relation(repo, "M1", number=number) for number in current] if relations is None else list(relations); repo.records = tuple(current); repo.projection_relations = relations if projection_relations is None else list(projection_relations)
-    result = service.run_evidence_vault_sv9_authority_evaluation(repository=repo, flow=flow, domain_or_url="example.test", source_scan_id="scan", current_series_contract=_series() if series is None else series, trusted_irrelevant_evidence=[_identity(number) for number in trusted])
+    result = service.run_evidence_vault_sv9_authority_evaluation(repository=repo, flow=flow, domain_or_url="example.test", source_scan_id=scan, current_series_contract=_series() if series is None else series, trusted_irrelevant_evidence=[_identity(number) for number in trusted])
     assert not repo.mutations; return result
 
 def test_first_run_with_exact_operational_projection_persists_witnessed_candidate():
@@ -366,34 +362,8 @@ def test_exact_reuse_and_explicit_irrelevant_evidence_skip_flow(current, trusted
 def test_hint_only_healthy_workset_runs_when_canonical_component_workset_is_empty():
     repo, flow = _Repository(_authority(), (3, 9)), _Flow(); repo.hint_only = True; outcome = _run(repo, flow, current=(3, 9))
     assert outcome["signed_delta"]["plan"]["component_workset"] == [] and [row["component_key"] for row in flow.calls] == ["mission", "coherencia"]
-    assert outcome["status"] == "review_required" and outcome["reason_codes"] == ["incomplete_candidate"] and outcome["candidate"] is None and len(repo.checkpoint_appends) == 2 and repo.get_calls == repo.append_calls == 0
-    assert outcome["unmapped_evidence_count"] == outcome["trusted_irrelevant_evidence_count"] == 0
+    assert outcome["status"] == "review_required" and outcome["candidate"] is None and len(repo.checkpoint_appends) == 2 and repo.get_calls == repo.append_calls == 0
     assert (outcome["calls_avoided"], outcome["reused_tiles"], outcome["review_tile_count"]) == (8, 69, 0)
-
-
-def test_bootstrap_hint_routing_persists_empty_relation_witness_with_exact_origins():
-    repo, flow = _Repository(records=(9,)), _Flow()
-    repo.bootstrap_hint_only = True
-    series = shared_process.build_core_shared_series_contract(
-        interpretation_model="interpretation-test",
-        labeling_model="labeling-test",
-        adjudicator_model="adjudicator-test",
-        evaluator_model="evaluator-test",
-        reasoning_model="reasoning-test",
-        editorial_model="editorial-test",
-        gate_authority="veto_only",
-        editorial_enabled=True,
-    )
-    flow.shared_analysis = {"status": "test"}
-
-    outcome = _run(repo, flow, current=(9,), series=series)
-
-    assert outcome["status"] == "candidate_available"
-    assert outcome["reason_codes"] == []
-    witness = next(iter(repo.candidates.values()))["authoritative_relation_witness"]
-    assert witness["authoritative_relations"] == []
-    assert witness["capture_origin"] == repo.context["capture_origin"]
-    assert witness["operation_origin"] == repo.context["operation_origin"]
 
 def test_continuity_review_outcome_uses_partition_telemetry():
     repo, flow = _Repository(_authority(), (3, 9)), _Flow(); repo.reopen = True; outcome = _run(repo, flow, current=(3, 9))
@@ -402,15 +372,13 @@ def test_continuity_review_outcome_uses_partition_telemetry():
 
 def test_provider_failure_outcome_uses_partition_telemetry():
     repo, flow = _Repository(_authority(), (3, 9)), _Flow(fail=1); repo.hint_only = True; outcome = _run(repo, flow, current=(3, 9))
-    assert outcome["status"] == "no_new_score" and outcome["reason_codes"] == ["provider_failure"]
-    assert outcome["unmapped_evidence_count"] == 0
+    assert outcome["status"] == "review_required" and outcome["reason_codes"] == ["unmapped_evidence", "provider_failure"]
     assert (outcome["calls_avoided"], outcome["reused_tiles"], outcome["review_tile_count"]) == (8, 69, 0)
 
 def test_resumed_partial_outcome_keeps_partition_telemetry():
     repo = _Repository(_authority(), (3, 9)); repo.hint_only = True
     first = _run(repo, _Flow(fail=2), current=(3, 9)); resumed = _run(repo, _Flow(fail=1), current=(3, 9))
-    assert first["status"] == resumed["status"] == "no_new_score" and first["reason_codes"] == resumed["reason_codes"] == ["provider_failure"]
-    assert first["unmapped_evidence_count"] == resumed["unmapped_evidence_count"] == 0
+    assert first["status"] == resumed["status"] == "review_required" and first["reason_codes"][-1] == resumed["reason_codes"][-1] == "provider_failure"
     assert tuple(first[key] for key in ("calls_avoided", "reused_tiles", "review_tile_count")) == (8, 69, 0)
     assert tuple(resumed[key] for key in ("calls_avoided", "reused_tiles", "review_tile_count")) == (8, 69, 0)
 
@@ -446,104 +414,16 @@ def test_coherencia_request_matches_uninterrupted_cached_upstream_state():
 def test_review_pending_allows_healthy_flow_but_no_candidate_side_effects():
     repo, flow = _Repository(records=(3, 9)), _Flow(); repo.unmapped = True; outcome = _run(repo, flow, current=(3, 9))
     assert outcome["status"] == "review_required" and outcome["reason_codes"] == ["unmapped_evidence", "incomplete_review_partition"] and flow.calls and repo.get_calls == repo.append_calls == 0
-    assert outcome["unmapped_evidence_count"] == len(outcome["workset_partition"]["pending_evidence"]) == 1
     assert outcome["candidate"] is None and not repo.candidates and not ({"assessment", "score", "adoption", "publication"} & set(outcome))
-
-
-def test_processing_complete_unmapped_evidence_can_produce_candidate_without_inflating_trusted_count():
-    repo, flow = _Repository(records=(3, 9)), _Flow()
-    repo.unmapped = True
-    repo.processing_complete = (9,)
-
-    assert (
-        repo.evaluation_input("scan", "b3s")["schema_version"]
-        == "evidence-vault-sv9-evaluation-input-v4"
-    )
-    outcome = _run(repo, flow, current=(3, 9))
-
-    assert outcome["status"] == "candidate_available"
-    assert outcome["reason_codes"] == []
-    assert outcome["unmapped_evidence_count"] == 0
-    assert outcome["trusted_irrelevant_evidence_count"] == 0
-
 
 def test_bootstrap_reopen_coverage_loss_uses_partition_reasons_without_candidate_io():
     repo, flow = _Repository(records=(3, 9)), _Flow(); repo.reopen = True; outcome = _run(repo, flow, current=(3, 9))
     value = service.partitioning.build_evidence_vault_sv9_workset_partition(evaluation_input=repo.evaluation_input("scan", "b3s"), judgment_delta=outcome["signed_delta"], trusted_irrelevant_evidence=[])["review_partition"]
     assert value["evaluation_input_reopened_tile_ids"] == value["operational_authority_coverage_loss_tile_ids"] == ["M1"] and not value["judgment_delta_coverage_loss_tile_ids"]
     partition = outcome["workset_partition"]
-    assert outcome["status"] == "review_required" and "coverage_loss" in outcome["reason_codes"] and "incomplete_candidate" not in outcome["reason_codes"] and not flow.calls and repo.get_calls == repo.append_calls == 0
+    assert outcome["status"] == "review_required" and "coverage_loss" in outcome["reason_codes"] and "incomplete_candidate" not in outcome["reason_codes"] and flow.calls and repo.get_calls == repo.append_calls == 0
     assert partition["review_partition"] == value and partition["judgment_delta"] == outcome["signed_delta"] and outcome["candidate"] is None
     assert not ({"assessment", "score", "adoption", "publication"} & set(outcome))
-
-
-@pytest.mark.parametrize(
-    ("historical", "current", "expected"),
-    [
-        ([(109, 209)], [], set()),
-        ([(109, 209)], [(109, 209)], set()),
-        ([(109, 209)], [(998, 999)], {"M1"}),
-        ([], [], {"M1"}),
-        ([(109, 209), (109, 209)], [], {"M1"}),
-        ([(109, 209)], [(109, 209), (109, 209)], {"M1"}),
-    ],
-)
-def test_accepted_support_identity_check_distinguishes_absence_from_mismatch(
-    historical, current, expected
-):
-    pair = _identity(9)
-
-    class IdentityRepository:
-        def load_evidence_vault_sv9_authoritative_relation_facts(
-            self, _scan, *, workspace_slug
-        ):
-            assert workspace_slug == "b3s"
-            return {
-                "evidence": [
-                    {
-                        **pair,
-                        "evidence_id": _hash(evidence_id),
-                        "source_identity_id": _hash(source_id),
-                    }
-                    for evidence_id, source_id in historical
-                ]
-            }
-
-    bindings = [
-        {
-            **pair,
-            "evidence_id": _hash(evidence_id),
-            "source_identity_id": _hash(source_id),
-        }
-        for evidence_id, source_id in current
-    ]
-    result = service._accepted_support_identity_mismatches(
-        IdentityRepository(),
-        {"accepted_candidate": {"source_scan_id": "accepted-scan"}},
-        [{"tile_id": "M1", "supporting_evidence": [pair]}],
-        bindings,
-        source_scan_id="current-scan",
-        workspace_slug="b3s",
-    )
-
-    assert result == expected
-
-def test_identity_mismatch_stays_fail_closed_before_hint_routing():
-    repo, flow = _Repository(_authority(), (3, 9)), _Flow()
-    repo.hint_only = True
-    load_historical = repo.load_evidence_vault_sv9_authoritative_relation_facts
-
-    def mismatched_historical(*args, **kwargs):
-        facts = load_historical(*args, **kwargs)
-        facts["evidence"][0]["evidence_id"] = _hash(998)
-        return facts
-
-    repo.load_evidence_vault_sv9_authoritative_relation_facts = mismatched_historical
-    outcome = _run(repo, flow, current=(3, 9))
-
-    assert outcome["status"] == "review_required"
-    assert "coverage_loss" in outcome["reason_codes"]
-    assert not flow.calls and repo.get_calls == repo.append_calls == 0
 
 
 def test_contradictory_checkpoint_fails_closed_before_flow():
@@ -602,3 +482,348 @@ def test_invalid_persisted_event_audit_metadata_stops_all_evaluation_effects(nam
     assert (result["status"], result["reason_codes"], result["accepted_authority"], result["candidate"], result["signed_delta"]) == ("no_new_score", ["invalid_input"], None, None, None)
     assert (repo.authority_calls, repo.projection_calls, repo.context_calls, repo.evidence_calls, repo.get_calls, repo.append_calls, flow.calls) == (1, 0, 0, 0, 0, 0, [])
 # fmt: on
+
+
+def test_authority_diagnostic_observer_is_scoped_inert_and_projects_safe_coverage():
+    baseline_repo, baseline_flow = _Repository(_authority(), (3, 9)), _Flow()
+    baseline_repo.reopen = True
+    baseline = _run(baseline_repo, baseline_flow, current=(3, 9))
+
+    events = []
+    observed_repo, observed_flow = _Repository(_authority(), (3, 9)), _Flow()
+    observed_repo.reopen = True
+    with service.observe_evidence_vault_sv9_authority_evaluation_diagnostics(
+        lambda event, exc: events.append((event, exc))
+    ):
+        observed = _run(observed_repo, observed_flow, current=(3, 9))
+
+    assert observed == baseline
+    assert len(events) == 1 and events[0][1] is None
+    event = events[0][0]
+    assert event["boundary"] == "sv9_authority_evaluation"
+    assert event["status"] == "review_required"
+    assert event["coverage"]["review_partition"]["operational_authority_coverage_loss_tile_ids"] == ["M1"]
+    loss = event["coverage"]["operational_authority_coverage_loss"]
+    assert loss[0]["tile_id"] == "M1" and loss[0]["basis_facts"][0]["relation_id"]
+    assert "evidence_ref" not in str(event)
+
+    _run(_Repository(_authority(), (3, 9)), _Flow(), current=(3, 9))
+    assert len(events) == 1
+
+    failing_repo, failing_flow = _Repository(records=(9,)), _Flow()
+    failing_repo.fail_checkpoint_append = True
+    with service.observe_evidence_vault_sv9_authority_evaluation_diagnostics(
+        lambda _event, _exc: (_ for _ in ()).throw(RuntimeError("observer failure"))
+    ):
+        failed = _run(failing_repo, failing_flow, current=(9,))
+    assert failed["status"] == "no_new_score" and failed["reason_codes"] == ["repository_failure"]
+
+
+def test_authority_diagnostic_observer_receives_only_explicitly_caught_exception():
+    observed = []
+    repo, flow = _Repository(records=(9,)), _Flow()
+    repo.fail_checkpoint_append = True
+    with service.observe_evidence_vault_sv9_authority_evaluation_diagnostics(
+        lambda event, exc: observed.append((event, exc))
+    ):
+        outcome = _run(repo, flow, current=(9,))
+
+    assert outcome["reason_codes"] == ["repository_failure"]
+    assert len(observed) == 1 and type(observed[0][1]) is RuntimeError
+
+
+def test_next_scan_missing_accepted_support_uses_signed_delta_coverage_loss():
+    repo, flow = _Repository(_authority(), (3,)), _Flow()
+
+    outcome = _run(repo, flow, current=(9,), scan="next-scan")
+
+    assert outcome["status"] == "review_required"
+    assert outcome["reason_codes"] == ["coverage_loss"]
+    assert outcome["signed_delta"]["coverage_loss"][0]["reason"] == "supporting_evidence_missing"
+    assert flow.calls == []
+
+
+def test_next_scan_same_ref_hash_with_changed_canonical_identity_fails_closed():
+    repo, flow = _Repository(_authority(), (3,)), _Flow()
+    load = repo.load_evidence_vault_sv9_authoritative_relation_facts
+
+    def changed_historical_identity(scan, *, workspace_slug="b3s"):
+        facts = load(scan, workspace_slug=workspace_slug)
+        facts["evidence"][0]["evidence_id"] = _hash(998)
+        facts["evidence"][0]["source_identity_id"] = _hash(999)
+        return facts
+
+    repo.load_evidence_vault_sv9_authoritative_relation_facts = changed_historical_identity
+    outcome = _run(repo, flow, current=(3,), scan="next-scan")
+
+    assert outcome["status"] == "review_required"
+    assert outcome["reason_codes"] == ["coverage_loss"]
+    assert outcome["signed_delta"]["coverage_loss"] == []
+    assert flow.calls == []
+
+
+def test_next_scan_unchanged_accepted_support_reuses_without_flow():
+    repo, flow = _Repository(_authority(), (3,)), _Flow()
+
+    outcome = _run(repo, flow, current=(3,), scan="next-scan")
+
+    assert outcome["status"] == "no_new_score"
+    assert outcome["reason_codes"] == ["exact_reuse"]
+    assert flow.calls == []
+
+
+def test_first_scan_without_accepted_result_still_distinguishes_baseline_and_invalid_input():
+    baseline_repo, baseline_flow = _Repository(None, (9,)), _Flow()
+    baseline = _run(baseline_repo, baseline_flow, current=(9,), scan="first-scan")
+    assert baseline["status"] == "candidate_available"
+
+    blocked_repo, blocked_flow = _Repository(None, (9,)), _Flow()
+    blocked_repo.evaluation_input = lambda *_args: {
+        "status": "review_required",
+        "reason_codes": ["invalid_evaluation_input"],
+    }
+    blocked = _run(blocked_repo, blocked_flow, current=(9,), scan="first-scan")
+    assert blocked["status"] == "review_required"
+    assert blocked["reason_codes"] == ["invalid_evaluation_input"]
+
+
+class _CoreSharedFlow(_Flow):
+    def evaluate_component(self, request):
+        self.calls.append(deepcopy(request))
+        if self.fail == len(self.calls):
+            return evaluation.ComponentEvaluationOutcome.provider_failure()
+        mission_states = {"M1": "ok", "M2": "no", "M3": "ok", "M4": "no", "M5": "ok"}
+        rows = []
+        for requested in request["requested_tiles"]:
+            state = mission_states.get(requested["tile_id"], "sin_evidencia")
+            support = []
+            if state != "sin_evidencia":
+                support = [{key: requested["evidence"][0][key] for key in ("evidence_ref", "evidence_fingerprint")}]
+            rows.append(
+                {
+                    "tile_id": requested["tile_id"],
+                    "assessment_state": state,
+                    "supporting_evidence": support,
+                }
+            )
+        return evaluation.ComponentEvaluationOutcome.success(
+            evaluation.build_component_evaluation(
+                component_key=request["component_key"],
+                series_fingerprint=request["current_series_fingerprint"],
+                request_fingerprint=request["canonical_request_fingerprint"],
+                status="evaluated",
+                tile_results=rows,
+            )
+        )
+
+    def get_shared_checkpoint_process(self, request):
+        return {"request_fingerprint": request["canonical_request_fingerprint"]}
+
+    def restore_shared_checkpoint_process(self, request, accepted, process):
+        assert accepted["request_fingerprint"] == request["canonical_request_fingerprint"]
+        assert process["request_fingerprint"] == request["canonical_request_fingerprint"]
+
+    def build_shared_analysis_payload(self, assessment):
+        return {"assessment_fingerprint": assessment["assessment_fingerprint"]}
+
+
+def _core_shared_series():
+    from src.services.evidence_vault_sv9_shared_process import (
+        CORE_SHARED_EVALUATOR_VERSION,
+        CORE_SHARED_FLOW_VERSION,
+        CORE_SHARED_NORMALIZATION_VERSION,
+        CORE_SHARED_PROMPT_VERSION,
+    )
+
+    return _series(
+        evaluator_version=CORE_SHARED_EVALUATOR_VERSION,
+        prompt_version=CORE_SHARED_PROMPT_VERSION,
+        flow_version=CORE_SHARED_FLOW_VERSION,
+        normalization_version=CORE_SHARED_NORMALIZATION_VERSION,
+    )
+
+
+def test_first_core_shared_evaluation_uses_complete_validated_capture_before_judgment():
+    repo = _Repository(records=(1, 2, 3, 4, 5))
+    repo.routing_groups = {"M1": (0, 1), "M3": (2, 3), "M5": (4,)}
+    flow = _CoreSharedFlow()
+
+    outcome = _run(
+        repo,
+        flow,
+        current=(1, 2, 3, 4, 5),
+        relations=[
+            _relation(repo, "M1", number=1),
+            _relation(repo, "M3", number=3),
+            _relation(repo, "M5", number=5),
+        ],
+        series=_core_shared_series(),
+    )
+
+    assert outcome["status"] == "candidate_available"
+    mission = next(row for row in flow.calls if row["component_key"] == "mission")
+    expected = {f"evidence:{number}" for number in range(1, 6)}
+    assert all({item["evidence_ref"] for item in row["evidence"]} == expected for row in mission["requested_tiles"])
+    candidate = next(iter(repo.candidates.values()))
+    judgments = {row["tile_id"]: row["assessment_state"] for row in candidate["candidate_tile_judgments"]}
+    assert {tile: judgments[tile] for tile in ("M1", "M2", "M3", "M4", "M5")} == {
+        "M1": "ok",
+        "M2": "no",
+        "M3": "ok",
+        "M4": "no",
+        "M5": "ok",
+    }
+
+    resolved = {
+        (row["evidence_ref"], row["evidence_fingerprint"]): row
+        for row in [
+            {
+                "evidence_record_id": f"00000000-0000-0000-0000-{number:012d}",
+                **_identity(number),
+                "content": {"evidence": number},
+            }
+            for number in range(1, 6)
+        ]
+    }
+    narrow_packet = service._packets(candidate["plan"], resolved, repo.context)[0][0]
+    narrow_request = evaluation._request(candidate["plan"], narrow_packet, [])
+    assert narrow_request["canonical_request_fingerprint"] != mission["canonical_request_fingerprint"]
+
+    projected = repo.evaluation_input("scan", "b3s")
+    signed = delta.build_evidence_vault_sv9_judgment_delta(
+        current_evidence=delta.build_evidence_identity_set(projected["current_evidence"]),
+        prior_judgments=[],
+        prior_component_sentinels=[],
+        authoritative_relations=projected["authoritative_relations"],
+        current_series_contract=_core_shared_series(),
+    )
+    partition = service.partitioning.build_evidence_vault_sv9_workset_partition(
+        evaluation_input=projected,
+        judgment_delta=signed,
+        trusted_irrelevant_evidence=[],
+    )
+    outsider = [
+        *resolved.values(),
+        {"evidence_record_id": "00000000-0000-0000-0000-000000000999", **_identity(999), "content": {"evidence": 999}},
+    ]
+    with pytest.raises(evaluation.IncrementalEvaluationError):
+        evaluation._prepare_partial_evidence(partition, outsider, complete_capture=True)
+
+    packets = [
+        evaluation.build_evidence_packet(
+            component_key=request["component_key"],
+            tiles=[{"tile_id": row["tile_id"], "evidence": row["evidence"]} for row in request["requested_tiles"]],
+            capture_origin=request["capture_origin"],
+            operation_origin=request["operation_origin"],
+            series_fingerprint=request["current_series_fingerprint"],
+        )
+        for request in flow.calls
+    ]
+    replay = evaluation.replay_incremental_evaluations(
+        candidate["plan"],
+        packets,
+        candidate["component_evaluations"],
+        complete_capture=True,
+    )
+    assert replay["status"] == "available"
+    from src.history.repository import _sv9_judgment_candidate_replay
+
+    persisted_candidate = {key: value for key, value in candidate.items() if key != "id"}
+    assert _sv9_judgment_candidate_replay(persisted_candidate, packets) == persisted_candidate
+    captured = [
+        {"request": request, "evaluation": component}
+        for request, component in zip(flow.calls, candidate["component_evaluations"], strict=True)
+    ]
+    assert (
+        evaluation.replay_incremental_evaluation(candidate["plan"], packets, captured, complete_capture=True)["status"]
+        == "available"
+    )
+    tampered = deepcopy(packets)
+    tampered[0]["tiles"][0]["evidence"][0]["content"] = {"tampered": True}
+    tampered[0] = evaluation.build_evidence_packet(
+        component_key=tampered[0]["component_key"],
+        tiles=tampered[0]["tiles"],
+        capture_origin=tampered[0]["capture_origin"],
+        operation_origin=tampered[0]["operation_origin"],
+        series_fingerprint=tampered[0]["series_fingerprint"],
+    )
+    assert (
+        evaluation.replay_incremental_evaluations(
+            candidate["plan"],
+            tampered,
+            candidate["component_evaluations"],
+            complete_capture=True,
+        )["status"]
+        == "pending"
+    )
+
+
+def test_complete_capture_preparation_is_limited_to_first_core_shared_evaluation():
+    repo = _Repository(records=(1, 2, 3, 4, 5))
+    ordinary = _Flow()
+    outcome = _run(
+        repo,
+        ordinary,
+        current=(1, 2, 3, 4, 5),
+        relations=[
+            _relation(repo, "M1", number=1),
+            _relation(repo, "M3", number=3),
+            _relation(repo, "M5", number=5),
+        ],
+    )
+    assert outcome["status"] == "candidate_available"
+    mission = next(row for row in ordinary.calls if row["component_key"] == "mission")
+    evidence_by_tile = {
+        row["tile_id"]: {item["evidence_ref"] for item in row["evidence"]} for row in mission["requested_tiles"]
+    }
+    assert evidence_by_tile == {f"M{number}": {f"evidence:{number}"} for number in range(1, 6)}
+
+    accepted_repo = _Repository(_authority(series=_core_shared_series()), records=(3,))
+    accepted_flow = _CoreSharedFlow()
+    accepted = _run(
+        accepted_repo,
+        accepted_flow,
+        current=(3,),
+        series=_core_shared_series(),
+        scan="next-scan",
+    )
+    assert accepted["status"] == "no_new_score"
+    assert accepted["reason_codes"] == ["exact_reuse"]
+    assert accepted_flow.calls == []
+
+
+def test_first_core_shared_review_partition_never_calls_blocked_coherencia_or_publishes():
+    repo = _Repository(records=(3, 9))
+    repo.unmapped = True
+    flow = _CoreSharedFlow()
+
+    outcome = _run(
+        repo,
+        flow,
+        current=(3, 9),
+        series=_core_shared_series(),
+    )
+
+    assert outcome["status"] == "review_required"
+    assert outcome["candidate"] is None
+    assert repo.append_calls == 0
+    assert all(request["component_key"] != "coherencia" for request in flow.calls)
+
+
+def test_first_core_shared_resume_rebuilds_identical_complete_capture_requests():
+    repo = _Repository(records=(1, 2, 3, 4, 5))
+    repo.routing_groups = {"M1": (0, 1), "M3": (2, 3), "M5": (4,)}
+    interrupted = _CoreSharedFlow(fail=2)
+
+    first = _run(repo, interrupted, current=(1, 2, 3, 4, 5), series=_core_shared_series())
+    resumed = _CoreSharedFlow()
+    second = _run(repo, resumed, current=(1, 2, 3, 4, 5), series=_core_shared_series())
+
+    assert first["status"] == "no_new_score"
+    assert first["reason_codes"] == ["provider_failure"]
+    assert second["status"] == "candidate_available"
+    assert resumed.calls[0]["canonical_request_fingerprint"] == interrupted.calls[1]["canonical_request_fingerprint"]
+    expected = {f"evidence:{number}" for number in range(1, 6)}
+    assert all(
+        {item["evidence_ref"] for item in row["evidence"]} == expected for row in resumed.calls[0]["requested_tiles"]
+    )

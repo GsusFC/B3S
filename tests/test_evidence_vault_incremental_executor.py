@@ -42,9 +42,9 @@ class ExecutorLLM:
                 ]
             }
         assert kwargs["schema_name"] == "evidence_tile_relation_proposals"
-        self.relation_payloads.append(json.loads(user.split(":\n", 1)[1]))
-        marker = '"evidence_fingerprint": "'
-        fingerprint = user.split(marker, 1)[1].split('"', 1)[0]
+        payload = json.loads(user.split(":\n", 1)[1])
+        self.relation_payloads.append(payload)
+        fingerprints = [row["evidence_fingerprint"] for row in payload]
         return {
             "relations": [
                 {
@@ -54,7 +54,15 @@ class ExecutorLLM:
                     "literal_quote": "help teams ship better products",
                     "rationale": "This is an explicit organizational contribution.",
                 }
-            ]
+                for fingerprint in fingerprints
+            ],
+            "analysis": [
+                {
+                    "evidence_fingerprint": fingerprint,
+                    "decision": "supported",
+                }
+                for fingerprint in fingerprints
+            ],
         }
 
 
@@ -78,6 +86,21 @@ class FailingRelationLLM(ExecutorLLM):
             if self.relation_calls == self.fail_on_relation_call:
                 self.calls.append(kwargs["schema_name"])
                 raise RuntimeError("synthetic provider failure")
+        return super()._call_json(system, user, **kwargs)
+
+
+class SchemaFailureLabelExecutorLLM(ExecutorLLM):
+    def _call_json(self, system, user, **kwargs):
+        if kwargs["schema_name"] == "sv9_flow_evidence_labeling":
+            self.calls.append(kwargs["schema_name"])
+            self.last_failure_reason = "schema_validation_error"
+            self.call_failures = [
+                {
+                    "reason": "schema_validation_error",
+                    "error": "$.labels[0].relevant_blocks: expected array",
+                }
+            ]
+            return {}
         return super()._call_json(system, user, **kwargs)
 
 
@@ -739,6 +762,31 @@ def test_late_provider_failure_leaves_retryable_operation_and_retry_is_determini
     validate_vault_operation_result(result)
 
 
+def test_label_schema_failure_reaches_retryable_last_error_without_candidate() -> None:
+    rows = [_row()]
+    plan = _baseline_plan(rows)
+    repository = MemoryRepository(plan=plan, rows=rows)
+
+    with pytest.raises(RuntimeError, match="schema_path=\\$\\.labels\\[0\\]\\.relevant_blocks"):
+        execute_vault_operation_plan(
+            repository=repository,
+            source_scan_id="scan-1",
+            worker_id="worker-a",
+            llm=SchemaFailureLabelExecutorLLM(),
+        )
+
+    assert repository.operation["status"] == "failed_retryable"
+    assert repository.operation["result_payload"] is None
+    assert repository.operation["result_fingerprint"] is None
+    assert repository.source_packets == []
+    assert repository.operational_packets == []
+    assert repository.failures == [
+        "EvidenceVaultIncrementalExecutorError: selected evidence labeling did not cover the eligible workset: "
+        "evidence_labeling_provider_failed:schema_validation_error:"
+        "schema_path=$.labels[0].relevant_blocks;schema_category=expected_type"
+    ]
+
+
 class BroadLabelExecutorLLM(ExecutorLLM):
     def _call_json(self, system, user, **kwargs):
         if kwargs["schema_name"] == "sv9_flow_evidence_labeling":
@@ -768,8 +816,18 @@ class BroadLabelExecutorLLM(ExecutorLLM):
                 ]
             }
         self.calls.append(kwargs["schema_name"])
-        self.relation_payloads.append(json.loads(user.split(":\n", 1)[1]))
-        return {"relations": []}
+        payload = json.loads(user.split(":\n", 1)[1])
+        self.relation_payloads.append(payload)
+        return {
+            "relations": [],
+            "analysis": [
+                {
+                    "evidence_fingerprint": row["evidence_fingerprint"],
+                    "decision": "analyzed_without_sufficient_support",
+                }
+                for row in payload
+            ],
+        }
 
 
 def test_baseline_caps_broad_semantic_shortlists_with_audit() -> None:

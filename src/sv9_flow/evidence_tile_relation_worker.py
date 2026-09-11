@@ -1,7 +1,8 @@
 """Narrow LLM worker for pending evidence-to-tile relation proposals.
 
-The model may propose semantic relations only. It never emits identities,
-review state, authority, tile state, score, or absence claims.
+The model may propose semantic relations and explicit per-evidence processing
+decisions only. It never emits identities, review state, authority, tile state,
+score, or absence claims.
 """
 
 from __future__ import annotations
@@ -17,12 +18,18 @@ EVIDENCE_TILE_RELATION_LEGACY_PROPOSAL_VERSION = (
     "evidence-tile-relation-proposal-v2"
 )
 EVIDENCE_TILE_RELATION_PROPOSAL_VERSION = (
-    "evidence-tile-relation-proposal-v3"
+    "evidence-tile-relation-proposal-v4"
 )
 EVIDENCE_TILE_RELATION_POLICY_VERSION = "evidence-tile-relation-policy-v3"
 _ALLOWED_POLARITIES = {"supports", "contradicts"}
 _MAX_RELATIONS_PER_CALL = 120
 _MAX_QUOTE_CHARS = 320
+_ANALYSIS_STATES = {
+    "analyzed_without_sufficient_support",
+    "supported",
+    "inconclusive",
+}
+_ANALYSIS_RANK = {"inconclusive": 0, "analyzed_without_sufficient_support": 1, "supported": 2}
 
 
 class EvidenceTileRelationProposalError(ValueError):
@@ -43,6 +50,7 @@ def propose_evidence_tile_relations(
     shortlist = _tile_shortlists(tile_shortlists, evidence_by_fingerprint=evidence)
     relations: list[dict[str, str]] = []
     discarded: list[dict[str, str]] = []
+    analysis_states: dict[str, str] = {}
     seen: set[tuple[str, str, str]] = set()
     for batch_evidence, batch_shortlist in _proposal_batches(evidence, shortlist):
         raw = llm._call_json(
@@ -56,6 +64,7 @@ def propose_evidence_tile_relations(
         if (
             not isinstance(raw, Mapping)
             or not isinstance(raw.get("relations"), list)
+            or not isinstance(raw.get("analysis"), list)
             or len(raw["relations"]) > _MAX_RELATIONS_PER_CALL
         ):
             raise EvidenceTileRelationProposalError(
@@ -67,6 +76,36 @@ def propose_evidence_tile_relations(
             shortlist=batch_shortlist,
         )
         discarded.extend(rejected)
+        batch_states = _validate_analysis(raw["analysis"], batch_evidence)
+        batch_supported = {row["evidence_fingerprint"] for row in accepted}
+        rejected_fingerprints = {
+            str(raw_relation.get("evidence_fingerprint"))
+            for raw_relation in raw["relations"]
+            if isinstance(raw_relation, Mapping)
+            and _submitted_fingerprint(raw_relation)
+            in {row["submitted_relation_fingerprint"] for row in rejected}
+        }
+        for fingerprint, state in batch_states.items():
+            if fingerprint in batch_supported:
+                if state != "supported":
+                    raise EvidenceTileRelationProposalError(
+                        "supported relation requires a supported analysis decision"
+                    )
+                effective = "supported"
+            elif fingerprint in rejected_fingerprints:
+                effective = "inconclusive"
+            elif state == "supported":
+                # A model decision cannot manufacture support without a
+                # relation that passed the deterministic validator.
+                effective = "inconclusive"
+            else:
+                effective = state
+            previous = analysis_states.get(fingerprint)
+            analysis_states[fingerprint] = (
+                effective
+                if previous is None or _ANALYSIS_RANK[effective] < _ANALYSIS_RANK[previous]
+                else previous
+            )
         for relation in accepted:
             submitted = relation.pop("_submitted_relation_fingerprint")
             key = tuple(relation[field] for field in (
@@ -88,6 +127,7 @@ def propose_evidence_tile_relations(
         "discarded_relations": sorted(discarded, key=lambda row: (
             row["submitted_relation_fingerprint"], row["reason"]
         )),
+        "analysis_states": dict(sorted(analysis_states.items())),
     }
 
 
@@ -327,6 +367,27 @@ def _submitted_fingerprint(raw: Any) -> str:
     return hashlib.sha256(rendered).hexdigest()
 
 
+def _validate_analysis(
+    rows: Any, evidence_by_fingerprint: Mapping[str, Mapping[str, Any]]
+) -> dict[str, str]:
+    if not isinstance(rows, list):
+        raise EvidenceTileRelationProposalError("analysis decisions are required")
+    result: dict[str, str] = {}
+    for raw in rows:
+        if not isinstance(raw, Mapping) or set(raw) != {"evidence_fingerprint", "decision"}:
+            raise EvidenceTileRelationProposalError("analysis decision fields are invalid")
+        fingerprint = _sha256(raw.get("evidence_fingerprint"), field="analysis evidence fingerprint")
+        decision = raw.get("decision")
+        if fingerprint not in evidence_by_fingerprint or decision not in _ANALYSIS_STATES:
+            raise EvidenceTileRelationProposalError("analysis decision is invalid")
+        if fingerprint in result:
+            raise EvidenceTileRelationProposalError("duplicate analysis decision")
+        result[fingerprint] = str(decision)
+    if set(result) != set(evidence_by_fingerprint):
+        raise EvidenceTileRelationProposalError("analysis decisions do not cover the batch")
+    return result
+
+
 def _system_prompt() -> str:
     return (
         "You propose pending evidence-to-rubric relations for Brand3. "
@@ -336,8 +397,11 @@ def _system_prompt() -> str:
         "verbatim substring copied exactly from one supplied evidence passage, "
         "including Markdown punctuation and capitalization; never join fragments, "
         "shorten with ellipses, strip formatting, or paraphrase. If no supplied "
-        "continuous quote works, omit the relation. Omit "
-        "uncertainty. Never infer absence, never score, and never grant authority."
+        "continuous quote works, omit the relation. For every supplied evidence "
+        "fingerprint return exactly one analysis decision: supported only with a "
+        "valid relation; analyzed_without_sufficient_support only when processing "
+        "completed but no sufficient relation exists; otherwise inconclusive. "
+        "Never infer absence, never score, and never grant authority."
     )
 
 
@@ -361,6 +425,18 @@ def _schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
+            "analysis": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "evidence_fingerprint": {"type": "string"},
+                        "decision": {"type": "string", "enum": sorted(_ANALYSIS_STATES)},
+                    },
+                    "required": ["evidence_fingerprint", "decision"],
+                },
+            },
             "relations": {
                 "type": "array",
                 "items": {
@@ -386,7 +462,7 @@ def _schema() -> dict[str, Any]:
                 },
             }
         },
-        "required": ["relations"],
+        "required": ["analysis", "relations"],
     }
 
 

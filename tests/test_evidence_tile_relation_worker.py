@@ -16,7 +16,30 @@ class RelationLLM:
 
     def _call_json(self, system, user, **kwargs):
         self.calls.append((system, user, kwargs))
-        return {"relations": self.relations}
+        return {
+            "relations": self.relations,
+            "analysis": [
+                {
+                    "evidence_fingerprint": "a" * 64,
+                    "decision": "supported",
+                }
+            ],
+        }
+
+
+class DecisionLLM(RelationLLM):
+    def __init__(self, relations, decision, *, omit_analysis=False):
+        super().__init__(relations)
+        self.decision = decision
+        self.omit_analysis = omit_analysis
+
+    def _call_json(self, system, user, **kwargs):
+        payload = super()._call_json(system, user, **kwargs)
+        if self.omit_analysis:
+            payload.pop("analysis")
+        else:
+            payload["analysis"][0]["decision"] = self.decision
+        return payload
 
 
 def _evidence():
@@ -139,3 +162,37 @@ def test_relation_worker_rejects_oversized_model_payload() -> None:
             tile_shortlists=_shortlist(),
             llm=RelationLLM([relation] * 121),
         )
+
+
+def test_relation_worker_requires_explicit_analysis_decision() -> None:
+    with pytest.raises(EvidenceTileRelationProposalError, match="invalid payload"):
+        propose_evidence_tile_relations(
+            evidence_rows=_evidence(),
+            tile_shortlists=_shortlist(),
+            llm=DecisionLLM([], "inconclusive", omit_analysis=True),
+        )
+
+
+def test_rejected_relation_cannot_complete_evidence_without_support() -> None:
+    relation = {
+        "evidence_fingerprint": "a" * 64,
+        "tile_id": "M1",
+        "polarity": "supports",
+        "literal_quote": "invented quote",
+        "rationale": "Not literal.",
+    }
+    result = propose_evidence_tile_relations(
+        evidence_rows=_evidence(),
+        tile_shortlists=_shortlist(),
+        llm=DecisionLLM([relation], "analyzed_without_sufficient_support"),
+    )
+    assert result["analysis_states"] == {"a" * 64: "inconclusive"}
+
+
+def test_supported_decision_without_valid_relation_is_inconclusive() -> None:
+    result = propose_evidence_tile_relations(
+        evidence_rows=_evidence(),
+        tile_shortlists=_shortlist(),
+        llm=DecisionLLM([], "supported"),
+    )
+    assert result["analysis_states"] == {"a" * 64: "inconclusive"}

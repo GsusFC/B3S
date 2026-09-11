@@ -18,11 +18,12 @@ def _uuid(number): return f"00000000-0000-0000-0000-{number:012d}"
 
 class _ApplicationRepository(_Repository):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs); self.context = {"capture_origin": {"capture_id": _uuid(9), "capture_fingerprint": _hash(9)}, "operation_origin": {"operation_id": _uuid(10), "operation_fingerprint": _hash(10)}}; self.event, self.candidate, self.authority_calls, self.interleave, self.appear = 500, 400, 0, 0, None; self.adopt_failure = self.corrupt_after_adopt = self.authority_failure = self._corrupt = False; self.witness_seed = 300; self.adopt_error = None; self.authority_responses = []; self.reopen_partitions = []
+        super().__init__(*args, **kwargs); self.context = {"capture_origin": {"capture_id": _uuid(9), "capture_fingerprint": _hash(9)}, "operation_origin": {"operation_id": _uuid(10), "operation_fingerprint": _hash(10)}}; self.event, self.candidate, self.authority_calls, self.interleave, self.appear = 500, 400, 0, 0, None; self.adopt_failure = self.corrupt_after_adopt = self.authority_failure = self._corrupt = False; self.witness_seed = 300; self.adopt_error = None; self.authority_responses = []; self.reopen_partitions = []; self.records_by_scan = {}
     def load_evidence_vault_sv9_authoritative_relation_facts(self, scan, *, workspace_slug="b3s"):
+        records = self.records_by_scan.setdefault(scan, tuple(self.records))
         source = {"workspace_id": _uuid(1), "brand_id": _uuid(2), "scan_run_id": _uuid(3), "source_scan_id": scan, "workspace_slug": workspace_slug, "canonical_domain": "example.test", "capture_id": self.context["capture_origin"]["capture_id"], "capture_fingerprint": self.context["capture_origin"]["capture_fingerprint"], "operation_plan_id": self.context["operation_origin"]["operation_id"], "operation_fingerprint": self.context["operation_origin"]["operation_fingerprint"], "operation_status": "completed"}
         evidence, basis = [], []
-        for number in self.records:
+        for number in records:
             evidence_id, source_identity_id = _hash(100 + number), _hash(200 + number)
             evidence.append(source | {"evidence_record_id": _uuid(number), "evidence_ref": f"evidence:{number}", "evidence_fingerprint": _hash(number), "evidence_id": evidence_id, "source_identity_id": source_identity_id})
             basis.append({"relation_id": _hash(300 + number), "evidence_id": evidence_id, "source_identity_id": source_identity_id, "polarity": "supports"})

@@ -7,12 +7,151 @@ import pytest
 
 from src.history import repository as history
 from src.services import evidence_vault_sv9_authority_application as application
+from src.services import evidence_vault_sv9_shared_process as shared_process
 from src.services.evidence_vault_sv9_authoritative_relations import project_evidence_vault_sv9_evaluation_input
 from src.services.evidence_vault_sv9_evaluation_checkpoint import build_evidence_vault_sv9_evaluation_checkpoint
+from src.sv9 import judgment_memory
+from tests.test_evidence_vault_sv9_authority_evaluation import _Flow
 from tests.test_evidence_vault_sv9_evaluation_checkpoint import _build, _build_not_detected, _progress, _sha
 from tests.test_evidence_vault_sv9_judgment_candidates_postgres import _AuthorityFlow, _operational
 from tests.test_evidence_vault_scan_orchestration_postgres import _reset_repository
 from tests.test_sv9_judgment_memory import _series
+def _shared_series():
+    return shared_process.build_core_shared_series_contract(
+        interpretation_model="interpretation-fake",
+        labeling_model="labeling-fake",
+        adjudicator_model="adjudicator-fake",
+        evaluator_model="evaluator-fake",
+        reasoning_model="reasoning-fake",
+        editorial_model="editorial-fake",
+        gate_authority="veto_only",
+        editorial_enabled=True,
+    )
+
+
+class _CheckpointSharedFlow(_Flow):
+    def __init__(self, source_scan_id):
+        super().__init__()
+        self.shared_analysis = {}
+        self.source_scan_id = source_scan_id
+
+    @staticmethod
+    def _core_candidate():
+        from src.sv9_flow.contracts import (
+            BrandEvidencePack,
+            BrandInterpretation,
+            Sv9FlowCandidate,
+        )
+
+        return Sv9FlowCandidate(
+            evidence_pack=BrandEvidencePack(
+                brand_name="Example",
+                url="https://example.com",
+            ),
+            interpretation=BrandInterpretation(
+                brand_name="Example",
+                url="https://example.com",
+                blocks={},
+                evidence_refs={},
+            ),
+        ).to_dict()
+
+    def get_shared_checkpoint_process(self, request):
+        from scripts.sv9_flow_sv9_shadow_eval import (
+            SV9_FLOW_SV9_SHADOW_EVAL_VERSION,
+            _llm_usage_summary,
+        )
+
+        usage = _llm_usage_summary(None)
+        return {
+            "schema_version": "evidence-vault-sv9-shared-checkpoint-process-v1",
+            "binding": {
+                "source_scan_id": self.source_scan_id,
+                "canonical_plan_fingerprint": request["plan_fingerprint"],
+                "canonical_request_fingerprint": request["canonical_request_fingerprint"],
+                "current_series_fingerprint": request["current_series_fingerprint"],
+                "candidate_series_fingerprint": request["candidate_series_fingerprint"],
+                "component_key": request["component_key"],
+                "capture_origin": deepcopy(request["capture_origin"]),
+                "operation_origin": deepcopy(request["operation_origin"]),
+                "snapshot_fingerprint": judgment_memory.canonical_fingerprint(
+                    "evidence-vault-sv9-shared-checkpoint-snapshot-v1",
+                    {
+                        "source_scan_id": self.source_scan_id,
+                        "url": "https://example.com",
+                    },
+                ),
+            },
+            "flow_context": {
+                "candidate": self._core_candidate(),
+                "interpretation_debug": {},
+                "visual_evidence_packet": None,
+            },
+            "component_result": deepcopy(
+                self.shared_components[request["component_key"]]
+            ),
+            "llm_usage": {
+                "schema_version": f"{SV9_FLOW_SV9_SHADOW_EVAL_VERSION}.llm_usage",
+                "roles": {
+                    role: deepcopy(usage)
+                    for role in (
+                        "flow_labeling",
+                        "flow_interpretation",
+                        "sv9_evaluator",
+                        "sv9_reasoning",
+                    )
+                },
+                "totals": {
+                    "cache_hits": 0,
+                    "cache_misses": 0,
+                    "cache_writes": 0,
+                    "provider_calls": 0,
+                    "usage_metadata_available": False,
+                },
+            },
+        }
+
+    def build_shared_analysis_payload(self, assessment):
+        from scripts.sv9_flow_sv9_shadow_eval import (
+            SV9_FLOW_SV9_SHADOW_EVAL_VERSION,
+            _result_summary,
+        )
+        from src.services.evidence_vault_sv9_shared_process import (
+            _component_from_shared_analysis_row,
+        )
+        from src.sv9.service import _aggregate_sv9_analysis
+
+        candidate = self._core_candidate()
+        result = _aggregate_sv9_analysis(
+            {
+                key: _component_from_shared_analysis_row(key, value)
+                for key, value in self.shared_components.items()
+            },
+            brand_name="Example",
+            url="https://example.com",
+            source_run_id=self.source_scan_id,
+            evaluator_llm=None,
+        )
+        assert result.assessment["sv9_score"] == assessment["sv9_score"]
+        return {
+            "schema_version": "evidence-vault-sv9-shared-analysis-payload-v1",
+            "analysis_payload": {
+                "schema_version": SV9_FLOW_SV9_SHADOW_EVAL_VERSION,
+                "source_run_id": self.source_scan_id,
+                "brand_name": "Example",
+                "url": "https://example.com",
+                "flow": {"candidate": deepcopy(candidate)},
+                "sv9": _result_summary(result.to_dict()) | {"result": result.to_dict()},
+            },
+            "evaluation_components": deepcopy(self.shared_components),
+            "component_provenance": {
+                key: deepcopy(candidate)
+                for key in sorted(self.shared_components)
+                if key != "coherencia"
+            },
+        }
+
+
 def _checkpoint(repository, scan, snapshot, request="checkpoint"):
     value = project_evidence_vault_sv9_evaluation_input(repository=repository, source_scan_id=scan); assert value["status"] == "available"
     progress = _progress(value, request)
@@ -83,7 +222,10 @@ def _checkpoint_readback_repository(monkeypatch, *, rows, records, checkpoint_ro
 
 def test_checkpoint_migration_contract_is_forward_only_and_non_authoritative():
     sql = Path("src/history/migrations/034_evidence_vault_sv9_evaluation_checkpoints.sql").read_text(); columns = sql.split("checkpoint_payload", 1)[0]
-    assert history._migration_files()[-1][0] == "035_evidence_vault_sv9_empty_relation_witness.sql"
+    assert [name for name, _sql in history._migration_files()][-2:] == [
+        "035_evidence_vault_sv9_empty_relation_witness.sql",
+        "036_evidence_vault_sv9_shared_analysis_snapshots.sql",
+    ]
     assert all(value in sql for value in ("PRIMARY KEY (checkpoint_id, evidence_record_id)", "FOREIGN KEY (capture_id, evidence_record_id, evidence_fingerprint)", "BEFORE UPDATE OR DELETE OR TRUNCATE", "GRANT SELECT, INSERT", "authority IS FALSE", "runtime_effect = 'checkpoint_only'", "score_state = 'unavailable'", "REVOKE ALL"))
     assert all(value not in columns for value in ("assessment", "adoptable", "publishable", "complete_record")) and "$.**" in sql
 
@@ -223,7 +365,7 @@ def test_checkpoint_ledger_round_trips_fences_mutation_and_bootstrap_race():
             with pytest.raises(psycopg.Error): conn.execute("INSERT INTO b3s_history.evidence_vault_sv9_evaluation_checkpoint_evidence_bindings (checkpoint_id, workspace_id, brand_id, scan_run_id, capture_id, operation_plan_id, evidence_record_id, evidence_ref, evidence_fingerprint) VALUES (%s, %s, %s, %s, %s, %s, %s, 'wrong', %s)", (stored["id"], context["workspace_id"], context["brand_id"], context["scan_run_id"], capture, context["operation_plan_id"], record, fingerprint))
         for statement in ("UPDATE b3s_history.evidence_vault_sv9_evaluation_checkpoints SET evaluation_state = 'partial'", "DELETE FROM b3s_history.evidence_vault_sv9_evaluation_checkpoints", "TRUNCATE b3s_history.evidence_vault_sv9_evaluation_checkpoints"):
             with pytest.raises(psycopg.Error): conn.execute(statement)
-    applied = application.run_evidence_vault_sv9_authority_application(repository=repository, flow=_AuthorityFlow(), domain_or_url="example.com", source_scan_id=scan, current_series_contract=_series())
+    applied = application.run_evidence_vault_sv9_authority_application(repository=repository, flow=_CheckpointSharedFlow(scan), domain_or_url="example.com", source_scan_id=scan, current_series_contract=_shared_series())
     assert applied["status"] == "authority_established"
     authority = repository.get_evidence_vault_sv9_judgment_authority("example.com"); candidate, active, head = authority["accepted_candidate"], authority["active_authority_event"], authority["current_head"]
     snapshot = {"state": "accepted_authority", "accepted_candidate_id": candidate["id"], "active_event_id": active["event_id"], "current_head_event_fingerprint": head["event_fingerprint"], "candidate_complete_record_fingerprint": candidate["complete_record_fingerprint"], "canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"], "current_series_fingerprint": candidate["current_series_fingerprint"]}

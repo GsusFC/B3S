@@ -11,6 +11,7 @@ the editorial layer.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from src.config import (
@@ -152,57 +153,14 @@ def run_sv9_from_audit_snapshot(
     else:
         reasoning = _reasoning_llm()
 
-    # get_run_snapshot nests run metadata under "run"; manual snapshots may
-    # carry it at the top level. Accept both shapes.
-    run_meta = snapshot.get("run") if isinstance(snapshot.get("run"), dict) else {}
-    if sv9_flow_candidate is not None:
-        tldr = detection_blocks_from_flow_candidate(sv9_flow_candidate)
-        brand_name = str(
-            sv9_flow_candidate.evidence_pack.brand_name
-            or run_meta.get("brand_name")
-            or snapshot.get("brand_name")
-            or ""
-        )
-        url = str(
-            sv9_flow_candidate.evidence_pack.url
-            or run_meta.get("url")
-            or snapshot.get("url")
-            or ""
-        )
-        source_run_id = _to_int(
-            source_run_id
-            if source_run_id is not None
-            else run_meta.get("id") or snapshot.get("id")
-        )
-        extra_signals = merge_signals(
-            flow_candidate_extra_signals(sv9_flow_candidate), extra_signals
-        )
-    else:
-        if magnetism_result is None:
-            magnetism_result = MagnetismExtractor(llm=base_llm).extract_from_audit_snapshot(snapshot)
-        tldr = magnetism_result.get("tldr_brand3") or {}
-        brand_name = str(
-            magnetism_result.get("brand_name")
-            or run_meta.get("brand_name")
-            or snapshot.get("brand_name")
-            or ""
-        )
-        url = str(
-            magnetism_result.get("source_url")
-            or magnetism_result.get("url")
-            or run_meta.get("url")
-            or snapshot.get("url")
-            or ""
-        )
-        source_run_id = _to_int(
-            source_run_id
-            if source_run_id is not None
-            else magnetism_result.get("source_run_id")
-            or run_meta.get("id")
-            or snapshot.get("id")
-        )
-
-    signals = merge_signals(collect_signals(snapshot), extra_signals)
+    tldr, signals, brand_name, url, source_run_id = _prepare_sv9_analysis_inputs(
+        snapshot,
+        llm=base_llm,
+        magnetism_result=magnetism_result,
+        sv9_flow_candidate=sv9_flow_candidate,
+        source_run_id=source_run_id,
+        extra_signals=extra_signals,
+    )
     components = evaluate_snapshot_components(
         tldr=tldr,
         signals=signals,
@@ -211,6 +169,106 @@ def run_sv9_from_audit_snapshot(
         llm=base_llm,
         reasoning_llm=reasoning,
     )
+    return _aggregate_sv9_analysis(
+        components,
+        brand_name=brand_name,
+        url=url,
+        source_run_id=source_run_id,
+        evaluator_llm=base_llm,
+    )
+
+
+def _prepare_sv9_analysis_inputs(
+    snapshot: Mapping[str, Any],
+    *,
+    llm: Any,
+    magnetism_result: Mapping[str, Any] | None = None,
+    sv9_flow_candidate: Sv9FlowCandidate | None = None,
+    source_run_id: Any = None,
+    extra_signals: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]], str, str, int | None]:
+    """Prepare the canonical SV9 evaluator inputs for legacy or Flow ingress.
+
+    This private seam is intentionally shared with Vault's selective adapter so
+    both paths use the same detection projection and signal merge. It does not
+    evaluate, aggregate, persist, or change authority.
+    """
+
+    if magnetism_result is not None and sv9_flow_candidate is not None:
+        raise ValueError(
+            "SV9 analysis inputs received both magnetism_result and "
+            "sv9_flow_candidate; pass exactly one detection input."
+        )
+    snapshot_dict = dict(snapshot)
+    run_meta = (
+        snapshot_dict.get("run")
+        if isinstance(snapshot_dict.get("run"), dict)
+        else {}
+    )
+    if sv9_flow_candidate is not None:
+        tldr = detection_blocks_from_flow_candidate(sv9_flow_candidate)
+        brand_name = str(
+            sv9_flow_candidate.evidence_pack.brand_name
+            or run_meta.get("brand_name")
+            or snapshot_dict.get("brand_name")
+            or ""
+        )
+        url = str(
+            sv9_flow_candidate.evidence_pack.url
+            or run_meta.get("url")
+            or snapshot_dict.get("url")
+            or ""
+        )
+        resolved_source_run_id = _to_int(
+            source_run_id
+            if source_run_id is not None
+            else run_meta.get("id") or snapshot_dict.get("id")
+        )
+        merged_extra = merge_signals(
+            flow_candidate_extra_signals(sv9_flow_candidate), extra_signals
+        )
+    else:
+        if magnetism_result is None:
+            magnetism_result = MagnetismExtractor(
+                llm=llm
+            ).extract_from_audit_snapshot(snapshot_dict)
+        tldr = magnetism_result.get("tldr_brand3") or {}
+        brand_name = str(
+            magnetism_result.get("brand_name")
+            or run_meta.get("brand_name")
+            or snapshot_dict.get("brand_name")
+            or ""
+        )
+        url = str(
+            magnetism_result.get("source_url")
+            or magnetism_result.get("url")
+            or run_meta.get("url")
+            or snapshot_dict.get("url")
+            or ""
+        )
+        resolved_source_run_id = _to_int(
+            source_run_id
+            if source_run_id is not None
+            else magnetism_result.get("source_run_id")
+            or run_meta.get("id")
+            or snapshot_dict.get("id")
+        )
+        merged_extra = extra_signals
+
+    signals = merge_signals(collect_signals(snapshot_dict), merged_extra)
+    return dict(tldr), signals, brand_name, url, resolved_source_run_id
+
+
+def _aggregate_sv9_analysis(
+    components: Mapping[str, Any],
+    *,
+    brand_name: str,
+    url: str,
+    source_run_id: Any,
+    evaluator_llm: Any,
+) -> Sv9ScanResult:
+    """Apply the canonical deterministic SV9 aggregation and model label."""
+
     result = aggregate(
         components,
         brand_name=brand_name,
@@ -219,7 +277,7 @@ def run_sv9_from_audit_snapshot(
     )
     # Scan-level label records the base tier; per-component evaluation_model
     # captures the Flash/reasoning routing for regression measurement.
-    result.evaluator_model = getattr(base_llm, "model", None)
+    result.evaluator_model = getattr(evaluator_llm, "model", None)
     return result
 
 

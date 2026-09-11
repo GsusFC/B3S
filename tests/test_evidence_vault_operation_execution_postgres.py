@@ -38,13 +38,19 @@ class ExecutorLLM:
             } for row in payload["records"]]}
         marker = '"evidence_fingerprint": "'
         fingerprint = user.split(marker, 1)[1].split('"', 1)[0]
-        return {"relations": [{
-            "evidence_fingerprint": fingerprint,
-            "tile_id": "M1",
-            "polarity": "supports",
-            "literal_quote": "help teams ship better products",
-            "rationale": "Explicit contribution statement.",
-        }]}
+        return {
+            "relations": [{
+                "evidence_fingerprint": fingerprint,
+                "tile_id": "M1",
+                "polarity": "supports",
+                "literal_quote": "help teams ship better products",
+                "rationale": "Explicit contribution statement.",
+            }],
+            "analysis": [{
+                "evidence_fingerprint": fingerprint,
+                "decision": "supported",
+            }],
+        }
 
 
 class NoCallLLM:

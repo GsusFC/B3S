@@ -981,7 +981,7 @@ def test_vault_resume_run_branches_to_memory_projection_without_interpreter(
 
     captured: list[dict] = []
 
-    def fake_publish(_scan_id: str, report: dict) -> bool:
+    def fake_publish(_scan_id: str, report: dict, **_kwargs) -> bool:
         captured.append(report)
         return True
 
@@ -1104,7 +1104,7 @@ def test_vault_projection_cancellation_does_not_advance_report_phases(
     monkeypatch.setattr(
         scan_runner,
         "_publish_completed_report",
-        lambda _scan_id, report: published.append(report) or True,
+        lambda _scan_id, report, **_kwargs: published.append(report) or True,
     )
     from scripts import sv9_flow_sv9_shadow_eval as flow_eval
 
@@ -1474,7 +1474,7 @@ def test_vault_activation_failure_is_diagnostic_after_canonical_report(
     monkeypatch.setattr(
         scan_runner,
         "_publish_completed_report",
-        lambda _scan_id, report: published.append(report) or True,
+        lambda _scan_id, report, **_kwargs: published.append(report) or True,
     )
 
     original_activate = scan_runner._activate_vault_result_unless_cancelled
@@ -1594,7 +1594,7 @@ def test_fresh_vault_activation_projects_memory_without_second_interpreter(
     monkeypatch.setattr(
         scan_runner,
         "_publish_completed_report",
-        lambda _scan_id, report: captured.append(report) or True,
+        lambda _scan_id, report, **_kwargs: captured.append(report) or True,
     )
     monkeypatch.setattr(scan_runner, "_attach_evidence_stability", lambda value: value)
     monkeypatch.setattr(
@@ -1726,7 +1726,7 @@ def test_result_persisted_resume_materializes_before_projection(
     monkeypatch.setattr(
         scan_runner,
         "_publish_completed_report",
-        lambda _scan_id, report: published.append(report) or True,
+        lambda _scan_id, report, **_kwargs: published.append(report) or True,
     )
     try:
         scan_runner._run(scan_id, "https://example.com", "Example", False)
@@ -1879,7 +1879,7 @@ def test_llm_vault_operation_without_memory_score_publishes_canonical_flow_resul
     monkeypatch.setattr(
         scan_runner,
         "_publish_completed_report",
-        lambda _scan_id, report: published.append(report) or True,
+        lambda _scan_id, report, **_kwargs: published.append(report) or True,
     )
     monkeypatch.setattr(scan_runner, "_attach_evidence_stability", lambda value: value)
     try:
@@ -1958,7 +1958,7 @@ def test_completed_llm_resume_keeps_canonical_flow_independent_of_sidecar(
     monkeypatch.setattr(
         scan_runner,
         "_publish_completed_report",
-        lambda _scan_id, report: published.append(report) or True,
+        lambda _scan_id, report, **_kwargs: published.append(report) or True,
     )
     monkeypatch.setattr(scan_runner, "_attach_evidence_stability", lambda value: value)
     try:
@@ -1992,7 +1992,7 @@ def test_vault_run_fails_closed_without_persisted_capture(
 
     observed = []
 
-    def fake_publish(_scan_id: str, report: dict) -> bool:
+    def fake_publish(_scan_id: str, report: dict, **_kwargs) -> bool:
         observed.append(report)
         return True
 
