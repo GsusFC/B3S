@@ -99,55 +99,6 @@ def _patch_repository_projection_seams(monkeypatch, source):
     monkeypatch.setattr(history, "evaluate_scanner_semantic_authority", lambda **_kwargs: {"authority_profile_id": "scanner-semantic-v1", "authority_matrix_fingerprint": _sha("authority-matrix"), "authority_decision_fingerprint": _sha("authority-decision")})
     monkeypatch.setattr(history, "validate_authority_decision", lambda *_args, **_kwargs: None)
 
-def test_candidate_freshness_reuses_first_run_operational_witness_and_rejects_stale_authority(monkeypatch):
-    first_run_facts = _facts()
-    first_run_facts["authority"]["accepted"] = []
-    projection, _repository = _project(first_run_facts)
-    source = first_run_facts["source"]
-    capture_origin = {
-        "capture_id": source["capture_id"],
-        "capture_fingerprint": source["capture_fingerprint"],
-    }
-    operation_origin = {
-        "operation_id": source["operation_plan_id"],
-        "operation_fingerprint": source["operation_fingerprint"],
-    }
-    candidate = {
-        "schema_version": "evidence-vault-sv9-judgment-candidate-v2",
-        "authoritative_relation_witness": build_evidence_vault_sv9_authoritative_relation_witness(
-            source_scan_id=source["source_scan_id"],
-            projection=projection,
-            capture_origin=capture_origin,
-            operation_origin=operation_origin,
-        ),
-    }
-    context = {
-        "source_scan_id": source["source_scan_id"],
-        "capture_id": source["capture_id"],
-        "capture_fingerprint": source["capture_fingerprint"],
-        "operation_plan_id": source["operation_plan_id"],
-        "operation_fingerprint": source["operation_fingerprint"],
-    }
-    current_facts = first_run_facts
-    calls = []
-
-    def load_facts(_conn, _context, _workspace, *, for_evaluation_input=False):
-        calls.append(for_evaluation_input)
-        assert for_evaluation_input is True
-        return deepcopy(current_facts)
-
-    monkeypatch.setattr(history, "_sv9_judgment_authoritative_relation_facts", load_facts)
-    history._sv9_judgment_current_authoritative_relation_witness(
-        object(), candidate, context, "b3s"
-    )
-
-    current_facts = _facts()
-    with pytest.raises(history.EvidenceVaultSv9AuthoritativeRelationStaleWitnessError):
-        history._sv9_judgment_current_authoritative_relation_witness(
-            object(), candidate, context, "b3s"
-        )
-    assert calls == [True, True]
-
 
 def test_repository_projection_carries_empty_sin_evidencia_state_without_basis(monkeypatch):
     connection, context, memory, source = _repository_projection_inputs("sin_evidencia")
@@ -385,12 +336,10 @@ def test_evaluation_input_is_deterministic_and_rejects_unavailable_or_invalid_fa
 
 
 def test_evaluation_input_projects_capture_bound_non_authoritative_hints_without_authority_fingerprint_drift():
-    facts = _distinct_facts()
-    facts["evaluation_hint_seeds"] = [
-        _hint_seed(tile_id="M1", evidence_record_id=_id("second"))
-    ]
+    facts = _facts()
+    facts["evaluation_hint_seeds"] = [_hint_seed()]
     hinted = project_evidence_vault_sv9_evaluation_input(repository=_Repository(facts), source_scan_id="scan-1")
-    baseline_facts = _distinct_facts()
+    baseline_facts = _facts()
     baseline = project_evidence_vault_sv9_evaluation_input(repository=_Repository(baseline_facts), source_scan_id="scan-1")
 
     assert hinted["status"] == baseline["status"] == "available"
@@ -401,7 +350,7 @@ def test_evaluation_input_projects_capture_bound_non_authoritative_hints_without
         "capture_id", "capture_fingerprint", "authority", "runtime_effect", "hint_fingerprint",
     }
     assert hint["tile_id"] == "M1" and hint["component_key"] == "mission"
-    assert hint["evidence_record_id"] == _id("second")
+    assert hint["evidence_record_id"] == _id("record")
     assert hint["capture_id"] == hinted["source_identity"]["capture_id"]
     assert hint["capture_fingerprint"] == hinted["source_identity"]["capture_fingerprint"]
     assert hint["authority"] is False and hint["runtime_effect"] == "evaluation_routing_only"
@@ -412,24 +361,12 @@ def test_evaluation_input_projects_capture_bound_non_authoritative_hints_without
     assert hinted["evaluation_input_fingerprint"] != baseline["evaluation_input_fingerprint"]
 
 
-def test_evaluation_input_filters_redundant_hint_for_current_authoritative_tile():
-    facts = _facts()
-    facts["evaluation_hint_seeds"] = [_hint_seed()]
-
-    result = project_evidence_vault_sv9_evaluation_input(
-        repository=_Repository(facts), source_scan_id="scan-1"
-    )
-
-    assert result["status"] == "available"
-    assert result["non_authoritative_hints"] == []
-
-
 def test_evaluation_hint_seed_reordering_is_semantically_invariant_and_changes_are_signed():
     facts = _distinct_facts()
     first_record, second_record = facts["evidence"][0]["evidence_record_id"], facts["evidence"][1]["evidence_record_id"]
     facts["evaluation_hint_seeds"] = [
-        _hint_seed(label="second", tile_id="M1", evidence_record_id=second_record),
-        _hint_seed(label="first", tile_id="M2", evidence_record_id=first_record),
+        _hint_seed(label="second", tile_id="M2", evidence_record_id=second_record),
+        _hint_seed(label="first", tile_id="M1", evidence_record_id=first_record),
     ]
     first = project_evidence_vault_sv9_evaluation_input(repository=_Repository(facts), source_scan_id="scan-1")
     reordered = deepcopy(facts)
@@ -460,10 +397,8 @@ def test_evaluation_hint_seed_reordering_is_semantically_invariant_and_changes_a
     ],
 )
 def test_evaluation_input_validator_rejects_hint_tampering(mutate):
-    facts = _distinct_facts()
-    facts["evaluation_hint_seeds"] = [
-        _hint_seed(tile_id="M1", evidence_record_id=_id("second"))
-    ]
+    facts = _facts()
+    facts["evaluation_hint_seeds"] = [_hint_seed()]
     value = project_evidence_vault_sv9_evaluation_input(repository=_Repository(facts), source_scan_id="scan-1")
     tampered = deepcopy(value)
     mutate(tampered["non_authoritative_hints"][0])

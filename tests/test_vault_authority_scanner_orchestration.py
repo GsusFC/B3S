@@ -88,6 +88,7 @@ def test_authority_terminal_actions_and_completed_non_llm_resume_are_guarded(mon
     from src import config
     from src.services import evidence_vault_incremental_executor as executor, evidence_vault_sv9_authority_application as application, evidence_vault_sv9_authority_report as publication, evidence_vault_sv9_authoritative_relations as relations
     monkeypatch.setattr(config, "SV9_FLOW_MODEL", "test-model"); monkeypatch.setattr(executor, "execute_vault_operation_plan", lambda **_k: {"execution_status": "completed"})
+    monkeypatch.setattr(scan_runner, "_vault_core_shared_flow", lambda **_k: (object(), {"series": "shared"}))
     monkeypatch.setattr(relations, "project_evidence_vault_sv9_authoritative_relations", lambda **_k: pytest.fail("legacy relation projector called"))
     monkeypatch.setattr(relations, "project_evidence_vault_sv9_capture_current", lambda **_k: pytest.fail("legacy capture projector called"))
     for action in ("publish_current", "retain_source", "record_no_score"):
@@ -120,6 +121,7 @@ def test_authority_scanner_delegates_capture_partition_failure_to_application(mo
     scan_runner._SCAN_EVENTS[scan_id] = scan_runner.threading.Event()
     monkeypatch.setattr(scan_runner, "_execute_vault_operational_preparation", lambda **_kwargs: "p")
     monkeypatch.setattr(scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": True})
+    monkeypatch.setattr(scan_runner, "_vault_core_shared_flow", lambda **_kwargs: (object(), {"series": "shared"}))
     monkeypatch.setattr(relations, "project_evidence_vault_sv9_authoritative_relations", lambda **_kwargs: pytest.fail("legacy relation projector called"))
     monkeypatch.setattr(relations, "project_evidence_vault_sv9_capture_current", lambda **_kwargs: pytest.fail("legacy capture projector called"))
     calls = []
@@ -135,7 +137,7 @@ def test_authority_scanner_delegates_capture_partition_failure_to_application(mo
     )
     monkeypatch.setattr(scan_runner, "_compose_report", lambda identity, *_args: {"id": identity})
     monkeypatch.setattr(scan_runner, "_validate_report_sv9_assessment", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(scan_runner, "_publish_completed_report", lambda *_args: True)
+    monkeypatch.setattr(scan_runner, "_publish_completed_report", lambda *_args, **_kwargs: True)
     try:
         assert scan_runner._run_vault_sv9_authority_scanner(
             scan_id=scan_id,
@@ -884,6 +886,11 @@ def test_ordinary_publication_imports_frozen_evidence_without_overwriting_report
     payload.pop("flow", None)
     monkeypatch.setattr(application, "run_evidence_vault_sv9_authority_application", lambda **_kwargs: {})
     monkeypatch.setattr(
+        scan_runner,
+        "_vault_core_shared_flow",
+        lambda **_kwargs: (object(), {"series": "shared"}),
+    )
+    monkeypatch.setattr(
         publication,
         "project_vault_authority_publication",
         lambda *_args: {"action": action, "scanner_payload": payload},
@@ -935,7 +942,7 @@ def test_first_baseline_runtime_publishes_frozen_capture_and_validated_memory(mo
     from src.sv9 import incremental_evaluation as evaluation, incremental_flow_adapter
     from tests.test_evidence_vault_scan_orchestration import _Repository as CaptureRepository, _snapshot
     from tests.test_evidence_vault_sv9_authoritative_relations import _facts, _sha
-    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
+    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository, _series
 
     scan_id, url = "first-baseline-runtime", "https://example.com"
     capture_repository = CaptureRepository(memory=None, history=[])
@@ -998,6 +1005,11 @@ def test_first_baseline_runtime_publishes_frozen_capture_and_validated_memory(mo
     store = _file_report_store(monkeypatch, tmp_path)
     monkeypatch.setattr(store, "_postgres_repository", lambda: None)
     monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *_args, **_kwargs: Flow())
+    monkeypatch.setattr(
+        scan_runner,
+        "_vault_core_shared_flow",
+        lambda **_kwargs: (incremental_flow_adapter.FlowSv9StrictComponentAdapter(), _series()),
+    )
     monkeypatch.setattr(scan_runner, "_execute_vault_operational_preparation", lambda **_kwargs: source["operation_fingerprint"])
     monkeypatch.setattr(scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": True})
     monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda *_args: None)
@@ -1155,6 +1167,11 @@ def test_accepted_same_source_replay_publishes_without_changing_immutable_report
     source_capture = {key: binding[key] for key in ("source_scan_id", "observation_hash", "capture_hash")}
     flow = authority_tests._Flow()
     monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *_args, **_kwargs: flow)
+    monkeypatch.setattr(
+        scan_runner,
+        "_vault_core_shared_flow",
+        lambda **_kwargs: (flow, authority_tests._series()),
+    )
     monkeypatch.setattr(scan_runner, "_execute_vault_operational_preparation", lambda **_kwargs: "operation")
     monkeypatch.setattr(
         scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": False}

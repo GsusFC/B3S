@@ -16,7 +16,42 @@ class RelationLLM:
 
     def _call_json(self, system, user, **kwargs):
         self.calls.append((system, user, kwargs))
-        return {"relations": self.relations}
+        return {
+            "relations": self.relations,
+            "analysis": [
+                {
+                    "evidence_fingerprint": "a" * 64,
+                    "decision": "supported",
+                }
+            ],
+        }
+
+
+class DecisionLLM(RelationLLM):
+    def __init__(self, relations, decision, *, omit_analysis=False):
+        super().__init__(relations)
+        self.decision = decision
+        self.omit_analysis = omit_analysis
+
+    def _call_json(self, system, user, **kwargs):
+        payload = super()._call_json(system, user, **kwargs)
+        if self.omit_analysis:
+            payload.pop("analysis")
+        else:
+            payload["analysis"][0]["decision"] = self.decision
+        return payload
+
+
+class PassageLLM:
+    api_key = "test"
+
+    def __init__(self, payloads):
+        self.payloads = iter(payloads)
+        self.calls = []
+
+    def _call_json(self, system, user, **kwargs):
+        self.calls.append((system, user, kwargs))
+        return next(self.payloads)
 
 
 def _evidence():
@@ -139,3 +174,103 @@ def test_relation_worker_rejects_oversized_model_payload() -> None:
             tile_shortlists=_shortlist(),
             llm=RelationLLM([relation] * 121),
         )
+
+
+def test_relation_worker_requires_explicit_analysis_decision() -> None:
+    with pytest.raises(EvidenceTileRelationProposalError, match="invalid payload"):
+        propose_evidence_tile_relations(
+            evidence_rows=_evidence(),
+            tile_shortlists=_shortlist(),
+            llm=DecisionLLM([], "inconclusive", omit_analysis=True),
+        )
+
+
+def test_rejected_relation_cannot_complete_evidence_without_support() -> None:
+    relation = {
+        "evidence_fingerprint": "a" * 64,
+        "tile_id": "M1",
+        "polarity": "supports",
+        "literal_quote": "invented quote",
+        "rationale": "Not literal.",
+    }
+    result = propose_evidence_tile_relations(
+        evidence_rows=_evidence(),
+        tile_shortlists=_shortlist(),
+        llm=DecisionLLM([relation], "analyzed_without_sufficient_support"),
+    )
+    assert result["analysis_states"] == {"a" * 64: "inconclusive"}
+
+
+def test_supported_decision_without_valid_relation_is_inconclusive() -> None:
+    result = propose_evidence_tile_relations(
+        evidence_rows=_evidence(),
+        tile_shortlists=_shortlist(),
+        llm=DecisionLLM([], "supported"),
+    )
+    assert result["analysis_states"] == {"a" * 64: "inconclusive"}
+
+
+def _multi_passage_evidence():
+    evidence = _evidence()
+    evidence[0]["content"] = (
+        "We help teams ship better products. " + ("filler sentence. " * 5000)
+    )
+    assert len(semantic_passages(evidence[0]["content"])) == 2
+    return evidence
+
+
+def _analysis_payload(relations, decision):
+    return {
+        "relations": relations,
+        "analysis": [
+            {
+                "evidence_fingerprint": "a" * 64,
+                "decision": decision,
+            }
+        ],
+    }
+
+
+def test_retained_cross_passage_relation_forces_supported_analysis_state() -> None:
+    relation = {
+        "evidence_fingerprint": "a" * 64,
+        "tile_id": "M1",
+        "polarity": "supports",
+        "literal_quote": "We help teams ship better products",
+        "rationale": "This passage directly states the contribution.",
+    }
+    llm = PassageLLM(
+        [
+            _analysis_payload([relation], "supported"),
+            _analysis_payload([], "analyzed_without_sufficient_support"),
+        ]
+    )
+
+    result = propose_evidence_tile_relations(
+        evidence_rows=_multi_passage_evidence(),
+        tile_shortlists=_shortlist(),
+        llm=llm,
+    )
+
+    assert len(llm.calls) == 2
+    assert result["relations"] == [relation]
+    assert result["analysis_states"] == {"a" * 64: "supported"}
+
+
+def test_cross_passage_no_support_preserves_inconclusive_precedence() -> None:
+    llm = PassageLLM(
+        [
+            _analysis_payload([], "analyzed_without_sufficient_support"),
+            _analysis_payload([], "inconclusive"),
+        ]
+    )
+
+    result = propose_evidence_tile_relations(
+        evidence_rows=_multi_passage_evidence(),
+        tile_shortlists=_shortlist(),
+        llm=llm,
+    )
+
+    assert len(llm.calls) == 2
+    assert result["relations"] == []
+    assert result["analysis_states"] == {"a" * 64: "inconclusive"}

@@ -133,11 +133,14 @@ def test_exact_resume_uses_real_postgres_sqlite_and_report_publication(monkeypat
     from fastapi.testclient import TestClient
 
     from src.history.repository import PostgresHistoryRepository
-    from src.sv9 import incremental_flow_adapter
     from tests.test_evidence_vault_sv9_authority_evaluation import _Flow
-    from tests.test_evidence_vault_sv9_judgment_candidates_postgres import _operational
+    from tests.test_evidence_vault_sv9_judgment_candidates_postgres import (
+        _operational,
+        _seed_accepted_sv9_authority,
+    )
     from tests.test_scanner_api_v1 import AUTH, _InlineThread, _enable_resume_api
-    from web import exact_resume_controller, report_store
+    from tests.test_vault_stabilization_replay import _as_shared_flow, _shared_series
+    from web import exact_resume_controller, report_store, scan_runner
     from web.api_v1 import service
     from web.app import app
 
@@ -145,6 +148,7 @@ def test_exact_resume_uses_real_postgres_sqlite_and_report_publication(monkeypat
         pytest.skip("requires the existing disposable PostgreSQL service")
     repository = _reset_repository()
     scan = "stabilization-postgres-publication"
+    series = _shared_series()
     _operational(repository, scan)
     operation = repository.get_capture_operation_plan(scan)
     assert operation["status"] == "completed"
@@ -158,7 +162,11 @@ def test_exact_resume_uses_real_postgres_sqlite_and_report_publication(monkeypat
         ),
     )
     interrupted = _Flow(fail=2)
-    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *a, **k: interrupted)
+    monkeypatch.setattr(
+        scan_runner,
+        "_vault_core_shared_flow",
+        lambda **_kwargs: (_as_shared_flow(interrupted, scan, url="https://example.com"), series),
+    )
     client = TestClient(app)
     first = client.post(f"/api/v1/scans/{scan}/resume",
                         headers={**AUTH, "Idempotency-Key": "postgres-initial"})
@@ -167,13 +175,34 @@ def test_exact_resume_uses_real_postgres_sqlite_and_report_publication(monkeypat
     original = repository.get_report_payload(scan)
     assert original is not None and original["sv9_assessment"]["availability"] == "unavailable"
     original_bytes = report_store.report_path(scan).read_bytes()
-    assert len(interrupted.calls) == 2
+    assert len(interrupted.calls) == 1
+
+    # Operational adoption is transport-only.  Model the separate accepted
+    # SV9 decision before exact replay materializes an available successor.
+    accepted_flow = _Flow()
+    accepted = _seed_accepted_sv9_authority(
+        repository,
+        scan,
+        series,
+        _as_shared_flow(accepted_flow, scan, url="https://example.com"),
+    )
+    assert (
+        accepted["accepted_candidate"]["source_scan_id"] == scan
+        and len(accepted_flow.calls) == 10
+    )
 
     # A new repository instance must reconstruct progress from PostgreSQL.
     repository = PostgresHistoryRepository(_validated_test_dsn(), schema_policy="verify_head")
     _enable_resume_api(monkeypatch, tmp_path / "actions.sqlite3", repository)
-    resumed = _Flow()
-    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *a, **k: resumed)
+    resumed = _Flow(fail=1)
+    monkeypatch.setattr(
+        scan_runner,
+        "_vault_core_shared_flow",
+        lambda **_kwargs: (
+            _as_shared_flow(resumed, scan, url="https://example.com"),
+            series,
+        ),
+    )
     headers = {**AUTH, "Idempotency-Key": "postgres-completion"}
     completed = TestClient(app).post(f"/api/v1/scans/{scan}/resume", headers=headers)
     assert completed.status_code == 202 and completed.json()["state"] == "completed", completed.text
@@ -186,7 +215,7 @@ def test_exact_resume_uses_real_postgres_sqlite_and_report_publication(monkeypat
         "source_scan_id": scan, "observation_hash": operation["observation_hash"],
         "capture_hash": operation["capture_hash"],
     }
-    assert len(resumed.calls) == 9
+    assert not resumed.calls
     assert repository.get_report_payload(scan) == original
     assert report_store.report_path(scan).read_bytes() == original_bytes
     assert repository.get_capture_operation_plan(scan) == operation
@@ -194,7 +223,14 @@ def test_exact_resume_uses_real_postgres_sqlite_and_report_publication(monkeypat
     assert public.status_code == 200 and public.json()["score"]["publishable"] is True
 
     no_call = _Flow(fail=1)
-    monkeypatch.setattr(incremental_flow_adapter, "FlowSv9StrictComponentAdapter", lambda *a, **k: no_call)
+    monkeypatch.setattr(
+        scan_runner,
+        "_vault_core_shared_flow",
+        lambda **_kwargs: (
+            _as_shared_flow(no_call, scan, url="https://example.com"),
+            series,
+        ),
+    )
     replayed = TestClient(app).post(f"/api/v1/scans/{scan}/resume", headers=headers)
     assert replayed.status_code == 202 and replayed.headers["idempotent-replayed"] == "true"
     assert replayed.json()["result"] == result and not no_call.calls

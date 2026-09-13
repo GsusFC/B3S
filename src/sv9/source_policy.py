@@ -141,7 +141,7 @@ def apply_source_policy(components: Mapping[str, ComponentResult]) -> bool:
             changed = True
             capped_components += 1
 
-    if capped_components:
+    if capped_components and "coherencia" in components:
         reason = "source_policy:coherencia_capped_after_component_authority_caps"
         coherence_cap = 6 if capped_components < 3 else 5
         if _cap_component(components["coherencia"], coherence_cap, reason):

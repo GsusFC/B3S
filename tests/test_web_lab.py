@@ -45,7 +45,7 @@ def test_vault_judgment_shadow_is_default_off_and_post_publication(monkeypatch):
     scan_runner._run_vault_sv9_judgment_shadow_after_publication(scan_id="safe", repository=object(), payload={}, report=report)
     assert constructed == [True] and invoked["current_public_score"] == 64 and type(invoked["flow"]).__name__ == "FlowSv9StrictComponentAdapter"
     source = inspect.getsource(scan_runner._run)
-    assert source.index("_publish_completed_report(scan_id, report)") < source.index("_run_vault_sv9_judgment_shadow_after_publication(") and 'current_public_score=report.get("score")' in inspect.getsource(scan_runner._run_vault_sv9_judgment_shadow_after_publication)
+    assert source.index("_publish_completed_report(scan_id, report, assessment=assessment)") < source.index("_run_vault_sv9_judgment_shadow_after_publication(") and 'current_public_score=report.get("score")' in inspect.getsource(scan_runner._run_vault_sv9_judgment_shadow_after_publication)
 
 
 def test_report_store_saves_loads_and_fails_closed_on_corrupt_json(tmp_path, monkeypatch):

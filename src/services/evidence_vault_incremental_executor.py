@@ -67,6 +67,11 @@ _SUPPORTED_RELATION_PROPOSAL_VERSIONS = {
     "evidence-tile-relation-proposal-v3",
     EVIDENCE_TILE_RELATION_PROPOSAL_VERSION,
 }
+_ANALYSIS_STATES = {
+    "analyzed_without_sufficient_support",
+    "supported",
+    "inconclusive",
+}
 
 
 class EvidenceVaultIncrementalExecutorError(RuntimeError):
@@ -388,7 +393,9 @@ def validate_vault_operation_result(result: Mapping[str, Any]) -> None:
         "candidate_packet_fingerprint",
         "operational_candidate_packet",
     }
-    if set(result) != expected:
+    legacy_expected = set(expected)
+    current_expected = expected | {"evidence_analysis_states"}
+    if set(result) != legacy_expected and set(result) != current_expected:
         raise EvidenceVaultIncrementalExecutorError("candidate result fields mismatch")
     for field in (
         "source_candidate_packet_fingerprint",
@@ -573,6 +580,37 @@ def validate_vault_operation_result(result: Mapping[str, Any]) -> None:
             discarded.get("submitted_relation_fingerprint"),
             field="discarded relation fingerprint",
         )
+    if proposal.get("schema_version") == EVIDENCE_TILE_RELATION_PROPOSAL_VERSION:
+        states = proposal.get("analysis_states")
+        expected_state_keys = {
+            fingerprint
+            for fingerprint, rows in tile_shortlists.items()
+            if rows
+        }
+        if (
+            not isinstance(states, Mapping)
+            or set(states) != expected_state_keys
+            or not set(states.values()).issubset(_ANALYSIS_STATES)
+        ):
+            raise EvidenceVaultIncrementalExecutorError(
+                "relation proposal analysis states are invalid"
+            )
+        relation_fingerprints = {
+            str(row.get("evidence_fingerprint"))
+            for row in proposal["relations"]
+            if isinstance(row, Mapping)
+        }
+        if (
+            any(states[fingerprint] == "supported" for fingerprint in states if fingerprint not in relation_fingerprints)
+            or any(states.get(fingerprint) != "supported" for fingerprint in relation_fingerprints)
+        ):
+            raise EvidenceVaultIncrementalExecutorError(
+                "relation proposal analysis states do not match relations"
+            )
+    elif "analysis_states" in proposal:
+        raise EvidenceVaultIncrementalExecutorError(
+            "legacy relation proposal cannot contain analysis states"
+        )
     source = result.get("source_candidate_packet")
     operational = result.get("operational_candidate_packet")
     if not isinstance(source, Mapping) or not isinstance(operational, Mapping):
@@ -598,6 +636,16 @@ def validate_vault_operation_result(result: Mapping[str, Any]) -> None:
         )
     if not isinstance(result.get("basis_relations"), list):
         raise EvidenceVaultIncrementalExecutorError("basis relations are invalid")
+    if set(result) == current_expected:
+        states = result.get("evidence_analysis_states")
+        if (
+            not isinstance(states, Mapping)
+            or set(states) != set(result["selected_evidence_fingerprints"])
+            or not set(states.values()).issubset(_ANALYSIS_STATES)
+        ):
+            raise EvidenceVaultIncrementalExecutorError(
+                "evidence analysis states are invalid"
+            )
 
 
 def _build_candidate_result(
@@ -717,6 +765,15 @@ def _build_candidate_result(
         identities=identities,
         operation_plan_fingerprint=plan["operation_plan_fingerprint"],
     )
+    proposal_states = proposal.get("analysis_states", {})
+    evidence_analysis_states = {
+        fingerprint: (
+            "analyzed_without_sufficient_support"
+            if dispositions[fingerprint] != "semantic_candidate"
+            else str(proposal_states.get(fingerprint, "inconclusive"))
+        )
+        for fingerprint in (row["fingerprint"] for row in selected)
+    }
     source_packet = _source_candidate_packet(
         plan=plan,
         current_memory=current_memory,
@@ -782,6 +839,7 @@ def _build_candidate_result(
         "relation_proposal": proposal,
         "relation_proposal_call_count": relation_call_count,
         "basis_relations": basis_relations,
+        "evidence_analysis_states": dict(sorted(evidence_analysis_states.items())),
         "source_candidate_packet_fingerprint": source_packet[
             "candidate_packet_fingerprint"
         ],
@@ -977,6 +1035,7 @@ def _propose_relations_bounded(
             "schema_version": EVIDENCE_TILE_RELATION_PROPOSAL_VERSION,
             "relations": [],
             "discarded_relations": [],
+            "analysis_states": {},
         }, 0
     proposal = propose_evidence_tile_relations(
         evidence_rows=evidence_rows, tile_shortlists=tile_shortlists, llm=llm

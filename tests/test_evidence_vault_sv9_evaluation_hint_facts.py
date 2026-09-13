@@ -160,6 +160,7 @@ def _fake_loader(monkeypatch, operation, *, validate_result=True, reject_validat
     monkeypatch.setattr(history, "_sv9_judgment_context", lambda *_args: context)
     monkeypatch.setattr(history, "_vault_operation_row", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(history, "_vault_operation_plan_record", lambda _row: deepcopy(operation))
+    monkeypatch.setattr(history, "_replay_sv9_judgment_authority", lambda *_args: None)
     monkeypatch.setattr(history, "_project_vault_operational_memory_authority_chain", lambda *_args: [])
     monkeypatch.setattr(history, "project_evidence_memory_row_identity", lambda *_args, **_kwargs: {"evidence_id": _sha("evidence:one"), "document_id": _sha("source:one")})
 

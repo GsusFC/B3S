@@ -34,7 +34,11 @@ class SupplementLLM:
                 "polarity": "supports",
                 "literal_quote": "End the chase between companies.",
                 "rationale": "The line presents a clear audience tension.",
-            }]
+            }],
+            "analysis": [{
+                "evidence_fingerprint": row["evidence_fingerprint"],
+                "decision": "supported",
+            }],
         }
 
 
@@ -83,7 +87,36 @@ def test_coverage_supplement_is_bounded_pending_and_reproducible() -> None:
     assert result["basis_relations"][0]["review_status"] == "unreviewed"
     assert result["basis_relations"][0]["decision_event_id"] is None
     assert len(result["basis_relations"][0]["relation_id"]) == 64
+    assert result["relation_proposal"]["analysis_states"] == {
+        "a" * 64: "supported"
+    }
     validate_coverage_supplement_result(result, request=request)
+
+    for mutate in (
+        lambda proposal: proposal.pop("analysis_states"),
+        lambda proposal: proposal.__setitem__("unexpected", True),
+        lambda proposal: proposal["analysis_states"].__setitem__(
+            "a" * 64, "unknown"
+        ),
+        lambda proposal: proposal["analysis_states"].__setitem__(
+            "a" * 64, "analyzed_without_sufficient_support"
+        ),
+    ):
+        broken = deepcopy(result)
+        mutate(broken["relation_proposal"])
+        broken["result_fingerprint"] = canonical_fingerprint(
+            broken["schema_version"],
+            {
+                key: value
+                for key, value in broken.items()
+                if key != "result_fingerprint"
+            },
+        )
+        with pytest.raises(
+            EvidenceVaultCoverageSupplementError,
+            match="relation proposal|relation analysis",
+        ):
+            validate_coverage_supplement_result(broken, request=request)
 
 
 def test_persisted_relation_replay_is_audit_only_at_registration() -> None:
@@ -103,6 +136,11 @@ def test_persisted_relation_replay_is_audit_only_at_registration() -> None:
         ).read_text(encoding="utf-8")
     )
     frozen = json.loads((root / "audits/evidence_vault_field_validation_v1" / "causa-prima-coverage-supplement-v2.json").read_text())
+    assert set(frozen["result"]["relation_proposal"]) == {
+        "schema_version",
+        "relations",
+        "discarded_relations",
+    }
     validate_coverage_supplement_result(frozen["result"], request=frozen["request"])
     for versions in (("evidence-vault-coverage-supplement-result-v1", "evidence-tile-relation-proposal-v3"), ("evidence-vault-coverage-supplement-result-v2", "evidence-tile-relation-proposal-v2")):
         cross = deepcopy(frozen["result"]); cross["schema_version"], cross["relation_proposal"]["schema_version"] = versions; cross.update({"relation_proposal_call_count": 1} if versions[0].endswith("v2") else {}); cross["result_fingerprint"] = canonical_fingerprint(versions[0], {key: value for key, value in cross.items() if key != "result_fingerprint"})

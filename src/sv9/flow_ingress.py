@@ -157,7 +157,24 @@ def _evidence_snippets(
     *,
     limit: int = _MAX_EVIDENCE_ITEMS,
 ) -> list[str]:
-    snippets: list[str] = []
+    return [
+        snippet
+        for snippet, _ref in _evidence_snippet_pairs(
+            refs,
+            evidence_by_ref,
+            limit=limit,
+        )
+    ]
+
+
+def _evidence_snippet_pairs(
+    refs: list[str],
+    evidence_by_ref: dict[str, EvidenceRecord],
+    *,
+    limit: int = _MAX_EVIDENCE_ITEMS,
+) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for ref in refs:
         record = evidence_by_ref.get(ref)
         if record is None:
@@ -165,8 +182,14 @@ def _evidence_snippets(
         content = " ".join(record.content.split())
         if not content:
             continue
-        snippets.append(content[:_MAX_EVIDENCE_CHARS])
-    return _unique_strings(snippets)[:limit]
+        snippet = content[:_MAX_EVIDENCE_CHARS]
+        if snippet in seen:
+            continue
+        seen.add(snippet)
+        pairs.append((snippet, ref))
+        if len(pairs) >= limit:
+            break
+    return pairs
 
 
 def _source_summary(

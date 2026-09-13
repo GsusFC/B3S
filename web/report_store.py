@@ -14,6 +14,7 @@ import uuid
 from functools import lru_cache
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from time import monotonic
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
@@ -72,6 +73,11 @@ from src.services.scanner_report_assessment import (
 _LOG = logging.getLogger(__name__)
 _POSTGRES_PAGE_SIZE = 200
 _POSTGRES_INDEX_PAYLOAD_LIMIT = 1000
+
+# Home needs complete payloads to make the canonical selection. Keep only a
+# very short, process-local snapshot: it avoids rereading an unchanged archive
+# on consecutive home requests without turning this cache into an authority.
+_INDEX_PAYLOAD_CACHE_TTL_SECONDS = 1.0
 
 
 def reports_dir() -> Path:
@@ -222,6 +228,7 @@ def save_report(report: dict[str, Any]) -> None:
         record_report(report)
     except Exception:
         pass
+    _cached_report_payloads_for_index.cache_clear()
 
 
 def load_report(scan_id: str) -> dict[str, Any] | None:
@@ -263,8 +270,39 @@ def load_report(scan_id: str) -> dict[str, Any] | None:
     return postgres_report or file_report
 
 
+def _index_payload_cache_key() -> tuple[str, str, tuple[tuple[str, int, int], ...], int]:
+    directory = reports_dir()
+    file_state: tuple[tuple[str, int, int], ...] = ()
+    if directory.is_dir():
+        file_state = tuple(
+            sorted(
+                (path.name, path.stat().st_mtime_ns, path.stat().st_size)
+                for path in directory.glob("*.json")
+            )
+        )
+    return (
+        str(directory.resolve()),
+        os.environ.get("B3S_DATABASE_URL", "").strip(),
+        file_state,
+        int(monotonic() / _INDEX_PAYLOAD_CACHE_TTL_SECONDS),
+    )
+
+
+@lru_cache(maxsize=2)
+def _cached_report_payloads_for_index(
+    _cache_key: tuple[str, str, tuple[tuple[str, int, int], ...], int],
+) -> tuple[dict[str, Any], ...]:
+    return tuple(_read_report_payloads_for_index())
+
+
 def list_report_payloads_for_index() -> list[dict[str, Any]]:
     """Return every validated report payload for one home-page request."""
+
+    return list(_cached_report_payloads_for_index(_index_payload_cache_key()))
+
+
+def _read_report_payloads_for_index() -> list[dict[str, Any]]:
+    """Read and validate the full archive for a process-cache miss."""
 
     reports_by_id: dict[str, dict[str, Any]] = {}
     repository = _postgres_repository()

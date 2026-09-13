@@ -51,12 +51,53 @@ class ScanLinks(StrictModel):
     cancel: str
     report: str
     report_markdown: str
+    diagnostic_detail: str
 
 
 class ScanFailure(StrictModel):
     code: str
     message: str
     retryable: bool = False
+
+
+class ScanDiagnosticOrigin(StrictModel):
+    exception_type: str | None = Field(default=None, max_length=80, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    sqlstate: str | None = Field(default=None, pattern=r"^[0-9A-Z]{5}$")
+
+
+class ScanDiagnostic(StrictModel):
+    kind: Literal["execution_failed", "assessment_unavailable", "secondary_failure"]
+    stage: Literal["capture", "interpret", "score", "report", "vault_preparation", "vault_authority", "vault_sidecar", "unknown"]
+    capture_state: Literal["completed", "not_completed", "unknown"]
+    reason_codes: list[str] = Field(default_factory=list, max_length=24)
+    summary: str = Field(max_length=200)
+    build_sha: str = Field(pattern=r"^(?:[0-9a-f]{40}|unknown)$")
+    origin: ScanDiagnosticOrigin | None = None
+    unknowns: list[Literal["assessment_reason_not_available", "legacy_status_without_diagnostic"]] = Field(default_factory=list, max_length=4)
+
+
+class ScanDiagnosticDetailResponse(StrictModel):
+    object: Literal["scan_diagnostic_detail"] = "scan_diagnostic_detail"
+    api_version: Literal["v1"] = "v1"
+    scan_id: str
+    available: bool
+    state: str | None = None
+    reason: str | None = None
+    identity: dict[str, Any] = Field(default_factory=dict)
+    conditions: dict[str, Any] = Field(default_factory=dict)
+    events: list[dict[str, Any]] = Field(default_factory=list, max_length=24)
+    dropped_event_count: int = Field(default=0, ge=0)
+    truncated_event_count: int = Field(default=0, ge=0)
+    additional_status_write_count: int = Field(default=0, ge=0)
+    additional_status_bytes: int = Field(default=0, ge=0)
+    durability: str | None = None
+    persistence: dict[str, Any] = Field(default_factory=dict)
+    dependency: dict[str, Any] = Field(default_factory=dict)
+    artifacts: dict[str, Any] = Field(default_factory=dict)
+    impact: dict[str, Any] = Field(default_factory=dict)
+    recovery: dict[str, Any] = Field(default_factory=dict)
+    exact_resume: dict[str, Any] = Field(default_factory=dict)
+    links: dict[str, str] = Field(default_factory=dict)
 
 
 class ScanStatusResponse(StrictModel):
@@ -75,6 +116,7 @@ class ScanStatusResponse(StrictModel):
     acquisition: list[dict[str, Any]] = Field(default_factory=list)
     acquisition_gate: dict[str, Any] = Field(default_factory=dict)
     failure: ScanFailure | None = None
+    diagnostic: ScanDiagnostic | None = None
     result_available: bool
     durable_status: bool = True
     resumable_after_restart: bool = False
@@ -167,6 +209,7 @@ class ScanResultResponse(StrictModel):
     acquisition_gate: dict[str, Any]
     stability: dict[str, Any] = Field(default_factory=dict)
     metadata: ResultMetadata
+    diagnostic: ScanDiagnostic | None = None
     links: ScanLinks
 
 

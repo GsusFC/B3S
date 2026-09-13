@@ -57,6 +57,9 @@ EVIDENCE_VAULT_COVERAGE_SUPPLEMENT_SOURCE_RESOLUTION_VERSION = (
 )
 _MAX_EVIDENCE_ROWS = 40
 _MAX_PAIRS = 120
+_RELATION_ANALYSIS_STATES = frozenset(
+    {"analyzed_without_sufficient_support", "supported", "inconclusive"}
+)
 _DISCARD_REASONS = frozenset(
     {
         "duplicate_relation",
@@ -957,14 +960,24 @@ def validate_coverage_supplement_result(
                 "coverage supplement evidence binding changed"
             )
     proposal = result.get("relation_proposal")
+    version_pair = (
+        result.get("schema_version"),
+        proposal.get("schema_version") if isinstance(proposal, Mapping) else None,
+    )
+    expected_proposal_fields = {
+        "schema_version",
+        "relations",
+        "discarded_relations",
+    }
+    if version_pair == (
+        EVIDENCE_VAULT_COVERAGE_SUPPLEMENT_RESULT_VERSION,
+        EVIDENCE_TILE_RELATION_PROPOSAL_VERSION,
+    ):
+        expected_proposal_fields.add("analysis_states")
     if (
         not isinstance(proposal, Mapping)
-        or set(proposal) != {
-            "schema_version",
-            "relations",
-            "discarded_relations",
-        }
-        or (result.get("schema_version"), proposal.get("schema_version")) not in {
+        or set(proposal) != expected_proposal_fields
+        or version_pair not in {
             (_LEGACY_COVERAGE_SUPPLEMENT_RESULT_VERSION, EVIDENCE_TILE_RELATION_LEGACY_PROPOSAL_VERSION),
             (EVIDENCE_VAULT_COVERAGE_SUPPLEMENT_RESULT_VERSION, EVIDENCE_TILE_RELATION_PROPOSAL_VERSION),
         }
@@ -975,6 +988,31 @@ def validate_coverage_supplement_result(
             "coverage supplement relation proposal is invalid"
         )
     if proposal_version == EVIDENCE_TILE_RELATION_PROPOSAL_VERSION:
+        analysis_states = proposal["analysis_states"]
+        analyzed_fingerprints = {
+            fingerprint for fingerprint, tile_ids in workset.items() if tile_ids
+        }
+        relation_fingerprints = {
+            str(row.get("evidence_fingerprint") or "")
+            for row in proposal["relations"]
+            if isinstance(row, Mapping)
+        }
+        if (
+            type(analysis_states) is not dict
+            or set(analysis_states) != analyzed_fingerprints
+            or any(
+                type(state) is not str or state not in _RELATION_ANALYSIS_STATES
+                for state in analysis_states.values()
+            )
+            or any(
+                (fingerprint in relation_fingerprints)
+                != (state == "supported")
+                for fingerprint, state in analysis_states.items()
+            )
+        ):
+            raise EvidenceVaultCoverageSupplementError(
+                "coverage supplement relation analysis is invalid"
+            )
         contracts = {str(row["tile_id"]): row for row in build_tile_contract_registry()["tiles"]}
         calls = evidence_tile_relation_call_count(
             evidence_rows=list(result["evidence_snapshot"]),

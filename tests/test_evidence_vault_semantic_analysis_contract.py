@@ -28,7 +28,7 @@ def test_current_semantic_contract_is_canonical_and_runtime_bound() -> None:
     ) == contract
     assert contract["evidence_labeling_version"] == "sv9-flow-evidence-labeling-v4"
     assert contract["relation_proposal_version"] == (
-        "evidence-tile-relation-proposal-v3"
+        "evidence-tile-relation-proposal-v4"
     )
 
 

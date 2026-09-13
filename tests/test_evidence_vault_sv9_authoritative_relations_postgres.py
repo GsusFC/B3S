@@ -174,10 +174,13 @@ def test_authoritative_relation_validation_deduplicates_only_identical_sources(m
     not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1",
     reason="requires disposable PostgreSQL",
 )
-def test_projection_replays_human_accepted_basis_without_writing() -> None:
+def test_projection_keeps_human_accepted_basis_non_authoritative_without_writing() -> None:
     import psycopg
     from src.services.evidence_vault_incremental_executor import execute_vault_operation_plan
-    from src.services.evidence_vault_sv9_authoritative_relations import project_evidence_vault_sv9_authoritative_relations
+    from src.services.evidence_vault_sv9_authoritative_relations import (
+        project_evidence_vault_sv9_authoritative_relations,
+        project_evidence_vault_sv9_evaluation_input,
+    )
     from tests.test_evidence_vault_operation_execution_postgres import ExecutorLLM, _persist_baseline, _reset_repository
 
     repository = _reset_repository(); _persist_baseline(repository, "relations-scan")
@@ -191,7 +194,13 @@ def test_projection_replays_human_accepted_basis_without_writing() -> None:
     before = counts()
     first = project_evidence_vault_sv9_authoritative_relations(repository=repository, source_scan_id="relations-scan")
     second = project_evidence_vault_sv9_authoritative_relations(repository=repository, source_scan_id="relations-scan")
-    assert first == second and first["status"] == "available" and first["authoritative_relations"]
-    assert {row["disposition"] for row in first["authoritative_relations"]} == {"relevant"}
+    evaluation_input = project_evidence_vault_sv9_evaluation_input(
+        repository=repository,
+        source_scan_id="relations-scan",
+    )
+    assert first == second and first["status"] == "available"
+    assert first["authoritative_relations"] == []
+    assert evaluation_input["status"] == "available"
+    assert evaluation_input["non_authoritative_hints"]
     assert counts() == before
 # fmt: on

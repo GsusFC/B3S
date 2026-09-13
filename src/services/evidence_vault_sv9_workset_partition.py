@@ -13,6 +13,7 @@ _FINGERPRINT = "evidence-vault-sv9-workset-partition-fingerprint-v1"
 _FIELDS = frozenset(
     "schema_version authority runtime_effect score_state evaluation_input judgment_delta input_binding healthy_workset "
     "allowed_reuse_tile_ids review_partition trusted_irrelevant_evidence pending_evidence coherencia_dependency "
+    "processing_complete_evidence "
     "partition_fingerprint".split()
 )
 _BINDING_FIELDS = frozenset("evaluation_input_fingerprint canonical_delta_fingerprint canonical_plan_fingerprint".split())
@@ -43,8 +44,15 @@ def build_evidence_vault_sv9_workset_partition(
         hinted_tiles, hinted_records = _hints(source, delta, by_record, unmapped)
         trusted = _trusted(trusted_irrelevant_evidence, bindings, unmapped, hinted_records)
         trusted_records = {row["evidence_record_id"] for row in trusted}
+        processing_complete = _processing_complete(
+            source.get("processing_complete_evidence", []),
+            bindings=bindings,
+            unmapped=unmapped,
+            hinted_records=hinted_records,
+        )
+        processing_records = {row["evidence_record_id"] for row in processing_complete}
         pending = [
-            row for row in bindings if row["evidence_record_id"] in unmapped - hinted_records - trusted_records
+            row for row in bindings if row["evidence_record_id"] in unmapped - hinted_records - trusted_records - processing_records
         ]
         review = _review_causes(source, delta, plan)
         planned = set(plan["tile_workset"])
@@ -84,6 +92,7 @@ def build_evidence_vault_sv9_workset_partition(
             "allowed_reuse_tile_ids": _ordered(reusable, "allowed reuse tiles"),
             "review_partition": review,
             "trusted_irrelevant_evidence": trusted,
+            "processing_complete_evidence": processing_complete,
             "pending_evidence": pending,
             "coherencia_dependency": dependency,
         }
@@ -135,7 +144,7 @@ def _inputs(evaluation_input: Any, judgment_delta: Any) -> tuple[dict[str, Any],
         raise EvidenceVaultSv9WorksetPartitionError("signed input is invalid") from exc
     if not all(canonical_json(raw) == canonical_json(rebuilt) for raw, rebuilt in ((evaluation_input, source), (judgment_delta, delta), (delta["plan"], plan))):
         _fail("signed input replay")
-    if delta["schema_version"] != JUDGMENT_DELTA_VERSION or plan["schema_version"] != planner.PLAN_VERSION:
+    if delta["schema_version"] not in {JUDGMENT_DELTA_VERSION, "evidence-vault-sv9-judgment-delta-v3"} or plan["schema_version"] != planner.PLAN_VERSION:
         _fail("signed input schema versions")
     if not _same(source["current_evidence"], delta["current_evidence"]["evidence"]) or not _same(source["authoritative_relations"], delta["authoritative_relations"]):
         _fail("input evidence or relations do not match delta")
@@ -188,6 +197,36 @@ def _trusted(value: Any, bindings: list[dict[str, Any]], unmapped: set[str], hin
             _fail("trusted irrelevant evidence")
         selected.add(raw["evidence_record_id"])
     return [row for row in bindings if row["evidence_record_id"] in selected]
+
+
+def _processing_complete(
+    value: Any,
+    *,
+    bindings: list[dict[str, Any]],
+    unmapped: set[str],
+    hinted_records: set[str],
+) -> list[dict[str, Any]]:
+    if type(value) is not list:
+        _fail("processing completion evidence")
+    by_pair = {
+        (row["evidence_ref"], row["evidence_fingerprint"]): row
+        for row in bindings
+    }
+    selected: set[str] = set()
+    for raw in value:
+        if type(raw) is not dict or set(raw) != {"evidence_ref", "evidence_fingerprint"}:
+            _fail("processing completion evidence")
+        row = by_pair.get((raw["evidence_ref"], raw["evidence_fingerprint"]))
+        if row is None or row["evidence_record_id"] not in unmapped - hinted_records or row["evidence_record_id"] in selected:
+            _fail("processing completion evidence")
+        if raw != {"evidence_ref": row["evidence_ref"], "evidence_fingerprint": row["evidence_fingerprint"]}:
+            _fail("processing completion evidence")
+        selected.add(row["evidence_record_id"])
+    expected = [
+        {"evidence_ref": row["evidence_ref"], "evidence_fingerprint": row["evidence_fingerprint"], "evidence_record_id": row["evidence_record_id"]}
+        for row in bindings if row["evidence_record_id"] in selected
+    ]
+    return sorted(expected, key=lambda row: (row["evidence_ref"], row["evidence_fingerprint"]))
 def _review_causes(source: Mapping[str, Any], delta: Mapping[str, Any], plan: Mapping[str, Any]) -> dict[str, Any]:
     reopened = _ordered(source["reopen_tile_ids"], "reopened tiles")
     operational = _source_tiles(source["authority_coverage_loss"], "operational coverage loss")

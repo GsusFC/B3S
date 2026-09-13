@@ -36,15 +36,27 @@ class ExecutorLLM:
                 "identity_match": "domain",
                 "specificity": "explicit",
             } for row in payload["records"]]}
-        marker = '"evidence_fingerprint": "'
-        fingerprint = user.split(marker, 1)[1].split('"', 1)[0]
-        return {"relations": [{
-            "evidence_fingerprint": fingerprint,
-            "tile_id": "M1",
-            "polarity": "supports",
-            "literal_quote": "help teams ship better products",
-            "rationale": "Explicit contribution statement.",
-        }]}
+        payload = json.loads(user.split(":\n", 1)[1])
+        fingerprints = [row["evidence_fingerprint"] for row in payload]
+        return {
+            "relations": [
+                {
+                    "evidence_fingerprint": fingerprint,
+                    "tile_id": "M1",
+                    "polarity": "supports",
+                    "literal_quote": "help teams ship better products",
+                    "rationale": "Explicit contribution statement.",
+                }
+                for fingerprint in fingerprints
+            ],
+            "analysis": [
+                {
+                    "evidence_fingerprint": fingerprint,
+                    "decision": "supported",
+                }
+                for fingerprint in fingerprints
+            ],
+        }
 
 
 class NoCallLLM:

@@ -42,6 +42,14 @@
       }
     },
     {
+      "name": "b3s_get_scan_diagnostic_detail",
+      "risk": "read-only",
+      "expectedAnnotations": {
+        "readOnly": true,
+        "untrustedContent": true
+      }
+    },
+    {
       "name": "b3s_prepare_scan",
       "risk": "reversible",
       "expectedAnnotations": {
