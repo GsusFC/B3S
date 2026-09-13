@@ -24,7 +24,13 @@ def _shared_series():
     )
 
 
-def _as_shared_flow(flow, scan):
+def _as_shared_flow(
+    flow,
+    scan,
+    *,
+    brand_name="Example",
+    url="https://example.test",
+):
     from scripts.sv9_flow_sv9_shadow_eval import (
         SV9_FLOW_SV9_SHADOW_EVAL_VERSION,
         _result_summary,
@@ -42,12 +48,12 @@ def _as_shared_flow(flow, scan):
     flow.shared_analysis = {}
     flow_candidate = Sv9FlowCandidate(
         evidence_pack=BrandEvidencePack(
-            brand_name="Example",
-            url="https://example.test",
+            brand_name=brand_name,
+            url=url,
         ),
         interpretation=BrandInterpretation(
-            brand_name="Example",
-            url="https://example.test",
+            brand_name=brand_name,
+            url=url,
             blocks={},
             evidence_refs={},
         ),
@@ -59,8 +65,8 @@ def _as_shared_flow(flow, scan):
                 key: _component_from_shared_analysis_row(key, value)
                 for key, value in flow.shared_components.items()
             },
-            brand_name="Example",
-            url="https://example.test",
+            brand_name=brand_name,
+            url=url,
             source_run_id=scan,
             evaluator_llm=None,
         )
@@ -70,8 +76,8 @@ def _as_shared_flow(flow, scan):
             "analysis_payload": {
                 "schema_version": SV9_FLOW_SV9_SHADOW_EVAL_VERSION,
                 "source_run_id": scan,
-                "brand_name": "Example",
-                "url": "https://example.test",
+                "brand_name": brand_name,
+                "url": url,
                 "flow": {"candidate": deepcopy(flow_candidate)},
                 "sv9": _result_summary(result.to_dict())
                 | {"result": result.to_dict()},

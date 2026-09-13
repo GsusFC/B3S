@@ -857,8 +857,25 @@ class _PersistedCoverageLLM:
         self._relations = relations
 
     def _call_json(self, system, user, **kwargs):
-        del system, user, kwargs
-        return {"relations": self._relations}
+        del system, kwargs
+        evidence_rows = json.loads(user.split(":\n", 1)[1])
+        supported = {
+            relation["evidence_fingerprint"] for relation in self._relations
+        }
+        return {
+            "relations": self._relations,
+            "analysis": [
+                {
+                    "evidence_fingerprint": row["evidence_fingerprint"],
+                    "decision": (
+                        "supported"
+                        if row["evidence_fingerprint"] in supported
+                        else "analyzed_without_sufficient_support"
+                    ),
+                }
+                for row in evidence_rows
+            ],
+        }
 
 
 class _C7MaterialChangeLLM:
@@ -883,8 +900,8 @@ class _C7MaterialChangeLLM:
                     for row in payload["records"]
                 ]
             }
-        marker = '"evidence_fingerprint": "'
-        fingerprint = user.split(marker, 1)[1].split('"', 1)[0]
+        evidence_rows = json.loads(user.split(":\n", 1)[1])
+        fingerprint = evidence_rows[0]["evidence_fingerprint"]
         return {
             "relations": [
                 {
@@ -894,7 +911,18 @@ class _C7MaterialChangeLLM:
                     "literal_quote": "The agent-to-agent network  for finance teams.",
                     "rationale": "Changed owned-channel evidence requires review.",
                 }
-            ]
+            ],
+            "analysis": [
+                {
+                    "evidence_fingerprint": row["evidence_fingerprint"],
+                    "decision": (
+                        "supported"
+                        if row["evidence_fingerprint"] == fingerprint
+                        else "analyzed_without_sufficient_support"
+                    ),
+                }
+                for row in evidence_rows
+            ],
         }
 
 

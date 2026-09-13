@@ -4,8 +4,13 @@ from pathlib import Path
 import pytest
 from src.history import repository as history
 from src.services import evidence_vault_sv9_authority_evaluation as authority
+from src.services import evidence_vault_sv9_authority_event as authority_event
+from src.services import evidence_vault_sv9_authoritative_relations as authoritative_relations
 from src.services.evidence_vault_incremental_executor import execute_vault_operation_plan
-from src.services.evidence_vault_sv9_authoritative_relations import project_evidence_vault_sv9_authoritative_relations
+from src.services.evidence_vault_sv9_authoritative_relations import (
+    project_evidence_vault_sv9_authoritative_relations,
+    project_evidence_vault_sv9_evaluation_input,
+)
 from src.services.evidence_vault_incremental_refresh import build_vault_scan_plan
 from src.sv9 import incremental_evaluation as ie
 from src.sv9 import incremental_planner as ip
@@ -91,23 +96,198 @@ class _AuthorityFlow:
 def _operational(repository, scan, previous=()):
     row = _row() | {"ref": f"raw_inputs.{len(previous)}.chunk.0", "content": _row()["content"] if not previous else f"Safer {scan}. {_row()['content']}"}; current = [*previous, row]; memory = repository.get_evidence_vault_operational_memory("example.com"); plan = build_vault_scan_plan(brand_identity="example.com", subject_url="https://example.com", mode="incremental_refresh" if memory else "baseline", current_evidence_records=current, previous_capture_evidence_records=list(previous) or current, known_evidence_records=current, canonical_memory_version=memory["canonical_memory_version"] if memory else None); _persist_baseline(repository, scan, current, plan)
     execute_vault_operation_plan(repository=repository, source_scan_id=scan, worker_id="candidate-worker", llm=ExecutorLLM()); operation = repository.get_capture_operation_plan(scan)["result_payload"]
-    repository.review_and_adopt_evidence_vault_operational_source("example.com", source_candidate_packet_fingerprint=operation["source_candidate_packet_fingerprint"], decisions=[{"relation_id": operation["basis_relations"][0]["relation_id"], "decision": "accept", "rationale": "Direct literal support."}], reviewer_id="candidate-reviewer", reviewed_at="2026-08-07T13:00:00+02:00", created_at="2026-08-07T11:00:00Z")
+    repository.review_and_adopt_evidence_vault_operational_source("example.com", source_candidate_packet_fingerprint=operation["source_candidate_packet_fingerprint"], decisions=[{"relation_id": relation["relation_id"], "decision": "accept", "rationale": "Direct literal support."} for relation in operation["basis_relations"]], reviewer_id="candidate-reviewer", reviewed_at="2026-08-07T13:00:00+02:00", created_at="2026-08-07T11:00:00Z")
     return current
 
 def _captured_candidate(monkeypatch, repository, scan, series):
-    projection = project_evidence_vault_sv9_authoritative_relations(repository=repository, source_scan_id=scan); evidence = [{key: row[key] for key in ("evidence_ref", "evidence_fingerprint")} for row in repository.resolve_evidence_vault_sv9_judgment_evidence(scan, [row["evidence_ref"] for row in projection["authoritative_relations"]])["evidence"]]; captured = {}
+    evaluation_input = project_evidence_vault_sv9_evaluation_input(repository=repository, source_scan_id=scan)
+    context, records = authority._source(repository, scan, evaluation_input, "b3s", "example.com")
+    projection = project_evidence_vault_sv9_authoritative_relations(repository=repository, source_scan_id=scan)
+    evidence = [
+        {key: row[key] for key in ("evidence_ref", "evidence_fingerprint")}
+        for row in evaluation_input["current_evidence"]
+    ]
+    captured = {}
     def append(_scan, candidate, **_kwargs): captured["candidate"] = deepcopy(candidate); raise RuntimeError
-    with monkeypatch.context() as patch: patch.setattr(repository, "append_evidence_vault_sv9_judgment_candidate", append); authority.run_evidence_vault_sv9_authority_evaluation(repository=repository, flow=_AuthorityFlow(), domain_or_url="example.com", source_scan_id=scan, current_series_contract=series)
+    # This is a historical full-capture candidate fixture.  Operational review
+    # remains a non-authoritative transport witness; the test must not resolve
+    # its advisory refs as SV9-authoritative evidence.
+    with monkeypatch.context() as patch:
+        patch.setattr(repository, "append_evidence_vault_sv9_judgment_candidate", append)
+        with pytest.raises(RuntimeError):
+            authority._evaluate_first_baseline(
+                repository,
+                _AuthorityFlow(),
+                scan,
+                "b3s",
+                evaluation_input,
+                context,
+                records,
+                series,
+                None,
+                None,
+            )
     return captured["candidate"], projection, evidence
+
+
+def _seed_accepted_sv9_authority(repository, scan, series, flow=None):
+    """Seed a replay-valid historical accepted SV9 authority for continuity tests."""
+    if repository.get_evidence_vault_sv9_judgment_authority("example.com") is not None:
+        raise AssertionError("historical authority fixture must start absent")
+    evaluation_input = project_evidence_vault_sv9_evaluation_input(
+        repository=repository,
+        source_scan_id=scan,
+    )
+    context, records = authority._source(repository, scan, evaluation_input, "b3s", "example.com")
+    captured = {}
+
+    class _CapturedCandidate(Exception):
+        pass
+
+    def append(_scan, candidate, **kwargs):
+        captured["candidate"] = deepcopy(candidate)
+        captured["shared_analysis_payload"] = deepcopy(kwargs.get("shared_analysis_payload"))
+        raise _CapturedCandidate
+
+    original_append = repository.append_evidence_vault_sv9_judgment_candidate
+    original_append_checkpoint = repository.append_evidence_vault_sv9_evaluation_checkpoint
+    repository.append_evidence_vault_sv9_judgment_candidate = append
+    # Historical authority is seeded as an accepted record; continuity tests
+    # attach only checkpoints whose input matches that accepted state.
+    repository.append_evidence_vault_sv9_evaluation_checkpoint = (
+        lambda _scan, checkpoint, **_kwargs: (checkpoint, False)
+    )
+    try:
+        authority._evaluate_first_baseline(
+            repository,
+            flow or _AuthorityFlow(),
+            scan,
+            "b3s",
+            evaluation_input,
+            context,
+            records,
+            series,
+            None,
+            None,
+        )
+    except _CapturedCandidate:
+        pass
+    finally:
+        repository.append_evidence_vault_sv9_judgment_candidate = original_append
+        repository.append_evidence_vault_sv9_evaluation_checkpoint = original_append_checkpoint
+    candidate = captured["candidate"]
+    facts = repository.load_evidence_vault_sv9_authoritative_relation_facts(scan)
+    operation = repository.get_capture_operation_plan(scan)["result_payload"]
+    basis = operation["basis_relations"][0]
+    projection = authoritative_relations._project(
+        facts["source"],
+        facts["evidence"],
+        {
+            "witness": evaluation_input["operational_witness"],
+            "accepted": [
+                {
+                    "tile_id": basis["tile_id"],
+                    "component_key": "mission",
+                    "assessment_state": "ok",
+                    "authority_state": "accepted",
+                    "review_state": "resolved",
+                    "lifecycle_state": "active",
+                    "basis": [
+                        {
+                            key: basis[key]
+                            for key in (
+                                "relation_id",
+                                "evidence_id",
+                                "source_identity_id",
+                                "polarity",
+                            )
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    candidate["authoritative_relation_witness"] = (
+        authoritative_relations.build_evidence_vault_sv9_authoritative_relation_witness(
+            source_scan_id=scan,
+            projection=projection,
+        )
+    )
+    candidate["complete_record_fingerprint"] = jm.canonical_fingerprint(
+        "evidence-vault-sv9-judgment-candidate-record-v2",
+        {
+            key: value
+            for key, value in candidate.items()
+            if key != "complete_record_fingerprint"
+        },
+    )
+    candidate_id = _insert(
+        repository,
+        scan,
+        candidate,
+        shared_analysis_payload=captured["shared_analysis_payload"],
+    )
+    stored = repository.get_evidence_vault_sv9_judgment_candidate(
+        scan,
+        canonical_plan_fingerprint=candidate["canonical_plan_fingerprint"],
+    )
+    assert stored["id"] == candidate_id
+    request = authority_event.build_evidence_vault_sv9_authority_request(
+        action="adopt_candidate",
+        candidate_id=candidate_id,
+        expected_predecessor_event_fingerprint=None,
+        delta_fingerprint=None,
+        source_scan_id=scan,
+    )
+    with repository._connect() as connection:
+        source_context = history._sv9_judgment_context(connection, scan, "b3s", True)
+        candidate_row = connection.execute(
+            "SELECT * FROM b3s_history.evidence_vault_sv9_judgment_candidates WHERE id = %s",
+            (candidate_id,),
+        ).fetchone()
+        event = history._sv9_authority_event(
+            source_context,
+            None,
+            request,
+            authority_event.authority_application_idempotency_fingerprint(request),
+            stored,
+            candidate_row,
+            None,
+        )
+        history._append_sv9_judgment_authority_event(connection, event)
+    accepted = repository.get_evidence_vault_sv9_judgment_authority("example.com")
+    assert accepted["accepted_candidate"]["id"] == candidate_id
+    return accepted
 
 def _legacy(candidate):
     value = {key: row for key, row in candidate.items() if key != "authoritative_relation_witness"}; value["schema_version"] = "evidence-vault-sv9-judgment-candidate-v1"; value["complete_record_fingerprint"] = jm.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v1", {key: row for key, row in value.items() if key != "complete_record_fingerprint"})
     return value
 
-def _insert(repository, scan, candidate):
+def _insert(repository, scan, candidate, *, shared_analysis_payload=None):
     import psycopg; from psycopg.types.json import Jsonb; from uuid import uuid4
     context = repository.load_evidence_vault_sv9_judgment_context(scan)
-    with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"], autocommit=True) as conn: conn.execute(f"INSERT INTO b3s_history.evidence_vault_sv9_judgment_candidates (id, workspace_id, brand_id, scan_run_id, source_scan_id, capture_id, operation_plan_id, schema_version, canonical_plan_fingerprint, current_series_fingerprint, candidate_series_fingerprint, evaluation_bundle_fingerprint, assessment_fingerprint, score_fingerprint, complete_record_fingerprint, candidate_payload, authority, review_state, lifecycle_state, runtime_effect) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', 'none', 'active', 'shadow_only')", (uuid4(), context["workspace_id"], context["brand_id"], context["scan_run_id"], scan, context["capture_id"], context["operation_plan_id"], *[candidate[key] for key in ("schema_version", "canonical_plan_fingerprint", "current_series_fingerprint", "candidate_series_fingerprint", "evaluation_bundle_fingerprint", "assessment_fingerprint", "score_fingerprint", "complete_record_fingerprint")], Jsonb(candidate)))
+    candidate_id = uuid4()
+    with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"], autocommit=True) as conn:
+        conn.execute(f"INSERT INTO b3s_history.evidence_vault_sv9_judgment_candidates (id, workspace_id, brand_id, scan_run_id, source_scan_id, capture_id, operation_plan_id, schema_version, canonical_plan_fingerprint, current_series_fingerprint, candidate_series_fingerprint, evaluation_bundle_fingerprint, assessment_fingerprint, score_fingerprint, complete_record_fingerprint, candidate_payload, authority, review_state, lifecycle_state, runtime_effect) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', 'none', 'active', 'shadow_only')", (candidate_id, context["workspace_id"], context["brand_id"], context["scan_run_id"], scan, context["capture_id"], context["operation_plan_id"], *[candidate[key] for key in ("schema_version", "canonical_plan_fingerprint", "current_series_fingerprint", "candidate_series_fingerprint", "evaluation_bundle_fingerprint", "assessment_fingerprint", "score_fingerprint", "complete_record_fingerprint")], Jsonb(candidate)))
+        for evidence_record_id, evidence_fingerprint in {
+            row["evidence_record_id"]: row["evidence_fingerprint"]
+            for row in candidate["evidence_bindings"]
+        }.items():
+            conn.execute(
+                "INSERT INTO b3s_history.evidence_vault_sv9_judgment_evidence_bindings (candidate_id, workspace_id, brand_id, scan_run_id, capture_id, operation_plan_id, evidence_record_id, evidence_fingerprint) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (candidate_id, context["workspace_id"], context["brand_id"], context["scan_run_id"], context["capture_id"], context["operation_plan_id"], evidence_record_id, evidence_fingerprint),
+            )
+        shared_analysis = history._prepare_sv9_shared_analysis_snapshot(
+            shared_analysis_payload,
+            candidate=candidate,
+            context=context,
+        )
+        if shared_analysis is not None:
+            conn.execute(
+                "INSERT INTO b3s_history.evidence_vault_sv9_shared_analysis_snapshots (candidate_id, workspace_id, brand_id, scan_run_id, source_scan_id, capture_id, operation_plan_id, schema_version, candidate_complete_record_fingerprint, canonical_plan_fingerprint, current_series_fingerprint, candidate_series_fingerprint, evaluation_bundle_fingerprint, assessment_fingerprint, score_fingerprint, payload_sha256, payload, payload_raw) VALUES (%s, %s, %s, %s, %s, %s, %s, 'evidence-vault-sv9-shared-analysis-snapshot-v1', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (candidate_id, context["workspace_id"], context["brand_id"], context["scan_run_id"], scan, context["capture_id"], context["operation_plan_id"], candidate["complete_record_fingerprint"], candidate["canonical_plan_fingerprint"], candidate["current_series_fingerprint"], candidate["candidate_series_fingerprint"], candidate["evaluation_bundle_fingerprint"], candidate["assessment_fingerprint"], candidate["score_fingerprint"], shared_analysis["payload_sha256"], Jsonb(shared_analysis["payload"]), shared_analysis["payload_raw"]),
+            )
+    return str(candidate_id)
 # fmt: on
 
 
@@ -281,7 +461,7 @@ def test_candidate_witness_check_rejects_invalid_payloads_and_row_payload_diverg
     origins = {"capture_origin": capture, "operation_origin": operation}
     empty["authoritative_relation_witness"] |= origins | {"authoritative_relations": []}
     empty["plan"]["delta_projections"] = [deepcopy(origins), deepcopy(origins)]
-    for value in (None, [], [[]], [[origins]], [origins, []], [origins, {}]):
+    for value in (None, [[]], [[origins]], [origins, []], [origins, {}]):
         rejected(200, v2_source, v2_scan, malformed(empty, ("plan", "delta_projections"), value))
     for origin, fingerprint in (("capture_origin", "capture_fingerprint"), ("operation_origin", "operation_fingerprint")):
         for value in (None, {}, [], [origins[origin]], origins[origin] | {"extra": True}):
@@ -289,6 +469,10 @@ def test_candidate_witness_check_rejects_invalid_payloads_and_row_payload_diverg
         rejected(202, v2_source, v2_scan, malformed(empty, ("authoritative_relation_witness", origin, fingerprint), "f" * 64))
         rejected(203, v2_source, v2_scan, malformed(empty, ("plan", "delta_projections", 1, origin, fingerprint), "f" * 64))
     insert(204, v2_source, v2_scan, empty)
+    empty_projection = deepcopy(empty)
+    empty_projection["canonical_plan_fingerprint"] = "b" * 64
+    empty_projection["plan"]["delta_projections"] = []
+    insert(205, v2_source, v2_scan, empty_projection)
 # fmt: on
 
 
@@ -312,7 +496,10 @@ def test_repository_fences_witnessed_candidate_append_and_invalid_readback(monke
     repository = _reset_repository(); legacy_scan = "candidate-v1-legacy"; _operational(repository, legacy_scan); third, _, _ = _captured_candidate(monkeypatch, repository, legacy_scan, _series(prompt_version="v3")); legacy, _ = repository.append_evidence_vault_sv9_judgment_candidate(legacy_scan, _legacy(third))
     replayed_legacy = repository.get_evidence_vault_sv9_judgment_candidate(legacy_scan, canonical_plan_fingerprint=legacy["canonical_plan_fingerprint"])
     assert replayed_legacy["schema_version"].endswith("v1") and replayed_legacy["complete_record_fingerprint"] == legacy["complete_record_fingerprint"]
-    repository = _reset_repository(); invalid_scan = "candidate-v2-invalid"; _operational(repository, invalid_scan); invalid, _, _ = _captured_candidate(monkeypatch, repository, invalid_scan, _series(prompt_version="v4")); relation = invalid["authoritative_relation_witness"]["authoritative_relations"][0]; relation["relation_fingerprint"] = "0" * 64 if relation["relation_fingerprint"] != "0" * 64 else "1" * 64; invalid["complete_record_fingerprint"] = jm.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v2", {key: row for key, row in invalid.items() if key != "complete_record_fingerprint"}); _insert(repository, invalid_scan, invalid)
-    flow = _AuthorityFlow(); outcome = authority.run_evidence_vault_sv9_authority_evaluation(repository=repository, flow=flow, domain_or_url="example.com", source_scan_id=invalid_scan, current_series_contract=_series(prompt_version="v4"))
-    assert outcome["status"] == "review_required" and outcome["reason_codes"] == ["invalid_authoritative_relation_witness"] and not flow.calls
+    repository = _reset_repository(); invalid_scan = "candidate-v2-invalid"; _operational(repository, invalid_scan); invalid, _, _ = _captured_candidate(monkeypatch, repository, invalid_scan, _series(prompt_version="v4")); witness = invalid["authoritative_relation_witness"]; witness["witness_fingerprint"] = "0" * 64 if witness["witness_fingerprint"] != "0" * 64 else "1" * 64; invalid["complete_record_fingerprint"] = jm.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v2", {key: row for key, row in invalid.items() if key != "complete_record_fingerprint"}); _insert(repository, invalid_scan, invalid)
+    with pytest.raises(history.EvidenceVaultSv9AuthoritativeRelationWitnessError):
+        repository.get_evidence_vault_sv9_judgment_candidate(
+            invalid_scan,
+            canonical_plan_fingerprint=invalid["canonical_plan_fingerprint"],
+        )
 # fmt: on

@@ -13,7 +13,11 @@ from src.services.evidence_vault_sv9_evaluation_checkpoint import build_evidence
 from src.sv9 import judgment_memory
 from tests.test_evidence_vault_sv9_authority_evaluation import _Flow
 from tests.test_evidence_vault_sv9_evaluation_checkpoint import _build, _build_not_detected, _progress, _sha
-from tests.test_evidence_vault_sv9_judgment_candidates_postgres import _AuthorityFlow, _operational
+from tests.test_evidence_vault_sv9_judgment_candidates_postgres import (
+    _AuthorityFlow,
+    _operational,
+    _seed_accepted_sv9_authority,
+)
 from tests.test_evidence_vault_scan_orchestration_postgres import _reset_repository
 from tests.test_sv9_judgment_memory import _series
 def _shared_series():
@@ -383,8 +387,14 @@ def test_checkpoint_ledger_round_trips_fences_mutation_and_bootstrap_race():
             with pytest.raises(psycopg.Error): conn.execute("INSERT INTO b3s_history.evidence_vault_sv9_evaluation_checkpoint_evidence_bindings (checkpoint_id, workspace_id, brand_id, scan_run_id, capture_id, operation_plan_id, evidence_record_id, evidence_ref, evidence_fingerprint) VALUES (%s, %s, %s, %s, %s, %s, %s, 'wrong', %s)", (stored["id"], context["workspace_id"], context["brand_id"], context["scan_run_id"], capture, context["operation_plan_id"], record, fingerprint))
         for statement in ("UPDATE b3s_history.evidence_vault_sv9_evaluation_checkpoints SET evaluation_state = 'partial'", "DELETE FROM b3s_history.evidence_vault_sv9_evaluation_checkpoints", "TRUNCATE b3s_history.evidence_vault_sv9_evaluation_checkpoints"):
             with pytest.raises(psycopg.Error): conn.execute(statement)
+    _seed_accepted_sv9_authority(
+        repository,
+        scan,
+        _shared_series(),
+        flow=_CheckpointSharedFlow(scan),
+    )
     applied = application.run_evidence_vault_sv9_authority_application(repository=repository, flow=_CheckpointSharedFlow(scan), domain_or_url="example.com", source_scan_id=scan, current_series_contract=_shared_series())
-    assert applied["status"] == "authority_established"
+    assert applied["status"] == "authority_retained"
     authority = repository.get_evidence_vault_sv9_judgment_authority("example.com"); candidate, active, head = authority["accepted_candidate"], authority["active_authority_event"], authority["current_head"]
     snapshot = {"state": "accepted_authority", "accepted_candidate_id": candidate["id"], "active_event_id": active["event_id"], "current_head_event_fingerprint": head["event_fingerprint"], "candidate_complete_record_fingerprint": candidate["complete_record_fingerprint"], "canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"], "current_series_fingerprint": candidate["current_series_fingerprint"]}
     accepted, _ = repository.append_evidence_vault_sv9_evaluation_checkpoint(scan, _checkpoint(repository, scan, snapshot, "post-authority")); assert accepted["prior_authority_snapshot"]["state"] == "accepted_authority"
@@ -431,12 +441,20 @@ def test_full_checkpoint_request_lookup_preserves_input_and_rejects_ambiguity(mo
 )
 def test_accepted_candidate_reuses_full_checkpoint_input_with_uncited_evidence(monkeypatch):
     from src.sv9 import incremental_evaluation as evaluator
+    from tests.test_evidence_vault_checkpoint_bootstrap_postgres import _prepare
 
     class Flow(_AuthorityFlow):
         def evaluate_component(self, request):
             value = deepcopy(super().evaluate_component(request).evaluation)
             for row in value["tile_results"]:
-                row.update(assessment_state="sin_evidencia", supporting_evidence=[])
+                if row["tile_id"] == "M1":
+                    row["supporting_evidence"] = [
+                        evidence
+                        for evidence in row["supporting_evidence"]
+                        if evidence["evidence_ref"] == "raw_inputs.0.chunk.0"
+                    ]
+                else:
+                    row.update(assessment_state="sin_evidencia", supporting_evidence=[])
             return evaluator.ComponentEvaluationOutcome.success(
                 evaluator.build_component_evaluation(
                     **{
@@ -449,7 +467,7 @@ def test_accepted_candidate_reuses_full_checkpoint_input_with_uncited_evidence(m
 
     repository = _reset_repository()
     scan = "checkpoint-accepted-reuse"
-    _operational(repository, scan)
+    _prepare(repository, scan)
     run = lambda flow: application.run_evidence_vault_sv9_authority_application(
         repository=repository,
         flow=flow,
@@ -458,19 +476,58 @@ def test_accepted_candidate_reuses_full_checkpoint_input_with_uncited_evidence(m
         current_series_contract=_series(),
     )
     flow = Flow()
-    assert run(flow)["status"] == "authority_established"
+    _seed_accepted_sv9_authority(repository, scan, _series(), flow=flow)
     assert any(tile["evidence"] for request in flow.calls for tile in request["requested_tiles"])
     accepted = repository.get_evidence_vault_sv9_judgment_authority("example.com")
     candidate = accepted["accepted_candidate"]
     current = project_evidence_vault_sv9_evaluation_input(repository=repository, source_scan_id=scan)
+    active, head = accepted["active_authority_event"], accepted["current_head"]
+    snapshot = {
+        "state": "accepted_authority",
+        "accepted_candidate_id": candidate["id"],
+        "active_event_id": active["event_id"],
+        "current_head_event_fingerprint": head["event_fingerprint"],
+        "candidate_complete_record_fingerprint": candidate["complete_record_fingerprint"],
+        "canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"],
+        "current_series_fingerprint": candidate["current_series_fingerprint"],
+    }
     for component in candidate["component_evaluations"]:
+        component_key = component["component_key"]
+        checkpoint = build_evidence_vault_sv9_evaluation_checkpoint(
+            evaluation_input=current,
+            prior_authority_snapshot=snapshot,
+            current_series_fingerprint=candidate["current_series_fingerprint"],
+            canonical_plan_fingerprint=candidate["canonical_plan_fingerprint"],
+            candidate_series_fingerprint=candidate["candidate_series_fingerprint"],
+            healthy_tile_ids=[
+                row["tile_id"]
+                for row in candidate["candidate_tile_judgments"]
+                if row["component_key"] == component_key
+            ],
+            component_evaluations=[component],
+            evaluated_tile_judgments=[
+                row
+                for row in candidate["candidate_tile_judgments"]
+                if row["component_key"] == component_key
+            ],
+            evaluated_component_sentinels=[
+                row
+                for row in candidate["candidate_component_sentinels"]
+                if row["component_key"] == component_key
+            ],
+        )
+        repository.append_evidence_vault_sv9_evaluation_checkpoint(scan, checkpoint)
         proof = repository.get_evidence_vault_sv9_evaluation_checkpoint_for_request(
             scan,
             canonical_plan_fingerprint=candidate["canonical_plan_fingerprint"],
             canonical_request_fingerprint=component["request_fingerprint"],
         )
         assert proof["evaluation_input"] == current and proof["healthy_workset"]["component_evaluations"] == [component]
-        assert proof["prior_authority_snapshot"]["state"] == "bootstrap_absent"
+        assert {
+            key: value
+            for key, value in proof["prior_authority_snapshot"].items()
+            if key != "snapshot_fingerprint"
+        } == snapshot
     for method in (
         "append_evidence_vault_sv9_evaluation_checkpoint",
         "append_evidence_vault_sv9_judgment_candidate",

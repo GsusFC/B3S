@@ -1068,6 +1068,7 @@ def test_concurrent_release_migration_is_database_serialized() -> None:
                     "evidence_vault_sv9_evaluation_checkpoints.sql",
                     "evidence_vault_sv9_empty_relation_witness.sql",
                     "evidence_vault_sv9_shared_analysis_snapshots.sql",
+                    "evidence_vault_sv9_empty_witness_plan_relaxation.sql",
                 ],
                 start=1,
             )

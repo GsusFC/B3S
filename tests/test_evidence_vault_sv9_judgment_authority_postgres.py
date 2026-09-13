@@ -312,7 +312,9 @@ def test_repository_authority_adopts_replays_competes_and_reopens(monkeypatch) -
     from src.services import evidence_vault_sv9_authority_event as authority_event
     from src.services import evidence_vault_sv9_authority_projection as authority_projection
     from src.services import evidence_vault_sv9_judgment_delta as delta
-    from src.services.evidence_vault_sv9_authoritative_relations import EvidenceVaultSv9AuthoritativeRelationStaleWitnessError, EvidenceVaultSv9AuthoritativeRelationWitnessError
+    from src.services.evidence_vault_sv9_authoritative_relations import (
+        EvidenceVaultSv9AuthoritativeRelationWitnessError,
+    )
     from src.sv9 import judgment_memory as memory
     from tests.test_evidence_vault_sv9_judgment_candidates_postgres import _captured_candidate, _insert, _legacy, _operational
     from tests.test_sv9_judgment_memory import _series
@@ -351,7 +353,10 @@ def test_repository_authority_adopts_replays_competes_and_reopens(monkeypatch) -
         next_current = _operational(repository, "authority-next", current)
         same, replayed = repository.adopt_evidence_vault_sv9_judgment_candidate("authority-a", stored["id"], expected_predecessor_event_fingerprint=None, idempotency_key_hash=winner_key)
         assert replayed and same["event"] == winner["event"]
-        for error, candidate_id in ((EvidenceVaultSv9AuthoritativeRelationStaleWitnessError, stale["id"]), (EvidenceVaultSv9AuthoritativeRelationWitnessError, invalid_id)):
+        for error, candidate_id in (
+            (EvidenceVaultSv9JudgmentCandidateConflictError, stale["id"]),
+            (EvidenceVaultSv9AuthoritativeRelationWitnessError, invalid_id),
+        ):
             before = head()
             with pytest.raises(error): repository.adopt_evidence_vault_sv9_judgment_candidate("authority-a", candidate_id, expected_predecessor_event_fingerprint=winner["current_head"]["event_fingerprint"], idempotency_key_hash=key("adopt_candidate", "authority-a", candidate_id, predecessor=winner["current_head"]["event_fingerprint"]))
             assert head() == before
@@ -440,14 +445,14 @@ def _insert_event(conn, identifier, event_type, sequence, workspace, brand, pred
     not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1",
     reason="requires disposable PostgreSQL",
 )
-def test_authority_application_adopts_witnessed_candidate_and_replays() -> None:
+def test_authority_application_retains_historical_witnessed_candidate_and_replays() -> None:
     import psycopg
     from src.history.repository import PostgresHistoryRepository
     from src.services import evidence_vault_sv9_authority_application as application
     from src.services.evidence_vault_sv9_authoritative_relations import (
         project_evidence_vault_sv9_authoritative_relations,
     )
-    from tests.test_evidence_vault_sv9_judgment_candidates_postgres import _AuthorityFlow, _operational
+    from tests.test_evidence_vault_sv9_judgment_candidates_postgres import _AuthorityFlow, _operational, _seed_accepted_sv9_authority
     from tests.test_sv9_judgment_memory import _series
 
     dsn = os.environ["B3S_TEST_DATABASE_URL"]
@@ -463,6 +468,11 @@ def test_authority_application_adopts_witnessed_candidate_and_replays() -> None:
         repository.migrate()
 
         _operational(repository, "authority-service-current")
+        seeded = _seed_accepted_sv9_authority(
+            repository,
+            "authority-service-current",
+            _series(),
+        )
         projection = project_evidence_vault_sv9_authoritative_relations(
             repository=repository, source_scan_id="authority-service-current"
         )
@@ -481,16 +491,14 @@ def test_authority_application_adopts_witnessed_candidate_and_replays() -> None:
             source_scan_id="authority-service-current",
             current_series_contract=_series(),
         )
-        stored = repository.get_evidence_vault_sv9_judgment_candidate(
-            "authority-service-current", canonical_plan_fingerprint=applied["candidate"]["canonical_plan_fingerprint"]
-        )
+        stored = seeded["accepted_candidate"]
         authority = repository.get_evidence_vault_sv9_judgment_authority("example.com")
         assert (
-            applied["status"] == "authority_established"
+            applied["status"] == "authority_retained"
             and repeated["status"] == "authority_retained"
             and stored
             and stored["schema_version"].endswith("v2")
-            and stored["id"] == applied["candidate"]["id"]
+            and applied["candidate"] is None
             and authority["accepted_candidate"]["id"] == stored["id"]
             and authority["reopen_review_overlay"] is None
         )
