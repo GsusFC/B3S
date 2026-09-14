@@ -152,11 +152,25 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
     except EvidenceVaultSv9AuthorityEvaluationError as exc: return _outcome("no_new_score", reasons=["invalid_input"], diagnostic_exception=exc)
     except Exception as exc: return _outcome("no_new_score", reasons=["repository_failure"], diagnostic_exception=exc)
     try:
+        # SV9 authority, not the presence of an operational/canonical memory,
+        # determines whether this is the first evaluation.  An operational
+        # incremental-refresh plan can still be the first SV9 evaluation when
+        # no accepted SV9 judgment authority exists, so it must receive the
+        # complete 80-tile baseline.  A matching accepted full-capture
+        # candidate remains an exact-replay shortcut for idempotent retries.
         initial = authority is None or (
             authority["accepted_candidate"]["source_scan_id"] == source_scan_id
             and _full_capture_candidate(authority["accepted_candidate"], current["evidence"])
         )
-        if initial and not evaluation_input["non_authoritative_hints"] and _first_baseline(repository, evaluation_input, workspace_slug):
+        # Routing hints are advisory only.  They may accompany the first
+        # capture and remain pending unless the evaluator independently cites
+        # exact evidence; they must not suppress the complete baseline.  An
+        # accepted same-scan baseline is still admitted here so the inner
+        # checkpoint proof can decide whether unchanged hints permit replay.
+        if (
+            initial
+            and _first_baseline(repository, evaluation_input, workspace_slug)
+        ):
             if not overlay and not signed["plan"]["review_set"] and not evaluation_input["authority_coverage_loss"] and not evaluation_input["reopen_tile_ids"]:
                 return _evaluate_first_baseline(repository, flow, source_scan_id, workspace_slug, evaluation_input, context, records, current_series_contract, authority, authority_ids)
     except EvidenceVaultSv9AuthoritativeRelationStaleWitnessError as exc: return _outcome("review_required", authority=authority_ids, reasons=["stale_authoritative_relation_witness"], diagnostic_exception=exc)
@@ -333,7 +347,10 @@ def _first_baseline(repository, current, workspace):
         or normalize_domain(plan["subject_url"]) != source["canonical_domain"]
     ):
         raise EvidenceVaultSv9AuthorityEvaluationError("baseline source is invalid")
-    return plan["mode"] == "baseline" and plan["canonical_memory_version"] is None
+    # The operation plan describes the capture path, not SV9 authority.  Both
+    # baseline and incremental-refresh captures may be the first SV9 input
+    # when no accepted authority exists; diagnostic captures remain excluded.
+    return plan["mode"] in {"baseline", "incremental_refresh"}
 
 
 def _full_capture_candidate(candidate, evidence):
@@ -373,7 +390,13 @@ def _evaluate_first_baseline(repository, flow, scan, workspace, current, context
     )
     if authority is not None:
         accepted = authority["accepted_candidate"]
-        if not current["non_authoritative_hints"] and accepted["plan"] == plan and accepted["evidence_bindings"] == bindings and accepted.get("authoritative_relation_witness") == witness and _replays(accepted, accepted, accepted, packets):
+        if (
+            accepted["plan"] == plan
+            and accepted["evidence_bindings"] == bindings
+            and accepted.get("authoritative_relation_witness") == witness
+            and _accepted_input_replays(repository, authority, current, plan, witness, records, context, workspace)
+            and _replays(accepted, accepted, accepted, packets)
+        ):
             return _outcome(
                 "no_new_score",
                 plan,
@@ -841,7 +864,6 @@ def _accepted_input_replays(repository, authority, current, plan, witness, recor
     candidate = authority["accepted_candidate"]
     if (
         authority["reopen_review_overlay"] is not None
-        or current["non_authoritative_hints"]
         or candidate["source_scan_id"] != current["source_identity"]["source_scan_id"]
         or candidate["current_series_fingerprint"] != plan["current_series_fingerprint"]
         or candidate.get("authoritative_relation_witness") != witness
@@ -876,11 +898,11 @@ def _accepted_input_replays(repository, authority, current, plan, witness, recor
             if (
                 proof["evaluation_state"] != "partial"
                 or proof["evaluation_input"] != current
+                or proof["non_authoritative_hints"] != current["non_authoritative_hints"]
                 or proof["plan_binding"] != expected_plan
                 or proof["healthy_workset"]["component_evaluations"] != [component]
                 or proof["review_partition"]["tile_ids"]
                 or proof["pending_evidence"]
-                or proof["non_authoritative_hints"]
                 or (prior_snapshot is not None and proof["prior_authority_snapshot"] != prior_snapshot)
             ):
                 return False
