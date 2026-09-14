@@ -250,6 +250,23 @@ def compare_reports(
 
     baseline = build_evidence_snapshot(baseline_report)
     candidate = build_evidence_snapshot(candidate_report)
+    return _compare_snapshots(
+        baseline,
+        candidate,
+        baseline_report=baseline_report,
+        candidate_report=candidate_report,
+    )
+
+
+def _compare_snapshots(
+    baseline: EvidenceSnapshot,
+    candidate: EvidenceSnapshot,
+    *,
+    baseline_report: dict[str, Any],
+    candidate_report: dict[str, Any],
+) -> EvidenceComparison:
+    """Compare two already-built snapshots of immutable reports."""
+
     baseline_by_locator = _records_by_locator(baseline.material_records)
     candidate_by_locator = _records_by_locator(candidate.material_records)
     baseline_by_fingerprint = {
@@ -411,9 +428,19 @@ def classify_report_history(reports: Iterable[dict[str, Any]]) -> dict[str, Any]
     selected_report: dict[str, Any] | None = None
     selected_kind = ""
     previous_report: dict[str, Any] | None = None
+    snapshots: dict[int, EvidenceSnapshot] = {}
+
+    def _snapshot(report: dict[str, Any]) -> EvidenceSnapshot:
+        # Reports are copied once above, so identity is stable across the loop
+        # and one immutable report never needs a second projection.
+        cached = snapshots.get(id(report))
+        if cached is None:
+            cached = build_evidence_snapshot(report)
+            snapshots[id(report)] = cached
+        return cached
 
     for index, report in enumerate(ordered):
-        snapshot = build_evidence_snapshot(report)
+        snapshot = _snapshot(report)
         eligible = _eligible_for_canonical(report, snapshot)
         if selected_report is None:
             if snapshot.invalid:
@@ -441,8 +468,22 @@ def classify_report_history(reports: Iterable[dict[str, Any]]) -> dict[str, Any]
             previous_report = report
             continue
 
-        baseline_comparison = compare_reports(selected_report, report)
-        previous_comparison = compare_reports(previous_report, report) if previous_report is not None else None
+        baseline_comparison = _compare_snapshots(
+            _snapshot(selected_report),
+            snapshot,
+            baseline_report=selected_report,
+            candidate_report=report,
+        )
+        previous_comparison = (
+            _compare_snapshots(
+                _snapshot(previous_report),
+                snapshot,
+                baseline_report=previous_report,
+                candidate_report=report,
+            )
+            if previous_report is not None
+            else None
+        )
         effective = previous_comparison if previous_comparison and previous_comparison.classification in {
             "invalid",
             "acquisition_regression",

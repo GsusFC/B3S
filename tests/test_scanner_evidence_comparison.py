@@ -561,6 +561,32 @@ def test_annotated_history_is_returned_newest_first() -> None:
     assert annotated[1]["canonical_status"] == "provisional"
 
 
+def test_classify_history_projects_each_report_snapshot_once() -> None:
+    """History classification must stay linear in the number of reports."""
+
+    import src.services.scanner_evidence_comparison as comparison
+
+    reports = [
+        _report(f"r{index}", f"2026-07-{index + 1:02d}T00:00:00Z")
+        for index in range(6)
+    ]
+    original = comparison.build_evidence_snapshot
+    built: list[str] = []
+
+    def counting(report: dict) -> object:
+        built.append(str(report.get("id") or ""))
+        return original(report)
+
+    comparison.build_evidence_snapshot = counting
+    try:
+        comparison.classify_report_history(reports)
+    finally:
+        comparison.build_evidence_snapshot = original
+
+    assert len(built) == len(reports)
+    assert len(set(built)) == len(reports)
+
+
 def _evidence(
     ref: str,
     source: str,
