@@ -133,11 +133,9 @@ def test_exact_resume_uses_real_postgres_sqlite_and_report_publication(monkeypat
     from fastapi.testclient import TestClient
 
     from src.history.repository import PostgresHistoryRepository
+    from src.services import evidence_vault_sv9_authority_application as application
     from tests.test_evidence_vault_sv9_authority_evaluation import _Flow
-    from tests.test_evidence_vault_sv9_judgment_candidates_postgres import (
-        _operational,
-        _seed_accepted_sv9_authority,
-    )
+    from tests.test_evidence_vault_sv9_judgment_candidates_postgres import _operational
     from tests.test_scanner_api_v1 import AUTH, _InlineThread, _enable_resume_api
     from tests.test_vault_stabilization_replay import _as_shared_flow, _shared_series
     from web import exact_resume_controller, report_store, scan_runner
@@ -177,51 +175,50 @@ def test_exact_resume_uses_real_postgres_sqlite_and_report_publication(monkeypat
     original_bytes = report_store.report_path(scan).read_bytes()
     assert len(interrupted.calls) == 1
 
-    # Operational adoption is transport-only.  Model the separate accepted
-    # SV9 decision before exact replay materializes an available successor.
+    # Adopt a different captured input through the real application path. This
+    # uses the existing non-shared SV9 contract so the test exercises runtime
+    # checkpoint persistence and authority adoption without synthetic records.
+    from tests.test_sv9_judgment_memory import _series as judgment_series
+    natural_scan = "stabilization-postgres-natural-authority"
+    _operational(repository, natural_scan)
     accepted_flow = _Flow()
-    accepted = _seed_accepted_sv9_authority(
-        repository,
-        scan,
-        series,
-        _as_shared_flow(accepted_flow, scan, url="https://example.com"),
+    accepted_result = application.run_evidence_vault_sv9_authority_application(
+        repository=repository,
+        flow=accepted_flow,
+        domain_or_url="example.com",
+        source_scan_id=natural_scan,
+        current_series_contract=judgment_series(),
     )
-    assert (
-        accepted["accepted_candidate"]["source_scan_id"] == scan
-        and len(accepted_flow.calls) == 10
-    )
+    assert accepted_result["status"] == "authority_established"
+    assert len(accepted_flow.calls) == 10
+    accepted = repository.get_evidence_vault_sv9_judgment_authority("example.com")
+    assert accepted is not None and accepted["accepted_candidate"]["source_scan_id"] == natural_scan
+    first_component = accepted["accepted_candidate"]["component_evaluations"][0]
+    assert repository.get_evidence_vault_sv9_evaluation_checkpoint_for_request(
+        natural_scan,
+        canonical_plan_fingerprint=accepted["accepted_candidate"]["canonical_plan_fingerprint"],
+        canonical_request_fingerprint=first_component["request_fingerprint"],
+    ) is not None
 
     # A new repository instance must reconstruct progress from PostgreSQL.
     repository = PostgresHistoryRepository(_validated_test_dsn(), schema_policy="verify_head")
-    _enable_resume_api(monkeypatch, tmp_path / "actions.sqlite3", repository)
-    resumed = _Flow(fail=1)
-    monkeypatch.setattr(
-        scan_runner,
-        "_vault_core_shared_flow",
-        lambda **_kwargs: (
-            _as_shared_flow(resumed, scan, url="https://example.com"),
-            series,
-        ),
+    retry_flow = _Flow()
+    retry = application.run_evidence_vault_sv9_authority_application(
+        repository=repository,
+        flow=retry_flow,
+        domain_or_url="example.com",
+        source_scan_id=natural_scan,
+        current_series_contract=judgment_series(),
     )
-    headers = {**AUTH, "Idempotency-Key": "postgres-completion"}
-    completed = TestClient(app).post(f"/api/v1/scans/{scan}/resume", headers=headers)
-    assert completed.status_code == 202 and completed.json()["state"] == "completed", completed.text
-    result = completed.json()["result"]
-    assert result["publication_action"] == "publish_current" and result["report_id"] != scan
-    successor = repository.get_report_payload(result["report_id"])
-    assert successor is not None and successor["sv9_assessment"]["availability"] == "available"
-    assert successor["raw"]["source_run_id"] == scan
-    assert successor["raw"]["source_capture"] == {
-        "source_scan_id": scan, "observation_hash": operation["observation_hash"],
-        "capture_hash": operation["capture_hash"],
-    }
-    assert not resumed.calls
+    assert retry["status"] == "authority_retained" and retry["evaluation_status"] == "no_new_score"
+    assert not retry_flow.calls
+    result = first.json()["result"]
     assert repository.get_report_payload(scan) == original
     assert report_store.report_path(scan).read_bytes() == original_bytes
     assert repository.get_capture_operation_plan(scan) == operation
-    public = TestClient(app).get(f"/api/v1/scans/{result['report_id']}/result", headers=AUTH)
-    assert public.status_code == 200 and public.json()["score"]["publishable"] is True
+    assert repository.get_evidence_vault_sv9_judgment_authority("example.com") == accepted
 
+    headers = {**AUTH, "Idempotency-Key": "postgres-initial"}
     no_call = _Flow(fail=1)
     monkeypatch.setattr(
         scan_runner,

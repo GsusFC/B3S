@@ -387,14 +387,17 @@ def test_checkpoint_ledger_round_trips_fences_mutation_and_bootstrap_race():
             with pytest.raises(psycopg.Error): conn.execute("INSERT INTO b3s_history.evidence_vault_sv9_evaluation_checkpoint_evidence_bindings (checkpoint_id, workspace_id, brand_id, scan_run_id, capture_id, operation_plan_id, evidence_record_id, evidence_ref, evidence_fingerprint) VALUES (%s, %s, %s, %s, %s, %s, %s, 'wrong', %s)", (stored["id"], context["workspace_id"], context["brand_id"], context["scan_run_id"], capture, context["operation_plan_id"], record, fingerprint))
         for statement in ("UPDATE b3s_history.evidence_vault_sv9_evaluation_checkpoints SET evaluation_state = 'partial'", "DELETE FROM b3s_history.evidence_vault_sv9_evaluation_checkpoints", "TRUNCATE b3s_history.evidence_vault_sv9_evaluation_checkpoints"):
             with pytest.raises(psycopg.Error): conn.execute(statement)
-    _seed_accepted_sv9_authority(
+    seeded = _seed_accepted_sv9_authority(
         repository,
         scan,
         _shared_series(),
         flow=_CheckpointSharedFlow(scan),
     )
-    applied = application.run_evidence_vault_sv9_authority_application(repository=repository, flow=_CheckpointSharedFlow(scan), domain_or_url="example.com", source_scan_id=scan, current_series_contract=_shared_series())
-    assert applied["status"] == "authority_retained"
+    before = repository.get_evidence_vault_sv9_judgment_authority("example.com")
+    applied_flow = _CheckpointSharedFlow(scan)
+    applied = application.run_evidence_vault_sv9_authority_application(repository=repository, flow=applied_flow, domain_or_url="example.com", source_scan_id=scan, current_series_contract=_shared_series())
+    assert applied["status"] == "authority_conflict" and applied["evaluation_status"] == "no_new_score" and not applied_flow.calls
+    assert repository.get_evidence_vault_sv9_judgment_authority("example.com") == before == seeded
     authority = repository.get_evidence_vault_sv9_judgment_authority("example.com"); candidate, active, head = authority["accepted_candidate"], authority["active_authority_event"], authority["current_head"]
     snapshot = {"state": "accepted_authority", "accepted_candidate_id": candidate["id"], "active_event_id": active["event_id"], "current_head_event_fingerprint": head["event_fingerprint"], "candidate_complete_record_fingerprint": candidate["complete_record_fingerprint"], "canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"], "current_series_fingerprint": candidate["current_series_fingerprint"]}
     accepted, _ = repository.append_evidence_vault_sv9_evaluation_checkpoint(scan, _checkpoint(repository, scan, snapshot, "post-authority")); assert accepted["prior_authority_snapshot"]["state"] == "accepted_authority"
