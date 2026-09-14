@@ -64,6 +64,14 @@ class _Repository:
         return deepcopy(self.checkpoints.get((canonical_plan_fingerprint, canonical_request_fingerprint)))
     def get_evidence_vault_sv9_evaluation_checkpoint_shared_process(self, _scan, *, canonical_plan_fingerprint, canonical_request_fingerprint, **_kwargs):
         return deepcopy(self.shared_processes.get((canonical_plan_fingerprint, canonical_request_fingerprint)))
+    def get_evidence_vault_sv9_evaluation_checkpoint_for_request(self, _scan, *, canonical_plan_fingerprint, canonical_request_fingerprint, **_kwargs):
+        for value in reversed(self.checkpoint_appends):
+            if value["plan_binding"]["canonical_plan_fingerprint"] != canonical_plan_fingerprint:
+                continue
+            evaluations = value["healthy_workset"]["component_evaluations"]
+            if evaluations and evaluations[0]["request_fingerprint"] == canonical_request_fingerprint:
+                return deepcopy(value)
+        return None
     def append_evidence_vault_sv9_evaluation_checkpoint(self, _scan, checkpoint, **_kwargs):
         self.checkpoint_appends.append(deepcopy(checkpoint))
         if self.fail_checkpoint_append: raise RuntimeError("checkpoint failed")
@@ -117,7 +125,18 @@ class _Repository:
         if self.reopen: facts["authority"]["accepted"][0]["basis"][0].update(evidence_id=_hash(998), source_identity_id=_hash(999))
         if self.unmapped or self.hint_only: facts["authority"]["accepted"] = facts["authority"]["accepted"][:1]
         if getattr(self, "empty_adopted_basis", False): facts["authority"]["accepted"] = []
-        if self.hint_only: facts["evaluation_hint_seeds"] = [{"hint_id": "00000000-0000-0000-0000-000000000987", "tile_id": "M1", "component_key": "mission", "evidence_record_id": rows[1]["evidence_record_id"], "provenance_fingerprint": _hash(987)}]
+        if self.hint_only:
+            hint_count = getattr(self, "hint_count", 1)
+            facts["evaluation_hint_seeds"] = [
+                {
+                    "hint_id": f"00000000-0000-0000-0000-{987 + index:012d}",
+                    "tile_id": planner._REGISTRY[index % len(planner._REGISTRY)][0],
+                    "component_key": planner._REGISTRY[index % len(planner._REGISTRY)][1],
+                    "evidence_record_id": rows[(1 if hint_count == 1 else index // len(planner._REGISTRY))]["evidence_record_id"],
+                    "provenance_fingerprint": _hash(987 + index),
+                }
+                for index in range(hint_count)
+            ]
         if self.bootstrap_hint_only:
             facts["authority"]["accepted"] = []
             facts["evaluation_hint_seeds"] = [{"hint_id": "00000000-0000-0000-0000-000000000987", "tile_id": "M1", "component_key": "mission", "evidence_record_id": rows[0]["evidence_record_id"], "provenance_fingerprint": _hash(987)}]
@@ -166,16 +185,20 @@ def test_first_run_with_exact_operational_projection_persists_witnessed_candidat
     repeated = _run(repo, _Flow(), current=(9,)); assert repeated["status"] == "candidate_available" and not repeated["calls_issued"] and repo.append_calls == 1
 
 
-def _first_baseline(repo):
+def _first_baseline(repo, *, operation_mode="baseline", canonical_memory_version=None):
     from src.services.evidence_vault_incremental_refresh import build_vault_scan_plan
 
     repo.unmapped = True
+    current_records = [
+        {"ref": f"evidence:{number}", "source": "web", "evidence_type": "owned_content", "url": "https://example.test", "content": f"Frozen synthetic evidence {number}", "metadata": {}}
+        for number in repo.records
+    ]
     repo.baseline_plan = build_vault_scan_plan(
-        brand_identity="example.test", subject_url="https://example.test", mode="baseline",
-        current_evidence_records=[
-            {"ref": f"evidence:{number}", "source": "web", "evidence_type": "owned_content", "url": "https://example.test", "content": f"Frozen synthetic evidence {number}", "metadata": {}}
-            for number in repo.records
-        ],
+        brand_identity="example.test", subject_url="https://example.test", mode=operation_mode,
+        current_evidence_records=current_records,
+        previous_capture_evidence_records=current_records if operation_mode == "incremental_refresh" else (),
+        known_evidence_records=current_records if operation_mode == "incremental_refresh" else (),
+        canonical_memory_version=canonical_memory_version,
     )
 
     def operation(scan, **_kwargs):
@@ -215,6 +238,74 @@ class _SelectiveFlow(_Flow):
                 tile_results=rows[:-1] if self.malformed else rows,
             )
         )
+
+
+def test_first_sv9_evaluation_uses_full_capture_with_legacy_operational_memory_and_hints_then_replays_exactly():
+    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
+
+    repo = _first_baseline(
+        _ApplicationRepository(records=(3, 9)),
+        operation_mode="incremental_refresh",
+        canonical_memory_version=_hash(500),
+    )
+    repo.hint_only = True
+    repo.hint_count = 114
+    input_ = repo.evaluation_input("scan", "b3s")
+    assert repo.baseline_plan["mode"] == "incremental_refresh"
+    assert repo.baseline_plan["canonical_memory_version"] == _hash(500)
+    assert len(input_["non_authoritative_hints"]) == 113
+    assert {row["evidence_ref"] for row in input_["current_identity_bindings"]} == {"evidence:3", "evidence:9"}
+    assert {row["evidence_ref"] for row in input_["authoritative_relations"]} == {"evidence:3"}
+
+    flow = _SelectiveFlow()
+    outcome = _baseline_application(repo, flow)
+
+    assert outcome["status"] == "authority_established"
+    assert len(flow.calls) == len(repo.checkpoint_appends) == 10
+    candidate = repo.authority["accepted_candidate"]
+    assert len(candidate["candidate_tile_judgments"]) == 80
+    assert len(repo.candidates) == repo.append_calls == 1
+    assert {
+        row["evidence_ref"]
+        for row in candidate["authoritative_relation_witness"]["authoritative_relations"]
+    } == {"evidence:3"}
+    assert {
+        evidence["evidence_ref"]
+        for row in candidate["candidate_tile_judgments"]
+        for evidence in row["supporting_evidence"]
+    } == {"evidence:3"}
+
+    accepted = deepcopy(repo.authority)
+    retry_flow = _SelectiveFlow(fail=1)
+    retry = _baseline_application(repo, retry_flow)
+    assert retry["status"] == "authority_retained"
+    assert not retry_flow.calls and repo.append_calls == 1 and repo.authority == accepted
+
+    repo.hint_count = 115
+    changed_flow = _SelectiveFlow(fail=1)
+    changed = _baseline_application(repo, changed_flow)
+    assert changed["status"] != "authority_retained"
+    assert not changed_flow.calls and repo.append_calls == 1 and repo.authority == accepted
+
+
+def test_accepted_sv9_authority_does_not_rebootstrap_later_capture():
+    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
+
+    repo = _first_baseline(
+        _ApplicationRepository(records=(3, 9)),
+        operation_mode="incremental_refresh",
+        canonical_memory_version=_hash(500),
+    )
+    assert _baseline_application(repo, _SelectiveFlow())["status"] == "authority_established"
+
+    repo.hint_only = True
+    flow = _SelectiveFlow()
+    outcome = _baseline_application(repo, flow, source="scan-2")
+
+    assert outcome["status"] == "review_required"
+    assert outcome["evaluation_status"] == "review_required"
+    assert "unmapped_evidence" in outcome["reason_codes"]
+    assert len(flow.calls) < 10
 
 
 @pytest.mark.parametrize("empty_basis", [False, True])
@@ -307,7 +398,7 @@ def test_first_baseline_failed_complete_analysis_never_adopts_or_publishes_score
         assert len(resumed.calls) == 9 and len(repo.checkpoint_appends) == 10
 
 
-@pytest.mark.parametrize(("review_input", "empty_basis"), [("hint_only", False), ("reopen", False), ("hint_only", True)])
+@pytest.mark.parametrize(("review_input", "empty_basis"), [("reopen", False)])
 def test_first_baseline_with_unresolved_review_input_cannot_establish_authority(review_input, empty_basis):
     from src.services.evidence_vault_sv9_authority_report import project_vault_authority_publication
     from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
