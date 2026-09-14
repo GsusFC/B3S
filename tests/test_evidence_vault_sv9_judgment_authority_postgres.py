@@ -477,16 +477,18 @@ def test_authority_application_retains_historical_witnessed_candidate_and_replay
             repository=repository, source_scan_id="authority-service-current"
         )
         assert projection["status"] == "available"
+        applied_flow = _AuthorityFlow()
         applied = application.run_evidence_vault_sv9_authority_application(
             repository=repository,
-            flow=_AuthorityFlow(),
+            flow=applied_flow,
             domain_or_url="example.com",
             source_scan_id="authority-service-current",
             current_series_contract=_series(),
         )
+        repeated_flow = _AuthorityFlow()
         repeated = application.run_evidence_vault_sv9_authority_application(
             repository=repository,
-            flow=_AuthorityFlow(),
+            flow=repeated_flow,
             domain_or_url="example.com",
             source_scan_id="authority-service-current",
             current_series_contract=_series(),
@@ -494,8 +496,12 @@ def test_authority_application_retains_historical_witnessed_candidate_and_replay
         stored = seeded["accepted_candidate"]
         authority = repository.get_evidence_vault_sv9_judgment_authority("example.com")
         assert (
-            applied["status"] == "authority_retained"
-            and repeated["status"] == "authority_retained"
+            applied["status"] == "authority_conflict"
+            and repeated["status"] == "authority_conflict"
+            and applied["evaluation_status"] == "no_new_score"
+            and repeated["evaluation_status"] == "no_new_score"
+            and not applied_flow.calls
+            and not repeated_flow.calls
             and stored
             and stored["schema_version"].endswith("v2")
             and applied["candidate"] is None

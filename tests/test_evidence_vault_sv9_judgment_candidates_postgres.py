@@ -150,13 +150,12 @@ def _seed_accepted_sv9_authority(repository, scan, series, flow=None):
         raise _CapturedCandidate
 
     original_append = repository.append_evidence_vault_sv9_judgment_candidate
-    original_append_checkpoint = repository.append_evidence_vault_sv9_evaluation_checkpoint
     repository.append_evidence_vault_sv9_judgment_candidate = append
-    # Historical authority is seeded as an accepted record; continuity tests
-    # attach only checkpoints whose input matches that accepted state.
-    repository.append_evidence_vault_sv9_evaluation_checkpoint = (
-        lambda _scan, checkpoint, **_kwargs: (checkpoint, False)
-    )
+    # Historical authority is seeded as an accepted record.  Legacy callers
+    # intentionally omit checkpoints because this helper represents a
+    # proofless historical record, not current runtime production.
+    original_append_checkpoint = repository.append_evidence_vault_sv9_evaluation_checkpoint
+    repository.append_evidence_vault_sv9_evaluation_checkpoint = lambda _scan, checkpoint, **_kwargs: (checkpoint, False)
     try:
         authority._evaluate_first_baseline(
             repository,

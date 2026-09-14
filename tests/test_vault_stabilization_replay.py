@@ -238,6 +238,43 @@ def test_later_scan_retains_published_successor(exact_replay):
     assert report_store.load_report(scan)["sv9_assessment"]["availability"] == "unavailable"
 
 
+def test_proofless_historical_authority_preserves_published_report_through_orchestration(
+    exact_replay, monkeypatch
+):
+    """Missing replay proof cannot overwrite a published report through the scanner seam."""
+    scan, repo, run, _directory = exact_replay
+    run(_Flow(fail=2))
+    successor = run(_Flow())
+    accepted_before = deepcopy(repo.authority)
+    report_path = report_store.report_path(successor.report_id)
+    report_bytes = report_path.read_bytes()
+    report_before = deepcopy(report_store.load_report(successor.report_id))
+    repo.checkpoints.clear()
+    repo.checkpoint_appends.clear()
+
+    no_call = _Flow()
+    fresh_action = {
+        "action_id": "stabilization-action-proofless-retry",
+        "scan_id": scan,
+        "state": "running",
+    }
+    monkeypatch.setattr(
+        scan_runner,
+        "_vault_core_shared_flow",
+        lambda **_kwargs: (_as_shared_flow(no_call, scan), _shared_series()),
+    )
+    result = scan_runner._run_vault_exact_resume(
+        scan_id=scan, action=fresh_action, repository=repo
+    )
+    fresh_successor_id = scan_runner._exact_successor_report_id(fresh_action)
+    assert result == scan_runner._ExactResumePublication("record_no_score", scan)
+    assert fresh_successor_id and report_store.load_report(fresh_successor_id) is None
+    assert not no_call.calls
+    assert repo.authority == accepted_before
+    assert report_path.read_bytes() == report_bytes
+    assert report_store.load_report(successor.report_id) == report_before
+
+
 def test_report_read_failure_is_not_confirmed_absence(monkeypatch, tmp_path):
     class UnavailableRepository:
         def get_report_payload(self, _report_id):

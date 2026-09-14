@@ -394,7 +394,17 @@ def _evaluate_first_baseline(repository, flow, scan, workspace, current, context
             accepted["plan"] == plan
             and accepted["evidence_bindings"] == bindings
             and accepted.get("authoritative_relation_witness") == witness
-            and _accepted_input_replays(repository, authority, current, plan, witness, records, context, workspace)
+            and _accepted_input_replays(
+                repository,
+                authority,
+                current,
+                plan,
+                witness,
+                records,
+                context,
+                workspace,
+                allow_hints=True,
+            )
             and _replays(accepted, accepted, accepted, packets)
         ):
             return _outcome(
@@ -859,11 +869,12 @@ def _outcome(status: str, plan: Mapping[str, Any] | None = None, authority: Mapp
 # fmt: on
 
 
-def _accepted_input_replays(repository, authority, current, plan, witness, records, context, workspace):
+def _accepted_input_replays(repository, authority, current, plan, witness, records, context, workspace, *, allow_hints=False):
     """Reuse accepted authority only with its original, complete checkpoint input proof."""
     candidate = authority["accepted_candidate"]
     if (
         authority["reopen_review_overlay"] is not None
+        or (current["non_authoritative_hints"] and not allow_hints)
         or candidate["source_scan_id"] != current["source_identity"]["source_scan_id"]
         or candidate["current_series_fingerprint"] != plan["current_series_fingerprint"]
         or candidate.get("authoritative_relation_witness") != witness

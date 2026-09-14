@@ -288,6 +288,59 @@ def test_first_sv9_evaluation_uses_full_capture_with_legacy_operational_memory_a
     assert not changed_flow.calls and repo.append_calls == 1 and repo.authority == accepted
 
 
+@pytest.mark.parametrize("proof_fault", ["intact", "missing", "corrupt"])
+def test_cleared_hints_do_not_infer_historical_hint_free_authority_replay(proof_fault):
+    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
+
+    repo = _first_baseline(
+        _ApplicationRepository(records=(3, 9)),
+        operation_mode="incremental_refresh",
+        canonical_memory_version=_hash(500),
+    )
+    repo.hint_only = True
+    repo.hint_count = 114
+    assert _baseline_application(repo, _SelectiveFlow())["status"] == "authority_established"
+    accepted = deepcopy(repo.authority)
+
+    original_get = repo.get_evidence_vault_sv9_evaluation_checkpoint_for_request
+    proof_reads = []
+
+    def counted_get(*args, **kwargs):
+        proof_reads.append((args, kwargs))
+        if proof_fault == "missing":
+            return None
+        value = original_get(*args, **kwargs)
+        if proof_fault == "corrupt" and value is not None:
+            value["checkpoint_fingerprint"] = _hash(999)
+        return value
+
+    repo.get_evidence_vault_sv9_evaluation_checkpoint_for_request = counted_get
+    repo.hint_only = False
+    retry = _baseline_application(repo, _SelectiveFlow(fail=1))
+
+    assert proof_reads, "cleared hints must validate persisted input provenance"
+    assert repo.authority == accepted
+    assert retry["status"] != "authority_retained"
+
+
+@pytest.mark.parametrize("proof_fault", ["missing", "corrupt"])
+def test_true_baseline_without_checkpoint_proof_requires_review(proof_fault):
+    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
+
+    repo = _first_baseline(_ApplicationRepository(records=(3, 9)))
+    assert _baseline_application(repo, _SelectiveFlow())["status"] == "authority_established"
+    accepted = deepcopy(repo.authority)
+    if proof_fault == "missing":
+        repo.checkpoint_appends.clear()
+    else:
+        repo.checkpoint_appends[-1]["checkpoint_fingerprint"] = _hash(999)
+
+    retry_flow = _SelectiveFlow(fail=1)
+    retry = _baseline_application(repo, retry_flow)
+    assert retry["status"] != "authority_retained"
+    assert not retry_flow.calls and repo.authority == accepted
+
+
 def test_accepted_sv9_authority_does_not_rebootstrap_later_capture():
     from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
 
