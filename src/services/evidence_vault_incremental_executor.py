@@ -680,14 +680,10 @@ def _build_candidate_result(
             max_records=len(labelable),
             selected_refs=[row["row"]["ref"] for row in labelable],
         )
-        if (
-            labeling_debug.get("status") != "labeled"
-            or labeling_debug.get("records_labeled") != len(labelable)
-        ):
-            raise EvidenceVaultIncrementalExecutorError(
-                "selected evidence labeling did not cover the eligible workset: "
-                f"{labeling_debug.get('reason')}"
-            )
+        # Semantic labeling is advisory. A malformed provider response must
+        # leave the deterministic identity/shortlist path intact rather than
+        # aborting the frozen operation; the worker reports the failure and
+        # applies no labels when coverage is incomplete.
     else:
         labeling_debug = {
             "version": EVIDENCE_LABELING_VERSION,

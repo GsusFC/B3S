@@ -59,6 +59,32 @@ class ExecutorLLM:
         }
 
 
+class RootArrayLabelExecutorLLM(ExecutorLLM):
+    def _call_json(self, system, user, **kwargs):
+        if kwargs["schema_name"] == "sv9_flow_evidence_labeling":
+            self.calls.append(kwargs["schema_name"])
+            payload = json.loads(user)
+            self.last_raw_response = json.dumps([
+                {
+                    "ref": row["ref"],
+                    "relevant_blocks": [],
+                    "stance": "neutral",
+                    "identity_match": "domain",
+                    "specificity": "incidental",
+                }
+                for row in payload["records"]
+            ])
+            self.last_failure_reason = "schema_validation_error"
+            self.call_failures = [
+                {
+                    "reason": "schema_validation_error",
+                    "error": "$: expected object",
+                }
+            ]
+            return {}
+        return super()._call_json(system, user, **kwargs)
+
+
 class NoCallLLM:
     api_key = "test"
 
@@ -113,6 +139,24 @@ class TamperSemanticShortlistResult:
                 for tile_id in rows
             }
         )
+        kwargs["result_payload"] = payload
+        return self.repository.persist_capture_operation_result(
+            source_scan_id,
+            **kwargs,
+        )
+
+
+class TamperLabelingDebugResult:
+    def __init__(self, repository, updates):
+        self.repository = repository
+        self.updates = updates
+
+    def __getattr__(self, name):
+        return getattr(self.repository, name)
+
+    def persist_capture_operation_result(self, source_scan_id, **kwargs):
+        payload = deepcopy(kwargs["result_payload"])
+        payload["labeling_debug"].update(self.updates)
         kwargs["result_payload"] = payload
         return self.repository.persist_capture_operation_result(
             source_scan_id,
@@ -338,6 +382,108 @@ def test_repository_rederives_shortlists_from_persisted_semantic_labels() -> Non
             source_scan_id="tampered-semantic-shortlist",
             worker_id="worker-a",
             llm=ExecutorLLM(),
+        )
+
+
+def test_advisory_label_failure_persists_deterministic_result() -> None:
+    repository = _reset_repository()
+    _persist_baseline(repository, "label-fallback-scan")
+    llm = RootArrayLabelExecutorLLM()
+
+    execution = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="label-fallback-scan",
+        worker_id="worker-a",
+        llm=llm,
+    )
+
+    assert execution["execution_status"] == "completed"
+    operation = repository.get_capture_operation_plan("label-fallback-scan")
+    assert operation["status"] == "completed"
+    result = operation["result_payload"]
+    assert result["labeling_debug"]["status"] == "failed"
+    assert result["labeling_debug"]["reason"] == (
+        "evidence_labeling_provider_failed:schema_validation_error:"
+        "schema_path=$;schema_category=expected_type"
+    )
+    fingerprint = result["selected_evidence_fingerprints"][0]
+    assert result["semantic_labels"][fingerprint] == {
+        "relevant_blocks": [],
+        "stance": "neutral",
+        "identity_match_llm": "unverified",
+        "specificity": "incidental",
+    }
+
+
+def test_repository_rejects_partially_applied_advisory_label_fallback() -> None:
+    repository = _reset_repository()
+    _persist_baseline(repository, "label-fallback-partial")
+
+    with pytest.raises(CaptureConflictError, match="semantic labeling audit"):
+        execute_vault_operation_plan(
+            repository=TamperLabelingDebugResult(
+                repository,
+                {"records_labeled": 1},
+            ),
+            source_scan_id="label-fallback-partial",
+            worker_id="worker-a",
+            llm=RootArrayLabelExecutorLLM(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (
+            "skipped",
+            "evidence_labeling_provider_failed:transport_error",
+        ),
+        ("failed", "missing_llm_api_key"),
+    ],
+)
+def test_repository_rejects_unreachable_advisory_label_fallback(
+    status, reason
+) -> None:
+    repository = _reset_repository()
+    scan_id = f"label-fallback-impossible-{status}"
+    _persist_baseline(repository, scan_id)
+
+    with pytest.raises(CaptureConflictError, match="semantic labeling audit"):
+        execute_vault_operation_plan(
+            repository=TamperLabelingDebugResult(
+                repository,
+                {"status": status, "reason": reason},
+            ),
+            source_scan_id=scan_id,
+            worker_id="worker-a",
+            llm=RootArrayLabelExecutorLLM(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("counter", "value"),
+    [
+        ("records_labeled", False),
+        ("artifact_cache_hits", False),
+        ("artifact_cache_misses", False),
+        ("provider_records", False),
+        ("provider_call_count", False),
+        ("records_considered", True),
+        ("semantic_passage_count", True),
+        ("semantic_batch_count", True),
+    ],
+)
+def test_repository_rejects_boolean_advisory_label_counter(counter, value) -> None:
+    repository = _reset_repository()
+    scan_id = f"label-fallback-bool-{counter}"
+    _persist_baseline(repository, scan_id)
+
+    with pytest.raises(CaptureConflictError, match="semantic labeling audit"):
+        execute_vault_operation_plan(
+            repository=TamperLabelingDebugResult(repository, {counter: value}),
+            source_scan_id=scan_id,
+            worker_id="worker-a",
+            llm=RootArrayLabelExecutorLLM(),
         )
 
 
