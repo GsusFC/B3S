@@ -1,7 +1,38 @@
 import json
+import logging
+
+import pytest
 
 from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
-from src.sv9_flow.evidence_labeling_worker import EVIDENCE_LABELING_VERSION, label_evidence_pack
+from src.sv9_flow.evidence_labeling_worker import (
+    EVIDENCE_LABELING_VERSION,
+    _LABEL_SCHEMA,
+    label_evidence_pack,
+)
+
+_ROOT_ARRAY_SCHEMA_ERROR = "$: expected object"
+
+
+def _f820_shaped_root_array(rows):
+    """Build a root array shaped like the scan f820 drift: complete label items without the object envelope.
+
+    The real rejected payload was never persisted, so the items are synthetic and derived from the
+    label schema's required fields.
+    """
+
+    item_fields = _LABEL_SCHEMA["properties"]["labels"]["items"]["required"]
+    items = [
+        {
+            "ref": row["ref"],
+            "relevant_blocks": ["mission"],
+            "stance": "supports",
+            "identity_match": "domain",
+            "specificity": "explicit",
+        }
+        for row in rows
+    ]
+    assert all(sorted(item) == sorted(item_fields) for item in items)
+    return items
 
 
 class StubLabelingLLM:
@@ -60,6 +91,30 @@ class FailingArtifactCachingLabelingLLM(ArtifactCachingLabelingLLM):
     def _call_json(self, system, user, **kwargs):
         self.provider_calls.append(json.loads(user))
         self.last_failure_reason = "transport_error"
+        return {}
+
+
+class SchemaRejectedLabelingLLM(ArtifactCachingLabelingLLM):
+    """Labeler whose client rejected the parsed provider answer against the label schema.
+
+    Mirrors the client contract after a schema rejection: an empty result, the failure reason
+    and its recorded detail, and the parsed value kept on `last_rejected_payload`.
+    """
+
+    def __init__(self, rejected_payload, *, schema_error=_ROOT_ARRAY_SCHEMA_ERROR):
+        super().__init__()
+        self.rejected_payload = rejected_payload
+        self.schema_error = schema_error
+        self.last_failure_reason = None
+        self.call_failures = []
+        self.last_rejected_payload = None
+
+    def _call_json(self, system, user, **kwargs):
+        payload = json.loads(user)
+        self.provider_calls.append(payload)
+        self.last_failure_reason = "schema_validation_error"
+        self.call_failures.append({"reason": "schema_validation_error", "error": self.schema_error})
+        self.last_rejected_payload = self.rejected_payload(payload["records"])
         return {}
 
 
@@ -312,6 +367,104 @@ def test_label_cache_does_not_store_neutral_artifacts_after_provider_failure() -
     assert debug["status"] == "failed"
     assert debug["reason"] == "evidence_labeling_provider_failed:transport_error"
     assert llm.cache == {}
+    assert "relevant_blocks" not in pack.evidence[0].metadata
+
+
+def _owned_copy_pack() -> BrandEvidencePack:
+    return BrandEvidencePack(
+        "Acme",
+        "https://acme.example",
+        [
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="web",
+                evidence_type="raw_input",
+                content="Acme helps teams close faster.",
+                url="https://acme.example",
+                metadata={"source_class": "owned_copy", "identity_match": "domain"},
+            )
+        ],
+    )
+
+
+def test_label_evidence_pack_repairs_f820_shaped_root_array_envelope(caplog) -> None:
+    llm = SchemaRejectedLabelingLLM(_f820_shaped_root_array)
+    pack = _owned_copy_pack()
+
+    debug = label_evidence_pack(pack, llm=llm)
+
+    assert debug["status"] == "labeled"
+    assert debug["reason"] == ""
+    assert debug["records_labeled"] == 1
+    assert debug["artifact_cache_hits"] == 0
+    assert debug["artifact_cache_misses"] == 1
+    assert debug["provider_records"] == 1
+    assert debug["provider_call_count"] == 1
+    assert len(llm.provider_calls) == 1
+    record = pack.evidence[0]
+    assert record.metadata["relevant_blocks"] == ["mission"]
+    assert record.metadata["stance"] == "supports"
+    assert record.metadata["identity_match_llm"] == "domain"
+    assert record.metadata["specificity"] == "explicit"
+    assert record.metadata["semantic_labeling_version"] == EVIDENCE_LABELING_VERSION
+    assert [value["label"]["relevant_blocks"] for value in llm.cache.values()] == [["mission"]]
+    assert llm.last_failure_reason is None
+    warnings = [entry for entry in caplog.records if entry.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "root-array envelope" in warnings[0].getMessage()
+    assert "items=1" in warnings[0].getMessage()
+    assert "Acme helps teams close faster." not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        pytest.param(
+            lambda item: {key: value for key, value in item.items() if key != "specificity"},
+            id="missing_required_field",
+        ),
+        pytest.param(lambda item: {**item, "confidence": "high"}, id="unexpected_field"),
+        pytest.param(lambda item: {**item, "relevant_blocks": "mission"}, id="wrong_field_type"),
+        pytest.param(lambda item: [item["ref"]], id="non_object_item"),
+    ],
+)
+def test_label_evidence_pack_keeps_failing_closed_for_invalid_root_array_items(drift, caplog) -> None:
+    llm = SchemaRejectedLabelingLLM(lambda rows: [drift(item) for item in _f820_shaped_root_array(rows)])
+    pack = _owned_copy_pack()
+
+    debug = label_evidence_pack(pack, llm=llm)
+
+    assert debug["status"] == "failed"
+    assert debug["reason"] == (
+        "evidence_labeling_provider_failed:schema_validation_error:"
+        "schema_path=$;schema_category=expected_type"
+    )
+    assert debug["records_labeled"] == 0
+    assert debug["provider_call_count"] == 0
+    assert len(llm.provider_calls) == 1
+    assert llm.cache == {}
+    assert llm.last_failure_reason == "schema_validation_error"
+    assert "relevant_blocks" not in pack.evidence[0].metadata
+    assert "root-array envelope" not in caplog.text
+
+
+def test_label_evidence_pack_does_not_repair_non_list_rejected_payload() -> None:
+    llm = SchemaRejectedLabelingLLM(
+        lambda rows: {"label": _f820_shaped_root_array(rows)[0]},
+        schema_error="$: missing required field(s): labels",
+    )
+    pack = _owned_copy_pack()
+
+    debug = label_evidence_pack(pack, llm=llm)
+
+    assert debug["status"] == "failed"
+    assert debug["reason"] == (
+        "evidence_labeling_provider_failed:schema_validation_error:"
+        "schema_path=$;schema_category=missing_required"
+    )
+    assert debug["records_labeled"] == 0
+    assert llm.cache == {}
+    assert llm.last_failure_reason == "schema_validation_error"
     assert "relevant_blocks" not in pack.evidence[0].metadata
 
 

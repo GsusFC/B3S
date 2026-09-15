@@ -399,6 +399,51 @@ class LLMCacheTests(unittest.TestCase):
         self.assertEqual(failure["base_url"], "https://llm.test")
         self.assertNotIn("secret-key", json.dumps(failure))
 
+    def test_call_json_schema_rejection_exposes_rejected_payload_until_next_call(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "brand3.sqlite3")
+            llm = LLMAnalyzer(api_key="key", base_url="https://llm.test", model="model-a")
+            schema = {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["labels"],
+                "properties": {"labels": {"type": "array", "items": {"type": "object"}}},
+            }
+            root_array = [{"ref": "web.home"}]
+            envelope = {"labels": root_array}
+            self.assertIsNone(llm.last_rejected_payload)
+
+            with patch("src.features.llm_analyzer.BRAND3_DB_PATH", db_path):
+                with patch(
+                    "src.features.llm_analyzer._run_llm_http_call",
+                    side_effect=[
+                        ("ok", json.dumps(envelope)),
+                        ("ok", json.dumps(root_array)),
+                        ("ok", json.dumps(envelope)),
+                    ],
+                ) as llm_http:
+                    first = llm._call_json("system", "valid", json_schema=schema, schema_name="labels")
+                    self.assertIsNone(llm.last_rejected_payload)
+
+                    rejected = llm._call_json("system", "root-array", json_schema=schema, schema_name="labels")
+                    self.assertEqual(rejected, {})
+                    self.assertEqual(llm.last_failure_reason, "schema_validation_error")
+                    self.assertEqual(llm.call_failures[-1]["error"], "$: expected object")
+                    self.assertEqual(llm.last_rejected_payload, root_array)
+
+                    cached = llm._call_json("system", "valid", json_schema=schema, schema_name="labels")
+                    self.assertIsNone(llm.last_rejected_payload)
+                    self.assertIsNone(llm.last_failure_reason)
+
+                    recovered = llm._call_json("system", "root-array", json_schema=schema, schema_name="labels")
+                    self.assertIsNone(llm.last_rejected_payload)
+
+        self.assertEqual(first, envelope)
+        self.assertEqual(cached, envelope)
+        self.assertEqual(recovered, envelope)
+        self.assertEqual(llm_http.call_count, 3)
+        self.assertEqual(llm.cache_hits, 1)
+
     def test_call_json_extracts_payload_from_provider_prose(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "brand3.sqlite3")

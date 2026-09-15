@@ -13,6 +13,7 @@ import logging
 import re
 from typing import Any, Iterable
 
+from src.features.llm_analyzer_support import _validate_json_schema
 from src.sv9_flow.calibration_terms import block_evidence_policy
 from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
 from src.sv9_flow.evidence_identity import (
@@ -77,6 +78,7 @@ _SAFE_LABEL_SCHEMA_PATH = re.compile(
     r"^\$(?:\.labels(?:\[(\d{1,4})\](?:\.(ref|stance|identity_match|specificity)|\.relevant_blocks(?:\[(\d{1,4})\])?)?)?)?$"
 )
 _SAFE_LABEL_SCHEMA_TYPES = frozenset({"object", "array", "string"})
+_ROOT_ARRAY_SCHEMA_DETAIL = "schema_path=$;schema_category=expected_type"
 
 
 def _safe_schema_validation_detail(
@@ -115,6 +117,40 @@ def _safe_schema_validation_detail(
     if safe_path:
         return f"schema_path={safe_path};schema_category={category}"
     return f"schema_category={category}"
+
+
+def _repair_root_array_envelope(
+    llm: Any, raw: Any, *, failure_start: int | None, ref: str, call_index: int
+) -> Any:
+    """Wrap a schema-rejected root array into the label envelope.
+
+    This is the single tolerated provider drift: the client rejected a root
+    array where the object envelope was expected. The wrapped value must pass
+    the full label schema with the client's own validator; any other drift
+    keeps the recorded failure and falls through to the fail-closed path.
+    """
+
+    if not (isinstance(raw, dict) and not raw):
+        return raw
+    if _safe_schema_validation_detail(llm, failure_start=failure_start) != _ROOT_ARRAY_SCHEMA_DETAIL:
+        return raw
+    rejected = getattr(llm, "last_rejected_payload", None)
+    if not isinstance(rejected, list):
+        return raw
+    repaired = {"labels": rejected}
+    if _validate_json_schema(repaired, _LABEL_SCHEMA) is not None:
+        return raw
+    logger.warning(
+        "evidence labeling repaired root-array envelope ref=%s call=%d items=%d",
+        ref,
+        call_index,
+        len(rejected),
+    )
+    # The repaired call counts as a provider success, so the failure checks that
+    # follow (per call and after the batch) must see the same state the client
+    # leaves after an accepted response.
+    llm.last_failure_reason = None
+    return repaired
 
 
 def _provider_failure_reason(llm: Any, *, failure_start: int | None = None) -> str:
@@ -328,6 +364,9 @@ def _call_labeler(
                 json_schema=_LABEL_SCHEMA,
                 schema_name="sv9_flow_evidence_labeling",
                 temperature=0.0,
+            )
+            raw = _repair_root_array_envelope(
+                llm, raw, failure_start=failure_start, ref=parent, call_index=call_count
             )
             failure = _provider_failure_reason(llm, failure_start=failure_start)
             if failure:

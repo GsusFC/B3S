@@ -92,6 +92,7 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
         self.timeout_seconds = LLM_CALL_TIMEOUT_SECONDS
         self.last_failure_reason: str | None = None
         self.last_raw_response: str | None = None
+        self.last_rejected_payload: Any | None = None
         self.call_failures: list[dict[str, Any]] = []
         self.last_request_debug: dict[str, Any] | None = None
         self.usage_observations: list[dict[str, Any]] = []
@@ -188,8 +189,11 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
 
         Uses JSON mode by default. When `json_schema` is provided, uses the
         OpenAI-compatible `json_schema` response_format and falls back to plain
-        `json_object` if the provider rejects schema mode.
+        `json_object` if the provider rejects schema mode. A parsed response
+        rejected by schema validation stays readable on `last_rejected_payload`
+        until the next call.
         """
+        self.last_rejected_payload = None
         if not self.api_key:
             return {}
 
@@ -343,6 +347,7 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
                         schema_error,
                         error_type="schema_validation_error",
                     )
+                    self.last_rejected_payload = parsed
                     return {}
             self._cache_save(cache_key, "json", parsed)
             self._clear_failure()
