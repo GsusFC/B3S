@@ -6,6 +6,8 @@ import json
 
 import pytest
 
+from src.history.models import CaptureConflictError
+from src.history.repository import _validate_vault_operation_result_for_plan
 from src.services.evidence_vault_canonical_core import (
     build_tile_contract_registry,
     canonical_fingerprint,
@@ -154,6 +156,14 @@ class RootArrayLabelExecutorLLM(ExecutorLLM):
                 }
             ]
             return {}
+        return super()._call_json(system, user, **kwargs)
+
+
+class RaisingLabelExecutorLLM(ExecutorLLM):
+    def _call_json(self, system, user, **kwargs):
+        if kwargs["schema_name"] == "sv9_flow_evidence_labeling":
+            self.calls.append(kwargs["schema_name"])
+            raise RuntimeError("boom")
         return super()._call_json(system, user, **kwargs)
 
 
@@ -869,6 +879,111 @@ def test_label_schema_failure_falls_back_to_deterministic_executor_path() -> Non
         "specificity": "incidental",
     }
     validate_vault_operation_result(result)
+
+
+def test_unexpected_label_exception_falls_back_to_deterministic_executor_path() -> None:
+    rows = [_row()]
+    plan = _baseline_plan(rows)
+    repository = MemoryRepository(plan=plan, rows=rows)
+
+    execution = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="scan-1",
+        worker_id="worker-a",
+        llm=RaisingLabelExecutorLLM(),
+    )
+
+    assert execution["execution_status"] == "completed"
+    result = repository.operation["result_payload"]
+    assert result["labeling_debug"]["status"] == "failed"
+    assert result["labeling_debug"]["reason"] == "evidence_labeling_worker_error:RuntimeError"
+    assert "boom" not in result["labeling_debug"]["reason"]
+    assert result["labeling_debug"]["records_labeled"] == 0
+    fingerprint = result["selected_evidence_fingerprints"][0]
+    assert result["evidence_work_dispositions"][fingerprint] == "semantic_candidate"
+    assert result["semantic_labels"][fingerprint] == {
+        "relevant_blocks": [],
+        "stance": "neutral",
+        "identity_match_llm": "unverified",
+        "specificity": "incidental",
+    }
+    validate_vault_operation_result(result)
+
+
+def _persistence_operation(repository):
+    plan = repository.context["plan"]
+    return {
+        "plan_payload": plan,
+        "operation_plan_fingerprint": plan["operation_plan_fingerprint"],
+        "observation_hash": repository.context["observation_hash"],
+        "canonical_memory_version": plan["canonical_memory_version"],
+        "canonical_domain": repository.context["brand_identity"],
+    }
+
+
+def _persistence_evidence_rows(rows):
+    return [
+        {
+            "evidence_ref": row["ref"],
+            "source": row["source"],
+            "source_class": row["metadata"]["source_class"],
+            "evidence_type": row["evidence_type"],
+            "url": row["url"],
+            "content": row["content"],
+            "content_raw": None,
+            "confidence": row["confidence"],
+            "metadata": row["metadata"],
+        }
+        for row in rows
+    ]
+
+
+def test_persistence_admits_worker_error_label_fallback() -> None:
+    rows = [_row()]
+    repository = MemoryRepository(plan=_baseline_plan(rows), rows=rows)
+    execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="scan-1",
+        worker_id="worker-a",
+        llm=RaisingLabelExecutorLLM(),
+    )
+    result = repository.operation["result_payload"]
+    assert result["labeling_debug"]["reason"] == "evidence_labeling_worker_error:RuntimeError"
+
+    _validate_vault_operation_result_for_plan(
+        None,
+        result,
+        operation=_persistence_operation(repository),
+        evidence_rows=_persistence_evidence_rows(rows),
+    )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "evidence_labeling_worker_error:not an identifier",
+        "some arbitrary text",
+    ],
+)
+def test_persistence_rejects_unclassified_label_failure_reason(reason) -> None:
+    rows = [_row()]
+    repository = MemoryRepository(plan=_baseline_plan(rows), rows=rows)
+    execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="scan-1",
+        worker_id="worker-a",
+        llm=RootArrayLabelExecutorLLM(),
+    )
+    result = deepcopy(repository.operation["result_payload"])
+    result["labeling_debug"].update({"status": "failed", "reason": reason})
+
+    with pytest.raises(CaptureConflictError, match="semantic labeling audit"):
+        _validate_vault_operation_result_for_plan(
+            None,
+            result,
+            operation=_persistence_operation(repository),
+            evidence_rows=_persistence_evidence_rows(rows),
+        )
 
 
 class BroadLabelExecutorLLM(ExecutorLLM):

@@ -13684,11 +13684,18 @@ def _validate_vault_operation_result_for_plan(
         ) or (
             fallback_status == "failed"
             and isinstance(fallback_reason, str)
-            and fallback_reason.startswith(
-                (
-                    "evidence_labeling_provider_failed:",
-                    "evidence_labeling_provider_incomplete:",
+            and (
+                fallback_reason.startswith(
+                    (
+                        "evidence_labeling_provider_failed:",
+                        "evidence_labeling_provider_incomplete:",
+                    )
                 )
+                or re.fullmatch(
+                    r"evidence_labeling_worker_error:[A-Za-z_][A-Za-z0-9_]*",
+                    fallback_reason,
+                )
+                is not None
             )
         )
         advisory_fallback = (

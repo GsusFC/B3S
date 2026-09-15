@@ -63,6 +63,21 @@ class FailingArtifactCachingLabelingLLM(ArtifactCachingLabelingLLM):
         return {}
 
 
+class RaisingLabelingLLM:
+    api_key = "test"
+
+    def __init__(self, exc: Exception):
+        self.exc = exc
+
+    def _call_json(self, system, user, **kwargs):
+        raise self.exc
+
+
+class RaisingCacheLabelingLLM(ArtifactCachingLabelingLLM):
+    def _cache_get(self, key, response_type):
+        raise OSError("artifact cache unavailable")
+
+
 def test_label_evidence_pack_enriches_metadata_without_changing_pack_shape() -> None:
     pack = BrandEvidencePack(
         brand_name="Acme",
@@ -327,6 +342,66 @@ def test_label_evidence_pack_fails_closed_when_provider_omits_a_record() -> None
     )
     assert debug["records_labeled"] == 0
     assert "semantic_labeling_version" not in pack.evidence[0].metadata
+
+
+def test_label_evidence_pack_maps_unexpected_labeler_exception_to_worker_error(caplog) -> None:
+    pack = BrandEvidencePack(
+        "Acme",
+        "https://acme.example",
+        [
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="web",
+                evidence_type="raw_input",
+                content="Acme helps teams close faster.",
+                url="https://acme.example",
+                metadata={"source_class": "owned_copy", "identity_match": "domain"},
+            )
+        ],
+    )
+
+    debug = label_evidence_pack(pack, llm=RaisingLabelingLLM(RuntimeError("boom")))
+
+    assert debug["status"] == "failed"
+    assert debug["reason"] == "evidence_labeling_worker_error:RuntimeError"
+    assert "boom" not in debug["reason"]
+    assert debug["records_labeled"] == 0
+    assert debug["artifact_cache_hits"] == 0
+    assert debug["artifact_cache_misses"] == 0
+    assert debug["provider_records"] == 0
+    assert debug["provider_call_count"] == 0
+    assert "semantic_labeling_version" not in pack.evidence[0].metadata
+    assert "RuntimeError" in caplog.text
+    assert "boom" in caplog.text
+
+
+def test_label_evidence_pack_maps_artifact_cache_error_to_worker_error() -> None:
+    llm = RaisingCacheLabelingLLM()
+    pack = BrandEvidencePack(
+        "Acme",
+        "https://acme.example",
+        [
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="web",
+                evidence_type="raw_input",
+                content="Acme helps teams close faster.",
+                url="https://acme.example",
+                metadata={"source_class": "owned_copy", "identity_match": "domain"},
+            )
+        ],
+    )
+
+    debug = label_evidence_pack(pack, llm=llm)
+
+    assert debug["status"] == "failed"
+    assert debug["reason"] == "evidence_labeling_worker_error:OSError"
+    assert "artifact cache unavailable" not in debug["reason"]
+    assert debug["records_labeled"] == 0
+    assert debug["provider_call_count"] == 0
+    assert llm.provider_calls == []
+    assert llm.cache == {}
+    assert "relevant_blocks" not in pack.evidence[0].metadata
 
 
 def test_label_evidence_pack_filters_workset_but_keeps_full_identity_context() -> None:
