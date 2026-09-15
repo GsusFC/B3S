@@ -891,3 +891,27 @@ def test_concurrency_without_clone_support_runs_sequentially() -> None:
     assert debug["records_labeled"] == 4
     assert debug["provider_call_count"] == 6
     assert [payload["records"][0]["content"] for payload in llm.provider_calls] == _ordered_passages(pack)
+
+
+class CloneFailingLabelingLLM(ArtifactCachingLabelingLLM):
+    """Advertises `clone()` but cannot build one, like a subclass with another constructor."""
+
+    def clone(self):
+        raise TypeError("unexpected keyword argument 'api_key'")
+
+
+def test_concurrency_with_failing_clone_runs_sequentially(caplog) -> None:
+    pack = _parallel_pack()
+    llm = CloneFailingLabelingLLM()
+
+    with caplog.at_level(logging.WARNING):
+        debug = label_evidence_pack(pack, llm=llm, concurrency=3)
+
+    assert debug["status"] == "labeled"
+    assert debug["records_labeled"] == 4
+    assert debug["provider_call_count"] == 6
+    assert [payload["records"][0]["content"] for payload in llm.provider_calls] == _ordered_passages(pack)
+    warnings = [entry for entry in caplog.records if entry.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "clone" in warnings[0].getMessage()
+    assert "TypeError" in warnings[0].getMessage()

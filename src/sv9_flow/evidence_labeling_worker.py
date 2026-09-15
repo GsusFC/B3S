@@ -424,10 +424,9 @@ def _call_labeler(
     concurrency: int = 1,
 ) -> tuple[list[dict[str, Any]], int]:
     tasks = _passage_tasks(records)
-    if concurrency > 1 and len(tasks) > 1 and callable(getattr(llm, "clone", None)):
-        labels_by_parent = _label_passages_parallel(
-            evidence_pack=evidence_pack, tasks=tasks, llm=llm, concurrency=concurrency
-        )
+    clones = _labeling_clones(llm, count=min(concurrency, len(tasks))) if concurrency > 1 and len(tasks) > 1 else []
+    if clones:
+        labels_by_parent = _label_passages_parallel(evidence_pack=evidence_pack, tasks=tasks, llm=llm, clones=clones)
     else:
         labels_by_parent = {}
         for task in tasks:
@@ -441,12 +440,32 @@ def _call_labeler(
     ], len(tasks)
 
 
+def _labeling_clones(llm: Any, *, count: int) -> list[Any]:
+    """Build the analyzer clones for the parallel path, or none when the client cannot clone.
+
+    A clone that cannot be constructed must not fail labeling: the passages are
+    then labeled sequentially on the shared analyzer, exactly as with a client
+    that offers no `clone()` at all.
+    """
+
+    clone = getattr(llm, "clone", None)
+    if not callable(clone):
+        return []
+    try:
+        return [clone() for _ in range(count)]
+    except Exception as exc:
+        logger.warning(
+            "evidence labeling clone unavailable (%s); labeling passages sequentially", type(exc).__name__
+        )
+        return []
+
+
 def _label_passages_parallel(
     *,
     evidence_pack: BrandEvidencePack,
     tasks: list[_PassageTask],
     llm: Any,
-    concurrency: int,
+    clones: list[Any],
 ) -> dict[str, list[dict[str, Any]]]:
     """Label passages on a pool of analyzer clones, reproducing the sequential outcome.
 
@@ -456,10 +475,10 @@ def _label_passages_parallel(
     sequential batch leaves for the caller's post-batch failure check.
     """
 
-    workers = min(concurrency, len(tasks))
+    workers = len(clones)
     idle_clones: SimpleQueue[Any] = SimpleQueue()
-    for _ in range(workers):
-        idle_clones.put(llm.clone())
+    for clone in clones:
+        idle_clones.put(clone)
     clone_by_index: dict[int, Any] = {}
 
     def run(task: _PassageTask) -> dict[str, Any]:

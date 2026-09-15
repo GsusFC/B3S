@@ -1113,7 +1113,7 @@ def test_baseline_caps_broad_semantic_shortlists_with_audit() -> None:
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [(None, 1), ("", 1), ("four", 1), ("0", 1), ("-3", 1), ("4", 4)],
+    [(None, 1), ("", 1), ("four", 1), ("0", 1), ("-3", 1), ("4", 4), ("100", 8)],
 )
 def test_labeling_concurrency_env_knob(monkeypatch, raw, expected) -> None:
     if raw is None:

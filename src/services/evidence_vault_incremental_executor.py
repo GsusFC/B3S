@@ -649,15 +649,22 @@ def validate_vault_operation_result(result: Mapping[str, Any]) -> None:
             )
 
 
+_LABELING_CONCURRENCY_MAX = 8
+
+
 def _labeling_concurrency() -> int:
-    """Worker fan-out for semantic labeling; unset, invalid or below 1 stays sequential."""
+    """Worker fan-out for semantic labeling; unset, invalid or below 1 stays sequential.
+
+    The value is capped so a misconfigured environment cannot turn every passage
+    into its own thread, clone, and provider request.
+    """
 
     raw_value = os.environ.get("BRAND3_LABELING_CONCURRENCY", "1")
     try:
         value = int(raw_value)
     except (TypeError, ValueError):
         return 1
-    return max(1, value)
+    return min(max(1, value), _LABELING_CONCURRENCY_MAX)
 
 
 def _build_candidate_result(
