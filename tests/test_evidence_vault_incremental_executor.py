@@ -134,21 +134,26 @@ class CrossPassageRelationExecutorLLM(ExecutorLLM):
 
 
 class RootArrayLabelExecutorLLM(ExecutorLLM):
+    """Labeler answering with a schema-rejected root array whose items stay invalid once wrapped."""
+
+    def _root_array_items(self, payload):
+        return [
+            {
+                "ref": row["ref"],
+                "relevant_blocks": [],
+                "stance": "neutral",
+                "identity_match": "domain",
+            }
+            for row in payload["records"]
+        ]
+
     def _call_json(self, system, user, **kwargs):
         if kwargs["schema_name"] == "sv9_flow_evidence_labeling":
             self.calls.append(kwargs["schema_name"])
             self.last_failure_reason = "schema_validation_error"
-            payload = json.loads(user)
-            self.last_raw_response = json.dumps([
-                {
-                    "ref": row["ref"],
-                    "relevant_blocks": [],
-                    "stance": "neutral",
-                    "identity_match": "domain",
-                    "specificity": "incidental",
-                }
-                for row in payload["records"]
-            ])
+            items = self._root_array_items(json.loads(user))
+            self.last_raw_response = json.dumps(items)
+            self.last_rejected_payload = items
             self.call_failures = [
                 {
                     "reason": "schema_validation_error",
@@ -157,6 +162,22 @@ class RootArrayLabelExecutorLLM(ExecutorLLM):
             ]
             return {}
         return super()._call_json(system, user, **kwargs)
+
+
+class RepairableRootArrayLabelExecutorLLM(RootArrayLabelExecutorLLM):
+    """Labeler whose root array carries complete label items, so the envelope repair applies."""
+
+    def _root_array_items(self, payload):
+        return [
+            {
+                "ref": row["ref"],
+                "relevant_blocks": ["mission"],
+                "stance": "supports",
+                "identity_match": "domain",
+                "specificity": "explicit",
+            }
+            for row in payload["records"]
+        ]
 
 
 class RaisingLabelExecutorLLM(ExecutorLLM):
@@ -879,6 +900,44 @@ def test_label_schema_failure_falls_back_to_deterministic_executor_path() -> Non
         "specificity": "incidental",
     }
     validate_vault_operation_result(result)
+
+
+def test_label_root_array_envelope_repair_completes_labeled_executor_path() -> None:
+    rows = [_row()]
+    plan = _baseline_plan(rows)
+    repository = MemoryRepository(plan=plan, rows=rows)
+    llm = RepairableRootArrayLabelExecutorLLM()
+
+    execution = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="scan-1",
+        worker_id="worker-a",
+        llm=llm,
+    )
+
+    assert execution["execution_status"] == "completed"
+    assert llm.calls == ["sv9_flow_evidence_labeling", "evidence_tile_relation_proposals"]
+    result = repository.operation["result_payload"]
+    assert result["labeling_debug"]["status"] == "labeled"
+    assert result["labeling_debug"]["reason"] == ""
+    assert result["labeling_debug"]["records_labeled"] == 1
+    assert result["labeling_debug"]["provider_records"] == 1
+    assert result["labeling_debug"]["provider_call_count"] == 1
+    fingerprint = result["selected_evidence_fingerprints"][0]
+    assert result["evidence_work_dispositions"][fingerprint] == "semantic_candidate"
+    assert result["semantic_labels"][fingerprint] == {
+        "relevant_blocks": ["mission"],
+        "stance": "supports",
+        "identity_match_llm": "domain",
+        "specificity": "explicit",
+    }
+    validate_vault_operation_result(result)
+    _validate_vault_operation_result_for_plan(
+        None,
+        result,
+        operation=_persistence_operation(repository),
+        evidence_rows=_persistence_evidence_rows(rows),
+    )
 
 
 def test_unexpected_label_exception_falls_back_to_deterministic_executor_path() -> None:
