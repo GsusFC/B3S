@@ -13676,6 +13676,46 @@ def _validate_vault_operation_result_for_plan(
         hits = debug.get("artifact_cache_hits") if isinstance(debug, Mapping) else None
         misses = debug.get("artifact_cache_misses") if isinstance(debug, Mapping) else None
         calls = debug.get("provider_call_count") if isinstance(debug, Mapping) else None
+        fallback_status = debug.get("status") if isinstance(debug, Mapping) else None
+        fallback_reason = debug.get("reason") if isinstance(debug, Mapping) else None
+        fallback_pair = (
+            fallback_status == "skipped"
+            and fallback_reason == "missing_llm_api_key"
+        ) or (
+            fallback_status == "failed"
+            and isinstance(fallback_reason, str)
+            and fallback_reason.startswith(
+                (
+                    "evidence_labeling_provider_failed:",
+                    "evidence_labeling_provider_incomplete:",
+                )
+            )
+        )
+        advisory_fallback = (
+            isinstance(debug, Mapping)
+            and fallback_pair
+            and type(debug.get("records_labeled")) is int
+            and debug.get("records_labeled") == 0
+            and all(
+                type(debug.get(field)) is int and debug.get(field) == 0
+                for field in (
+                    "artifact_cache_hits",
+                    "artifact_cache_misses",
+                    "provider_records",
+                    "provider_call_count",
+                )
+            )
+            and all(
+                result["semantic_labels"].get(fingerprint)
+                == {
+                    "relevant_blocks": [],
+                    "stance": "neutral",
+                    "identity_match_llm": "unverified",
+                    "specificity": "incidental",
+                }
+                for fingerprint in semantic_fingerprints
+            )
+        )
         if (
             not isinstance(debug, Mapping)
             or debug.get("version")
@@ -13684,15 +13724,39 @@ def _validate_vault_operation_result_for_plan(
                 if semantic_contract is not None
                 else EVIDENCE_LABELING_VERSION
             )
-            or debug.get("status") != ("labeled" if records else "not_required")
+            or (
+                debug.get("status")
+                != ("labeled" if records else "not_required")
+                and not advisory_fallback
+            )
             or debug.get("records_considered") != len(records)
-            or debug.get("records_labeled") != len(records)
+            or (
+                debug.get("records_labeled") != len(records)
+                and not advisory_fallback
+            )
             or debug.get("semantic_passage_count") != passages
             or debug.get("semantic_batch_count") != passages
-            or not all(type(value) is int and value >= 0 for value in (hits, misses, calls, debug.get("records_considered"), debug.get("records_labeled"), debug.get("provider_records"), debug.get("semantic_passage_count"), debug.get("semantic_batch_count")))
-            or hits + misses != len(records)
-            or debug.get("provider_records") != misses
-            or (calls != 0 if misses == 0 else not misses <= calls <= passages - hits)
+            or (
+                not all(
+                    type(value) is int and value >= 0
+                    for value in (
+                        hits,
+                        misses,
+                        calls,
+                        debug.get("records_considered"),
+                        debug.get("records_labeled"),
+                        debug.get("provider_records"),
+                        debug.get("semantic_passage_count"),
+                        debug.get("semantic_batch_count"),
+                    )
+                )
+            )
+            or (hits + misses != len(records) and not advisory_fallback)
+            or (debug.get("provider_records") != misses and not advisory_fallback)
+            or (
+                (calls != 0 if misses == 0 else not misses <= calls <= passages - hits)
+                and not advisory_fallback
+            )
         ):
             raise CaptureConflictError("executor semantic labeling audit is invalid")
         relation_rows = [

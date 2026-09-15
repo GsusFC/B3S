@@ -131,15 +131,26 @@ class CrossPassageRelationExecutorLLM(ExecutorLLM):
         }
 
 
-class SchemaFailureLabelExecutorLLM(ExecutorLLM):
+class RootArrayLabelExecutorLLM(ExecutorLLM):
     def _call_json(self, system, user, **kwargs):
         if kwargs["schema_name"] == "sv9_flow_evidence_labeling":
             self.calls.append(kwargs["schema_name"])
             self.last_failure_reason = "schema_validation_error"
+            payload = json.loads(user)
+            self.last_raw_response = json.dumps([
+                {
+                    "ref": row["ref"],
+                    "relevant_blocks": [],
+                    "stance": "neutral",
+                    "identity_match": "domain",
+                    "specificity": "incidental",
+                }
+                for row in payload["records"]
+            ])
             self.call_failures = [
                 {
                     "reason": "schema_validation_error",
-                    "error": "$.labels[0].relevant_blocks: expected array",
+                    "error": "$: expected object",
                 }
             ]
             return {}
@@ -830,29 +841,34 @@ def test_late_provider_failure_leaves_retryable_operation_and_retry_is_determini
     validate_vault_operation_result(result)
 
 
-def test_label_schema_failure_reaches_retryable_last_error_without_candidate() -> None:
+def test_label_schema_failure_falls_back_to_deterministic_executor_path() -> None:
     rows = [_row()]
     plan = _baseline_plan(rows)
     repository = MemoryRepository(plan=plan, rows=rows)
 
-    with pytest.raises(RuntimeError, match="schema_path=\\$\\.labels\\[0\\]\\.relevant_blocks"):
-        execute_vault_operation_plan(
-            repository=repository,
-            source_scan_id="scan-1",
-            worker_id="worker-a",
-            llm=SchemaFailureLabelExecutorLLM(),
-        )
+    execution = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="scan-1",
+        worker_id="worker-a",
+        llm=RootArrayLabelExecutorLLM(),
+    )
 
-    assert repository.operation["status"] == "failed_retryable"
-    assert repository.operation["result_payload"] is None
-    assert repository.operation["result_fingerprint"] is None
-    assert repository.source_packets == []
-    assert repository.operational_packets == []
-    assert repository.failures == [
-        "EvidenceVaultIncrementalExecutorError: selected evidence labeling did not cover the eligible workset: "
+    assert execution["execution_status"] == "completed"
+    result = repository.operation["result_payload"]
+    assert result["labeling_debug"]["status"] == "failed"
+    assert result["labeling_debug"]["reason"] == (
         "evidence_labeling_provider_failed:schema_validation_error:"
-        "schema_path=$.labels[0].relevant_blocks;schema_category=expected_type"
-    ]
+        "schema_path=$;schema_category=expected_type"
+    )
+    fingerprint = result["selected_evidence_fingerprints"][0]
+    assert result["evidence_work_dispositions"][fingerprint] == "semantic_candidate"
+    assert result["semantic_labels"][fingerprint] == {
+        "relevant_blocks": [],
+        "stance": "neutral",
+        "identity_match_llm": "unverified",
+        "specificity": "incidental",
+    }
+    validate_vault_operation_result(result)
 
 
 class BroadLabelExecutorLLM(ExecutorLLM):
