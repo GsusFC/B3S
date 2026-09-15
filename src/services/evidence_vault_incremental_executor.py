@@ -6,6 +6,7 @@ before any packet write, and can never adopt memory or calculate a score.
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from threading import Event, Thread
 from typing import Any, Mapping, Protocol
@@ -648,6 +649,17 @@ def validate_vault_operation_result(result: Mapping[str, Any]) -> None:
             )
 
 
+def _labeling_concurrency() -> int:
+    """Worker fan-out for semantic labeling; unset, invalid or below 1 stays sequential."""
+
+    raw_value = os.environ.get("BRAND3_LABELING_CONCURRENCY", "1")
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, value)
+
+
 def _build_candidate_result(
     *,
     context: Mapping[str, Any],
@@ -679,6 +691,7 @@ def _build_candidate_result(
             llm=llm,
             max_records=len(labelable),
             selected_refs=[row["row"]["ref"] for row in labelable],
+            concurrency=_labeling_concurrency(),
         )
         # Semantic labeling is advisory. A malformed provider response must
         # leave the deterministic identity/shortlist path intact rather than

@@ -1,14 +1,19 @@
 import json
 import logging
+import threading
+import time
 
 import pytest
 
+import src.sv9_flow.evidence_labeling_worker as labeling_worker
 from src.sv9_flow.contracts import BrandEvidencePack, EvidenceRecord
+from src.sv9_flow.evidence_identity import canonical_evidence_records
 from src.sv9_flow.evidence_labeling_worker import (
     EVIDENCE_LABELING_VERSION,
     _LABEL_SCHEMA,
     label_evidence_pack,
 )
+from src.sv9_flow.semantic_passages import semantic_passages
 
 _ROOT_ARRAY_SCHEMA_ERROR = "$: expected object"
 
@@ -592,3 +597,297 @@ def test_label_evidence_pack_filters_workset_but_keeps_full_identity_context() -
     assert len(prompt["owned_identity_context"]) == 2
     assert debug["records_labeled"] == 1
     assert "semantic_labeling_version" not in pack.evidence[1].metadata
+
+
+def _label_for(row):
+    return {
+        "ref": row["ref"],
+        "relevant_blocks": ["mission"],
+        "stance": "supports",
+        "identity_match": "domain",
+        "specificity": "explicit" if "explicit" in row["content"] else "implied",
+    }
+
+
+def _labeled_answer(llm, row):
+    llm.last_failure_reason = None
+    return {"labels": [_label_for(row)]}
+
+
+def _failing_on(target_content):
+    def answer(llm, row):
+        if row["content"] != target_content:
+            return _labeled_answer(llm, row)
+        llm.last_failure_reason = "transport_error"
+        llm.call_failures.append({"reason": "transport_error", "error": "connection reset"})
+        return {}
+
+    return answer
+
+
+def _rate_limited_once_on(target_content):
+    def answer(llm, row):
+        if row["content"] == target_content:
+            with llm.shared["lock"]:
+                first_attempt = "rate_limited" not in llm.shared["seen"]
+                llm.shared["seen"].add("rate_limited")
+            if first_attempt:
+                llm.last_failure_reason = "provider_http_error"
+                llm.call_failures.append(
+                    {
+                        "reason": "provider_http_error",
+                        "error": 'HTTP 429: {"error": {"code": "rate_limit_exceeded"}}',
+                        "error_type": "http_error",
+                        "http_status": 429,
+                    }
+                )
+                return {}
+        return _labeled_answer(llm, row)
+
+    return answer
+
+
+def _root_array_on(target_content):
+    def answer(llm, row):
+        if row["content"] != target_content:
+            return _labeled_answer(llm, row)
+        llm.last_failure_reason = "schema_validation_error"
+        llm.call_failures.append({"reason": "schema_validation_error", "error": _ROOT_ARRAY_SCHEMA_ERROR})
+        llm.last_rejected_payload = [{**_label_for(row), "relevant_blocks": ["vision"], "stance": "contradicts"}]
+        return {}
+
+    return answer
+
+
+class ParallelLabelingLLM:
+    """Thread-safe labeling double whose clones share one call log and one answer policy.
+
+    Every clone keeps its own client state (`last_failure_reason`, `call_failures`,
+    `last_rejected_payload`), mirroring one analyzer instance per worker thread.
+    """
+
+    api_key = "test"
+    model = "label-parallel-test"
+    base_url = "https://llm.test"
+
+    def __init__(self, answer=None, *, shared=None):
+        self.answer = answer or _labeled_answer
+        self.shared = (
+            shared
+            if shared is not None
+            else {
+                "lock": threading.Lock(),
+                "calls": [],
+                "clones": [],
+                "seen": set(),
+                "active": 0,
+                "max_active": 0,
+            }
+        )
+        self.provider_calls = []
+        self.last_failure_reason = None
+        self.call_failures = []
+        self.last_rejected_payload = None
+
+    def clone(self):
+        clone = type(self)(self.answer, shared=self.shared)
+        with self.shared["lock"]:
+            self.shared["clones"].append(clone)
+        return clone
+
+    def _call_json(self, system, user, **kwargs):
+        self.last_rejected_payload = None
+        payload = json.loads(user)
+        row = payload["records"][0]
+        with self.shared["lock"]:
+            self.shared["calls"].append({"llm": self, "content": row["content"], "kwargs": kwargs})
+            self.shared["active"] += 1
+            self.shared["max_active"] = max(self.shared["max_active"], self.shared["active"])
+        try:
+            time.sleep(0.02)
+            self.provider_calls.append(payload)
+            return self.answer(self, row)
+        finally:
+            with self.shared["lock"]:
+                self.shared["active"] -= 1
+
+
+def _two_passage_content(head: str, tail: str) -> str:
+    """Content long enough for two semantic passages, with `tail` only in the second one."""
+
+    return head + " " + ("filler " * 8_000) + tail
+
+
+def _parallel_pack() -> BrandEvidencePack:
+    """Four labelable records spanning six semantic passages."""
+
+    return BrandEvidencePack(
+        "Acme",
+        "https://acme.example",
+        [
+            EvidenceRecord(
+                "raw_inputs.0", "web", "raw_input",
+                _two_passage_content("Acme mission copy, explicit.", "Closing mission notes."),
+                url="https://acme.example",
+                metadata={"source_class": "owned_copy", "identity_match": "domain"},
+            ),
+            EvidenceRecord(
+                "raw_inputs.1", "web", "raw_input",
+                _two_passage_content("Acme vision copy.", "Vision closing, explicit."),
+                url="https://acme.example/vision",
+                metadata={"source_class": "owned_copy", "identity_match": "domain"},
+            ),
+            EvidenceRecord(
+                "raw_inputs.2.exa.mentions.0", "exa", "external_proof.external_mentions",
+                "Independent review of Acme, explicit.",
+                url="https://proof.example/review",
+                metadata={"source_class": "external_proof", "identity_match": "brand_name"},
+            ),
+            EvidenceRecord(
+                "raw_inputs.2.exa.mentions.1", "exa", "external_proof.external_mentions",
+                "Passing mention of Acme.",
+                url="https://proof.example/mention",
+                metadata={"source_class": "external_proof", "identity_match": "domain"},
+            ),
+        ],
+    )
+
+
+def _ordered_passages(pack: BrandEvidencePack) -> list[str]:
+    """Passages in the order the sequential labeler sends them."""
+
+    return [
+        passage
+        for record in canonical_evidence_records(pack.evidence)
+        for passage in semantic_passages(record.content)
+    ]
+
+
+def _middle_passage(pack: BrandEvidencePack) -> str:
+    ordered = _ordered_passages(pack)
+    target = ordered[len(ordered) // 2]
+    assert 0 < ordered.index(target) < len(ordered) - 1
+    return target
+
+
+def _run_labeling(answer=None, *, concurrency: int, stale_failure=None):
+    pack = _parallel_pack()
+    llm = ParallelLabelingLLM(answer)
+    llm.last_failure_reason = stale_failure
+    debug = label_evidence_pack(pack, llm=llm, concurrency=concurrency)
+    return pack, llm, debug
+
+
+def test_parallel_labeling_matches_sequential_output() -> None:
+    seq_pack, seq_llm, seq_debug = _run_labeling(concurrency=1, stale_failure="transport_error")
+    par_pack, par_llm, par_debug = _run_labeling(concurrency=3, stale_failure="transport_error")
+
+    assert seq_debug["status"] == "labeled"
+    assert seq_debug["records_labeled"] == 4
+    assert seq_debug["semantic_passage_count"] == 6
+    assert seq_debug["provider_call_count"] == 6
+    assert par_debug == seq_debug
+    assert [record.metadata for record in par_pack.evidence] == [record.metadata for record in seq_pack.evidence]
+    assert [call["content"] for call in seq_llm.shared["calls"]] == _ordered_passages(seq_pack)
+    assert sorted(call["content"] for call in par_llm.shared["calls"]) == sorted(_ordered_passages(par_pack))
+    assert all(call["kwargs"] == seq_llm.shared["calls"][0]["kwargs"] for call in par_llm.shared["calls"])
+    assert par_llm.shared["calls"][0]["kwargs"] == {
+        "max_tokens": 8000,
+        "json_schema": _LABEL_SCHEMA,
+        "schema_name": "sv9_flow_evidence_labeling",
+        "temperature": 0.0,
+    }
+    assert len(par_llm.shared["clones"]) == 3
+    assert par_llm.provider_calls == []
+    assert par_llm.shared["max_active"] > 1
+    assert seq_llm.last_failure_reason is None
+    assert par_llm.last_failure_reason is None
+
+
+def test_parallel_labeling_failure_matches_sequential_failure() -> None:
+    target = _middle_passage(_parallel_pack())
+    seq_pack, seq_llm, seq_debug = _run_labeling(_failing_on(target), concurrency=1)
+    par_pack, par_llm, par_debug = _run_labeling(_failing_on(target), concurrency=3)
+
+    assert seq_debug["status"] == "failed"
+    assert seq_debug["reason"] == "evidence_labeling_provider_failed:transport_error"
+    assert par_debug == seq_debug
+    for key in (
+        "records_labeled",
+        "artifact_cache_hits",
+        "artifact_cache_misses",
+        "provider_records",
+        "provider_call_count",
+    ):
+        assert par_debug[key] == 0
+    assert [record.metadata for record in par_pack.evidence] == [record.metadata for record in seq_pack.evidence]
+    assert all("relevant_blocks" not in record.metadata for record in par_pack.evidence)
+    assert len(par_llm.shared["clones"]) == 3
+    assert seq_llm.last_failure_reason == "transport_error"
+    assert par_llm.last_failure_reason == "transport_error"
+
+
+def test_parallel_labeling_retries_rate_limited_passage_once(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(labeling_worker, "_RATE_LIMIT_RETRY_SECONDS", 0.0)
+    target = _middle_passage(_parallel_pack())
+    target_index = _ordered_passages(_parallel_pack()).index(target) + 1
+
+    pack, llm, debug = _run_labeling(_rate_limited_once_on(target), concurrency=3)
+
+    assert debug["status"] == "labeled"
+    assert debug["records_labeled"] == 4
+    assert debug["provider_call_count"] == 6
+    assert len(llm.shared["calls"]) == 7
+    attempts = [call["llm"] for call in llm.shared["calls"] if call["content"] == target]
+    assert len(attempts) == 2
+    assert attempts[0] is attempts[1]
+    assert all(record.metadata["relevant_blocks"] == ["mission"] for record in pack.evidence)
+    warnings = [entry for entry in caplog.records if entry.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "rate-limited" in warnings[0].getMessage()
+    assert f"call={target_index}" in warnings[0].getMessage()
+    assert "Acme" not in warnings[0].getMessage()
+
+    _, _, sequential_debug = _run_labeling(_rate_limited_once_on(target), concurrency=1)
+
+    assert sequential_debug["status"] == "failed"
+    assert sequential_debug["reason"] == "evidence_labeling_provider_failed:provider_http_error"
+
+
+def test_parallel_labeling_repairs_root_array_for_one_passage_only(caplog) -> None:
+    target = _middle_passage(_parallel_pack())
+    target_index = _ordered_passages(_parallel_pack()).index(target) + 1
+
+    pack, llm, debug = _run_labeling(_root_array_on(target), concurrency=3)
+
+    assert debug["status"] == "labeled"
+    assert debug["reason"] == ""
+    assert debug["records_labeled"] == 4
+    assert debug["provider_call_count"] == 6
+    assert len(llm.shared["calls"]) == 6
+    owner = next(record for record in pack.evidence if target in semantic_passages(record.content))
+    assert owner.metadata["stance"] == "contradicts"
+    assert "vision" in owner.metadata["relevant_blocks"]
+    others = [record for record in pack.evidence if record is not owner]
+    assert len(others) == 3
+    assert all(record.metadata["stance"] == "supports" for record in others)
+    assert all(record.metadata["relevant_blocks"] == ["mission"] for record in others)
+    assert all(clone.last_failure_reason is None for clone in llm.shared["clones"])
+    assert llm.last_failure_reason is None
+    warnings = [entry for entry in caplog.records if entry.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "root-array envelope" in warnings[0].getMessage()
+    assert f"call={target_index}" in warnings[0].getMessage()
+    assert "Acme" not in caplog.text
+
+
+def test_concurrency_without_clone_support_runs_sequentially() -> None:
+    pack = _parallel_pack()
+    llm = ArtifactCachingLabelingLLM()
+
+    debug = label_evidence_pack(pack, llm=llm, concurrency=3)
+
+    assert debug["status"] == "labeled"
+    assert debug["records_labeled"] == 4
+    assert debug["provider_call_count"] == 6
+    assert [payload["records"][0]["content"] for payload in llm.provider_calls] == _ordered_passages(pack)
