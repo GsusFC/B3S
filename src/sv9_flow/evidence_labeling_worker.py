@@ -9,6 +9,7 @@ deterministic identity gate.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, Iterable
 
@@ -30,6 +31,8 @@ from src.sv9_flow.evidence_source import (
 )
 from src.sv9_flow.semantic_passages import semantic_passages
 
+logger = logging.getLogger(__name__)
+
 EVIDENCE_LABELING_VERSION = "sv9-flow-evidence-labeling-v4"
 
 _BLOCKS = tuple(block_evidence_policy()["block_terms"].keys())
@@ -39,6 +42,10 @@ _SPECIFICITIES = {"explicit", "implied", "incidental"}
 _MAX_RECORDS = 80
 _IDENTITY_CONTEXT_RECORDS = 4
 _IDENTITY_CONTEXT_CHARS = 500
+_CLASSIFIED_FAILURE_PREFIXES = (
+    "evidence_labeling_provider_failed:",
+    "evidence_labeling_provider_incomplete:",
+)
 
 _LABEL_SCHEMA = {
     "type": "object",
@@ -120,6 +127,23 @@ def _provider_failure_reason(llm: Any, *, failure_start: int | None = None) -> s
     return f"evidence_labeling_provider_failed:{reason}"
 
 
+def _failure_reason(exc: Exception) -> str:
+    """Project a labeling exception onto the fail-closed reason taxonomy.
+
+    Provider-classified failures keep their reason. Anything else is reported
+    by exception class only, so persistence can admit the fallback without
+    carrying free-form text; the message goes to the log instead.
+    """
+
+    message = str(exc)[:300]
+    if message.startswith(_CLASSIFIED_FAILURE_PREFIXES):
+        return message
+    logger.warning(
+        "evidence labeling worker error %s: %s", type(exc).__name__, message, exc_info=True
+    )
+    return f"evidence_labeling_worker_error:{type(exc).__name__}"
+
+
 def label_evidence_pack(
     evidence_pack: BrandEvidencePack,
     *,
@@ -171,7 +195,7 @@ def label_evidence_pack(
         )
     except Exception as exc:
         debug["status"] = "failed"
-        debug["reason"] = str(exc)[:300]
+        debug["reason"] = _failure_reason(exc)
         return debug
     debug.update(cache_debug)
     applied = 0

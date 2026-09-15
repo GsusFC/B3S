@@ -85,6 +85,14 @@ class RootArrayLabelExecutorLLM(ExecutorLLM):
         return super()._call_json(system, user, **kwargs)
 
 
+class RaisingLabelExecutorLLM(ExecutorLLM):
+    def _call_json(self, system, user, **kwargs):
+        if kwargs["schema_name"] == "sv9_flow_evidence_labeling":
+            self.calls.append(kwargs["schema_name"])
+            raise RuntimeError("boom")
+        return super()._call_json(system, user, **kwargs)
+
+
 class NoCallLLM:
     api_key = "test"
 
@@ -415,6 +423,33 @@ def test_advisory_label_failure_persists_deterministic_result() -> None:
     }
 
 
+def test_advisory_worker_error_persists_deterministic_result() -> None:
+    repository = _reset_repository()
+    _persist_baseline(repository, "label-worker-error-scan")
+
+    execution = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="label-worker-error-scan",
+        worker_id="worker-a",
+        llm=RaisingLabelExecutorLLM(),
+    )
+
+    assert execution["execution_status"] == "completed"
+    operation = repository.get_capture_operation_plan("label-worker-error-scan")
+    assert operation["status"] == "completed"
+    result = operation["result_payload"]
+    assert result["labeling_debug"]["status"] == "failed"
+    assert result["labeling_debug"]["reason"] == "evidence_labeling_worker_error:RuntimeError"
+    assert result["labeling_debug"]["records_labeled"] == 0
+    fingerprint = result["selected_evidence_fingerprints"][0]
+    assert result["semantic_labels"][fingerprint] == {
+        "relevant_blocks": [],
+        "stance": "neutral",
+        "identity_match_llm": "unverified",
+        "specificity": "incidental",
+    }
+
+
 def test_repository_rejects_partially_applied_advisory_label_fallback() -> None:
     repository = _reset_repository()
     _persist_baseline(repository, "label-fallback-partial")
@@ -439,6 +474,8 @@ def test_repository_rejects_partially_applied_advisory_label_fallback() -> None:
             "evidence_labeling_provider_failed:transport_error",
         ),
         ("failed", "missing_llm_api_key"),
+        ("failed", "evidence_labeling_worker_error:not an identifier"),
+        ("failed", "some arbitrary text"),
     ],
 )
 def test_repository_rejects_unreachable_advisory_label_fallback(
