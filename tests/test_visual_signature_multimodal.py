@@ -444,3 +444,37 @@ def test_analyze_visual_semantics_accepts_shared_transport_three_tuple(tmp_path,
     assert result["status"] == "detected", result.get("error_detail")
     assert result["fallback_used"] is False
     assert result["data"]["visual_mood"] == "high-trust"
+
+
+def test_multimodal_payload_allows_a_full_semantics_object() -> None:
+    # A pretty-printed 16-field object with sentence lists does not fit in 1200
+    # output tokens; production responses were cut mid-object and failed to parse.
+    import src.visual_signature._internal.multimodal_client as multimodal_client
+
+    payload = multimodal_client.build_multimodal_payload(
+        prompt_template="Audit {brand_name}.",
+        system_preamble="",
+        encoded_image="AAAA",
+        mime_type="image/png",
+        brand_name="Example Brand",
+    )
+
+    assert payload["max_tokens"] == multimodal_client.MULTIMODAL_MAX_OUTPUT_TOKENS == 4096
+
+
+def test_json_parse_error_detail_keeps_the_response_tail(tmp_path, monkeypatch) -> None:
+    # The tail of a truncated response is what proves truncation; keep both ends.
+    screenshot = tmp_path / "shot.png"
+    screenshot.write_bytes(b"brand3 image bytes")
+    truncated = '{\n  "aesthetic_style": "modern scientific",\n' + '  "visual_mood": "' + ("precise, " * 60) + '",\n  "visual_polish_score": '
+
+    monkeypatch.setattr(multimodal_analyzer, "BRAND3_LLM_API_KEY", "test-key")
+    monkeypatch.setattr(multimodal_analyzer, "_run_llm_http_call", lambda **_kwargs: ("ok", truncated))
+
+    result = multimodal_analyzer.analyze_visual_semantics(screenshot_path=str(screenshot), brand_name="Example Brand")
+
+    assert result["error_type"] == "json_parse_error"
+    message = result["error_detail"]["message"]
+    assert message.startswith('{\n  "aesthetic_style"')
+    assert message.endswith('"visual_polish_score": ')
+    assert len(message) <= 320

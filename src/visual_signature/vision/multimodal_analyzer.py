@@ -278,7 +278,7 @@ def _failure_semantics(
     """Neutral fallback for a failure after the request was built, plus the detail needed to explain it."""
     error_detail = {
         "http_status": http_status,
-        "message": str(message or "")[:ERROR_DETAIL_MESSAGE_LIMIT],
+        "message": _excerpt(str(message or "")),
         "image_bytes": image_bytes,
         "payload_bytes": payload_bytes,
         "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
@@ -296,6 +296,16 @@ def _failure_semantics(
         error_detail["message"],
     )
     return fallback_semantics(error_type, analysis_scope=analysis_scope, error_detail=error_detail)
+
+
+def _excerpt(message: str) -> str:
+    """Keep both ends of a long message: the tail is what shows a truncated response."""
+    if len(message) <= ERROR_DETAIL_MESSAGE_LIMIT:
+        return message
+    separator = " … "
+    head = ERROR_DETAIL_MESSAGE_LIMIT * 2 // 3
+    tail = ERROR_DETAIL_MESSAGE_LIMIT - head - len(separator)
+    return f"{message[:head]}{separator}{message[-tail:]}"
 
 
 def _http_status_from_message(message: str) -> int | None:
