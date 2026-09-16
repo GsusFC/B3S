@@ -576,6 +576,49 @@ def test_magnetism_owned_hook_limitation_with_owned_evidence_marks_hook_tiles_ad
     assert "magnetism.MG10" not in by_tile
 
 
+def test_magnetism_owned_hook_limitation_ignores_evaluation_refs_missing_from_pack() -> None:
+    # flow_ingress drops evaluation refs that do not exist in the pack and then
+    # falls back to the interpretation refs; the owned check must read the same
+    # records the evaluator ends up reading.
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content="Acme is the finance close platform that teams recommend to each other.",
+            ),
+        ],
+    )
+    interpretation = BrandInterpretation(
+        brand_name="Acme",
+        url="https://acme.example",
+        blocks={
+            "magnetism": {
+                "detected": True,
+                "content": "Acme has audience preference evidence but no owned hook mechanism.",
+                "confidence": "medium",
+                "rationale": "The evidence supports magnetism only in preference terms.",
+            }
+        },
+        evidence_refs={"magnetism": ["raw_inputs.0"]},
+        limitations=["magnetism_no_owned_hook_evidence"],
+    )
+
+    signals = build_tile_signals_from_interpretation(
+        interpretation,
+        evidence_pack=pack,
+        evaluation_evidence_refs={"magnetism": ["ghost.1", "ghost.2"]},
+    )
+
+    by_tile = {signal.tile: signal.to_dict() for signal in signals}
+    for tile in ("magnetism.MG3", "magnetism.MG4", "magnetism.MG5", "magnetism.MG6"):
+        assert by_tile[tile]["confidence"] == "medium"
+        assert by_tile[tile]["effect"] == "insufficient_evidence"
+
+
 def test_magnetism_owned_hook_limitation_reads_owned_evidence_from_evaluation_refs() -> None:
     # The evaluator judges MG3-MG6 from the frozen evaluation refs, so owned
     # copy there counts even when the interpretation cited only external proof.

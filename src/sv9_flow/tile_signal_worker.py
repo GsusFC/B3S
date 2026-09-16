@@ -68,8 +68,9 @@ def build_tile_signals_from_interpretation(
                     interpretation_limitations=interpretation.limitations,
                     sibling_blocks=interpretation.blocks,
                     owned_evidence_present=_owned_evidence_present(
-                        (evaluation_evidence_refs or {}).get(block_name) or refs,
-                        evidence_by_ref,
+                        evaluation_refs=(evaluation_evidence_refs or {}).get(block_name) or [],
+                        refs=refs,
+                        evidence_by_ref=evidence_by_ref,
                     ),
                 )
             )
@@ -230,20 +231,24 @@ def _magnetism_lacks_owned_hook_mechanism(limitations: list[str]) -> bool:
 
 
 def _owned_evidence_present(
+    *,
+    evaluation_refs: list[str],
     refs: list[str],
     evidence_by_ref: dict[str, EvidenceRecord] | None,
 ) -> bool | None:
-    """Whether any cited record is owned copy; None when no evidence pack is available.
+    """Whether any record the evaluator reads for the block is owned copy.
 
-    Same source-class notion as the evaluator's `evidence_source_summary`
-    (src/sv9/flow_ingress.py), applied to the block's evaluation refs.
+    Mirrors src/sv9/flow_ingress.py: evaluation refs that exist in the pack win,
+    otherwise the interpretation refs; the source-class notion is the one behind
+    the evaluator's `evidence_source_summary`. None when no pack is available.
     """
 
     if evidence_by_ref is None:
         return None
+    candidates = [ref for ref in evaluation_refs if ref in evidence_by_ref] or refs
     return any(
         source_class_for_record(evidence_by_ref[ref]) == SOURCE_CLASS_OWNED_COPY
-        for ref in refs
+        for ref in candidates
         if ref in evidence_by_ref
     )
 
