@@ -473,7 +473,27 @@ def test_market_momentum_only_magnetism_marks_mechanism_tiles_insufficient() -> 
     assert by_tile["magnetism.MG9"]["confidence"] == "high"
 
 
-def test_magnetism_owned_hook_limitation_only_marks_hook_tiles_insufficient() -> None:
+def test_magnetism_owned_hook_limitation_without_owned_evidence_keeps_hook_tiles_hard_insufficient() -> None:
+    # The pack has owned copy, but the magnetism block cites none of it: the
+    # owned-hook gap is a true absence for this block and stays a hard override.
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content="Acme is the finance close platform that teams recommend to each other.",
+            ),
+            EvidenceRecord(
+                ref="features.7",
+                source="legacy_feature",
+                evidence_type="vitalidad.momentum",
+                content="Funding and press momentum are visible.",
+            ),
+        ],
+    )
     interpretation = BrandInterpretation(
         brand_name="Acme",
         url="https://acme.example",
@@ -485,20 +505,167 @@ def test_magnetism_owned_hook_limitation_only_marks_hook_tiles_insufficient() ->
                 "rationale": "The evidence supports magnetism only in preference terms.",
             }
         },
-        evidence_refs={"magnetism": ["raw_inputs.2"]},
+        evidence_refs={"magnetism": ["features.7"]},
         limitations=["magnetism_no_owned_hook_evidence"],
     )
 
-    signals = build_tile_signals_from_interpretation(interpretation)
+    signals = build_tile_signals_from_interpretation(interpretation, evidence_pack=pack)
 
     by_tile = {signal.tile: signal.to_dict() for signal in signals}
     for tile in ("magnetism.MG3", "magnetism.MG4", "magnetism.MG5", "magnetism.MG6"):
         assert by_tile[tile]["effect"] == "insufficient_evidence"
         assert by_tile[tile]["confidence"] == "high"
+        assert by_tile[tile]["rationale"] == (
+            "Flow detected magnetism but found no direct evidence for this owned hook or mechanism tile."
+        )
     assert "magnetism.MG7" not in by_tile
     assert "magnetism.MG8" not in by_tile
     assert "magnetism.MG9" not in by_tile
     assert "magnetism.MG10" not in by_tile
+
+
+def test_magnetism_owned_hook_limitation_with_owned_evidence_marks_hook_tiles_advisory() -> None:
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.2",
+                source="homepage",
+                evidence_type="raw_input",
+                content="Acme is the finance close platform that teams recommend to each other.",
+            ),
+            EvidenceRecord(
+                ref="features.7",
+                source="legacy_feature",
+                evidence_type="vitalidad.momentum",
+                content="Funding and press momentum are visible.",
+            ),
+        ],
+    )
+    interpretation = BrandInterpretation(
+        brand_name="Acme",
+        url="https://acme.example",
+        blocks={
+            "magnetism": {
+                "detected": True,
+                "content": "Acme has audience preference evidence but no owned hook mechanism.",
+                "confidence": "medium",
+                "rationale": "The evidence supports magnetism only in preference terms.",
+            }
+        },
+        evidence_refs={"magnetism": ["raw_inputs.2", "features.7"]},
+        limitations=["magnetism_no_owned_hook_evidence"],
+    )
+
+    signals = build_tile_signals_from_interpretation(interpretation, evidence_pack=pack)
+
+    by_tile = {signal.tile: signal.to_dict() for signal in signals}
+    assert by_tile["magnetism.MG1"]["effect"] == "supports"
+    for tile in ("magnetism.MG3", "magnetism.MG4", "magnetism.MG5", "magnetism.MG6"):
+        assert by_tile[tile]["effect"] == "insufficient_evidence"
+        assert by_tile[tile]["confidence"] == "medium"
+        assert by_tile[tile]["evidence_refs"] == ["raw_inputs.2", "features.7"]
+        assert by_tile[tile]["rationale"] == (
+            "Flow detected magnetism with owned evidence but matched no direct hook or mechanism term; "
+            "the evaluator's per-tile verdict stands."
+        )
+    assert "magnetism.MG7" not in by_tile
+    assert "magnetism.MG8" not in by_tile
+    assert "magnetism.MG9" not in by_tile
+    assert "magnetism.MG10" not in by_tile
+
+
+def test_magnetism_owned_hook_limitation_ignores_evaluation_refs_missing_from_pack() -> None:
+    # flow_ingress drops evaluation refs that do not exist in the pack and then
+    # falls back to the interpretation refs; the owned check must read the same
+    # records the evaluator ends up reading.
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content="Acme is the finance close platform that teams recommend to each other.",
+            ),
+        ],
+    )
+    interpretation = BrandInterpretation(
+        brand_name="Acme",
+        url="https://acme.example",
+        blocks={
+            "magnetism": {
+                "detected": True,
+                "content": "Acme has audience preference evidence but no owned hook mechanism.",
+                "confidence": "medium",
+                "rationale": "The evidence supports magnetism only in preference terms.",
+            }
+        },
+        evidence_refs={"magnetism": ["raw_inputs.0"]},
+        limitations=["magnetism_no_owned_hook_evidence"],
+    )
+
+    signals = build_tile_signals_from_interpretation(
+        interpretation,
+        evidence_pack=pack,
+        evaluation_evidence_refs={"magnetism": ["ghost.1", "ghost.2"]},
+    )
+
+    by_tile = {signal.tile: signal.to_dict() for signal in signals}
+    for tile in ("magnetism.MG3", "magnetism.MG4", "magnetism.MG5", "magnetism.MG6"):
+        assert by_tile[tile]["confidence"] == "medium"
+        assert by_tile[tile]["effect"] == "insufficient_evidence"
+
+
+def test_magnetism_owned_hook_limitation_reads_owned_evidence_from_evaluation_refs() -> None:
+    # The evaluator judges MG3-MG6 from the frozen evaluation refs, so owned
+    # copy there counts even when the interpretation cited only external proof.
+    pack = BrandEvidencePack(
+        brand_name="Acme",
+        url="https://acme.example",
+        evidence=[
+            EvidenceRecord(
+                ref="raw_inputs.0",
+                source="homepage",
+                evidence_type="raw_input",
+                content="Acme is the finance close platform that teams recommend to each other.",
+            ),
+            EvidenceRecord(
+                ref="features.7",
+                source="legacy_feature",
+                evidence_type="vitalidad.momentum",
+                content="Funding and press momentum are visible.",
+            ),
+        ],
+    )
+    interpretation = BrandInterpretation(
+        brand_name="Acme",
+        url="https://acme.example",
+        blocks={
+            "magnetism": {
+                "detected": True,
+                "content": "Acme has audience preference evidence but no owned hook mechanism.",
+                "confidence": "medium",
+                "rationale": "The evidence supports magnetism only in preference terms.",
+            }
+        },
+        evidence_refs={"magnetism": ["features.7"]},
+        limitations=["magnetism_no_owned_hook_evidence"],
+    )
+
+    signals = build_tile_signals_from_interpretation(
+        interpretation,
+        evidence_pack=pack,
+        evaluation_evidence_refs={"magnetism": ["features.7", "raw_inputs.0"]},
+    )
+
+    by_tile = {signal.tile: signal.to_dict() for signal in signals}
+    for tile in ("magnetism.MG3", "magnetism.MG4", "magnetism.MG5", "magnetism.MG6"):
+        assert by_tile[tile]["effect"] == "insufficient_evidence"
+        assert by_tile[tile]["confidence"] == "medium"
+        assert by_tile[tile]["evidence_refs"] == ["features.7"]
 
 
 def test_magnetism_preference_limitation_only_marks_preference_tiles_insufficient() -> None:

@@ -9,7 +9,8 @@ from src.sv9_flow.calibration_terms import (
     core_purpose_heuristics,
     magnetism_direct_pull_gap_markers,
 )
-from src.sv9_flow.contracts import BrandInterpretation, TileSignal
+from src.sv9_flow.contracts import BrandEvidencePack, BrandInterpretation, EvidenceRecord, TileSignal
+from src.sv9_flow.evidence_source import SOURCE_CLASS_OWNED_COPY, source_class_for_record
 
 _CORE_PURPOSE_HEURISTICS = core_purpose_heuristics()
 _GENERIC_CATEGORY_MARKERS = tuple(_CORE_PURPOSE_HEURISTICS["generic_category_markers"])
@@ -44,7 +45,12 @@ def build_tile_signals_from_interpretation(
     interpretation: BrandInterpretation,
     *,
     visual_signature_evidence: dict[str, Any] | None = None,
+    evidence_pack: BrandEvidencePack | None = None,
+    evaluation_evidence_refs: dict[str, list[str]] | None = None,
 ) -> list[TileSignal]:
+    evidence_by_ref = (
+        {record.ref: record for record in evidence_pack.evidence} if evidence_pack is not None else None
+    )
     signals: list[TileSignal] = []
     for block_name, block_payload in sorted(interpretation.blocks.items()):
         component, tile = _BLOCK_TO_ANCHOR_TILE.get(block_name, (block_name, f"{block_name}.unknown"))
@@ -61,6 +67,11 @@ def build_tile_signals_from_interpretation(
                     evidence_refs=refs,
                     interpretation_limitations=interpretation.limitations,
                     sibling_blocks=interpretation.blocks,
+                    owned_evidence_present=_owned_evidence_present(
+                        evaluation_refs=(evaluation_evidence_refs or {}).get(block_name) or [],
+                        refs=refs,
+                        evidence_by_ref=evidence_by_ref,
+                    ),
                 )
             )
         else:
@@ -89,6 +100,7 @@ def _detected_block_tile_signals(
     evidence_refs: list[str],
     interpretation_limitations: list[str],
     sibling_blocks: dict[str, dict[str, Any]],
+    owned_evidence_present: bool | None = None,
 ) -> list[TileSignal]:
     confidence = feature_confidence(block_payload.get("confidence"))
     signals = [
@@ -146,17 +158,25 @@ def _detected_block_tile_signals(
             )
         )
     if block_name == "magnetism" and _magnetism_lacks_owned_hook_mechanism(interpretation_limitations):
+        # The owned_hook family is an exact-phrase vocabulary match. When the
+        # block has owned copy that simply matched no hook term, the gap is
+        # advisory and the evaluator judges MG3-MG6 from that copy; only a block
+        # with no owned evidence at all keeps the hard override.
+        advisory = owned_evidence_present is True
         for blind_tile in ("magnetism.MG3", "magnetism.MG4", "magnetism.MG5", "magnetism.MG6"):
             signals.append(
                 TileSignal(
                     component="magnetism",
                     tile=blind_tile,
                     effect="insufficient_evidence",
-                    confidence="high",
+                    confidence="medium" if advisory else "high",
                     source="brand_interpretation",
                     evidence_refs=evidence_refs,
                     rationale=(
-                        "Flow detected magnetism but found no direct evidence for this owned hook "
+                        "Flow detected magnetism with owned evidence but matched no direct hook or "
+                        "mechanism term; the evaluator's per-tile verdict stands."
+                        if advisory
+                        else "Flow detected magnetism but found no direct evidence for this owned hook "
                         "or mechanism tile."
                     ),
                 )
@@ -208,6 +228,29 @@ def _detected_block_tile_signals(
 
 def _magnetism_lacks_owned_hook_mechanism(limitations: list[str]) -> bool:
     return _has_limitation(limitations, "magnetism_no_owned_hook_evidence")
+
+
+def _owned_evidence_present(
+    *,
+    evaluation_refs: list[str],
+    refs: list[str],
+    evidence_by_ref: dict[str, EvidenceRecord] | None,
+) -> bool | None:
+    """Whether any record the evaluator reads for the block is owned copy.
+
+    Mirrors src/sv9/flow_ingress.py: evaluation refs that exist in the pack win,
+    otherwise the interpretation refs; the source-class notion is the one behind
+    the evaluator's `evidence_source_summary`. None when no pack is available.
+    """
+
+    if evidence_by_ref is None:
+        return None
+    candidates = [ref for ref in evaluation_refs if ref in evidence_by_ref] or refs
+    return any(
+        source_class_for_record(evidence_by_ref[ref]) == SOURCE_CLASS_OWNED_COPY
+        for ref in candidates
+        if ref in evidence_by_ref
+    )
 
 
 def _magnetism_lacks_preference_mechanism(limitations: list[str]) -> bool:
