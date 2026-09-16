@@ -108,6 +108,8 @@ def build_flow_candidate(
     tile_signals = build_tile_signals_from_interpretation(
         interpretation,
         visual_signature_evidence=visual_signature_evidence,
+        evidence_pack=evidence_pack,
+        evaluation_evidence_refs=evaluation_evidence_refs,
     )
     claim_memory_evidence = build_claim_memory_evidence(
         evidence_pack,
