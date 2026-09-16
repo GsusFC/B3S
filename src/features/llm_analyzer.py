@@ -97,6 +97,17 @@ class LLMAnalyzer(_llm_runtime._LLMAnalyzerRuntime):
         self.last_request_debug: dict[str, Any] | None = None
         self.usage_observations: list[dict[str, Any]] = []
 
+    def clone(self) -> "LLMAnalyzer":
+        """Return an analyzer with this configuration and fresh per-call state.
+
+        `_call_json` keeps per-call state on the instance, so one analyzer cannot
+        serve concurrent calls; parallel callers hand each worker its own clone.
+        """
+        clone = type(self)(api_key=self.api_key, base_url=self.base_url, model=self.model)
+        clone.use_cache = self.use_cache
+        clone.timeout_seconds = self.timeout_seconds
+        return clone
+
     def _call(self, system: str, user: str, max_tokens: int = 8000) -> str:
         """Make an LLM call via the OpenAI-compatible endpoint.
 

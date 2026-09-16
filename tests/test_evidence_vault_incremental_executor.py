@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+import src.services.evidence_vault_incremental_executor as executor_module
 from src.history.models import CaptureConflictError
 from src.history.repository import _validate_vault_operation_result_for_plan
 from src.services.evidence_vault_canonical_core import (
@@ -1108,3 +1109,41 @@ def test_baseline_caps_broad_semantic_shortlists_with_audit() -> None:
         result["shortlist_truncations"][fingerprint]["omitted_tile_ids"]
     ) == 46
     validate_vault_operation_result(result)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(None, 1), ("", 1), ("four", 1), ("0", 1), ("-3", 1), ("4", 4), ("100", 8)],
+)
+def test_labeling_concurrency_env_knob(monkeypatch, raw, expected) -> None:
+    if raw is None:
+        monkeypatch.delenv("BRAND3_LABELING_CONCURRENCY", raising=False)
+    else:
+        monkeypatch.setenv("BRAND3_LABELING_CONCURRENCY", raw)
+
+    assert executor_module._labeling_concurrency() == expected
+
+
+def test_executor_passes_labeling_concurrency_to_worker(monkeypatch) -> None:
+    monkeypatch.setenv("BRAND3_LABELING_CONCURRENCY", "3")
+    seen = []
+    real_label_evidence_pack = executor_module.label_evidence_pack
+
+    def recording_label_evidence_pack(pack, **kwargs):
+        seen.append(kwargs.get("concurrency"))
+        return real_label_evidence_pack(pack, **kwargs)
+
+    monkeypatch.setattr(executor_module, "label_evidence_pack", recording_label_evidence_pack)
+    rows = [_row()]
+    repository = MemoryRepository(plan=_baseline_plan(rows), rows=rows)
+
+    execution = execute_vault_operation_plan(
+        repository=repository,
+        source_scan_id="scan-1",
+        worker_id="worker-a",
+        llm=ExecutorLLM(),
+    )
+
+    assert execution["execution_status"] == "completed"
+    assert seen == [3]
+    assert repository.operation["result_payload"]["labeling_debug"]["status"] == "labeled"

@@ -592,6 +592,50 @@ class LLMCacheTests(unittest.TestCase):
         self.assertEqual(second_body["response_format"], {"type": "json_object"})
         self.assertIsNone(llm.last_failure_reason)
 
+    def test_clone_copies_configuration_with_fresh_call_state(self):
+        original = LLMAnalyzer(api_key="key", base_url="https://llm.test", model="model-a")
+        original.use_cache = False
+        original.timeout_seconds = 7
+        original.cache_misses = 3
+        original.last_failure_reason = "transport_error"
+        original.call_failures.append({"reason": "transport_error"})
+
+        clone = original.clone()
+
+        self.assertIsNot(clone, original)
+        self.assertIsInstance(clone, LLMAnalyzer)
+        self.assertEqual((clone.api_key, clone.base_url, clone.model), ("key", "https://llm.test", "model-a"))
+        self.assertFalse(clone.use_cache)
+        self.assertEqual(clone.timeout_seconds, 7)
+        self.assertEqual((clone.cache_hits, clone.cache_misses, clone.cache_writes), (0, 0, 0))
+        self.assertIsNone(clone.last_failure_reason)
+        self.assertIsNone(clone.last_rejected_payload)
+        self.assertIsNone(clone.last_raw_response)
+        self.assertEqual(clone.call_failures, [])
+        self.assertEqual(clone.usage_observations, [])
+
+    def test_clone_call_leaves_original_state_untouched(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "brand3.sqlite3")
+            original = LLMAnalyzer(api_key="key", base_url="https://llm.test", model="model-a")
+            clone = original.clone()
+
+            with patch("src.features.llm_analyzer.BRAND3_DB_PATH", db_path):
+                with patch(
+                    "src.features.llm_analyzer._run_llm_http_call",
+                    return_value=("http_error", "HTTP 429: {}"),
+                ):
+                    result = clone._call_json("system", "user")
+
+        self.assertEqual(result, {})
+        self.assertEqual(clone.last_failure_reason, "provider_http_error")
+        self.assertEqual(clone.call_failures[0]["http_status"], 429)
+        self.assertEqual(clone.cache_misses, 1)
+        self.assertIsNone(original.last_failure_reason)
+        self.assertEqual(original.call_failures, [])
+        self.assertEqual(original.cache_misses, 0)
+        self.assertEqual(original.usage_observations, [])
+
 
 if __name__ == "__main__":
     unittest.main()

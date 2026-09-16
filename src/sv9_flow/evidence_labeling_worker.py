@@ -11,7 +11,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Iterable
+import time
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
+from queue import SimpleQueue
+from typing import Any, Iterable, NamedTuple
 
 from src.features.llm_analyzer_support import _validate_json_schema
 from src.sv9_flow.calibration_terms import block_evidence_policy
@@ -47,6 +50,9 @@ _CLASSIFIED_FAILURE_PREFIXES = (
     "evidence_labeling_provider_failed:",
     "evidence_labeling_provider_incomplete:",
 )
+# Parallel path only: one delayed retry per passage after a provider rate limit.
+_RATE_LIMIT_HTTP_STATUS = 429
+_RATE_LIMIT_RETRY_SECONDS = 2.0
 
 _LABEL_SCHEMA = {
     "type": "object",
@@ -186,8 +192,13 @@ def label_evidence_pack(
     llm: Any | None,
     max_records: int = _MAX_RECORDS,
     selected_refs: Iterable[str] | None = None,
+    concurrency: int = 1,
 ) -> dict[str, Any]:
-    """Annotate evidence records with semantic labels, returning debug info."""
+    """Annotate evidence records with semantic labels, returning debug info.
+
+    `concurrency` above 1 fans passage calls out over analyzer clones when the
+    client offers `clone()`; the labels and debug counters do not depend on it.
+    """
 
     debug: dict[str, Any] = {
         "version": EVIDENCE_LABELING_VERSION,
@@ -228,6 +239,7 @@ def label_evidence_pack(
             evidence_pack=evidence_pack,
             records=records,
             llm=llm,
+            concurrency=concurrency,
         )
     except Exception as exc:
         debug["status"] = "failed"
@@ -267,6 +279,7 @@ def _labels_with_artifact_cache(
     evidence_pack: BrandEvidencePack,
     records: list[EvidenceRecord],
     llm: Any,
+    concurrency: int = 1,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     labels: list[dict[str, Any]] = []
     missing: list[EvidenceRecord] = []
@@ -288,6 +301,7 @@ def _labels_with_artifact_cache(
             evidence_pack=evidence_pack,
             records=missing,
             llm=llm,
+            concurrency=concurrency,
         )
         failure_reason = _provider_failure_reason(llm)
         if failure_reason:
@@ -337,52 +351,198 @@ def evidence_labeling_call_count(records: list[EvidenceRecord]) -> int:
     return sum(len(semantic_passages(record.content)) for record in records)
 
 
-def _call_labeler(
-    *, evidence_pack: BrandEvidencePack, records: list[EvidenceRecord], llm: Any
-) -> tuple[list[dict[str, Any]], int]:
-    labels_by_parent: dict[str, list[dict[str, Any]]] = {}
-    call_count = 0
+class _PassageTask(NamedTuple):
+    index: int
+    record: EvidenceRecord
+    parent: str
+    row: dict[str, Any]
+
+
+def _passage_tasks(records: list[EvidenceRecord]) -> list[_PassageTask]:
+    """One labeler call per semantic passage, in the order the sequential loop visits them."""
+
+    tasks: list[_PassageTask] = []
     for record in canonical_evidence_records(records):
         parent = canonical_evidence_ref(record)
         metadata = record.metadata if isinstance(record.metadata, dict) else {}
         for content in semantic_passages(record.content):
-            call_count += 1
-            failures = getattr(llm, "call_failures", None)
-            failure_start = len(failures) if isinstance(failures, list) else None
-            row = {
-                "ref": parent,
-                "source_class": metadata.get("source_class") or source_class_for_record(record),
-                "evidence_type": record.evidence_type,
-                "url": normalize_evidence_url(record.url),
-                "content": content,
-                "deterministic_identity_match": metadata.get("identity_match") or "",
-            }
-            raw = llm._call_json(
-                _system_prompt(),
-                _user_prompt(evidence_pack=evidence_pack, rows=[row]),
-                max_tokens=8000,
-                json_schema=_LABEL_SCHEMA,
-                schema_name="sv9_flow_evidence_labeling",
-                temperature=0.0,
+            tasks.append(
+                _PassageTask(
+                    index=len(tasks) + 1,
+                    record=record,
+                    parent=parent,
+                    row={
+                        "ref": parent,
+                        "source_class": metadata.get("source_class") or source_class_for_record(record),
+                        "evidence_type": record.evidence_type,
+                        "url": normalize_evidence_url(record.url),
+                        "content": content,
+                        "deterministic_identity_match": metadata.get("identity_match") or "",
+                    },
+                )
             )
-            raw = _repair_root_array_envelope(
-                llm, raw, failure_start=failure_start, ref=parent, call_index=call_count
+    return tasks
+
+
+def _failure_start(llm: Any) -> int | None:
+    failures = getattr(llm, "call_failures", None)
+    return len(failures) if isinstance(failures, list) else None
+
+
+def _label_passage(
+    *, evidence_pack: BrandEvidencePack, llm: Any, task: _PassageTask, failure_start: int | None
+) -> dict[str, Any]:
+    raw = llm._call_json(
+        _system_prompt(),
+        _user_prompt(evidence_pack=evidence_pack, rows=[task.row]),
+        max_tokens=8000,
+        json_schema=_LABEL_SCHEMA,
+        schema_name="sv9_flow_evidence_labeling",
+        temperature=0.0,
+    )
+    raw = _repair_root_array_envelope(
+        llm, raw, failure_start=failure_start, ref=task.parent, call_index=task.index
+    )
+    failure = _provider_failure_reason(llm, failure_start=failure_start)
+    if failure:
+        raise RuntimeError(failure)
+    items = raw.get("labels", []) if isinstance(raw, dict) else []
+    normalized = [
+        _normalize_label(item) for item in items if isinstance(item, dict)
+    ]
+    match = next((label for label in normalized if label["ref"] in {task.parent, task.record.ref}), None)
+    if match is None:
+        raise RuntimeError(f"evidence_labeling_provider_incomplete:{task.parent}")
+    return match
+
+
+def _call_labeler(
+    *,
+    evidence_pack: BrandEvidencePack,
+    records: list[EvidenceRecord],
+    llm: Any,
+    concurrency: int = 1,
+) -> tuple[list[dict[str, Any]], int]:
+    tasks = _passage_tasks(records)
+    clones = _labeling_clones(llm, count=min(concurrency, len(tasks))) if concurrency > 1 and len(tasks) > 1 else []
+    if clones:
+        labels_by_parent = _label_passages_parallel(evidence_pack=evidence_pack, tasks=tasks, llm=llm, clones=clones)
+    else:
+        labels_by_parent = {}
+        for task in tasks:
+            match = _label_passage(
+                evidence_pack=evidence_pack, llm=llm, task=task, failure_start=_failure_start(llm)
             )
-            failure = _provider_failure_reason(llm, failure_start=failure_start)
-            if failure:
-                raise RuntimeError(failure)
-            items = raw.get("labels", []) if isinstance(raw, dict) else []
-            normalized = [
-                _normalize_label(item) for item in items if isinstance(item, dict)
-            ]
-            match = next((label for label in normalized if label["ref"] in {parent, record.ref}), None)
-            if match is None:
-                raise RuntimeError(f"evidence_labeling_provider_incomplete:{parent}")
-            labels_by_parent.setdefault(parent, []).append(match)
+            labels_by_parent.setdefault(task.parent, []).append(match)
     return [
         _aggregate_passage_labels(parent, labels_by_parent[parent])
         for parent in sorted(labels_by_parent)
-    ], call_count
+    ], len(tasks)
+
+
+def _labeling_clones(llm: Any, *, count: int) -> list[Any]:
+    """Build the analyzer clones for the parallel path, or none when the client cannot clone.
+
+    A clone that cannot be constructed must not fail labeling: the passages are
+    then labeled sequentially on the shared analyzer, exactly as with a client
+    that offers no `clone()` at all.
+    """
+
+    clone = getattr(llm, "clone", None)
+    if not callable(clone):
+        return []
+    try:
+        return [clone() for _ in range(count)]
+    except Exception as exc:
+        logger.warning(
+            "evidence labeling clone unavailable (%s); labeling passages sequentially", type(exc).__name__
+        )
+        return []
+
+
+def _label_passages_parallel(
+    *,
+    evidence_pack: BrandEvidencePack,
+    tasks: list[_PassageTask],
+    llm: Any,
+    clones: list[Any],
+) -> dict[str, list[dict[str, Any]]]:
+    """Label passages on a pool of analyzer clones, reproducing the sequential outcome.
+
+    A clone serves one passage at a time, so per-call client state never crosses
+    passages. Results are read back in task order, the lowest failing index wins
+    as it would sequentially, and the shared analyzer is left in the state a
+    sequential batch leaves for the caller's post-batch failure check.
+    """
+
+    workers = len(clones)
+    idle_clones: SimpleQueue[Any] = SimpleQueue()
+    for clone in clones:
+        idle_clones.put(clone)
+    clone_by_index: dict[int, Any] = {}
+
+    def run(task: _PassageTask) -> dict[str, Any]:
+        clone = idle_clones.get()
+        clone_by_index[task.index] = clone
+        try:
+            return _label_passage_with_rate_limit_retry(evidence_pack=evidence_pack, clone=clone, task=task)
+        finally:
+            idle_clones.put(clone)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(run, task) for task in tasks]
+        _, pending = wait(futures, return_when=FIRST_EXCEPTION)
+        for future in pending:
+            future.cancel()
+
+    labels_by_parent: dict[str, list[dict[str, Any]]] = {}
+    for task, future in zip(tasks, futures):
+        if future.cancelled():
+            continue
+        error = future.exception()
+        if error is not None:
+            llm.last_failure_reason = getattr(clone_by_index[task.index], "last_failure_reason", None)
+            raise error
+        labels_by_parent.setdefault(task.parent, []).append(future.result())
+    for task in tasks:
+        failure = _provider_failure_reason(clone_by_index[task.index])
+        if failure:
+            llm.last_failure_reason = clone_by_index[task.index].last_failure_reason
+            raise RuntimeError(failure)
+    llm.last_failure_reason = None
+    return labels_by_parent
+
+
+def _label_passage_with_rate_limit_retry(
+    *, evidence_pack: BrandEvidencePack, clone: Any, task: _PassageTask
+) -> dict[str, Any]:
+    failure_start = _failure_start(clone)
+    try:
+        return _label_passage(evidence_pack=evidence_pack, llm=clone, task=task, failure_start=failure_start)
+    except RuntimeError:
+        if not _rate_limited(clone, failure_start=failure_start):
+            raise
+    logger.warning(
+        "evidence labeling retrying rate-limited passage ref=%s call=%d", task.parent, task.index
+    )
+    time.sleep(_RATE_LIMIT_RETRY_SECONDS)
+    return _label_passage(
+        evidence_pack=evidence_pack, llm=clone, task=task, failure_start=_failure_start(clone)
+    )
+
+
+def _rate_limited(llm: Any, *, failure_start: int | None) -> bool:
+    """Return whether the failure recorded by the latest call is an HTTP 429."""
+
+    if str(getattr(llm, "last_failure_reason", None) or "") != "provider_http_error":
+        return False
+    failures = getattr(llm, "call_failures", None)
+    if not isinstance(failures, list) or not failures:
+        return False
+    if failure_start is not None and len(failures) <= failure_start:
+        return False
+    latest = failures[-1]
+    return isinstance(latest, dict) and latest.get("http_status") == _RATE_LIMIT_HTTP_STATUS
 
 
 def _aggregate_passage_labels(

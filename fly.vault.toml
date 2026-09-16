@@ -30,6 +30,8 @@ kill_timeout = "30s"
   BRAND3_VAULT_VERIFIED_RAW_ACQUISITION_SOCKET_PATH = ""
   SCREENSHOT_PROVIDER = "playwright"
   BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS = "90"
+  # Semantic labeling fan-out for the incremental executor; "1" keeps it sequential.
+  BRAND3_LABELING_CONCURRENCY = "4"
 
 [[mounts]]
   source = "b3s_vault_data"
