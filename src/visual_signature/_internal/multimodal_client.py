@@ -91,12 +91,15 @@ def run_multimodal_request(
     effective_url = url or f"{LLM_BASE_URL}/chat/completions"
     effective_timeout_seconds = timeout_seconds if timeout_seconds is not None else effective_timeout()
 
-    return _run_llm_http_call(
+    result = _run_llm_http_call(
         url=effective_url,
         payload=json.dumps(payload).encode("utf-8"),
         headers=effective_headers,
         timeout_seconds=effective_timeout_seconds,
     )
+    # The shared transport returns (status, content, usage); this contract
+    # exposes only status and content, so callers can unpack two values.
+    return result[0], result[1]
 
 
 def run_multimodal_http_call(
