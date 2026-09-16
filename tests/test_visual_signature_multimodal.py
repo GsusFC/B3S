@@ -423,3 +423,24 @@ def test_atlas_semantics_reports_labeled_section_scope(tmp_path, monkeypatch):
     assert result["status"] == "detected"
     assert result["audit"]["analysis_scope"] == "labeled_section_atlas"
     assert result["audit"]["input_kind"] == "labeled_atlas"
+
+
+def test_analyze_visual_semantics_accepts_shared_transport_three_tuple(tmp_path, monkeypatch) -> None:
+    # The shared LLM transport returns (status, content, usage). The multimodal
+    # client must not leak that third element to the analyzer, which unpacks two.
+    import src.visual_signature._internal.multimodal_client as multimodal_client
+
+    screenshot = tmp_path / "shot.png"
+    screenshot.write_bytes(b"brand3 image bytes")
+
+    def shared_transport(**_kwargs):
+        return ("ok", json.dumps({"visual_mood": "high-trust", "cta_salience": "clear"}), {"prompt_tokens": 12})
+
+    monkeypatch.setattr(multimodal_analyzer, "BRAND3_LLM_API_KEY", "test-key")
+    monkeypatch.setattr(multimodal_client, "_run_llm_http_call", shared_transport)
+
+    result = multimodal_analyzer.analyze_visual_semantics(screenshot_path=str(screenshot), brand_name="Example Brand")
+
+    assert result["status"] == "detected", result.get("error_detail")
+    assert result["fallback_used"] is False
+    assert result["data"]["visual_mood"] == "high-trust"
