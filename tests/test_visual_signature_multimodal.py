@@ -3,10 +3,21 @@ from __future__ import annotations
 import base64
 import importlib
 import json
+import logging
 from dataclasses import dataclass
 
 from src.visual_signature.types import VisualAcquisitionResult, VisualSignatureInput
 from src.visual_signature.vision import multimodal_analyzer
+
+STABLE_SEMANTICS_KEYS = {"status", "model", "prompt_version", "fallback_used", "error_type", "audit", "data"}
+
+
+def _warning_records(caplog) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING and record.name == multimodal_analyzer.logger.name
+    ]
 
 
 @dataclass
@@ -70,7 +81,7 @@ def test_multimodal_atlas_prompt_separates_first_viewport_from_page_sections():
     assert "gray gutters are audit scaffolding" in prompt
 
 
-def test_analyze_visual_semantics_encodes_image_and_normalizes_success(tmp_path, monkeypatch):
+def test_analyze_visual_semantics_encodes_image_and_normalizes_success(tmp_path, monkeypatch, caplog):
     screenshot = tmp_path / "screen.png"
     screenshot.write_bytes(b"brand3 image bytes")
     captured: dict[str, object] = {}
@@ -134,9 +145,54 @@ def test_analyze_visual_semantics_encodes_image_and_normalizes_success(tmp_path,
         "observed_risks": ["limited differentiation"],
         "notable_absences": ["no strong social proof visible"],
     }
+    assert "error_detail" not in result
+    assert _warning_records(caplog) == []
 
 
-def test_analyze_visual_semantics_http_failure_returns_neutral_fallback(tmp_path, monkeypatch):
+def test_analyze_visual_semantics_http_error_records_error_detail_and_warns_once(tmp_path, monkeypatch, caplog):
+    screenshot = tmp_path / "screen.png"
+    screenshot.write_bytes(b"brand3 image bytes")
+    encoded_image = base64.b64encode(b"brand3 image bytes").decode("utf-8")
+    provider_body = json.dumps({"error": {"message": "Request payload size exceeds the limit"}})
+
+    monkeypatch.setattr(multimodal_analyzer, "BRAND3_LLM_API_KEY", "test-key")
+    monkeypatch.setattr(
+        multimodal_analyzer,
+        "_run_llm_http_call",
+        lambda **_kwargs: ("http_error", f"HTTP 400: {provider_body}"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=multimodal_analyzer.logger.name):
+        result = multimodal_analyzer.analyze_visual_semantics(
+            screenshot_path=str(screenshot),
+            brand_name="Example Brand",
+        )
+
+    assert result["status"] == "unavailable"
+    assert result["fallback_used"] is True
+    assert result["error_type"] == "llm_error"
+    assert result["data"] == multimodal_analyzer.fallback_semantics("llm_error")["data"]
+    detail = result["error_detail"]
+    assert detail["http_status"] == 400
+    assert "Request payload size exceeds the limit" in detail["message"]
+    assert detail["image_bytes"] == len(b"brand3 image bytes")
+    assert isinstance(detail["payload_bytes"], int) and detail["payload_bytes"] > detail["image_bytes"]
+    assert isinstance(detail["elapsed_ms"], int) and detail["elapsed_ms"] >= 0
+    assert encoded_image not in json.dumps(detail)
+
+    warnings = _warning_records(caplog)
+    assert len(warnings) == 1
+    logged = warnings[0].getMessage()
+    assert "error_type=llm_error" in logged
+    assert "http_status=400" in logged
+    assert "image_bytes=18" in logged
+    assert "payload_bytes=" in logged
+    assert "Request payload size exceeds the limit" in logged
+    assert encoded_image not in logged
+    assert "test-key" not in logged
+
+
+def test_analyze_visual_semantics_timeout_records_error_detail_without_http_status(tmp_path, monkeypatch, caplog):
     screenshot = tmp_path / "screen.png"
     screenshot.write_bytes(b"brand3 image bytes")
 
@@ -144,18 +200,49 @@ def test_analyze_visual_semantics_http_failure_returns_neutral_fallback(tmp_path
     monkeypatch.setattr(
         multimodal_analyzer,
         "_run_llm_http_call",
-        lambda **_kwargs: ("error", "HTTP 429: quota"),
+        lambda **_kwargs: ("timeout", "The read operation timed out"),
     )
 
-    result = multimodal_analyzer.analyze_visual_semantics(
-        screenshot_path=str(screenshot),
-        brand_name="Example Brand",
-    )
+    with caplog.at_level(logging.WARNING, logger=multimodal_analyzer.logger.name):
+        result = multimodal_analyzer.analyze_visual_semantics(
+            screenshot_path=str(screenshot),
+            brand_name="Example Brand",
+        )
 
-    assert result == multimodal_analyzer.fallback_semantics("llm_error")
+    assert result["status"] == "unavailable"
+    assert result["error_type"] == "llm_timeout"
+    assert result["error_detail"]["http_status"] is None
+    assert result["error_detail"]["message"] == "The read operation timed out"
+    warnings = _warning_records(caplog)
+    assert len(warnings) == 1
+    assert "error_type=llm_timeout" in warnings[0].getMessage()
+    assert "http_status=None" in warnings[0].getMessage()
 
 
-def test_analyze_visual_semantics_invalid_json_returns_neutral_fallback(tmp_path, monkeypatch):
+def test_analyze_visual_semantics_transport_exception_records_exception_text(tmp_path, monkeypatch, caplog):
+    screenshot = tmp_path / "screen.png"
+    screenshot.write_bytes(b"brand3 image bytes")
+
+    def raise_transport_error(**_kwargs):
+        raise RuntimeError("connection reset by provider")
+
+    monkeypatch.setattr(multimodal_analyzer, "BRAND3_LLM_API_KEY", "test-key")
+    monkeypatch.setattr(multimodal_analyzer, "_run_llm_http_call", raise_transport_error)
+
+    with caplog.at_level(logging.WARNING, logger=multimodal_analyzer.logger.name):
+        result = multimodal_analyzer.analyze_visual_semantics(
+            screenshot_path=str(screenshot),
+            brand_name="Example Brand",
+        )
+
+    assert result["status"] == "unavailable"
+    assert result["error_type"] == "llm_error"
+    assert result["error_detail"]["http_status"] is None
+    assert result["error_detail"]["message"] == "connection reset by provider"
+    assert len(_warning_records(caplog)) == 1
+
+
+def test_analyze_visual_semantics_invalid_json_records_body_excerpt(tmp_path, monkeypatch, caplog):
     screenshot = tmp_path / "screen.png"
     screenshot.write_bytes(b"brand3 image bytes")
 
@@ -166,12 +253,68 @@ def test_analyze_visual_semantics_invalid_json_returns_neutral_fallback(tmp_path
         lambda **_kwargs: ("ok", "not json"),
     )
 
+    with caplog.at_level(logging.WARNING, logger=multimodal_analyzer.logger.name):
+        result = multimodal_analyzer.analyze_visual_semantics(
+            screenshot_path=str(screenshot),
+            brand_name="Example Brand",
+        )
+
+    assert result["status"] == "unavailable"
+    assert result["error_type"] == "json_parse_error"
+    assert result["data"] == multimodal_analyzer.fallback_semantics("json_parse_error")["data"]
+    assert result["error_detail"]["http_status"] is None
+    assert result["error_detail"]["message"] == "not json"
+    warnings = _warning_records(caplog)
+    assert len(warnings) == 1
+    assert "error_type=json_parse_error" in warnings[0].getMessage()
+
+
+def test_analyze_visual_semantics_error_detail_message_is_capped(tmp_path, monkeypatch):
+    screenshot = tmp_path / "screen.png"
+    screenshot.write_bytes(b"brand3 image bytes")
+
+    monkeypatch.setattr(multimodal_analyzer, "BRAND3_LLM_API_KEY", "test-key")
+    monkeypatch.setattr(
+        multimodal_analyzer,
+        "_run_llm_http_call",
+        lambda **_kwargs: ("http_error", "HTTP 413: " + "x" * 1000),
+    )
+
     result = multimodal_analyzer.analyze_visual_semantics(
         screenshot_path=str(screenshot),
         brand_name="Example Brand",
     )
 
-    assert result == multimodal_analyzer.fallback_semantics("json_parse_error")
+    assert result["error_type"] == "llm_error"
+    assert result["error_detail"]["http_status"] == 413
+    assert len(result["error_detail"]["message"]) == 300
+
+
+def test_analyze_visual_semantics_pre_call_fallback_keeps_stable_contract(monkeypatch, caplog):
+    monkeypatch.setattr(multimodal_analyzer, "BRAND3_VISUAL_SIGNATURE_SKIP_MULTIMODAL", False)
+
+    result = multimodal_analyzer.analyze_visual_semantics(screenshot_path=None, brand_name="Example Brand")
+
+    assert result == multimodal_analyzer.fallback_semantics("screenshot_path_missing")
+    assert set(result) == STABLE_SEMANTICS_KEYS
+    assert _warning_records(caplog) == []
+
+
+def test_fallback_semantics_attaches_error_detail_only_when_provided():
+    error_detail = {
+        "http_status": 400,
+        "message": "HTTP 400: payload too large",
+        "image_bytes": 18,
+        "payload_bytes": 700,
+        "elapsed_ms": 12,
+    }
+
+    plain = multimodal_analyzer.fallback_semantics("llm_error")
+    detailed = multimodal_analyzer.fallback_semantics("llm_error", error_detail=error_detail)
+
+    assert set(plain) == STABLE_SEMANTICS_KEYS
+    assert detailed["error_detail"] == error_detail
+    assert {key: value for key, value in detailed.items() if key != "error_detail"} == plain
 
 
 def test_extract_visual_signature_includes_stable_semantics_without_local_screenshot(monkeypatch):

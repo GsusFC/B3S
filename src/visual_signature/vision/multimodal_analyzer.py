@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,8 @@ from src.visual_signature._internal.multimodal_normalizer import normalize_seman
 from src.visual_signature.versions import MULTIMODAL_PROMPT_VERSION as PROMPT_VERSION
 
 logger = logging.getLogger(__name__)
+
+ERROR_DETAIL_MESSAGE_LIMIT = 300
 
 SYSTEM_PREAMBLE = (
     "You are a senior design director auditing a rendered brand website. "
@@ -119,34 +122,49 @@ def analyze_visual_semantics(screenshot_path: str | None, brand_name: str) -> di
         brand_name=brand_name,
         analysis_scope=analysis_scope,
     )
+    payload = json.dumps(body).encode("utf-8")
+    image_bytes = _file_size(path)
+    started_at = time.perf_counter()
+
+    def unavailable(error_type: str, message: str, http_status: int | None = None) -> dict[str, Any]:
+        return _failure_semantics(
+            error_type,
+            brand_name=brand_name,
+            analysis_scope=analysis_scope,
+            message=message,
+            http_status=http_status,
+            image_bytes=image_bytes,
+            payload_bytes=len(payload),
+            started_at=started_at,
+        )
 
     try:
         status, content = _run_llm_http_call(
             url=f"{LLM_BASE_URL}/chat/completions",
-            payload=json.dumps(body).encode("utf-8"),
+            payload=payload,
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {BRAND3_LLM_API_KEY}",
             },
             timeout_seconds=_multimodal_effective_timeout(),
         )
-    except Exception:
-        return fallback_semantics("llm_error", analysis_scope=analysis_scope)
+    except Exception as exc:
+        return unavailable("llm_error", str(exc))
 
     if status != "ok":
         error_type = "llm_timeout" if status == "timeout" else "llm_error"
-        return fallback_semantics(error_type, analysis_scope=analysis_scope)
+        return unavailable(error_type, content, http_status=_http_status_from_message(content))
 
     if not content:
-        return fallback_semantics("empty_response", analysis_scope=analysis_scope)
+        return unavailable("empty_response", "")
 
     try:
         parsed = json.loads(_strip_json_fence(content))
     except json.JSONDecodeError:
-        return fallback_semantics("json_parse_error", analysis_scope=analysis_scope)
+        return unavailable("json_parse_error", content)
 
     if not isinstance(parsed, dict):
-        return fallback_semantics("invalid_response", analysis_scope=analysis_scope)
+        return unavailable("invalid_response", content)
 
     data = normalize_semantics_data(parsed)
     return {
@@ -171,8 +189,10 @@ def fallback_semantics(
     error_type: str | None,
     *,
     analysis_scope: str = "single_capture",
+    error_detail: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    """Neutral contract; ``error_detail`` is attached only for failures observed after the request was built."""
+    semantics: dict[str, Any] = {
         "status": "unavailable",
         "model": BRAND3_VISUAL_SIGNATURE_MODEL,
         "prompt_version": PROMPT_VERSION,
@@ -205,6 +225,9 @@ def fallback_semantics(
             "notable_absences": [],
         },
     }
+    if error_detail is not None:
+        semantics["error_detail"] = error_detail
+    return semantics
 
 
 def encode_image_base64(path: Path) -> str:
@@ -239,6 +262,55 @@ def build_cache_key(*, brand_name: str, screenshot_bytes: bytes) -> str:
         brand_name=brand_name,
         screenshot_bytes=screenshot_bytes,
     )
+
+
+def _failure_semantics(
+    error_type: str,
+    *,
+    brand_name: str,
+    analysis_scope: str,
+    message: str,
+    http_status: int | None,
+    image_bytes: int | None,
+    payload_bytes: int,
+    started_at: float,
+) -> dict[str, Any]:
+    """Neutral fallback for a failure after the request was built, plus the detail needed to explain it."""
+    error_detail = {
+        "http_status": http_status,
+        "message": str(message or "")[:ERROR_DETAIL_MESSAGE_LIMIT],
+        "image_bytes": image_bytes,
+        "payload_bytes": payload_bytes,
+        "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+    }
+    logger.warning(
+        "visual_semantics unavailable (brand=%s model=%s error_type=%s http_status=%s image_bytes=%s "
+        "payload_bytes=%s elapsed_ms=%s): %s",
+        brand_name,
+        BRAND3_VISUAL_SIGNATURE_MODEL,
+        error_type,
+        http_status,
+        image_bytes,
+        payload_bytes,
+        error_detail["elapsed_ms"],
+        error_detail["message"],
+    )
+    return fallback_semantics(error_type, analysis_scope=analysis_scope, error_detail=error_detail)
+
+
+def _http_status_from_message(message: str) -> int | None:
+    """Parse the ``HTTP <code>: <body>`` prefix the shared transport emits on HTTPError."""
+    if not isinstance(message, str) or not message.startswith("HTTP "):
+        return None
+    code = message[5:].partition(":")[0].strip()
+    return int(code) if code.isdigit() else None
+
+
+def _file_size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
 
 
 def _strip_json_fence(content: str) -> str:
