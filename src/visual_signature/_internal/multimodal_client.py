@@ -29,6 +29,11 @@ def effective_timeout() -> int:
     return LLM_CALL_TIMEOUT_SECONDS
 
 
+# A pretty-printed 16-field semantics object with sentence lists exceeds 1200
+# output tokens; truncated JSON fails to parse and the whole audit is lost.
+MULTIMODAL_MAX_OUTPUT_TOKENS = 4096
+
+
 def build_multimodal_payload(*, prompt_template: str, system_preamble: str, encoded_image: str, mime_type: str, brand_name: str) -> dict[str, Any]:
     prompt = prompt_template.format(brand_name=brand_name)
 
@@ -51,7 +56,7 @@ def build_multimodal_payload(*, prompt_template: str, system_preamble: str, enco
                 ],
             }
         ],
-        "max_tokens": 1200,
+        "max_tokens": MULTIMODAL_MAX_OUTPUT_TOKENS,
         "temperature": 0.1,
         "response_format": {"type": "json_object"},
     }
