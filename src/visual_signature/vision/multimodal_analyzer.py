@@ -50,6 +50,7 @@ Return ONLY valid JSON with this exact shape:
   "hierarchy_clarity": "clear, mixed, weak, or not_detected",
   "cta_salience": "clear, partial, weak, or not_detected",
   "trust_signal_presence": "clear, partial, weak, or not_detected",
+  "page_content_type": "brand_page, interstitial, error_page, or not_detected",
   "first_impression_summary": "one short first-impression summary, or not_detected",
   "observed_strengths": ["short visible strengths"],
   "observed_risks": ["short visible risks"],
@@ -58,7 +59,13 @@ Return ONLY valid JSON with this exact shape:
 
 Use not_detected for fields where the screenshot does not provide enough evidence.
 Use [] for list fields when there is insufficient evidence.
-Do not infer facts that are not visible in the image."""
+Do not infer facts that are not visible in the image.
+
+Set page_content_type to interstitial when the screenshot shows a gate instead
+of the site itself: a bot check, a captcha, a human verification or security
+check, a loading screen, a cookie wall or an age gate. Use error_page for a
+not-found or server error page. Use brand_page only when the screenshot shows
+the brand's own content."""
 
 ATLAS_INSTRUCTIONS = """
 
@@ -219,6 +226,7 @@ def fallback_semantics(
             "hierarchy_clarity": "not_detected",
             "cta_salience": "not_detected",
             "trust_signal_presence": "not_detected",
+            "page_content_type": "not_detected",
             "first_impression_summary": "not_detected",
             "observed_strengths": [],
             "observed_risks": [],
