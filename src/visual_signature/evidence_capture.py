@@ -95,11 +95,14 @@ def capture_contract(
 def capture_content_trust(payload: dict[str, Any]) -> tuple[str, str | None]:
     """Judge whether the captured pixels show the brand or a gate in front of it.
 
-    The vision model already describes security checks and loading gates
-    accurately, but nothing read that description, so a screenshot of a bot
-    challenge was scored as if it were the brand's homepage. Two independent
-    hits are required -- an interstitial phrase and an explicit absence of
-    brand content -- because either one alone appears in ordinary brand copy.
+    Two independent signals, held in OR because either can miss on its own.
+    The model's enumerated answer cannot be reworded, so it survives the
+    rephrasing that defeats phrase matching; the phrase markers still catch
+    the case where the model describes the gate accurately but answers the
+    direct question wrong, and they are the only signal available for packets
+    captured before the field existed. Phrase matching needs two hits, an
+    interstitial phrase and an explicit absence of brand content, because
+    either one alone appears in ordinary brand copy.
     """
 
     semantics = _dict(payload.get("semantics"))
@@ -107,6 +110,10 @@ def capture_content_trust(payload: dict[str, Any]) -> tuple[str, str | None]:
         return "unknown", None
 
     data = _dict(semantics.get("data"))
+    reasons: list[str] = []
+    if str(data.get("page_content_type") or "").strip().lower() == "interstitial":
+        reasons.append("page_content_type:interstitial")
+
     described = " ".join(
         [
             str(data.get("first_impression_summary") or ""),
@@ -117,9 +124,12 @@ def capture_content_trust(payload: dict[str, Any]) -> tuple[str, str | None]:
 
     interstitial = matched_markers(described, INTERSTITIAL_MARKERS)
     absence = matched_markers(described, BRAND_ABSENCE_MARKERS)
-    if not interstitial or not absence:
+    if interstitial and absence:
+        reasons.extend(interstitial + absence)
+
+    if not reasons:
         return "trusted", None
-    return "untrusted", "+".join(interstitial + absence)
+    return "untrusted", "+".join(reasons)
 
 
 def matched_markers(described: str, markers: tuple[tuple[str, str], ...]) -> list[str]:

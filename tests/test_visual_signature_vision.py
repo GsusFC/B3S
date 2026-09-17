@@ -865,7 +865,7 @@ def test_same_capture_clean_observation_overrides_unrelated_web_html(tmp_path):
 def test_multimodal_prompt_version_is_stable_constant():
     from src.visual_signature.vision.multimodal_analyzer import PROMPT_VERSION
 
-    assert PROMPT_VERSION == "visual-signature-multimodal-v3"
+    assert PROMPT_VERSION == "visual-signature-multimodal-v4"
 
 
 def test_build_multimodal_payload_uses_template_with_brand_name():

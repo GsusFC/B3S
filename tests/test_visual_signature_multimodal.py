@@ -4,9 +4,11 @@ import base64
 import importlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 
 from src.visual_signature.types import VisualAcquisitionResult, VisualSignatureInput
+from src.visual_signature._internal.multimodal_normalizer import normalize_semantics_data
 from src.visual_signature.vision import multimodal_analyzer
 
 STABLE_SEMANTICS_KEYS = {"status", "model", "prompt_version", "fallback_used", "error_type", "audit", "data"}
@@ -106,6 +108,7 @@ def test_analyze_visual_semantics_encodes_image_and_normalizes_success(tmp_path,
             "hierarchy_clarity": "clear",
             "cta_salience": "clear",
             "trust_signal_presence": "partial",
+            "page_content_type": "brand_page",
             "first_impression_summary": "Polished, product-first and trustworthy.",
             "observed_strengths": ["clear hierarchy", "restrained palette"],
             "observed_risks": ["limited differentiation"],
@@ -140,6 +143,7 @@ def test_analyze_visual_semantics_encodes_image_and_normalizes_success(tmp_path,
         "hierarchy_clarity": "clear",
         "cta_salience": "clear",
         "trust_signal_presence": "partial",
+        "page_content_type": "brand_page",
         "first_impression_summary": "Polished, product-first and trustworthy.",
         "observed_strengths": ["clear hierarchy", "restrained palette"],
         "observed_risks": ["limited differentiation"],
@@ -478,3 +482,39 @@ def test_json_parse_error_detail_keeps_the_response_tail(tmp_path, monkeypatch) 
     assert message.startswith('{\n  "aesthetic_style"')
     assert message.endswith('"visual_polish_score": ')
     assert len(message) <= 320
+
+
+def test_vision_prompt_asks_for_the_page_content_type_directly():
+    payload = multimodal_analyzer.build_multimodal_payload(
+        encoded_image="ZmFrZS1pbWFnZQ==",
+        mime_type="image/png",
+        brand_name="Example Brand",
+    )
+
+    prompt = payload["messages"][0]["content"][0]["text"]
+    assert "page_content_type" in prompt
+    for value in ("brand_page", "interstitial", "error_page"):
+        assert value in prompt
+
+
+def test_every_field_the_vision_prompt_asks_for_reaches_the_normalized_contract():
+    shape = multimodal_analyzer.PROMPT_TEMPLATE.split(
+        "Return ONLY valid JSON with this exact shape:", 1
+    )[1]
+    requested = set(re.findall(r'^\s*"([a-z_]+)":', shape, re.MULTILINE))
+    normalized = set(multimodal_analyzer.normalize_semantics_data({}))
+
+    assert requested
+    assert requested <= normalized
+
+
+def test_page_content_type_falls_back_to_not_detected_for_unknown_values():
+    assert normalize_semantics_data({"page_content_type": "interstitial"})["page_content_type"] == "interstitial"
+    assert normalize_semantics_data({"page_content_type": "Brand Page"})["page_content_type"] == "brand_page"
+    assert normalize_semantics_data({"page_content_type": "a captcha wall"})["page_content_type"] == "not_detected"
+    assert normalize_semantics_data({})["page_content_type"] == "not_detected"
+    assert normalize_semantics_data({"page_content_type": None})["page_content_type"] == "not_detected"
+
+
+def test_fallback_semantics_reports_an_unknown_page_content_type():
+    assert multimodal_analyzer.fallback_semantics("llm_error")["data"]["page_content_type"] == "not_detected"
