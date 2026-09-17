@@ -368,25 +368,38 @@ def _strategic_token_root(token: str) -> str:
     return token
 
 
+def _visual_capture_blind_signal(rationale: str) -> TileSignal:
+    return TileSignal(
+        component="coherencia",
+        tile="coherencia.C6",
+        effect="insufficient_evidence",
+        confidence="high",
+        source="visual_signature",
+        evidence_refs=["visual_signature.capture"],
+        rationale=rationale,
+    )
+
+
 def _tile_signals_from_visual_signature(evidence: dict[str, Any] | None) -> list[TileSignal]:
     if not isinstance(evidence, dict) or evidence.get("schema_version") != "visual-signature-evidence-v1":
         return []
     capture = evidence.get("capture") if isinstance(evidence.get("capture"), dict) else {}
     if capture.get("status") != "usable":
         return [
-            TileSignal(
-                component="coherencia",
-                tile="coherencia.C6",
-                effect="insufficient_evidence",
-                confidence="high",
-                source="visual_signature",
-                evidence_refs=["visual_signature.capture"],
-                rationale=(
-                    "copy_visual_alignment_unjudgeable:"
-                    f"capture_status={capture.get('status') or 'unknown'};"
-                    "first_fold_evaluable="
-                    f"{capture.get('first_fold_evaluable')}"
-                ),
+            _visual_capture_blind_signal(
+                "copy_visual_alignment_unjudgeable:"
+                f"capture_status={capture.get('status') or 'unknown'};"
+                "first_fold_evaluable="
+                f"{capture.get('first_fold_evaluable')}"
+            )
+        ]
+    if str(capture.get("content_trust") or "") == "untrusted":
+        # The capture is technically fine but shows a gate rather than the
+        # brand. Reading tile signals off those pixels judges the wrong page.
+        return [
+            _visual_capture_blind_signal(
+                "copy_visual_alignment_unjudgeable:"
+                f"capture_content_untrusted:{capture.get('content_trust_reason') or 'unknown'}"
             )
         ]
     out: list[TileSignal] = []
