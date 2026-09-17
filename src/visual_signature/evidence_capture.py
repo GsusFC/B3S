@@ -10,6 +10,31 @@ from src.visual_signature._internal.utils import float_or_none as _float_or_none
 BLOCKED_QUALITIES = {"missing", "blocked", "unreadable", "blank"}
 LIMITED_QUALITIES = {"poor", "partial", "low_detail"}
 
+# Phrases the vision model uses when the screenshot shows a gate instead of the
+# site: a bot challenge, a verification step or a loading interstitial.
+INTERSTITIAL_MARKERS: tuple[tuple[str, str], ...] = (
+    ("loading screen", "loading_screen"),
+    ("security check", "security_check"),
+    ("checking your browser", "checking_your_browser"),
+    ("just a moment", "just_a_moment"),
+    ("captcha", "captcha"),
+    ("cloudflare", "cloudflare"),
+    ("verify you are human", "human_verification"),
+    ("are you human", "human_verification"),
+    ("access denied", "access_denied"),
+    ("ddos protection", "ddos_protection"),
+)
+
+# Deliberately narrow: only an explicit statement that brand content is absent.
+# A false positive here silences real brand signals, while a miss only leaves
+# today's behavior in place.
+BRAND_ABSENCE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("lack of actual brand content", "lack_of_actual_brand_content"),
+    ("lack of brand content", "lack_of_brand_content"),
+    ("no actual brand content", "no_actual_brand_content"),
+    ("no brand content", "no_brand_content"),
+)
+
 
 def screenshot_payload(payload: dict[str, Any], screenshot_payload: dict[str, Any] | None) -> dict[str, Any]:
     if isinstance(screenshot_payload, dict):
@@ -40,6 +65,7 @@ def capture_contract(
     if not isinstance(structured_errors, list):
         structured_errors = []
     first_fold_evaluable = first_fold_evaluable_for_capture(obstruction, available=available, quality=quality)
+    content_trust, content_trust_reason = capture_content_trust(payload)
     status = capture_status(
         available=available,
         quality=quality,
@@ -55,6 +81,8 @@ def capture_contract(
         "section_capture_status": str(screenshot.get("section_capture_status") or "") or None,
         "structured_capture_errors": [str(item) for item in structured_errors[:8]],
         "first_fold_evaluable": first_fold_evaluable,
+        "content_trust": content_trust,
+        "content_trust_reason": content_trust_reason,
         "viewport": viewport(screenshot),
         "url_requested": str(payload.get("website_url") or ""),
         "url_final": str(screenshot.get("page_url") or payload.get("analyzed_url") or payload.get("website_url") or ""),
@@ -62,6 +90,44 @@ def capture_contract(
         "path": str(screenshot.get("path") or screenshot.get("screenshot_url") or ""),
         "obstruction": obstruction,
     }
+
+
+def capture_content_trust(payload: dict[str, Any]) -> tuple[str, str | None]:
+    """Judge whether the captured pixels show the brand or a gate in front of it.
+
+    The vision model already describes security checks and loading gates
+    accurately, but nothing read that description, so a screenshot of a bot
+    challenge was scored as if it were the brand's homepage. Two independent
+    hits are required -- an interstitial phrase and an explicit absence of
+    brand content -- because either one alone appears in ordinary brand copy.
+    """
+
+    semantics = _dict(payload.get("semantics"))
+    if str(semantics.get("status") or "") != "detected" or bool(semantics.get("fallback_used")):
+        return "unknown", None
+
+    data = _dict(semantics.get("data"))
+    described = " ".join(
+        [
+            str(data.get("first_impression_summary") or ""),
+            *(str(item) for item in data.get("observed_risks") or []),
+            *(str(item) for item in data.get("notable_absences") or []),
+        ]
+    ).lower()
+
+    interstitial = matched_markers(described, INTERSTITIAL_MARKERS)
+    absence = matched_markers(described, BRAND_ABSENCE_MARKERS)
+    if not interstitial or not absence:
+        return "trusted", None
+    return "untrusted", "+".join(interstitial + absence)
+
+
+def matched_markers(described: str, markers: tuple[tuple[str, str], ...]) -> list[str]:
+    tokens: list[str] = []
+    for phrase, token in markers:
+        if phrase in described and token not in tokens:
+            tokens.append(token)
+    return tokens
 
 
 def capture_variant(screenshot: dict[str, Any]) -> str:

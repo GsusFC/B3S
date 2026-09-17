@@ -57,7 +57,12 @@ def tile_signals(
     layout_patterns = string_list(layout.get("layout_patterns"))
     has_navigation = bool(layout.get("has_navigation"))
     has_hero = bool(layout.get("has_hero"))
+    polish_available = first_impression.get("visual_polish") is not None
     polish_score = score01(first_impression.get("visual_polish"))
+    # score01 floors a missing score at 0.0, which reads as "maximally bad
+    # polish" and fires a high-confidence weakens. Unknown is not zero.
+    polish_reason = None if polish_available else "score_unavailable:visual_polish"
+    polish_text = round(polish_score, 3) if polish_available else "unavailable"
     copy_summary = str(copy_visual_alignment.get("summary") or "")
     distinctiveness = distinctiveness_proxy(payload)
     obstruction = _dict(capture.get("obstruction"))
@@ -100,8 +105,8 @@ def tile_signals(
             source="llm_multimodal" if multimodal_available else "heuristic",
             evidence_refs=["visual_signature:first_impression"],
             negative_reason=None,
-            unavailable_reason=None if multimodal_available else "multimodal_semantics_unavailable",
-            rationale_detail=f"first_impression:{first_impression.get('summary') or 'unknown'} polish:{round(polish_score,3)}",
+            unavailable_reason="multimodal_semantics_unavailable" if not multimodal_available else polish_reason,
+            rationale_detail=f"first_impression:{first_impression.get('summary') or 'unknown'} polish:{polish_text}",
         ),
         negative_or_threshold_signal(
             "brand_idea.I6",
@@ -143,8 +148,8 @@ def tile_signals(
             source="llm_multimodal" if multimodal_available else "heuristic",
             evidence_refs=first_impression.get("evidence_refs") or ["visual_signature:first_impression"],
             negative_reason="first_impression_not_available" if multimodal_available and not first_impression.get("summary") and polish_score == 0.0 else None,
-            unavailable_reason="multimodal_semantics_unavailable" if not multimodal_available else None,
-            rationale_detail=f"visual_polish:{round(polish_score,3)}",
+            unavailable_reason="multimodal_semantics_unavailable" if not multimodal_available else polish_reason,
+            rationale_detail=f"visual_polish:{polish_text}",
         ),
         threshold_signal("magnetism.MG5", distinctiveness, source="heuristic", evidence_refs=["visual_signature:visual_system"], rationale_detail=f"category_fit:{synthesis.get('category_fit') or 'unknown'} distinctiveness:{round(distinctiveness,3)}"),
         negative_or_threshold_signal(
@@ -153,8 +158,17 @@ def tile_signals(
             source="llm_multimodal" if copy_summary and multimodal_available else "heuristic",
             evidence_refs=["visual_signature:semantics"] if copy_summary else ["visual_signature:consistency"],
             negative_reason="copy_visual_alignment_missing" if multimodal_available and not copy_summary and consistency < 0.5 else None,
-            unavailable_reason="multimodal_semantics_unavailable" if not multimodal_available and not copy_summary else None,
-            rationale_detail=f"copy_alignment_present:{str(bool(copy_summary)).lower()}",
+            unavailable_reason=(
+                "multimodal_semantics_unavailable"
+                if not multimodal_available and not copy_summary
+                else polish_reason
+                if copy_summary
+                else None
+            ),
+            rationale_detail=(
+                f"copy_alignment_present:{str(bool(copy_summary)).lower()}"
+                + (f" polish:{polish_text}" if copy_summary else "")
+            ),
         ),
     ]
 
@@ -243,6 +257,8 @@ def limitations(payload: dict[str, Any], capture: dict[str, Any]) -> list[str]:
     values.extend(f"acquisition_warning:{item}" for item in acquisition.get("warnings") or [])
     if capture.get("status") != "usable":
         values.append(f"capture_unreliable:{capture.get('status')}")
+    if capture.get("content_trust") == "untrusted":
+        values.append(f"capture_content_untrusted:{capture.get('content_trust_reason') or 'unknown'}")
     if not capture.get("available"):
         values.append("screenshot_not_available")
     obstruction = _dict(capture.get("obstruction"))

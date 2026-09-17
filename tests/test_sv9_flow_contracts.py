@@ -299,6 +299,66 @@ def test_flow_candidate_keeps_high_confidence_negative_visual_signature_tile_sig
     } == {("coherencia.C6", "weakens", "visual_signature")}
 
 
+def test_flow_candidate_blinds_every_visual_signal_when_capture_content_is_untrusted() -> None:
+    reason = "loading_screen+security_check+lack_of_actual_brand_content"
+    visual_signature = {
+        "schema_version": "visual-signature-evidence-v1",
+        "capture": {
+            "status": "usable",
+            "first_fold_evaluable": True,
+            "content_trust": "untrusted",
+            "content_trust_reason": reason,
+        },
+        "tile_signals": [
+            {
+                "tile": "coherencia.C6",
+                "effect": "weakens",
+                "confidence": "high",
+                "source": "llm_multimodal",
+                "rationale": "Design and copy point in different directions.",
+            },
+            {
+                "tile": "brand_idea.I1",
+                "effect": "weakens",
+                "confidence": "high",
+                "source": "heuristic",
+                "rationale": "No logo detected in the capture.",
+            },
+            {
+                "tile": "brand_idea.I7",
+                "effect": "supports",
+                "confidence": "high",
+                "source": "heuristic",
+                "rationale": "Balanced visual density above the fold.",
+            },
+        ],
+    }
+
+    candidate = build_flow_candidate_from_current_outputs(
+        snapshot={"run": {"brand_name": "Acme", "url": "https://acme.example"}},
+        tldr_payload={"tldr_brand3": {}},
+        visual_signature_evidence=visual_signature,
+    )
+    signals = candidate.to_dict()["tile_signals"]
+    refs = {record.ref for record in candidate.evidence_pack.evidence}
+
+    assert len(signals) == 1
+    assert signals[0]["tile"] == "coherencia.C6"
+    assert signals[0]["effect"] == "insufficient_evidence"
+    assert signals[0]["confidence"] == "high"
+    assert signals[0]["evidence_refs"] == ["visual_signature.capture"]
+    assert signals[0]["rationale"] == (
+        f"copy_visual_alignment_unjudgeable:capture_content_untrusted:{reason}"
+    )
+    # Evidence records are an audit trail, not a guardrail: they stay complete.
+    assert {
+        "visual_signature.capture",
+        "visual_signature.tile_signals.0",
+        "visual_signature.tile_signals.1",
+        "visual_signature.tile_signals.2",
+    } <= refs
+
+
 def test_flow_candidate_blocks_positive_visual_signal_when_capture_is_unusable() -> None:
     visual_signature = {
         "schema_version": "visual-signature-evidence-v1",
