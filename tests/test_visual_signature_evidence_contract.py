@@ -383,3 +383,58 @@ def test_visual_signature_evidence_content_trust_is_unknown_without_multimodal_a
     assert evidence["capture"]["content_trust"] == "unknown"
     assert evidence["capture"]["content_trust_reason"] is None
     assert not any(item.startswith("capture_content_untrusted") for item in evidence["limitations"])
+
+
+def test_visual_signature_evidence_trusts_nothing_when_the_model_names_the_page_an_interstitial():
+    payload = _payload()
+    payload["semantics"]["data"]["page_content_type"] = "interstitial"
+
+    evidence = build_visual_signature_evidence_v1(payload)
+
+    # The prose here is ordinary brand copy: none of the phrase markers fire.
+    assert evidence["capture"]["content_trust"] == "untrusted"
+    assert evidence["capture"]["content_trust_reason"] == "page_content_type:interstitial"
+    assert "capture_content_untrusted:page_content_type:interstitial" in evidence["limitations"]
+
+
+def test_visual_signature_evidence_keeps_phrase_markers_when_the_model_claims_a_brand_page():
+    payload = _payload()
+    payload["consistency"]["overall_consistency"] = 0.198
+    payload["semantics"]["data"] = _interstitial_audit_data()
+    payload["semantics"]["data"]["page_content_type"] = "brand_page"
+
+    evidence = build_visual_signature_evidence_v1(payload)
+
+    # The direct answer can be wrong while the description is right, so the two
+    # signals stay in OR rather than the enum overriding the prose.
+    assert evidence["capture"]["content_trust"] == "untrusted"
+    assert evidence["capture"]["content_trust_reason"] == _INTERSTITIAL_REASON
+
+
+def test_visual_signature_evidence_reports_both_untrusted_signals_when_both_fire():
+    payload = _payload()
+    payload["consistency"]["overall_consistency"] = 0.198
+    payload["semantics"]["data"] = _interstitial_audit_data()
+    payload["semantics"]["data"]["page_content_type"] = "interstitial"
+
+    evidence = build_visual_signature_evidence_v1(payload)
+
+    assert evidence["capture"]["content_trust"] == "untrusted"
+    assert evidence["capture"]["content_trust_reason"] == (
+        f"page_content_type:interstitial+{_INTERSTITIAL_REASON}"
+    )
+
+
+def test_visual_signature_evidence_content_trust_ignores_the_page_content_type_without_multimodal_audit():
+    payload = _payload()
+    payload["semantics"] = {
+        "status": "unavailable",
+        "fallback_used": True,
+        "error_type": "api_key_missing",
+        "data": {"page_content_type": "interstitial"},
+    }
+
+    evidence = build_visual_signature_evidence_v1(payload)
+
+    assert evidence["capture"]["content_trust"] == "unknown"
+    assert evidence["capture"]["content_trust_reason"] is None
