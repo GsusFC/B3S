@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import json
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -22,6 +24,7 @@ from src.history.report_parser import parse_report
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reports-dir", default="data/reports")
+    parser.add_argument("--catalog-root", default=os.environ.get("B3S_REPORTS_DIR", "data/reports"))
     parser.add_argument("--database-url", default=B3S_DATABASE_URL)
     parser.add_argument("--workspace-slug", default="b3s")
     parser.add_argument("--workspace-name", default="B3S")
@@ -45,6 +48,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    arguments = sys.argv[1:] if argv is None else argv
+    if args.workspace_slug == "b3s" and any(
+        item == "--database-url" or item.startswith("--database-url=")
+        for item in arguments
+    ):
+        raise SystemExit("Use B3S_DATABASE_URL for b3s imports")
     if args.dry_run and (
         args.migrate_only
         or args.rebuild_evidence_ledger_shadow
@@ -109,24 +118,48 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    from web.brand_catalog import (
+        begin_intent,
+        catalog_lock,
+        mark_incomplete,
+        mark_ready,
+        repair_catalog,
+    )
+
+    catalog_root = Path(args.catalog_root)
+    index_b3s = args.workspace_slug == "b3s"
     outcomes = []
     import_failures = []
-    for report in sorted(reports, key=lambda item: (item.observed_at, item.source_report_id)):
-        try:
-            outcome = repository.import_report(
-                report,
-                workspace_slug=args.workspace_slug,
-                workspace_name=args.workspace_name,
-            )
-        except Exception as exc:
-            import_failures.append(
-                {
-                    "source_report_id": report.source_report_id,
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-            continue
-        outcomes.append(outcome)
+    with catalog_lock(catalog_root) if index_b3s else nullcontext():
+        if index_b3s:
+            mark_incomplete(catalog_root)
+        for report in sorted(reports, key=lambda item: (item.observed_at, item.source_report_id)):
+            try:
+                if index_b3s:
+                    begin_intent(catalog_root, report.report_payload, report.canonical_domain)
+                outcome = repository.import_report(
+                    report,
+                    workspace_slug=args.workspace_slug,
+                    workspace_name=args.workspace_name,
+                )
+                if index_b3s:
+                    mark_ready(catalog_root, report.report_payload, report.canonical_domain)
+            except Exception as exc:
+                import_failures.append(
+                    {
+                        "source_report_id": report.source_report_id,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                continue
+            outcomes.append(outcome)
+        if index_b3s and not import_failures:
+            try:
+                repair_catalog(catalog_root, repository=repository, lock_held=True)
+            except Exception as exc:
+                import_failures.append(
+                    {"source_report_id": "<catalog>", "error": f"{type(exc).__name__}: {exc}"}
+                )
 
     statuses = Counter(outcome.status for outcome in outcomes)
     payload = {

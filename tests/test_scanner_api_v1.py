@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -21,6 +22,177 @@ REVIEW_TOKEN = "test-b3s-evidence-review-token"
 REVIEWER_ID = "gsus"
 REVIEW_AUTH = {"Authorization": f"Bearer {REVIEW_TOKEN}"}
 REVIEW_PACKET_FINGERPRINT = "9" * 64
+
+
+def test_direct_b3s_import_reconciles_serving_catalog_not_source(tmp_path, monkeypatch, capsys):
+    from scripts import import_b3s_reports_postgres as importer
+    from src.history import repository as history_repository
+    from src.history.report_parser import parse_report
+    from web.brand_catalog import list_domains
+
+    historical = parse_report(_report("direct-import"))
+    monkeypatch.setattr(importer, "load_reports", lambda _root: ([historical], []))
+    monkeypatch.setattr(importer, "B3S_DATABASE_URL", "test-dsn")
+
+    class Repository:
+        def __init__(self, dsn):
+            assert dsn == "test-dsn"
+            self.payload = None
+
+        def migrate(self):
+            return []
+
+        def import_report(self, report, **_kwargs):
+            self.payload = report.report_payload
+            return SimpleNamespace(status="imported")
+
+        def list_report_summaries(self, *, workspace_slug, limit, offset):
+            assert workspace_slug == "b3s"
+            return [{"id": self.payload["id"]}][offset : offset + limit]
+
+        def get_report_payload(self, report_id, *, workspace_slug):
+            assert workspace_slug == "b3s" and report_id == self.payload["id"]
+            return self.payload
+
+        def storage_counts(self):
+            return {}
+
+    monkeypatch.setattr(history_repository, "PostgresHistoryRepository", Repository)
+    source_root, catalog_root = tmp_path / "source", tmp_path / "served"
+    assert importer.main(["--reports-dir", str(source_root), "--catalog-root", str(catalog_root)]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "ok"
+    assert not (source_root / ".brand-catalog.sqlite3").exists()
+    assert list_domains(catalog_root, limit=20, cursor=None, require_postgres_reconciliation=True) == (["example.com"], False, True)
+
+
+def test_direct_b3s_import_failure_keeps_catalog_incomplete(tmp_path, monkeypatch, capsys):
+    from scripts import import_b3s_reports_postgres as importer
+    from src.history import repository as history_repository
+    from src.history.report_parser import parse_report
+    from web.brand_catalog import CatalogUnavailable, list_domains
+
+    historical = parse_report(_report("failed-import"))
+    monkeypatch.setattr(importer, "load_reports", lambda _root: ([historical], []))
+    monkeypatch.setattr(importer, "B3S_DATABASE_URL", "test-dsn")
+
+    class Repository:
+        def __init__(self, _dsn):
+            pass
+
+        def migrate(self):
+            return []
+
+        def import_report(self, *_args, **_kwargs):
+            raise RuntimeError("simulated import failure")
+
+        def storage_counts(self):
+            return {}
+
+    monkeypatch.setattr(history_repository, "PostgresHistoryRepository", Repository)
+    catalog_root = tmp_path / "served"
+    assert importer.main(["--reports-dir", str(tmp_path / "source"), "--catalog-root", str(catalog_root)]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "partial"
+    with pytest.raises(CatalogUnavailable):
+        list_domains(catalog_root, limit=20, cursor=None)
+
+
+def test_non_b3s_import_does_not_touch_catalog_or_reject_legacy_dsn(tmp_path, monkeypatch):
+    from scripts import import_b3s_reports_postgres as importer
+    from src.history import repository as history_repository
+    from src.history.report_parser import parse_report
+
+    historical = parse_report(_report("other-workspace"))
+    monkeypatch.setattr(importer, "load_reports", lambda _root: ([historical], []))
+
+    class Repository:
+        def __init__(self, dsn):
+            assert dsn == "legacy-dsn"
+
+        def migrate(self):
+            return []
+
+        def import_report(self, *_args, **_kwargs):
+            return SimpleNamespace(status="imported")
+
+        def storage_counts(self):
+            return {}
+
+    monkeypatch.setattr(history_repository, "PostgresHistoryRepository", Repository)
+    catalog_root = tmp_path / "unused"
+    assert importer.main(["--workspace-slug", "other", "--database-url", "legacy-dsn", "--catalog-root", str(catalog_root)]) == 0
+    assert not catalog_root.exists()
+    with pytest.raises(SystemExit, match="B3S_DATABASE_URL"):
+        importer.main(["--database-url", "secret-dsn"])
+
+
+def test_offline_repair_cli_uses_environment_and_fails_closed_on_drift(tmp_path, monkeypatch, capsys):
+    from scripts import repair_brand_catalog as cli
+    from src.history import repository as history_repository
+    from src.history.models import ReportConflictError
+    from web.brand_catalog import CatalogUnavailable, list_domains
+
+    report = _report("pg-only")
+    report["url"] = "https://postgres.com"
+
+    class Repository:
+        def __init__(self, dsn, *, schema_policy):
+            assert dsn == "secret-dsn" and schema_policy == "verify_head"
+
+        def list_report_summaries(self, *, workspace_slug, limit, offset):
+            assert workspace_slug == "b3s"
+            return [{"id": report["id"]}][offset : offset + limit]
+
+        def get_report_payload(self, report_id, *, workspace_slug):
+            assert report_id == report["id"] and workspace_slug == "b3s"
+            return report
+
+    monkeypatch.setenv("B3S_DATABASE_URL", "secret-dsn")
+    monkeypatch.setattr(history_repository, "PostgresHistoryRepository", Repository)
+    assert cli.main(["--catalog-root", str(tmp_path)]) == 0
+    output = capsys.readouterr().out
+    assert json.loads(output) == {"status": "ready", "reports_indexed": 1, "postgres_reconciled": True}
+    assert "secret-dsn" not in output
+    assert list_domains(tmp_path, limit=20, cursor=None, require_postgres_reconciliation=True) == (["postgres.com"], False, True)
+
+    changed = dict(report)
+    changed["brand_name"] = "Different"
+    (tmp_path / "pg-only.json").write_text(json.dumps(changed), encoding="utf-8")
+    assert cli.main(["--catalog-root", str(tmp_path)]) == 1
+    output = capsys.readouterr().out
+    assert json.loads(output) == {"status": "incomplete", "error": ReportConflictError.__name__}
+    assert "secret-dsn" not in output
+    with pytest.raises(CatalogUnavailable):
+        list_domains(tmp_path, limit=20, cursor=None)
+
+
+def test_offline_repair_cli_recovers_file_only_archive(tmp_path, monkeypatch, capsys):
+    from scripts import repair_brand_catalog as cli
+    from web import report_store
+    from web.brand_catalog import list_domains
+
+    monkeypatch.delenv("B3S_DATABASE_URL", raising=False)
+    monkeypatch.delenv("B3S_POSTGRES_REQUIRED", raising=False)
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "core")
+    report_store.save_report(_report("file-only"))
+    assert cli.main(["--catalog-root", str(tmp_path)]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "ready", "reports_indexed": 1, "postgres_reconciled": False
+    }
+    assert list_domains(tmp_path, limit=20, cursor=None) == (["example.com"], False, False)
+
+
+def test_offline_repair_cli_requires_configured_pg_and_rejects_argv_secret(tmp_path, monkeypatch, capsys):
+    from scripts import repair_brand_catalog as cli
+
+    monkeypatch.delenv("B3S_DATABASE_URL", raising=False)
+    monkeypatch.setenv("B3S_POSTGRES_REQUIRED", "true")
+    assert cli.main(["--catalog-root", str(tmp_path)]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "incomplete"
+    assert not tmp_path.joinpath(".brand-catalog.sqlite3").exists()
+    with pytest.raises(SystemExit):
+        cli.main(["--database-url=secret-dsn"])
+    assert "secret-dsn" not in capsys.readouterr().err
 
 
 def _enable_vault_catalog_writes(monkeypatch, root):
