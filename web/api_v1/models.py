@@ -271,6 +271,25 @@ class BrandScanHistoryResponse(StrictModel):
     pagination: Pagination
 
 
+class BrandListItem(StrictModel):
+    domain: str
+    scans_url: str
+
+
+class BrandCatalogPagination(StrictModel):
+    limit: int
+    count: int
+    has_more: bool
+    next_cursor: str | None = None
+
+
+class BrandListResponse(StrictModel):
+    object: Literal["brand_list"] = "brand_list"
+    api_version: Literal["v1"] = "v1"
+    items: list[BrandListItem]
+    pagination: BrandCatalogPagination
+
+
 class EvidenceLedgerShadowResponse(StrictModel):
     object: Literal["evidence_ledger_shadow"] = "evidence_ledger_shadow"
     api_version: Literal["v1"] = "v1"

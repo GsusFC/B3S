@@ -147,6 +147,83 @@ Evidence is a separate resource because clients often need citations without
 the full editorial result. It exposes normalized references, verified absences,
 acquisition attempts, and aggregate counts.
 
+## Discover brands
+
+```text
+GET /api/v1/brands?limit=20&cursor=example.com
+```
+
+An authenticated `scans:read` client can discover normalized domains with at
+least one completed immutable report. The response contains one item per
+domain, ordered alphabetically. Each item has only `domain` and `scans_url`;
+use the linked history for latest, selected, score, and report details.
+`limit` is 1–100 (default 20). Omit `cursor` on the first page, then pass the
+returned `pagination.next_cursor` while `has_more` is true. Pagination also
+reports the returned `count`.
+
+This Vault-only endpoint is for internal clients only and is disabled by
+default. All authorized internal clients intentionally share the same brand
+catalog; there is no per-user or per-organization filtering. Do not distribute
+the scanner API credential to external clients or browser applications. Set
+`BRAND3_ENVIRONMENT=vault` and `B3S_VAULT_BRAND_CATALOG_API_ENABLED=true` to
+expose both the route and its OpenAPI entry. It uses the existing global
+`scans:read` credential, so every holder of that credential can enumerate all
+indexed brands. External access would require a separate authorization design
+before enabling it for that audience.
+
+The catalog reads a durable index beside the configured reports directory,
+not the full archive. Only enabled Vault scan writes maintain this index;
+direct `b3s` imports reconcile it separately. Scans in Core or with the flag
+off do not depend on or mutate it. That index includes file-only reports when
+PostgreSQL mirroring fails and PostgreSQL-only imports after reconciliation.
+Before the first successful reconciliation, or while an indexed report is
+pending or conflicted, the endpoint returns `503 brand_catalog_unavailable`
+rather than an incomplete list. When the index was reconciled with PostgreSQL,
+a fresh read-only PostgreSQL check is required before returning a page; an outage
+returns `503` so PostgreSQL-only brands do not link to falsely empty history.
+The index remains durable through the outage. File-only indexes do not require
+PostgreSQL unless `B3S_POSTGRES_REQUIRED=true`; that setting requires a
+PostgreSQL-reconciled index even with a custom reports directory. When
+PostgreSQL is required, a custom directory disables its history reads, so
+catalog discovery stays unavailable until that serving configuration is
+corrected. Availability can still change between a catalog response and a
+later request to its history link.
+
+Before every enable or re-enable after any period with the flag off when
+reports may have been saved, stop all report writers and importers and run
+offline repair, even if the index previously reported complete. Disabled
+writes do not invalidate that marker, so skipping repair can return a stale
+`200` list. Also repair after a
+crash or import conflict. The catalog returns `503` while reconciliation is
+incomplete; repair streams reports into the index in bounded pages rather than
+keeping the full archive in memory:
+
+```text
+python scripts/repair_brand_catalog.py --catalog-root /data/reports
+```
+
+Use the exact Vault serving reports volume, not Core's volume or an import
+source archive. Verify the configured PostgreSQL target independently.
+Provide `B3S_DATABASE_URL` through the secret environment when PostgreSQL
+contains reports not present in the file archive or when
+`B3S_POSTGRES_REQUIRED=true`; do not put credentials in command-line arguments.
+The repair validates and merges both sources and fails closed on an identity
+conflict. Keep the API flag off and stop all report writers before running
+offline repair after any PostgreSQL restore or repoint and before re-enabling
+the flag. This includes restores at the same database URL: the read probe
+checks availability, not dataset identity, so it cannot detect a replaced
+history automatically. The import script for the main `b3s` workspace keeps the
+catalog unavailable while it imports, then reconciles it on success; its
+`--catalog-root` (default `B3S_REPORTS_DIR` or `data/reports`) must point to
+the serving app's reports directory even when `--reports-dir` is a different
+source archive. Run direct imports with other report writers stopped as well.
+Imports through other custom callers must use the indexed write path or run this
+offline repair before catalog reads; the index is not a PostgreSQL trigger.
+
+This endpoint does not list in-progress scans or acquisition-only captures.
+To scan a new brand or rescan an existing one, use `POST /api/v1/scans`; each
+request creates a new scan.
+
 ## Brand history
 
 ```text

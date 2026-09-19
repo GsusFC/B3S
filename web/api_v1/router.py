@@ -30,6 +30,7 @@ from .errors import ApiError
 from .models import (
     ApiCapabilitiesResponse,
     ApiErrorResponse,
+    BrandListResponse,
     BrandScanHistoryResponse,
     EvidenceClaimMemoryShadowResponse,
     EvidenceClaimTileLedgerShadowResponse,
@@ -75,6 +76,8 @@ from .service import (
     get_scan,
     get_scan_diagnostic_status,
     get_vault_exact_resume_action,
+    brand_catalog_api_enabled,
+    list_brands,
     register_evidence_claim_tile_review_packet,
     create_vault_exact_resume_action,
     vault_exact_resume_api_enabled,
@@ -98,10 +101,20 @@ _RESUME_OPENAPI_SCHEMA_NAMES = (
     "ResumeActionResult",
     "ScanResumeActionResponse",
 )
+_BRAND_CATALOG_OPENAPI_SCHEMA_NAMES = (
+    "BrandCatalogPagination",
+    "BrandListItem",
+    "BrandListResponse",
+)
 
 
 def _resume_api_gate() -> None:
     if not vault_exact_resume_api_enabled():
+        raise ApiError(404, "not_found", "Resource not found.", headers={"Cache-Control": "no-store"})
+
+
+def _brand_catalog_api_gate() -> None:
+    if not brand_catalog_api_enabled():
         raise ApiError(404, "not_found", "Resource not found.", headers={"Cache-Control": "no-store"})
 
 
@@ -133,6 +146,11 @@ def scanner_openapi(request: Request) -> JSONResponse:
         spec["paths"].pop("/api/v1/scans/{scan_id}/resume-actions/{action_id}", None)
         schemas = spec.get("components", {}).get("schemas", {})
         for schema_name in _RESUME_OPENAPI_SCHEMA_NAMES:
+            schemas.pop(schema_name, None)
+    if not brand_catalog_api_enabled():
+        spec["paths"].pop("/api/v1/brands", None)
+        schemas = spec.get("components", {}).get("schemas", {})
+        for schema_name in _BRAND_CATALOG_OPENAPI_SCHEMA_NAMES:
             schemas.pop(schema_name, None)
     return JSONResponse(spec)
 
@@ -374,6 +392,21 @@ def read_evidence(
     response.headers["Cache-Control"] = "private, max-age=300, immutable"
     response.headers["Vary"] = "Authorization"
     return evidence_payload(report)
+
+
+@router.get(
+    "/brands",
+    dependencies=[Depends(_brand_catalog_api_gate)],
+    response_model=BrandListResponse,
+    operation_id="listBrands",
+    responses=_ERRORS,
+)
+def brand_catalog(
+    _principal: ReadPrincipal,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: Annotated[str | None, Query(max_length=253)] = None,
+) -> dict[str, Any]:
+    return list_brands(limit=limit, cursor=cursor)
 
 
 @router.get(
