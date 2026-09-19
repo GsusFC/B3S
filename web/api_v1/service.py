@@ -40,6 +40,7 @@ from src.services.evidence_scoring_recovery_review import (
 )
 from src.storage.sqlite_store import SQLiteStore
 from web.exact_resume_controller import launch_vault_exact_resume_action
+from web.brand_catalog import CatalogUnavailable, list_domains
 from web.report_store import (
     append_evidence_claim_reconciliation_for_domain,
     append_evidence_claim_tile_review_for_domain,
@@ -55,6 +56,9 @@ from web.report_store import (
     load_report,
     new_scan_id,
     register_evidence_claim_tile_review_packet_for_domain,
+    domain_key,
+    reports_dir,
+    vault_brand_catalog_enabled,
 )
 from web.scan_runner import (
     _vault_operational_pipeline_enabled,
@@ -75,6 +79,60 @@ _IDEMPOTENCY_KEY_RE = re.compile(r"^[\x21-\x7E]{1,200}$")
 _RESUME_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _EXACT_RESUME_REQUEST = {"operation": "exact_resume"}
 _RESUME_NOT_FOUND = (404, "not_found", "Resource not found.")
+
+
+def brand_catalog_api_enabled() -> bool:
+    return vault_brand_catalog_enabled()
+
+
+def list_brands(*, limit: int, cursor: str | None) -> dict[str, Any]:
+    """Read a bounded brand catalog from the durable history projection."""
+
+    if cursor is not None:
+        try:
+            valid_cursor = bool(cursor) and cursor == domain_key(cursor)
+        except ValueError:
+            valid_cursor = False
+        if not valid_cursor:
+            raise ApiError(400, "invalid_cursor", "The brand catalog cursor is invalid.")
+    try:
+        postgres_expected = (
+            os.environ.get("B3S_POSTGRES_REQUIRED", "").strip().casefold() == "true"
+            or bool(
+                os.environ.get("B3S_DATABASE_URL", "").strip()
+                and os.environ.get("B3S_REPORTS_DIR", "/data/reports") in {"", "/data/reports"}
+            )
+        )
+        domains, has_more, postgres_reconciled = list_domains(
+            reports_dir(),
+            limit=limit,
+            cursor=cursor,
+            require_postgres_reconciliation=postgres_expected,
+        )
+    except CatalogUnavailable as exc:
+        raise ApiError(503, "brand_catalog_unavailable", "The brand catalog is temporarily unavailable.") from exc
+    if postgres_reconciled:
+        try:
+            repository = _postgres_repository()
+            if repository is None:
+                raise CatalogUnavailable("PostgreSQL history is not configured")
+            repository.list_report_summaries(workspace_slug="b3s", limit=1, offset=0)
+        except Exception as exc:
+            raise ApiError(503, "brand_catalog_unavailable", "The brand catalog is temporarily unavailable.") from exc
+    return {
+        "object": "brand_list",
+        "api_version": "v1",
+        "items": [
+            {"domain": domain, "scans_url": f"/api/v1/brands/{domain}/scans"}
+            for domain in domains
+        ],
+        "pagination": {
+            "limit": limit,
+            "count": len(domains),
+            "has_more": has_more,
+            "next_cursor": domains[-1] if has_more and domains else None,
+        },
+    }
 
 
 def vault_exact_resume_api_enabled() -> bool:

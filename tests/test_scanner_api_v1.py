@@ -201,6 +201,142 @@ def _enable_vault_catalog_writes(monkeypatch, root):
     monkeypatch.setenv("B3S_VAULT_BRAND_CATALOG_API_ENABLED", "true")
 
 
+def _enable_brand_catalog_api(monkeypatch, root):
+    _enable_vault_catalog_writes(monkeypatch, root)
+    monkeypatch.setenv("B3S_SCANNER_API_TOKEN", TOKEN)
+
+
+def test_brand_catalog_api_requires_read_token(tmp_path, monkeypatch):
+    _enable_brand_catalog_api(monkeypatch, tmp_path)
+    response = TestClient(app).get("/api/v1/brands")
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_token"
+
+
+@pytest.mark.parametrize(
+    ("environment", "enabled"),
+    [("core", "true"), ("vault", "false"), ("vault", "")],
+)
+def test_brand_catalog_api_is_hidden_when_disabled(tmp_path, monkeypatch, environment, enabled):
+    _enable_brand_catalog_api(monkeypatch, tmp_path)
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", environment)
+    monkeypatch.setenv("B3S_VAULT_BRAND_CATALOG_API_ENABLED", enabled)
+    client = TestClient(app)
+    response = client.get("/api/v1/brands", headers=AUTH)
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"
+    for spec_url in ("/openapi.json", "/api/v1/openapi.json"):
+        spec = client.get(spec_url).json()
+        assert "/api/v1/brands" not in spec["paths"]
+        assert "BrandListResponse" not in spec["components"]["schemas"]
+
+
+def test_brand_catalog_api_openapi_declares_bearer_security(tmp_path, monkeypatch):
+    _enable_brand_catalog_api(monkeypatch, tmp_path)
+    client = TestClient(app)
+    spec = client.get("/api/v1/openapi.json").json()
+    endpoint = spec["paths"]["/api/v1/brands"]["get"]
+    assert endpoint["operationId"] == "listBrands"
+    assert endpoint["security"] == [{"B3SScannerBearer": []}]
+    assert "/api/v1/brands" in client.get("/openapi.json").json()["paths"]
+
+
+def test_brand_catalog_api_is_unavailable_until_repair(tmp_path, monkeypatch):
+    from web.brand_catalog import repair_catalog
+
+    _enable_brand_catalog_api(monkeypatch, tmp_path)
+    client = TestClient(app)
+    response = client.get("/api/v1/brands", headers=AUTH)
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "brand_catalog_unavailable"
+    assert repair_catalog(tmp_path) == 0
+    assert client.get("/api/v1/brands", headers=AUTH).json() == {
+        "object": "brand_list", "api_version": "v1", "items": [],
+        "pagination": {"limit": 20, "count": 0, "has_more": False, "next_cursor": None},
+    }
+
+
+def test_brand_catalog_api_pages_file_only_rescans_by_domain(tmp_path, monkeypatch):
+    from web import report_store
+    from web.brand_catalog import repair_catalog
+
+    _enable_brand_catalog_api(monkeypatch, tmp_path)
+    for report_id, domain in (("alpha-old", "alpha.com"), ("alpha-new", "www.alpha.com"), ("beta", "beta.com")):
+        report = _report(report_id)
+        report["url"] = f"https://{domain}"
+        report_store.save_report(report)
+    assert repair_catalog(tmp_path) == 3
+    client = TestClient(app)
+    first = client.get("/api/v1/brands?limit=1", headers=AUTH)
+    assert first.status_code == 200
+    assert first.json()["items"] == [{"domain": "alpha.com", "scans_url": "/api/v1/brands/alpha.com/scans"}]
+    assert first.json()["pagination"] == {"limit": 1, "count": 1, "has_more": True, "next_cursor": "alpha.com"}
+    second = client.get("/api/v1/brands?limit=1&cursor=alpha.com", headers=AUTH)
+    assert second.status_code == 200
+    assert second.json()["items"] == [{"domain": "beta.com", "scans_url": "/api/v1/brands/beta.com/scans"}]
+    assert second.json()["pagination"]["has_more"] is False
+
+
+def test_brand_catalog_api_fails_closed_on_postgres_only_outage(tmp_path, monkeypatch):
+    from web.api_v1 import service
+    from web.brand_catalog import repair_catalog
+
+    _enable_brand_catalog_api(monkeypatch, tmp_path)
+    report = _report("pg-only")
+    report["url"] = "https://postgres.com"
+
+    class Repository:
+        available = True
+
+        def list_report_summaries(self, *, workspace_slug, limit, offset):
+            assert workspace_slug == "b3s"
+            if not self.available:
+                raise OSError("PostgreSQL unavailable")
+            return [{"id": report["id"]}][offset : offset + limit]
+
+        def get_report_payload(self, report_id, *, workspace_slug):
+            assert report_id == report["id"] and workspace_slug == "b3s"
+            return report
+
+    repository = Repository()
+    assert repair_catalog(tmp_path, repository=repository) == 1
+    monkeypatch.setattr(service, "_postgres_repository", lambda: repository)
+    client = TestClient(app)
+    assert client.get("/api/v1/brands", headers=AUTH).json()["items"] == [
+        {"domain": "postgres.com", "scans_url": "/api/v1/brands/postgres.com/scans"}
+    ]
+    repository.available = False
+    response = client.get("/api/v1/brands", headers=AUTH)
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "brand_catalog_unavailable"
+
+
+def test_brand_catalog_api_required_postgres_with_custom_root_returns_503(tmp_path, monkeypatch):
+    from web.brand_catalog import repair_catalog
+
+    _enable_brand_catalog_api(monkeypatch, tmp_path)
+    monkeypatch.setenv("B3S_DATABASE_URL", "postgresql://unreachable.example/b3s")
+    monkeypatch.setenv("B3S_POSTGRES_REQUIRED", "true")
+    repair_catalog(tmp_path)
+    response = TestClient(app).get("/api/v1/brands", headers=AUTH)
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "brand_catalog_unavailable"
+
+
+def test_brand_catalog_api_rejects_invalid_pagination(tmp_path, monkeypatch):
+    from web.brand_catalog import repair_catalog
+
+    _enable_brand_catalog_api(monkeypatch, tmp_path)
+    repair_catalog(tmp_path)
+    client = TestClient(app)
+    for query in ("limit=0", "limit=101"):
+        assert client.get(f"/api/v1/brands?{query}", headers=AUTH).status_code == 422
+    for cursor in ("https://example.com", "http://[abc"):
+        response = client.get("/api/v1/brands", params={"cursor": cursor}, headers=AUTH)
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "invalid_cursor"
+
+
 def test_vault_save_records_intent_before_postgres_and_marks_ready_after_file(tmp_path, monkeypatch):
     import sqlite3
 
