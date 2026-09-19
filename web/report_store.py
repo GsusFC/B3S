@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import uuid
+from contextlib import nullcontext
 from functools import lru_cache
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -68,6 +69,7 @@ from src.services.scanner_report_assessment import (
     ScannerReportAssessmentError,
     assessment_projection_from_report,
 )
+from web.brand_catalog import begin_intent, catalog_lock, mark_incomplete, mark_ready
 
 
 _LOG = logging.getLogger(__name__)
@@ -82,6 +84,14 @@ _INDEX_PAYLOAD_CACHE_TTL_SECONDS = 1.0
 
 def reports_dir() -> Path:
     return Path(os.environ.get("B3S_REPORTS_DIR", "data/reports"))
+
+
+def vault_brand_catalog_enabled() -> bool:
+    return (
+        os.environ.get("BRAND3_ENVIRONMENT", "").strip().casefold() == "vault"
+        and os.environ.get("B3S_VAULT_BRAND_CATALOG_API_ENABLED", "").strip().casefold()
+        == "true"
+    )
 
 
 def verify_postgres_runtime_ready() -> None:
@@ -199,29 +209,42 @@ def save_report(report: dict[str, Any]) -> None:
     # fail closed on any duplicate or projection drift.
     assessment_projection_from_report(report)
     path = report_path(str(report["id"]))
-    if path.exists() or path.is_symlink():
-        existing = _read_report_file(
-            path,
-            expected_id=str(report["id"]),
-            require_id=True,
-        )
-        if isinstance(existing, dict) and existing != report:
-            raise ReportConflictError(f"report {report['id']} already exists with different content")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    repository = _postgres_repository()
-    if repository is not None:
-        try:
-            repository.import_report(report)
-        except ReportConflictError:
-            raise
-        except Exception:
-            # The mounted file store remains the recovery source when history
-            # cannot persist an otherwise valid web report.
-            _LOG.exception(
-                "failed to mirror report to postgres",
-                extra={"scan_id": str(report.get("id") or "")},
-            )
-    _write_immutable_report_file(path, report)
+    catalog_enabled = vault_brand_catalog_enabled()
+    with (catalog_lock(path.parent) if catalog_enabled else nullcontext()):
+        if path.exists() or path.is_symlink():
+            try:
+                existing = _read_report_file(
+                    path,
+                    expected_id=str(report["id"]),
+                    require_id=True,
+                )
+            except (ReportConflictError, ScannerReportAssessmentError):
+                if catalog_enabled:
+                    mark_incomplete(path.parent)
+                raise
+            if isinstance(existing, dict) and existing != report:
+                raise ReportConflictError(f"report {report['id']} already exists with different content")
+        if catalog_enabled:
+            domain = domain_key(str(report.get("url") or ""))
+            begin_intent(path.parent, report, domain)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        repository = _postgres_repository()
+        if repository is not None:
+            try:
+                repository.import_report(report)
+            except ReportConflictError:
+                raise
+            except Exception:
+                # The mounted file store remains the recovery source when history
+                # cannot persist an otherwise valid web report.
+                _LOG.exception(
+                    "failed to mirror report to postgres",
+                    extra={"scan_id": str(report.get("id") or "")},
+                )
+        _write_immutable_report_file(path, report, catalog_enabled)
+        if catalog_enabled:
+            mark_ready(path.parent, report, domain)
     try:
         from web.scoring_store import record_report
 
@@ -1163,7 +1186,7 @@ def _summary_row(report: dict[str, Any], *, fallback_id: str = "") -> dict[str, 
     }
 
 
-def _write_immutable_report_file(path: Path, report: dict[str, Any]) -> None:
+def _write_immutable_report_file(path: Path, report: dict[str, Any], durable: bool = False) -> None:
     serialized = json.dumps(report, ensure_ascii=False, indent=1)
     temporary_path: Path | None = None
     try:
@@ -1174,10 +1197,15 @@ def _write_immutable_report_file(path: Path, report: dict[str, Any]) -> None:
             prefix=f".{path.name}.",
             delete=False,
         ) as handle:
-            handle.write(serialized)
             temporary_path = Path(handle.name)
+            handle.write(serialized)
+            if durable:
+                handle.flush()
+                os.fsync(handle.fileno())
         try:
             os.link(temporary_path, path)
+            if durable:
+                _fsync_report_path(path)
             return
         except FileExistsError:
             pass
@@ -1192,6 +1220,18 @@ def _write_immutable_report_file(path: Path, report: dict[str, Any]) -> None:
     )
     if existing != report:
         raise ReportConflictError(f"report {report['id']} already exists with different content")
+    if durable:
+        _fsync_report_path(path)
+
+
+def _fsync_report_path(path: Path) -> None:
+    with path.open("rb") as handle:
+        os.fsync(handle.fileno())
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _read_report_file(
