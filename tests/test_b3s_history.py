@@ -9,6 +9,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from importlib import resources
 from threading import Barrier
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -48,6 +49,34 @@ from src.services.evidence_scoring_recovery_review import (
     build_recovery_review_supplement_packet_from_preview,
 )
 from src.sv9.rubric import COMPONENTS, component_points
+
+
+def test_report_summary_pages_have_stable_identity_tie_breaker(monkeypatch) -> None:
+    from src.history.repository import PostgresHistoryRepository
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return None
+
+        def execute(self, sql, params):
+            assert "report_snapshots.created_at DESC" in sql
+            assert "report_snapshots.source_report_id DESC" in sql
+            workspace, limit, offset = params
+            assert workspace == "b3s"
+            rows = [{"id": f"report-{number:03d}"} for number in range(204, -1, -1)]
+            return SimpleNamespace(fetchall=lambda: rows[offset : offset + limit])
+
+    repository = object.__new__(PostgresHistoryRepository)
+    monkeypatch.setattr(repository, "_ensure_migrated", lambda: None)
+    monkeypatch.setattr(repository, "_connect", lambda: Connection())
+    first = repository.list_report_summaries(limit=200)
+    second = repository.list_report_summaries(limit=200, offset=200)
+    assert len({row["id"] for row in first + second}) == 205
+    assert first[-1]["id"] == "report-005"
+    assert second[0]["id"] == "report-004"
 
 
 def test_report_parser_preserves_observed_and_evaluation_history() -> None:

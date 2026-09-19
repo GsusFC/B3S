@@ -1799,7 +1799,8 @@ class PostgresHistoryRepository:
                 JOIN {_SCHEMA}.workspaces
                   ON workspaces.id = report_snapshots.workspace_id
                 WHERE workspaces.slug = %s
-                ORDER BY report_snapshots.created_at DESC
+                ORDER BY report_snapshots.created_at DESC,
+                         report_snapshots.source_report_id DESC
                 LIMIT %s OFFSET %s
                 """,
                 (workspace_slug, limit, offset),
