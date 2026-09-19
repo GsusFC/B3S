@@ -1027,7 +1027,10 @@ def _evidence_from_visual_signature(evidence: dict[str, Any] | None) -> list[Evi
             },
         )
     )
-    if capture_status != "usable":
+    if capture_status != "usable" or str(capture.get("content_trust") or "") == "untrusted":
+        # The tile-signal consumer drops every signal for an untrusted capture.
+        # Emitting their records anyway leaves evidence that maps to no tile,
+        # which reads downstream as unmapped evidence and forces a review.
         return records
     for index, tile_signal in enumerate(evidence.get("tile_signals") or []):
         if not isinstance(tile_signal, dict):
