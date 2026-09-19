@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +21,121 @@ REVIEW_TOKEN = "test-b3s-evidence-review-token"
 REVIEWER_ID = "gsus"
 REVIEW_AUTH = {"Authorization": f"Bearer {REVIEW_TOKEN}"}
 REVIEW_PACKET_FINGERPRINT = "9" * 64
+
+
+def test_brand_catalog_requires_repair_and_reads_file_only_domains(tmp_path, monkeypatch):
+    from web import report_store
+    from web.brand_catalog import CatalogUnavailable, list_domains, repair_catalog
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    with pytest.raises(CatalogUnavailable, match="reconciled"):
+        list_domains(tmp_path, limit=1, cursor=None)
+    for report_id, url in (("old", "https://www.example.com"), ("new", "https://example.com"), ("other", "https://other.com")):
+        report = _report(report_id)
+        report["url"] = url
+        report_store.save_report(report)
+    assert repair_catalog(tmp_path) == 3
+    assert list_domains(tmp_path, limit=1, cursor=None) == (["example.com"], True, False)
+    assert list_domains(tmp_path, limit=1, cursor="example.com") == (["other.com"], False, False)
+
+
+@pytest.mark.parametrize("operation", ["begin_intent", "mark_ready"])
+def test_brand_catalog_writes_require_lock_and_matching_domain(tmp_path, operation):
+    from web import brand_catalog
+
+    report = _report("locked")
+    write = getattr(brand_catalog, operation)
+    with pytest.raises(RuntimeError, match="catalog_lock"):
+        write(tmp_path, report, "example.com")
+    with pytest.raises(RuntimeError, match="catalog_lock"):
+        brand_catalog.mark_incomplete(tmp_path)
+    with pytest.raises(RuntimeError, match="catalog_lock"):
+        brand_catalog.repair_catalog(tmp_path, lock_held=True)
+    with brand_catalog.catalog_lock(tmp_path):
+        with pytest.raises(ValueError, match="does not match"):
+            write(tmp_path, report, "other.com")
+        brand_catalog.begin_intent(tmp_path, report, "example.com")
+        brand_catalog.mark_ready(tmp_path, report, "example.com")
+
+
+def test_brand_catalog_lock_owner_is_not_inherited_by_async_task(tmp_path):
+    import asyncio
+
+    from web import brand_catalog
+
+    async def run():
+        with brand_catalog.catalog_lock(tmp_path):
+            async def borrowed():
+                with pytest.raises(RuntimeError, match="catalog_lock"):
+                    brand_catalog.mark_incomplete(tmp_path)
+
+            await asyncio.create_task(borrowed())
+        with pytest.raises(RuntimeError, match="catalog_lock"):
+            brand_catalog.mark_incomplete(tmp_path)
+
+    asyncio.run(run())
+
+
+def test_brand_catalog_repair_pages_postgres_only_reports(tmp_path):
+    from web.brand_catalog import list_domains, repair_catalog
+
+    reports = [_report(f"pg-{number:03d}") for number in range(205)]
+    reports[-1]["url"] = "https://last.com"
+
+    class Repository:
+        def list_report_summaries(self, *, workspace_slug, limit, offset):
+            assert workspace_slug == "b3s" and limit == 200
+            return [{"id": report["id"]} for report in reports[offset : offset + limit]]
+
+        def get_report_payload(self, report_id, *, workspace_slug):
+            assert workspace_slug == "b3s"
+            return next(report for report in reports if report["id"] == report_id)
+
+    assert repair_catalog(tmp_path, repository=Repository()) == 205
+    assert list_domains(tmp_path, limit=20, cursor=None, require_postgres_reconciliation=True) == (
+        ["example.com", "last.com"], False, True
+    )
+
+
+def test_brand_catalog_read_uses_one_snapshot(tmp_path, monkeypatch):
+    from web import brand_catalog
+
+    brand_catalog.repair_catalog(tmp_path)
+    real_connect = brand_catalog._connect
+    started = Event()
+    writer = None
+
+    def write_pending():
+        started.set()
+        with brand_catalog.catalog_lock(tmp_path):
+            brand_catalog.begin_intent(tmp_path, _report("pending"), "example.com")
+
+    class InterleavedConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, sql, *args):
+            nonlocal writer
+            result = self.connection.execute(sql, *args)
+            if sql.startswith("SELECT complete") and writer is None:
+                writer = executor.submit(write_pending)
+                assert started.wait(timeout=2)
+            return result
+
+        def close(self):
+            self.connection.close()
+
+    def connect(root, *, readonly=False):
+        connection = real_connect(root, readonly=readonly)
+        return InterleavedConnection(connection) if readonly else connection
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        monkeypatch.setattr(brand_catalog, "_connect", connect)
+        assert brand_catalog.list_domains(tmp_path, limit=1, cursor=None) == ([], False, False)
+        assert writer is not None
+        writer.result(timeout=2)
+    with pytest.raises(brand_catalog.CatalogUnavailable, match="pending"):
+        brand_catalog.list_domains(tmp_path, limit=1, cursor=None)
 
 
 def _configure_evidence_reviewer(monkeypatch) -> None:
