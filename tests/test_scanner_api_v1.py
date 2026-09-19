@@ -23,6 +23,129 @@ REVIEW_AUTH = {"Authorization": f"Bearer {REVIEW_TOKEN}"}
 REVIEW_PACKET_FINGERPRINT = "9" * 64
 
 
+def _enable_vault_catalog_writes(monkeypatch, root):
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(root))
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("B3S_VAULT_BRAND_CATALOG_API_ENABLED", "true")
+
+
+def test_vault_save_records_intent_before_postgres_and_marks_ready_after_file(tmp_path, monkeypatch):
+    import sqlite3
+
+    from web import report_store
+    from web.brand_catalog import catalog_path
+
+    _enable_vault_catalog_writes(monkeypatch, tmp_path)
+    report = _report("ordered-save")
+    imported = []
+
+    class Repository:
+        def import_report(self, payload):
+            with sqlite3.connect(catalog_path(tmp_path)) as conn:
+                assert conn.execute("SELECT state FROM report_domains WHERE report_id = ?", (payload["id"],)).fetchone() == ("pending",)
+            assert not report_store.report_path(payload["id"]).exists()
+            imported.append(payload)
+
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: Repository())
+    report_store.save_report(report)
+    assert imported == [report]
+    assert report_store.report_path(report["id"]).is_file()
+    with sqlite3.connect(catalog_path(tmp_path)) as conn:
+        assert conn.execute("SELECT domain, state FROM report_domains WHERE report_id = ?", (report["id"],)).fetchone() == ("example.com", "ready")
+
+
+def test_vault_save_file_failure_leaves_pending_for_postgres_repair(tmp_path, monkeypatch):
+    from web import report_store
+    from web.brand_catalog import CatalogUnavailable, list_domains, repair_catalog
+
+    _enable_vault_catalog_writes(monkeypatch, tmp_path)
+    report = _report("pg-only-after-failure")
+
+    class Repository:
+        def __init__(self):
+            self.payload = None
+
+        def import_report(self, payload):
+            self.payload = payload
+
+        def list_report_summaries(self, *, workspace_slug, limit, offset):
+            assert workspace_slug == "b3s"
+            return [{"id": self.payload["id"]}][offset : offset + limit]
+
+        def get_report_payload(self, report_id, *, workspace_slug):
+            assert workspace_slug == "b3s" and report_id == self.payload["id"]
+            return self.payload
+
+    repository = Repository()
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+    monkeypatch.setattr(report_store, "_write_immutable_report_file", lambda *_args: (_ for _ in ()).throw(OSError("simulated file failure")))
+    with pytest.raises(OSError, match="simulated file failure"):
+        report_store.save_report(report)
+    assert not report_store.report_path(report["id"]).exists()
+    with pytest.raises(CatalogUnavailable):
+        list_domains(tmp_path, limit=20, cursor=None)
+    assert repair_catalog(tmp_path, repository=repository) == 1
+    assert list_domains(tmp_path, limit=20, cursor=None, require_postgres_reconciliation=True) == (["example.com"], False, True)
+
+
+def test_vault_save_corrupt_existing_file_marks_catalog_incomplete(tmp_path, monkeypatch):
+    from src.history.models import ReportConflictError
+    from web import report_store
+    from web.brand_catalog import CatalogUnavailable, list_domains, repair_catalog
+
+    _enable_vault_catalog_writes(monkeypatch, tmp_path)
+    report = _report("corrupt-existing")
+    report_store.save_report(report)
+    repair_catalog(tmp_path)
+    report_store.report_path(report["id"]).write_text("{broken", encoding="utf-8")
+    with pytest.raises(ReportConflictError, match="unreadable"):
+        report_store.save_report(report)
+    with pytest.raises(CatalogUnavailable):
+        list_domains(tmp_path, limit=20, cursor=None)
+
+
+def test_vault_save_rejects_reused_id_with_different_content_until_repair(tmp_path, monkeypatch):
+    from src.history.models import ReportConflictError
+    from web import report_store
+    from web.brand_catalog import CatalogUnavailable, list_domains, repair_catalog
+
+    _enable_vault_catalog_writes(monkeypatch, tmp_path)
+    report = _report("same-id")
+    report_store.save_report(report)
+    repair_catalog(tmp_path)
+    path = report_store.report_path(report["id"])
+    original = path.read_bytes()
+    path.unlink()
+    changed = dict(report)
+    changed["brand_name"] = "Different"
+    with pytest.raises(ReportConflictError, match="different content"):
+        report_store.save_report(changed)
+    with pytest.raises(CatalogUnavailable):
+        list_domains(tmp_path, limit=20, cursor=None)
+    path.write_bytes(original)
+    assert repair_catalog(tmp_path) == 1
+    assert list_domains(tmp_path, limit=20, cursor=None)[0] == ["example.com"]
+
+
+def test_vault_catalog_requires_repair_after_flag_off_writes(tmp_path, monkeypatch):
+    from web import report_store
+    from web.brand_catalog import list_domains, repair_catalog
+
+    _enable_vault_catalog_writes(monkeypatch, tmp_path)
+    first = _report("before-off")
+    first["url"] = "https://first.com"
+    report_store.save_report(first)
+    assert repair_catalog(tmp_path) == 1
+    monkeypatch.setenv("B3S_VAULT_BRAND_CATALOG_API_ENABLED", "false")
+    second = _report("during-off")
+    second["url"] = "https://second.com"
+    report_store.save_report(second)
+    assert list_domains(tmp_path, limit=20, cursor=None)[0] == ["first.com"]
+    assert repair_catalog(tmp_path) == 2
+    monkeypatch.setenv("B3S_VAULT_BRAND_CATALOG_API_ENABLED", "true")
+    assert list_domains(tmp_path, limit=20, cursor=None)[0] == ["first.com", "second.com"]
+
+
 def test_brand_catalog_requires_repair_and_reads_file_only_domains(tmp_path, monkeypatch):
     from web import report_store
     from web.brand_catalog import CatalogUnavailable, list_domains, repair_catalog

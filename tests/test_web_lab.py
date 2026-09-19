@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -82,6 +83,50 @@ def test_report_store_saves_loads_and_fails_closed_on_corrupt_json(tmp_path, mon
     assert report_store.load_report("missing") is None
     with pytest.raises(ReportConflictError, match="already exists but is unreadable"):
         report_store.list_reports()
+
+
+@pytest.mark.parametrize(
+    ("environment", "catalog_enabled"),
+    [("core", "true"), ("vault", "false")],
+)
+def test_save_report_without_catalog_ignores_unusable_index(
+    tmp_path, monkeypatch, environment, catalog_enabled
+):
+    from web import report_store
+
+    root = tmp_path / "nested" / "reports"
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(root))
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", environment)
+    monkeypatch.setenv("B3S_VAULT_BRAND_CATALOG_API_ENABLED", catalog_enabled)
+    first = {"id": "first", "url": "https://example.com"}
+    report_store.save_report(first)
+    assert report_store.report_path("first").is_file()
+    assert not (root / ".brand-catalog.sqlite3").exists()
+
+    invalid_index = root / ".brand-catalog.sqlite3"
+    invalid_index.write_bytes(b"not a SQLite database")
+    second = {"id": "second", "url": "https://example.com"}
+    report_store.save_report(second)
+
+    assert report_store.load_report("second") == second
+    assert invalid_index.read_bytes() == b"not a SQLite database"
+    assert not (root / ".brand-catalog.lock").exists()
+
+
+def test_save_report_with_catalog_enabled_rejects_unusable_index(tmp_path, monkeypatch):
+    import sqlite3
+
+    from web import report_store
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("B3S_VAULT_BRAND_CATALOG_API_ENABLED", "true")
+    (tmp_path / ".brand-catalog.sqlite3").write_bytes(b"not a SQLite database")
+
+    with pytest.raises(sqlite3.DatabaseError):
+        report_store.save_report({"id": "blocked", "url": "https://example.com"})
+
+    assert not report_store.report_path("blocked").exists()
 
 
 def test_report_store_mirrors_new_reports_and_falls_back_to_files(tmp_path, monkeypatch):
@@ -1071,6 +1116,60 @@ def test_report_store_allows_concurrent_identical_file_write(tmp_path, monkeypat
 
     assert outcomes == [None, None]
     assert json.loads(report_store.report_path("concurrent").read_text(encoding="utf-8")) == report
+
+
+def test_report_store_syncs_immutable_file_and_directory_before_catalog_ready(tmp_path, monkeypatch):
+    from web import report_store
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("B3S_VAULT_BRAND_CATALOG_API_ENABLED", "true")
+    events = []
+    real_fsync = report_store.os.fsync
+    real_mark_ready = report_store.mark_ready
+
+    def track_sync(fd):
+        mode = report_store.os.fstat(fd).st_mode
+        events.append("directory" if stat.S_ISDIR(mode) else "file")
+        return real_fsync(fd)
+
+    def confirm_ready(root, report, domain):
+        assert events[-2:] == ["file", "directory"]
+        events.append("ready")
+        return real_mark_ready(root, report, domain)
+
+    monkeypatch.setattr(report_store.os, "fsync", track_sync)
+    monkeypatch.setattr(report_store, "mark_ready", confirm_ready)
+
+    report_store.save_report({"id": "durable", "url": "https://example.com"})
+
+    assert report_store.report_path("durable").is_file()
+    assert events[-3:] == ["file", "directory", "ready"]
+
+
+def test_report_store_cleans_temporary_file_when_sync_fails(tmp_path, monkeypatch):
+    import sqlite3
+
+    from web import report_store
+    from web.brand_catalog import catalog_path
+
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("B3S_VAULT_BRAND_CATALOG_API_ENABLED", "true")
+    real_fsync = report_store.os.fsync
+
+    def fail_file_sync(fd):
+        if stat.S_ISREG(report_store.os.fstat(fd).st_mode):
+            raise OSError("simulated file sync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(report_store.os, "fsync", fail_file_sync)
+    with pytest.raises(OSError, match="simulated file sync failure"):
+        report_store.save_report({"id": "sync-failure", "url": "https://example.com"})
+    assert not report_store.report_path("sync-failure").exists()
+    assert list(tmp_path.glob(".sync-failure.json.*")) == []
+    with sqlite3.connect(catalog_path(tmp_path)) as conn:
+        assert conn.execute("SELECT state FROM report_domains WHERE report_id = 'sync-failure'").fetchone() == ("pending",)
 
 
 def test_report_store_falls_back_when_postgres_is_unavailable(tmp_path, monkeypatch):
