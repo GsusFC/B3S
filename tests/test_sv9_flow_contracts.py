@@ -350,13 +350,11 @@ def test_flow_candidate_blinds_every_visual_signal_when_capture_content_is_untru
     assert signals[0]["rationale"] == (
         f"copy_visual_alignment_unjudgeable:capture_content_untrusted:{reason}"
     )
-    # Evidence records are an audit trail, not a guardrail: they stay complete.
-    assert {
-        "visual_signature.capture",
-        "visual_signature.tile_signals.0",
-        "visual_signature.tile_signals.1",
-        "visual_signature.tile_signals.2",
-    } <= refs
+    # Both consumers must agree. Tile signal records that no emitted tile
+    # signal references read downstream as unmapped evidence, which forces a
+    # review the capture cannot possibly resolve.
+    assert "visual_signature.capture" in refs
+    assert not any(ref.startswith("visual_signature.tile_signals.") for ref in refs)
 
 
 def test_flow_candidate_blocks_positive_visual_signal_when_capture_is_unusable() -> None:
