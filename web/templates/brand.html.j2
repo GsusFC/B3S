@@ -40,6 +40,9 @@
     <a class="source-link" href="#cola-revision-vault">cola de revisión</a>
     {% endif %}
     {% endif %}
+    {% if brand.sv9_authority.enabled %}
+    <a class="source-link" href="#autoridad-sv9">autoridad SV9</a>
+    {% endif %}
     {% else %}
     <strong class="brand-profile-score">—</strong>
     <span class="brand-profile-terminal-value is-empty">sin scan local</span>
@@ -53,6 +56,67 @@
 </section>
 
 <section class="brand-profile-summary">
+  {% if brand.sv9_authority.enabled %}
+  <section class="brand-profile-block vault-memory" id="autoridad-sv9">
+    <div class="section-head">
+      <span class="label">autoridad_sv9</span>
+      <span class="tag">// aceptado · rescan · revisión</span>
+    </div>
+    {% if brand.sv9_authority.available %}
+    <p class="prose text-pretty">
+      La tabla muestra la autoridad aceptada. Una baldosa que recibe evidencia por primera vez puede avanzar automáticamente;
+      un cambio sobre un veredicto establecido queda separado como propuesta hasta la decisión humana.
+    </p>
+    <div class="vault-memory-metrics" aria-label="Resumen de autoridad SV9">
+      <article class="vault-memory-metric"><span>score aceptado</span><strong>{{ brand.sv9_authority.score if brand.sv9_authority.score is not none else "—" }}</strong></article>
+      <article class="vault-memory-metric"><span>baldosas aceptadas</span><strong>{{ brand.sv9_authority.accepted_count }}</strong></article>
+      <article class="vault-memory-metric"><span>en revisión</span><strong>{{ brand.sv9_authority.pending_count }}</strong></article>
+      <article class="vault-memory-metric"><span>estado</span><strong>{{ "revisión" if brand.sv9_authority.status == "review_required" else "rechazado" if brand.sv9_authority.status == "rejected" else "aceptado" }}</strong></article>
+    </div>
+    {% if brand.sv9_authority.pending_count %}
+    <div class="panel vault-memory-empty">
+      <strong>Hay un rescan pendiente de decisión.</strong>
+      <p class="text-pretty">La autoridad, el informe y el score aceptados siguen vigentes hasta aprobar o rechazar esta propuesta.</p>
+      <span class="mono muted">scan: {{ brand.sv9_authority.review_scan_id }}</span>
+    </div>
+    {% endif %}
+    {% if brand.sv9_authority.status == "rejected" %}
+    <div class="panel vault-memory-empty">
+      <strong>La última propuesta fue rechazada.</strong>
+      <p class="text-pretty">La autoridad, el informe y el score aceptados siguen vigentes. Esa propuesta ya no aparece como pendiente.</p>
+    </div>
+    {% endif %}
+    <div class="overflow panel vault-memory-table-wrap">
+      <table class="vault-memory-table">
+        <thead><tr><th>baldosa</th><th>componente</th><th>estado aceptado</th><th>evidencia</th><th>autoridad</th></tr></thead>
+        <tbody>
+        {% for tile in brand.sv9_authority.tiles %}
+        <tr>
+          <td class="mono"><strong>{{ tile.tile_id }}</strong></td>
+          <td>{{ tile.component_key }}</td>
+          <td><span class="chip {{ "ok" if tile.state == "ok" else "bad" if tile.state == "no" else "warn" }}">{{ tile.state }}</span></td>
+          <td class="mono">{{ tile.evidence_count }}</td>
+          <td class="mono">aceptada</td>
+        </tr>
+        {% endfor %}
+        {% for tile in brand.sv9_authority.pending_tiles %}
+        <tr>
+          <td class="mono"><strong>{{ tile.tile_id }}</strong></td>
+          <td>{{ tile.component_key }}</td>
+          <td><span class="chip warn">revisión · {{ tile.proposed_state }}</span></td>
+          <td class="mono">{{ tile.evidence_count }}</td>
+          <td class="mono">pendiente</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="panel vault-memory-empty"><p class="text-pretty">{{ brand.sv9_authority.message or "Todavía no hay autoridad SV9 aceptada para esta marca." }}</p></div>
+    {% endif %}
+  </section>
+  {% endif %}
+
   {% if brand.vault_memory.enabled %}
   <section class="brand-profile-block vault-memory" id="memoria-vault">
     <div class="section-head">

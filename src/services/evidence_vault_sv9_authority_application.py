@@ -55,6 +55,8 @@ def _apply_candidate(repository, domain: str, source: str, workspace: str, outco
     if candidate is None or candidate["source_scan_id"] != source or not valid:
         return _result("authority_conflict", outcome)
     state, authority, details = _read(repository, domain, workspace)
+    if state == "authority" and details.get("rejected_candidate_id") == candidate["id"]:
+        return _result("authority_retained", dict(outcome) | {"reason_codes": ["review_rejected"]}, authority, candidate)
     if state == "conflict" or (state == "authority" and details["overlay"] is not None):
         return _result("authority_conflict", outcome)
     if state == "authority" and _matches(details, candidate):
@@ -122,7 +124,7 @@ def _apply_review(repository, domain: str, source: str, workspace: str, outcome:
 
 def _retain(repository, domain: str, workspace: str, outcome: Mapping[str, Any]) -> dict[str, Any]:
     state, authority, _details = _read(repository, domain, workspace)
-    if state == "authority" and _details["overlay"] is None:
+    if state == "authority" and (_details["overlay"] is None or _details.get("review_state") == "rejected"):
         return _result("authority_retained", outcome, authority)
     return _result("first_run_unresolved" if state == "absent" else "authority_conflict", outcome)
 
@@ -165,6 +167,8 @@ def _authority(value: Any) -> dict[str, Any]:
             "delta_fingerprint": overlay["delta_fingerprint"],
             "workset_partition_fingerprint": overlay.get("workset_partition_fingerprint"),
         },
+        "review_state": None if overlay is None else overlay["review_state"],
+        "rejected_candidate_id": None if overlay is None else overlay.get("candidate_id"),
     }
 
 def _candidate(value: Any) -> dict[str, str] | None:

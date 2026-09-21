@@ -780,6 +780,26 @@ class EvidenceScoringRecoveryReviewJournalResponse(StrictModel):
     pagination: Pagination
 
 
+class EvidenceVaultSv9ReviewResolutionCreateRequest(StrictModel):
+    """Canonical 038 row supplied by the Vault reviewer client."""
+
+    resolution: dict[str, Any]
+
+
+class EvidenceVaultSv9ReviewResolutionCreateResponse(StrictModel):
+    object: Literal["evidence_vault_sv9_review_resolution"] = (
+        "evidence_vault_sv9_review_resolution"
+    )
+    api_version: Literal["v1"] = "v1"
+    domain: str
+    replayed: bool
+    decision: Literal["approve", "reject"]
+    successor: dict[str, Any] | None = None
+    resolution: dict[str, Any]
+    authority: dict[str, Any] | None = None
+    publication: dict[str, Any] | None = None
+
+
 class VaultSv9ShadowStrictModel(StrictModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 

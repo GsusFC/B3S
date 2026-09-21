@@ -244,6 +244,7 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
             if existing["schema_version"].endswith("v1"): return _outcome("review_required", plan, authority_ids, ["unwitnessed_legacy_candidate"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id, partition=partition)
             if existing["authoritative_relation_witness"] != witness: return _outcome("review_required", plan, authority_ids, ["stale_authoritative_relation_witness"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id, partition=partition)
             if authority_ids and existing.get("id") == authority_ids["accepted_candidate_id"]: return _outcome("no_new_score", plan, authority_ids, ["exact_reuse"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id, partition=partition)
+            if authority_ids and existing.get("id") == authority_ids.get("rejected_candidate_id"): return _outcome("no_new_score", plan, authority_ids, ["review_rejected"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id, partition=partition)
             return _outcome("candidate_available", plan, authority_ids, ["candidate_already_present"], ignored, unmapped, candidate=existing, source_scan_id=source_scan_id, partition=partition)
     shared_series = is_core_shared_series_contract(plan["current_series_contract"])
     lookup, persist = _checkpoint_callbacks(
@@ -298,6 +299,7 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
     if stored["schema_version"].endswith("v1"): return _outcome("review_required", plan, authority_ids, ["unwitnessed_legacy_candidate"], ignored, unmapped, result, stored, source_scan_id=source_scan_id, partition=partition)
     if stored["authoritative_relation_witness"] != witness: return _outcome("review_required", plan, authority_ids, ["stale_authoritative_relation_witness"], ignored, unmapped, result, stored, source_scan_id=source_scan_id, partition=partition)
     if not _replays(stored, reloaded, candidate, packets, complete_capture=complete_capture): return _outcome("no_new_score", plan, authority_ids, ["invalid_replay"], ignored, unmapped, result, partition=partition)
+    if authority_ids and reloaded.get("id") == authority_ids.get("rejected_candidate_id"): return _outcome("no_new_score", plan, authority_ids, ["review_rejected"], ignored, unmapped, result, reloaded, source_scan_id=source_scan_id, partition=partition)
     return _outcome("candidate_available", plan, authority_ids, [] if inserted else ["candidate_already_present"], ignored, unmapped, result, reloaded, source_scan_id=source_scan_id, partition=partition)
 
 
@@ -463,9 +465,18 @@ def _authority(value: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]], 
         part, candidate = value["accepted_partition"], value["accepted_candidate"]
         tiles, sentinels = [_accepted(row) for row in part["candidate_tile_judgments"]], [_accepted(row, True) for row in part["candidate_component_sentinels"]]
         if _capacity(tiles, sentinels) != len(planner._REGISTRY): raise ValueError
+        overlay = value["reopen_review_overlay"]
         ids = {"accepted_candidate_id": str(UUID(candidate["id"])), "active_event_id": str(UUID(value["active_authority_event"]["event_id"])), "current_head_event_fingerprint": value["current_head"]["event_fingerprint"]}
-        snapshot = {"state": "accepted_authority", **ids, "candidate_complete_record_fingerprint": candidate["complete_record_fingerprint"], "canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"], "current_series_fingerprint": candidate["current_series_fingerprint"]}
-        return tiles, sentinels, ids, value["reopen_review_overlay"] is not None, snapshot
+        if overlay is not None and overlay.get("review_state") == "rejected":
+            ids["rejected_candidate_id"] = str(UUID(overlay["candidate_id"]))
+        snapshot = {
+            "state": "accepted_authority",
+            **{key: ids[key] for key in ("accepted_candidate_id", "active_event_id", "current_head_event_fingerprint")},
+            "candidate_complete_record_fingerprint": candidate["complete_record_fingerprint"],
+            "canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"],
+            "current_series_fingerprint": candidate["current_series_fingerprint"],
+        }
+        return tiles, sentinels, ids, overlay is not None and overlay.get("review_state") == "pending", snapshot
     except (AttributeError, KeyError, TypeError, ValueError, memory.JudgmentMemoryContractError, planner.IncrementalPlannerError) as exc: raise EvidenceVaultSv9AuthorityEvaluationError("authority is invalid") from exc
 
 

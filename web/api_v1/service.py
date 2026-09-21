@@ -1074,6 +1074,79 @@ def create_evidence_scoring_recovery_review(
         ) from exc
 
 
+def resolve_evidence_vault_sv9_review(
+    domain: str,
+    request_payload: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Resolve one canonical SV9 review and publish only approved authority."""
+
+    from src.history.repository import (
+        EvidenceVaultSv9JudgmentCandidateConflictError,
+        EvidenceVaultSv9JudgmentCandidateError,
+    )
+
+    resolution = request_payload.get("resolution")
+    if not isinstance(resolution, dict):
+        raise ApiError(
+            400,
+            "invalid_sv9_review_resolution",
+            "A canonical SV9 review resolution is required.",
+        )
+    repository = _postgres_repository()
+    if repository is None:
+        raise ApiError(
+            503,
+            "sv9_review_resolution_store_unavailable",
+            "The SV9 review-resolution store is temporarily unavailable.",
+        )
+    normalized = str(domain or "").strip().lower()
+    try:
+        result, replayed = repository.resolve_evidence_vault_sv9_judgment_review(
+            resolution,
+            canonical_domain=normalized,
+        )
+        publication = None
+        if result.get("resolution", {}).get("decision") == "approve":
+            from web.vault_sv9_review_publication import (
+                publish_approved_sv9_review,
+            )
+
+            try:
+                publication = publish_approved_sv9_review(
+                    resolution_result=result,
+                    domain=normalized,
+                    repository=repository,
+                )
+            except Exception as exc:
+                raise ApiError(
+                    503,
+                    "sv9_review_publication_unavailable",
+                    "The approved SV9 review could not publish its report yet.",
+                    details={"resolution_persisted": True},
+                ) from exc
+        return {**result, "publication": publication}, replayed
+    except EvidenceVaultSv9JudgmentCandidateConflictError as exc:
+        raise ApiError(
+            409,
+            "sv9_review_resolution_precondition_failed",
+            str(exc),
+        ) from exc
+    except EvidenceVaultSv9JudgmentCandidateError as exc:
+        raise ApiError(
+            400,
+            "invalid_sv9_review_resolution",
+            str(exc),
+        ) from exc
+    except ApiError:
+        raise
+    except Exception as exc:
+        raise ApiError(
+            503,
+            "sv9_review_resolution_store_unavailable",
+            "The SV9 review-resolution store is temporarily unavailable.",
+        ) from exc
+
+
 def get_evidence_scoring_recovery_reviews(
     domain: str,
     *,

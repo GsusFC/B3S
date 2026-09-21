@@ -228,9 +228,9 @@ def test_checkpoint_migration_contract_is_forward_only_and_non_authoritative():
     sql = Path("src/history/migrations/034_evidence_vault_sv9_evaluation_checkpoints.sql").read_text(); columns = sql.split("checkpoint_payload", 1)[0]
     migrations = dict(history._migration_files())
     assert list(migrations)[-3:] == [
-        "035_evidence_vault_sv9_empty_relation_witness.sql",
         "036_evidence_vault_sv9_shared_analysis_snapshots.sql",
         "037_evidence_vault_sv9_empty_witness_plan_relaxation.sql",
+        "038_evidence_vault_sv9_judgment_review_resolutions.sql",
     ]
     assert all(value in sql for value in ("PRIMARY KEY (checkpoint_id, evidence_record_id)", "FOREIGN KEY (capture_id, evidence_record_id, evidence_fingerprint)", "BEFORE UPDATE OR DELETE OR TRUNCATE", "GRANT SELECT, INSERT", "authority IS FALSE", "runtime_effect = 'checkpoint_only'", "score_state = 'unavailable'", "REVOKE ALL"))
     assert all(value not in columns for value in ("assessment", "adoptable", "publishable", "complete_record")) and "$.**" in sql

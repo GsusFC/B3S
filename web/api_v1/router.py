@@ -52,6 +52,8 @@ from .models import (
     EvidenceScoringRecoveryReviewCreateRequest,
     EvidenceScoringRecoveryReviewCreateResponse,
     EvidenceScoringRecoveryReviewJournalResponse,
+    EvidenceVaultSv9ReviewResolutionCreateRequest,
+    EvidenceVaultSv9ReviewResolutionCreateResponse,
     ScanCreateRequest,
     ScanDiagnosticDetailResponse,
     ScanEvidenceResponse,
@@ -66,6 +68,7 @@ from .service import (
     create_evidence_claim_tile_review,
     create_evidence_memory_adjudication,
     create_evidence_scoring_recovery_review,
+    resolve_evidence_vault_sv9_review,
     create_scan_job,
     get_completed_report,
     get_evidence_claim_tile_review_packet,
@@ -915,6 +918,47 @@ def create_brand_evidence_scoring_recovery_review(
         "authority": False,
         "automatic_scoring_effect": False,
         "event": event,
+    }
+
+
+@router.post(
+    "/brands/{domain}/evidence-vault/sv9/judgment-review-resolutions",
+    response_model=EvidenceVaultSv9ReviewResolutionCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="resolveBrandVaultSv9JudgmentReview",
+    responses=_ERRORS,
+)
+def resolve_brand_vault_sv9_judgment_review(
+    domain: str,
+    payload: EvidenceVaultSv9ReviewResolutionCreateRequest,
+    response: Response,
+    _principal: AdjudicationPrincipal,
+) -> dict[str, Any]:
+    normalized = domain_key(domain)
+    if not normalized:
+        raise ApiError(400, "invalid_domain", "A valid brand domain is required.")
+    result, replayed = resolve_evidence_vault_sv9_review(
+        normalized,
+        payload.model_dump(),
+    )
+    resolution = result["resolution"]
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Location"] = (
+        f"/api/v1/brands/{normalized}/evidence-vault/sv9/"
+        f"judgment-review-resolutions/{resolution['id']}"
+    )
+    if replayed:
+        response.headers["Idempotent-Replayed"] = "true"
+    return {
+        "object": "evidence_vault_sv9_review_resolution",
+        "api_version": "v1",
+        "domain": normalized,
+        "replayed": replayed,
+        "decision": resolution["decision"],
+        "successor": result.get("successor"),
+        "resolution": resolution,
+        "authority": result.get("authority"),
+        "publication": result.get("publication"),
     }
 
 

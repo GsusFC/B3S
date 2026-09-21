@@ -176,6 +176,54 @@ def _run(repo, flow, current=(3,), relations=None, series=None, trusted=(), proj
     result = service.run_evidence_vault_sv9_authority_evaluation(repository=repo, flow=flow, domain_or_url="example.test", source_scan_id="scan", current_series_contract=_series() if series is None else series, trusted_irrelevant_evidence=[_identity(number) for number in trusted])
     assert not repo.mutations; return result
 
+def test_accepted_sin_evidencia_with_authoritative_first_light_routes_to_evaluation():
+    repo = _Repository(records=(9,))
+    prior = _judgment(assessment_state="sin_evidencia", evidence=[])
+    relation = _relation(repo, "M1", number=9)
+    signed = delta.build_evidence_vault_sv9_judgment_delta(
+        current_evidence=delta.build_evidence_identity_set([_identity(9)]),
+        prior_judgments=[prior],
+        authoritative_relations=[relation],
+        current_series_contract=_series(),
+    )
+
+    item = next(row for row in signed["plan"]["items"] if row["tile_id"] == "M1")
+    assert item["action"] == "evaluate_delta"
+    assert "M1" in signed["plan"]["tile_workset"]
+    assert "M1" not in signed["plan"]["review_set"]
+    assert signed["unmapped_evidence"] == []
+
+def test_shadow_hint_alone_cannot_publish_a_candidate():
+    repo, flow = _Repository(_authority(), (3, 9)), _Flow()
+    repo.hint_only = True
+
+    outcome = _run(repo, flow, current=(3, 9))
+
+    assert outcome["status"] == "review_required"
+    assert outcome["candidate"] is None
+    assert "unmapped_evidence" in outcome["reason_codes"]
+    assert repo.append_calls == 0
+
+@pytest.mark.parametrize("prior_state", ("no", "ok"))
+def test_established_verdict_change_stays_in_human_review(prior_state):
+    repo = _Repository(records=(9,))
+    prior = _judgment(
+        assessment_state=prior_state,
+        evidence=[{"evidence_ref": "evidence:3", "evidence_fingerprint": _hash(3)}],
+    )
+    relation = _relation(repo, "M1", disposition="contradiction", number=9)
+    signed = delta.build_evidence_vault_sv9_judgment_delta(
+        current_evidence=delta.build_evidence_identity_set([_identity(9)]),
+        prior_judgments=[prior],
+        authoritative_relations=[relation],
+        current_series_contract=_series(),
+    )
+
+    item = next(row for row in signed["plan"]["items"] if row["tile_id"] == "M1")
+    assert item["action"] == "reopen_contradiction"
+    assert "M1" in signed["plan"]["review_set"]
+    assert "M1" not in signed["plan"]["tile_workset"]
+
 def test_first_run_with_exact_operational_projection_persists_witnessed_candidate():
     repo, flow = _Repository(records=(9,)), _Flow(); result = _run(repo, flow, current=(9,))
     assert result["status"] == "candidate_available" and len(flow.calls) == len(repo.checkpoint_appends) == 10 and repo.append_calls == 1 and repo.get_calls == 2

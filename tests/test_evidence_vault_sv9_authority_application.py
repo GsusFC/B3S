@@ -304,6 +304,38 @@ def test_pending_overlay_blocks_adoption_stable_success_and_retention(monkeypatc
     monkeypatch.setattr(evaluation_service, "run_evidence_vault_sv9_authority_evaluation", lambda **_kwargs: {"status": "no_new_score", "reason_codes": ["exact_reuse"]})
     assert _run(repo, _Flow())["status"] == "authority_conflict" and repo.mutations == before
 
+def test_rejected_overlay_retains_authority_and_blocks_exact_candidate_readoption(monkeypatch):
+    repo = _ApplicationRepository(records=(9,))
+    assert _run(repo, _Flow())["status"] == "authority_established"
+    repo.records = (3, 9)
+    relations = [_relation(repo, "M1", number=value) for value in repo.records]
+    assert _run(repo, _Flow(), current=repo.records, relations=relations, source="scan-2")["status"] == "authority_advanced"
+    repo.records = (9,)
+    assert _run(repo, _Flow(), current=(9,), relations=[_relation(repo, "M1", number=9)], source="scan-3")["status"] == "review_required"
+    accepted = repo.authority["accepted_candidate"]
+    rejected = next(row for row in repo.candidates.values() if row["id"] != accepted["id"])
+    repo.authority["reopen_review_overlay"] |= {
+        "review_state": "rejected",
+        "resolution_id": _uuid(901),
+        "resolution_key_hash": _hash(902),
+        "candidate_id": rejected["id"],
+    }
+    before = list(repo.mutations)
+    monkeypatch.setattr(
+        evaluation_service,
+        "run_evidence_vault_sv9_authority_evaluation",
+        lambda **_kwargs: {
+            "status": "candidate_available",
+            "reason_codes": [],
+            "candidate": rejected,
+            "accepted_authority": {"current_head_event_fingerprint": repo.authority["current_head"]["event_fingerprint"]},
+        },
+    )
+    result = _run(repo, _Flow(), source=rejected["source_scan_id"])
+    assert result["status"] == "authority_retained"
+    assert result["reason_codes"] == ["review_rejected"]
+    assert repo.mutations == before
+
 def test_first_run_review_and_no_score_or_repository_failures_fail_closed():
     first = _ApplicationRepository(records=()); unresolved = _run(first, _Flow(), current=())
     assert unresolved["status"] == "first_run_unresolved" and not first.mutations
@@ -601,6 +633,7 @@ class _CheckpointReplayRepository(_CoherenciaRepository):
             for node in ast.walk(tree)
             if isinstance(node, ast.If)
             and len(node.body) == 1
+            and node.lineno < 6500
             and isinstance(node.body[0], ast.Raise)
             and any(
                 isinstance(child, ast.Constant) and child.value == "SV9 judgment candidate is already adopted."
@@ -611,11 +644,14 @@ class _CheckpointReplayRepository(_CoherenciaRepository):
 
         class Connection:
             def execute(self, query, parameters):
-                assert "evidence_vault_sv9_judgment_authority_events" in query
+                self.review_query = "evidence_vault_sv9_judgment_review_resolutions" in query
+                assert self.review_query or "evidence_vault_sv9_judgment_authority_events" in query
                 assert parameters[-1] == candidate_id
                 return self
 
             def fetchone(self):
+                if self.review_query:
+                    return None
                 return {"exists": 1} if candidate_id in owner.adopted_ids else None
 
         exec(
