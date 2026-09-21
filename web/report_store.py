@@ -515,10 +515,12 @@ def list_reports_for_domain(domain: str) -> list[dict[str, Any]]:
                 report_ids = list_report_ids_for_domain(directory, target)
             except CatalogUnavailable as exc:
                 raise HistoryUnavailable("brand catalog is unavailable") from exc
-            paths = (directory / f"{report_id}.json" for report_id in report_ids)
+            paths = ((report_id, directory / f"{report_id}.json") for report_id in report_ids)
         else:
-            paths = directory.glob("*.json")
-        for path in paths:
+            paths = ((path.stem, path) for path in directory.glob("*.json"))
+        for report_id, path in paths:
+            if report_id in matches_by_id and not path.exists() and not path.is_symlink():
+                continue
             report = _read_report_file(path, expected_id=path.stem)
             if domain_key(str(report.get("url") or "")) == target:
                 report_id = str(report.get("id") or path.stem)

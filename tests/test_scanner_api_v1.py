@@ -357,6 +357,35 @@ def test_brand_history_reads_only_indexed_domain_files_and_ignores_unrelated_cor
     assert read_paths == [f"{target['id']}.json"]
 
 
+def test_brand_history_keeps_postgres_only_report_when_file_is_absent(tmp_path, monkeypatch):
+    from web import report_store
+    from web.brand_catalog import repair_catalog
+
+    _enable_brand_catalog_api(monkeypatch, tmp_path)
+    report = _report("postgres-only-history")
+    report["url"] = "https://postgres-only.example"
+
+    class Repository:
+        def list_report_payloads_for_domain(self, domain, **_kwargs):
+            assert domain == "postgres-only.example"
+            return [report]
+
+        def list_report_summaries(self, *, workspace_slug, limit, offset):
+            assert workspace_slug == "b3s" and limit == 200
+            return [{"id": report["id"]}][offset : offset + limit]
+
+        def get_report_payload(self, report_id, *, workspace_slug):
+            assert report_id == report["id"] and workspace_slug == "b3s"
+            return report
+
+    repository = Repository()
+    assert repair_catalog(tmp_path, repository=repository) == 1
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: repository)
+    response = TestClient(app).get("/api/v1/brands/postgres-only.example/scans", headers=AUTH)
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == [report["id"]]
+
+
 def test_brand_catalog_api_required_postgres_with_custom_root_returns_503(tmp_path, monkeypatch):
     from web.brand_catalog import repair_catalog
 
