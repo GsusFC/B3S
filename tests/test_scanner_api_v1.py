@@ -311,6 +311,52 @@ def test_brand_catalog_api_fails_closed_on_postgres_only_outage(tmp_path, monkey
     assert response.json()["error"]["code"] == "brand_catalog_unavailable"
 
 
+def test_brand_history_fails_closed_on_required_postgres_outage(tmp_path, monkeypatch):
+    from web import report_store
+
+    _enable_brand_catalog_api(monkeypatch, tmp_path)
+    monkeypatch.setenv("B3S_POSTGRES_REQUIRED", "true")
+
+    class Repository:
+        def list_report_payloads_for_domain(self, *_args, **_kwargs):
+            raise OSError("synthetic unavailable database")
+
+    monkeypatch.setattr(report_store, "_postgres_repository", lambda: Repository())
+    response = TestClient(app).get("/api/v1/brands/example.com/scans", headers=AUTH)
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "brand_history_unavailable"
+
+
+def test_brand_history_reads_only_indexed_domain_files_and_ignores_unrelated_corruption(
+    tmp_path, monkeypatch
+):
+    from web import report_store
+    from web.brand_catalog import repair_catalog
+
+    _enable_brand_catalog_api(monkeypatch, tmp_path)
+    target = _report("target-history")
+    target["url"] = "https://target.example"
+    unrelated = _report("unrelated-history")
+    unrelated["url"] = "https://unrelated.example"
+    (tmp_path / f"{target['id']}.json").write_text(json.dumps(target), encoding="utf-8")
+    (tmp_path / f"{unrelated['id']}.json").write_text(json.dumps(unrelated), encoding="utf-8")
+    assert repair_catalog(tmp_path) == 2
+    (tmp_path / f"{unrelated['id']}.json").write_text("{broken", encoding="utf-8")
+
+    read_paths = []
+    original_read = report_store._read_report_file
+
+    def tracked_read(path, **kwargs):
+        read_paths.append(path.name)
+        return original_read(path, **kwargs)
+
+    monkeypatch.setattr(report_store, "_read_report_file", tracked_read)
+    response = TestClient(app).get("/api/v1/brands/target.example/scans", headers=AUTH)
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == [target["id"]]
+    assert read_paths == [f"{target['id']}.json"]
+
+
 def test_brand_catalog_api_required_postgres_with_custom_root_returns_503(tmp_path, monkeypatch):
     from web.brand_catalog import repair_catalog
 

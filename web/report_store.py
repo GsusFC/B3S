@@ -69,7 +69,14 @@ from src.services.scanner_report_assessment import (
     ScannerReportAssessmentError,
     assessment_projection_from_report,
 )
-from web.brand_catalog import begin_intent, catalog_lock, mark_incomplete, mark_ready
+from web.brand_catalog import (
+    CatalogUnavailable,
+    begin_intent,
+    catalog_lock,
+    list_report_ids_for_domain,
+    mark_incomplete,
+    mark_ready,
+)
 
 
 _LOG = logging.getLogger(__name__)
@@ -91,6 +98,20 @@ def vault_brand_catalog_enabled() -> bool:
         os.environ.get("BRAND3_ENVIRONMENT", "").strip().casefold() == "vault"
         and os.environ.get("B3S_VAULT_BRAND_CATALOG_API_ENABLED", "").strip().casefold()
         == "true"
+    )
+
+
+class HistoryUnavailable(RuntimeError):
+    """History is required for the current serving configuration but unavailable."""
+
+
+def postgres_history_expected() -> bool:
+    return (
+        os.environ.get("B3S_POSTGRES_REQUIRED", "").strip().casefold() == "true"
+        or bool(
+            os.environ.get("B3S_DATABASE_URL", "").strip()
+            and os.environ.get("B3S_REPORTS_DIR", "/data/reports") in {"", "/data/reports"}
+        )
     )
 
 
@@ -469,7 +490,10 @@ def list_reports_for_domain(domain: str) -> list[dict[str, Any]]:
         return []
 
     matches_by_id: dict[str, dict[str, Any]] = {}
+    postgres_expected = postgres_history_expected()
     repository = _postgres_repository()
+    if postgres_expected and repository is None:
+        raise HistoryUnavailable("PostgreSQL history is unavailable")
     if repository is not None:
         try:
             fetch_page = lambda **page: repository.list_report_payloads_for_domain(target, **page)
@@ -479,12 +503,22 @@ def list_reports_for_domain(domain: str) -> list[dict[str, Any]]:
                     matches_by_id[report_id] = report
         except (ReportConflictError, ScannerReportAssessmentError):
             raise
-        except Exception:
+        except Exception as exc:
+            if postgres_expected:
+                raise HistoryUnavailable("PostgreSQL history is unavailable") from exc
             _LOG.exception("failed to list brand reports from postgres", extra={"domain": target})
 
     directory = reports_dir()
     if directory.is_dir():
-        for path in directory.glob("*.json"):
+        if vault_brand_catalog_enabled():
+            try:
+                report_ids = list_report_ids_for_domain(directory, target)
+            except CatalogUnavailable as exc:
+                raise HistoryUnavailable("brand catalog is unavailable") from exc
+            paths = (directory / f"{report_id}.json" for report_id in report_ids)
+        else:
+            paths = directory.glob("*.json")
+        for path in paths:
             report = _read_report_file(path, expected_id=path.stem)
             if domain_key(str(report.get("url") or "")) == target:
                 report_id = str(report.get("id") or path.stem)
