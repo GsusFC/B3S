@@ -205,6 +205,42 @@ def list_domains(
     )
 
 
+def list_report_ids_for_domain(reports_root: Path, domain: str) -> list[str]:
+    """Return indexed report identities for one normalized domain only."""
+
+    from web.report_store import domain_key
+
+    target = domain_key(domain)
+    if not target:
+        return []
+    try:
+        with closing(_connect(reports_root, readonly=True)) as conn:
+            conn.execute("BEGIN")
+            state = conn.execute(
+                "SELECT complete FROM catalog_state WHERE singleton = 1"
+            ).fetchone()
+            if state is None or state["complete"] != 1:
+                raise CatalogUnavailable("brand catalog reconciliation is incomplete")
+            unsettled = conn.execute(
+                "SELECT 1 FROM report_domains WHERE state IN ('pending', 'conflict') LIMIT 1"
+            ).fetchone()
+            if unsettled is not None:
+                raise CatalogUnavailable("brand catalog contains pending or conflicted reports")
+            rows = conn.execute(
+                """
+                SELECT report_id FROM report_domains
+                WHERE state = 'ready' AND domain = ?
+                ORDER BY report_id
+                """,
+                (target,),
+            ).fetchall()
+    except CatalogUnavailable:
+        raise
+    except (sqlite3.Error, OSError) as exc:
+        raise CatalogUnavailable("brand catalog is unavailable") from exc
+    return [str(row["report_id"]) for row in rows]
+
+
 def repair_catalog(
     reports_root: Path,
     *,

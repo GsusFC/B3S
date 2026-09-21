@@ -13,6 +13,7 @@ from src.build_info import current_build_sha
 from src.services.scanner_evidence_comparison import annotate_report_history
 from src.services.scanner_score_publication import score_publication_from_report
 from web.report_store import (
+    HistoryUnavailable,
     domain_key,
     evidence_claim_memory_for_domain,
     evidence_claim_tile_ledger_for_domain,
@@ -424,7 +425,14 @@ def brand_scan_history(
     normalized = domain_key(domain)
     if not normalized:
         raise ApiError(400, "invalid_domain", "A valid brand domain is required.")
-    reports, history_state = annotate_report_history(list_reports_for_domain(normalized))
+    try:
+        reports, history_state = annotate_report_history(list_reports_for_domain(normalized))
+    except HistoryUnavailable as exc:
+        raise ApiError(
+            503,
+            "brand_history_unavailable",
+            "The brand history is temporarily unavailable.",
+        ) from exc
     page = reports[offset : offset + limit]
     items = []
     for item in page:
