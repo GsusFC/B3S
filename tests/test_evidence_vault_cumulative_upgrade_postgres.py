@@ -93,7 +93,7 @@ def test_populated_v1_upgrade_through_cumulative_head_is_lossless() -> None:
     filenames = [filename for filename, _sql_text in migration_files]
     assert filenames[-1] == _HEAD_MIGRATION
     assert [filename.split("_", 1)[0] for filename in filenames] == [
-        f"{version:03d}" for version in range(1, 38)
+        f"{version:03d}" for version in range(1, 39)
     ]
 
     fixture = _v1_fixture()

@@ -1070,6 +1070,7 @@ def test_concurrent_release_migration_is_database_serialized() -> None:
                     "evidence_vault_sv9_empty_relation_witness.sql",
                     "evidence_vault_sv9_shared_analysis_snapshots.sql",
                     "evidence_vault_sv9_empty_witness_plan_relaxation.sql",
+                    "evidence_vault_sv9_judgment_review_resolutions.sql",
                 ],
                 start=1,
             )
