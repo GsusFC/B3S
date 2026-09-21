@@ -191,6 +191,7 @@ from src.services.evidence_vault_sv9_authority_application import (
 )
 from src.services import evidence_vault_sv9_authority_event as authority_event
 from src.services import evidence_vault_sv9_authority_projection as authority_projection
+from src.services import evidence_vault_sv9_review_resolution as review_resolution
 from src.services import evidence_vault_sv9_workset_partition as workset_partition
 from src.services.evidence_vault_lineage_replay import (
     EvidenceVaultLineageReplayError,
@@ -6427,12 +6428,399 @@ class PostgresHistoryRepository:
                 if candidate["schema_version"].endswith("v1"): raise EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError("SV9 judgment candidate v1 cannot establish new authority.")
                 _sv9_judgment_current_authoritative_relation_witness(conn, candidate, context, workspace_slug)
                 if conn.execute(f"SELECT 1 FROM {_SCHEMA}.evidence_vault_sv9_judgment_authority_events WHERE workspace_id = %s AND brand_id = %s AND candidate_id = %s", (context["workspace_id"], context["brand_id"], candidate_id)).fetchone(): raise EvidenceVaultSv9JudgmentCandidateConflictError("SV9 judgment candidate is already adopted.")
+                if conn.execute(f"SELECT 1 FROM {_SCHEMA}.evidence_vault_sv9_judgment_review_resolutions WHERE workspace_id = %s AND brand_id = %s AND candidate_id = %s AND decision = 'reject'", (context["workspace_id"], context["brand_id"], candidate_id)).fetchone(): raise EvidenceVaultSv9JudgmentCandidateConflictError("SV9 judgment candidate has a terminal rejected review.")
             elif state is None: raise EvidenceVaultSv9JudgmentCandidateConflictError("SV9 judgment authority is unavailable for reopen.")
             else: _sv9_authority_reopen_binding(conn, state, context, delta, partition, workspace_slug)
             event = _sv9_authority_event(context, state, request, idempotency_key_hash, candidate, candidate_row, delta, partition)
             _append_sv9_judgment_authority_event(conn, event)
             state = _replay_sv9_judgment_authority(conn, workspace_slug, context["workspace_id"], context["brand_id"])
             return _project_sv9_judgment_authority(state, state["events"][event["id"]]), False
+
+    def resolve_evidence_vault_sv9_judgment_review(
+        self,
+        resolution_request: Mapping[str, Any],
+        *,
+        workspace_slug: str = "b3s",
+        canonical_domain: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Append one canonical 038 review decision atomically.
+
+        ``resolution_request`` must be the complete row-shaped record produced
+        by ``evidence_vault_sv9_review_resolution``.  Candidate provenance and
+        authority lineage are rederived from the locked database state; values
+        supplied by a caller are never used to construct authority except for
+        the already-validated resolution id/key link.
+
+        The returned payload contains ``successor`` (``None`` for reject) and
+        the persisted ``resolution``.  The second tuple item reports an
+        idempotent replay.
+        """
+
+        if not isinstance(resolution_request, Mapping):
+            raise EvidenceVaultSv9JudgmentCandidateError(
+                "SV9 judgment review resolution request is invalid."
+            )
+        if not isinstance(workspace_slug, str) or not workspace_slug.strip():
+            raise EvidenceVaultSv9JudgmentCandidateError(
+                "SV9 judgment review resolution workspace is invalid."
+            )
+        source_scan_id = resolution_request.get("source_scan_id")
+        if (
+            not isinstance(source_scan_id, str)
+            or not source_scan_id
+            or source_scan_id != source_scan_id.strip()
+        ):
+            raise EvidenceVaultSv9JudgmentCandidateError(
+                "SV9 judgment review resolution source scan is invalid."
+            )
+        candidate_id = _sv9_authority_uuid(
+            resolution_request.get("candidate_id"), "candidate_id"
+        )
+        resolution_key_hash = _sv9_authority_fingerprint(
+            resolution_request.get("resolution_key_hash"), "resolution_key_hash"
+        )
+
+        self._ensure_migrated()
+        with self._connect() as conn:
+            _verify_exact_migration_head_under_shared_lock(conn)
+            context = _sv9_judgment_context(
+                conn, source_scan_id, workspace_slug, True
+            )
+            if context is None:
+                raise EvidenceVaultSv9JudgmentCandidateError(
+                    "SV9 judgment source scan is unavailable."
+                )
+            if canonical_domain is not None:
+                expected_domain = normalize_domain(canonical_domain)
+                actual_domain = normalize_domain(context["canonical_domain"])
+                if not expected_domain or actual_domain != expected_domain:
+                    raise EvidenceVaultSv9JudgmentCandidateConflictError(
+                        "SV9 judgment review domain does not match the source scan."
+                    )
+            for lock_name in (
+                "evidence-vault-canonical-promotion",
+                "evidence-vault-sv9-judgment-authority",
+            ):
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(%s)",
+                    (_advisory_lock_key(context["brand_id"], lock_name),),
+                )
+
+            existing = conn.execute(
+                f"""
+                SELECT *
+                FROM {_SCHEMA}.evidence_vault_sv9_judgment_review_resolutions
+                WHERE workspace_id = %s
+                  AND brand_id = %s
+                  AND resolution_key_hash = %s
+                """,
+                (context["workspace_id"], context["brand_id"], resolution_key_hash),
+            ).fetchone()
+            if existing is None:
+                existing = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM {_SCHEMA}.evidence_vault_sv9_judgment_review_resolutions
+                    WHERE workspace_id = %s
+                      AND brand_id = %s
+                      AND candidate_id = %s
+                    """,
+                    (context["workspace_id"], context["brand_id"], candidate_id),
+                ).fetchone()
+                if (
+                    existing is not None
+                    and str(existing["resolution_key_hash"]) != resolution_key_hash
+                ):
+                    raise EvidenceVaultSv9JudgmentCandidateConflictError(
+                        "SV9 judgment candidate already has another review resolution."
+                    )
+
+            if existing is not None:
+                stored_candidate, stored_candidate_row = _sv9_authority_candidate(
+                    conn,
+                    _sv9_authority_uuid(existing["candidate_id"], "candidate_id"),
+                    workspace_slug,
+                    context["workspace_id"],
+                    context["brand_id"],
+                )
+                if (
+                    str(stored_candidate_row["source_scan_id"])
+                    != context["source_scan_id"]
+                    or any(
+                        stored_candidate_row[field] != context[field]
+                        for field in ("scan_run_id", "capture_id", "operation_plan_id")
+                    )
+                ):
+                    raise EvidenceVaultSv9JudgmentCandidateConflictError(
+                        "SV9 judgment review resolution source context is stale."
+                    )
+                stored_candidate_payload = {
+                    key: value
+                    for key, value in stored_candidate.items()
+                    if key not in {"id", "source_scan_id", "created_at"}
+                }
+                stored_resolution = _sv9_review_resolution_record(existing)
+                try:
+                    stored_resolution = (
+                        review_resolution.validate_evidence_vault_sv9_review_resolution(
+                            stored_resolution,
+                            candidate_payload=stored_candidate_payload,
+                        )
+                    )
+                except review_resolution.EvidenceVaultSv9ReviewResolutionError as exc:
+                    raise EvidenceVaultSv9JudgmentCandidateError(
+                        "SV9 judgment review resolution readback is invalid."
+                    ) from exc
+                successor = None
+                if stored_resolution["decision"] == "approve":
+                    state = _replay_sv9_judgment_authority(
+                        conn,
+                        workspace_slug,
+                        context["workspace_id"],
+                        context["brand_id"],
+                    )
+                    event = (
+                        state["events"].get(
+                            stored_resolution["successor_authority_event_id"]
+                        )
+                        if state is not None
+                        else None
+                    )
+                    if event is None:
+                        raise EvidenceVaultSv9JudgmentCandidateError(
+                            "SV9 judgment review successor is unavailable."
+                        )
+                    successor = _sv9_authority_event_public(event)
+                    authority = _project_sv9_judgment_authority(state, event)
+                else:
+                    authority = None
+                return {
+                    "successor": successor,
+                    "resolution": stored_resolution,
+                    "authority": authority,
+                }, True
+
+            candidate, candidate_row = _sv9_authority_candidate(
+                conn,
+                candidate_id,
+                workspace_slug,
+                context["workspace_id"],
+                context["brand_id"],
+            )
+            if (
+                str(candidate_row["source_scan_id"]) != context["source_scan_id"]
+                or any(
+                    candidate_row[field] != context[field]
+                    for field in ("scan_run_id", "capture_id", "operation_plan_id")
+                )
+            ):
+                raise EvidenceVaultSv9JudgmentCandidateConflictError(
+                    "SV9 judgment candidate does not match the source scan context."
+                )
+            candidate_payload = {
+                key: value
+                for key, value in candidate.items()
+                if key not in {"id", "source_scan_id", "created_at"}
+            }
+            try:
+                canonical = (
+                    review_resolution.validate_evidence_vault_sv9_review_resolution(
+                        resolution_request,
+                        candidate_payload=candidate_payload,
+                    )
+                )
+            except review_resolution.EvidenceVaultSv9ReviewResolutionError as exc:
+                raise EvidenceVaultSv9JudgmentCandidateError(
+                    "SV9 judgment review resolution request is invalid."
+                ) from exc
+
+            expected_record = {
+                "workspace_id": str(context["workspace_id"]),
+                "brand_id": str(context["brand_id"]),
+                "candidate_id": str(candidate["id"]),
+                "scan_run_id": str(context["scan_run_id"]),
+                "capture_id": str(context["capture_id"]),
+                "operation_plan_id": str(context["operation_plan_id"]),
+                "source_scan_id": str(context["source_scan_id"]),
+                "candidate_schema_version": str(candidate["schema_version"]),
+                "candidate_complete_record_fingerprint": candidate[
+                    "complete_record_fingerprint"
+                ],
+                "canonical_plan_fingerprint": candidate[
+                    "canonical_plan_fingerprint"
+                ],
+                "current_series_fingerprint": candidate[
+                    "current_series_fingerprint"
+                ],
+                "candidate_series_fingerprint": candidate[
+                    "candidate_series_fingerprint"
+                ],
+                "evaluation_bundle_fingerprint": candidate[
+                    "evaluation_bundle_fingerprint"
+                ],
+                "assessment_fingerprint": candidate["assessment_fingerprint"],
+                "score_fingerprint": candidate["score_fingerprint"],
+            }
+            if any(canonical[name] != value for name, value in expected_record.items()):
+                raise EvidenceVaultSv9JudgmentCandidateConflictError(
+                    "SV9 judgment review resolution provenance is stale or invalid."
+                )
+
+            state = _replay_sv9_judgment_authority(
+                conn,
+                workspace_slug,
+                context["workspace_id"],
+                context["brand_id"],
+            )
+            if state is None or state.get("overlay") is None:
+                raise EvidenceVaultSv9JudgmentCandidateConflictError(
+                    "SV9 judgment review authority overlay is stale."
+                )
+            head = state["head"]
+            active = state["active"]
+            if (
+                head.get("event_type") != "reopen"
+                or active.get("event_type") not in {"adopt", "supersede"}
+                or head.get("active_parent_event_id") != active.get("id")
+                or head.get("active_parent_event_fingerprint")
+                != active.get("event_fingerprint")
+            ):
+                raise EvidenceVaultSv9JudgmentCandidateConflictError(
+                    "SV9 judgment review authority lineage is stale."
+                )
+            authority_bindings = {
+                "expected_authority_event_id": str(head["id"]),
+                "expected_authority_event_fingerprint": head["event_fingerprint"],
+                "expected_authority_event_sequence": int(head["sequence"]),
+                "reopen_authority_event_id": str(head["id"]),
+                "reopen_authority_event_fingerprint": head["event_fingerprint"],
+                "reopen_authority_event_sequence": int(head["sequence"]),
+                "active_authority_event_id": str(active["id"]),
+                "active_authority_event_fingerprint": active["event_fingerprint"],
+                "active_authority_event_sequence": int(active["sequence"]),
+                "evaluated_authority_event_id": str(active["id"]),
+                "evaluated_authority_event_fingerprint": active[
+                    "event_fingerprint"
+                ],
+                "evaluated_authority_sequence": int(active["sequence"]),
+                "reopen_delta_fingerprint": head["delta_fingerprint"],
+                "reopen_review_overlay_fingerprint": review_resolution.review_overlay_fingerprint(
+                    head["event_payload"]
+                ),
+            }
+            if any(canonical[name] != value for name, value in authority_bindings.items()):
+                raise EvidenceVaultSv9JudgmentCandidateConflictError(
+                    "SV9 judgment review authority CAS is stale."
+                )
+            if active["candidate"]["current_series_fingerprint"] != candidate[
+                "current_series_fingerprint"
+            ]:
+                raise EvidenceVaultSv9JudgmentCandidateConflictError(
+                    "SV9 judgment review series is stale."
+                )
+
+            adopted = conn.execute(
+                f"""
+                SELECT 1
+                FROM {_SCHEMA}.evidence_vault_sv9_judgment_authority_events
+                WHERE workspace_id = %s
+                  AND brand_id = %s
+                  AND candidate_id = %s
+                  AND event_type IN ('adopt', 'supersede')
+                """,
+                (context["workspace_id"], context["brand_id"], candidate_id),
+            ).fetchone()
+            if adopted is not None:
+                raise EvidenceVaultSv9JudgmentCandidateConflictError(
+                    "SV9 judgment candidate is already adopted."
+                )
+
+            if canonical["decision"] == "reject":
+                row = _append_sv9_review_resolution(conn, canonical)
+                stored = _sv9_review_resolution_record(row)
+                try:
+                    stored = (
+                        review_resolution.validate_evidence_vault_sv9_review_resolution(
+                            stored,
+                            candidate_payload=candidate_payload,
+                        )
+                    )
+                except review_resolution.EvidenceVaultSv9ReviewResolutionError as exc:
+                    raise EvidenceVaultSv9JudgmentCandidateError(
+                        "SV9 judgment review resolution readback is invalid."
+                    ) from exc
+                return {"successor": None, "resolution": stored}, False
+
+            request = _sv9_authority_request(
+                "adopt_candidate",
+                candidate["id"],
+                head["event_fingerprint"],
+                None,
+                context["source_scan_id"],
+            )
+            idempotency_key_hash = authority_event.authority_application_idempotency_fingerprint(
+                request
+            )
+            event = _sv9_authority_event(
+                context,
+                state,
+                request,
+                idempotency_key_hash,
+                candidate,
+                candidate_row,
+                None,
+                review_resolution={
+                    "resolution_id": canonical["id"],
+                    "resolution_key_hash": canonical["resolution_key_hash"],
+                },
+            )
+            if (
+                canonical["successor_authority_event_id"] != event["id"]
+                or canonical["successor_authority_event_fingerprint"]
+                != event["event_fingerprint"]
+                or canonical["successor_authority_event_sequence"]
+                != event["sequence"]
+            ):
+                raise EvidenceVaultSv9JudgmentCandidateConflictError(
+                    "SV9 judgment review successor binding is stale."
+                )
+            _append_sv9_judgment_authority_event(conn, event)
+            row = _append_sv9_review_resolution(conn, canonical)
+            stored = _sv9_review_resolution_record(row)
+            try:
+                stored = (
+                    review_resolution.validate_evidence_vault_sv9_review_resolution(
+                        stored,
+                        candidate_payload=candidate_payload,
+                    )
+                )
+            except review_resolution.EvidenceVaultSv9ReviewResolutionError as exc:
+                raise EvidenceVaultSv9JudgmentCandidateError(
+                    "SV9 judgment review resolution readback is invalid."
+                ) from exc
+            replayed_state = _replay_sv9_judgment_authority(
+                conn,
+                workspace_slug,
+                context["workspace_id"],
+                context["brand_id"],
+            )
+            successor_event = (
+                replayed_state["events"].get(event["id"])
+                if replayed_state is not None
+                else None
+            )
+            if successor_event is None:
+                raise EvidenceVaultSv9JudgmentCandidateError(
+                    "SV9 judgment review successor could not be replayed."
+                )
+            authority = _project_sv9_judgment_authority(
+                replayed_state, successor_event
+            )
+            return {
+                "successor": _sv9_authority_event_public(successor_event),
+                "resolution": stored,
+                "authority": authority,
+            }, False
     # fmt: on
 
     def list_evidence_vault_operational_sv9_shadow_diagnostics(
@@ -12136,14 +12524,21 @@ def _sv9_judgment_accepted_result_authority(
             supports = tile.get("supporting_evidence")
             if not isinstance(supports, list):
                 raise ValueError("accepted SV9 candidate supports are invalid")
-            candidate_supports[tile_id] = {
-                (str(item["evidence_ref"]), str(item["evidence_fingerprint"]))
+            if any(
+                not isinstance(item, Mapping)
+                or not isinstance(item.get("evidence_ref"), str)
+                or not item["evidence_ref"]
+                or not isinstance(item.get("evidence_fingerprint"), str)
+                or not _is_sha256(item["evidence_fingerprint"])
                 for item in supports
-                if isinstance(item, Mapping)
-                and isinstance(item.get("evidence_ref"), str)
-                and isinstance(item.get("evidence_fingerprint"), str)
+            ):
+                raise ValueError("accepted SV9 candidate supports are invalid")
+            candidate_supports[tile_id] = {
+                (item["evidence_ref"], item["evidence_fingerprint"])
+                for item in supports
             }
         packet_basis_by_identity: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        blind_accepted_tiles: dict[str, Mapping[str, Any]] = {}
         for tile in accepted_tiles:
             if not isinstance(tile, Mapping):
                 raise ValueError("accepted SV9 tile basis is invalid")
@@ -12151,6 +12546,10 @@ def _sv9_judgment_accepted_result_authority(
             basis = tile.get("basis")
             if not tile_id or not isinstance(basis, list):
                 raise ValueError("accepted SV9 tile basis is invalid")
+            if semantic_state == "sin_evidencia":
+                if basis:
+                    raise ValueError("accepted SV9 tile basis is invalid")
+                blind_accepted_tiles[tile_id] = tile
             for original in basis:
                 if not isinstance(original, Mapping) or not {"relation_id", "evidence_id", "source_identity_id", "polarity"}.issubset(original):
                     raise ValueError("accepted SV9 relation basis is incomplete")
@@ -12184,6 +12583,18 @@ def _sv9_judgment_accepted_result_authority(
             if tile["assessment_state"] == "sin_evidencia":
                 raise ValueError("accepted SV9 witness contradicts candidate tile state")
             accepted.append({"tile_id": tile_id, "component_key": str(tile["component_key"]), "assessment_state": tile["assessment_state"], "authority_state": "accepted", "review_state": "resolved", "lifecycle_state": "active", "basis": sorted(basis, key=lambda row: row["relation_id"])})
+        for tile_id, prior in blind_accepted_tiles.items():
+            if tile_id in selected_basis:
+                continue
+            tile = candidate_tiles.get(tile_id)
+            if (
+                tile is None
+                or str(tile.get("component_key")) != str(prior.get("component_key"))
+                or tile.get("assessment_state") != "sin_evidencia"
+                or candidate_supports.get(tile_id)
+            ):
+                continue
+            accepted.append({"tile_id": tile_id, "component_key": str(prior["component_key"]), "assessment_state": "sin_evidencia", "authority_state": "accepted", "review_state": "resolved", "lifecycle_state": "active", "basis": []})
         accepted.sort(key=lambda row: str(row["tile_id"]))
         expected_capture = {"capture_id": str(candidate_context["capture_id"]), "capture_fingerprint": str(candidate_context["capture_fingerprint"])}
         expected_operation = {"operation_id": str(candidate_context["operation_plan_id"]), "operation_fingerprint": str(candidate_context["operation_fingerprint"])}
@@ -12975,6 +13386,55 @@ def _sv9_checkpoint_stored_record(conn: Any, row: Mapping[str, Any] | None, cont
 _SV9_AUTHORITY_EVENT = "evidence-vault-sv9-judgment-authority-event-v1"
 _SV9_AUTHORITY_REQUEST = "evidence-vault-sv9-judgment-authority-request-v1"
 _SV9_AUTHORITY_COLUMNS = "id workspace_id brand_id event_type sequence predecessor_event_id active_parent_event_id candidate_id candidate_scan_run_id candidate_capture_id candidate_operation_plan_id request_fingerprint event_fingerprint evaluation_bundle_fingerprint canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint assessment_fingerprint score_fingerprint delta_fingerprint idempotency_key_hash event_payload".split()
+_SV9_REVIEW_RESOLUTION_COLUMNS = "id workspace_id brand_id candidate_id scan_run_id source_scan_id capture_id operation_plan_id schema_version candidate_schema_version candidate_complete_record_fingerprint canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint evaluation_bundle_fingerprint assessment_fingerprint score_fingerprint decision expected_authority_event_id expected_authority_event_fingerprint expected_authority_event_sequence active_authority_event_id active_authority_event_fingerprint active_authority_event_sequence evaluated_authority_event_id evaluated_authority_event_fingerprint evaluated_authority_sequence reopen_authority_event_id reopen_authority_event_fingerprint reopen_authority_event_sequence reopen_active_parent_event_id reopen_active_parent_event_fingerprint reopen_active_parent_event_sequence reopen_delta_fingerprint reopen_review_overlay_fingerprint successor_authority_event_id successor_authority_event_fingerprint successor_authority_event_sequence resolution_key_hash created_at".split()
+
+
+def _sv9_review_resolution_record(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a 038 row into the pure service's canonical string shape."""
+
+    try:
+        value: dict[str, Any] = {}
+        for name in _SV9_REVIEW_RESOLUTION_COLUMNS:
+            raw = row[name]
+            if name == "created_at":
+                value[name] = (
+                    raw.isoformat() if hasattr(raw, "isoformat") else raw
+                )
+            elif name.endswith("_id"):
+                value[name] = None if raw is None else str(raw)
+            elif name.endswith("_sequence"):
+                value[name] = None if raw is None else int(raw)
+            else:
+                value[name] = raw if raw is None else str(raw)
+        return value
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise EvidenceVaultSv9JudgmentCandidateError(
+            "SV9 judgment review resolution row is invalid."
+        ) from exc
+
+
+def _append_sv9_review_resolution(
+    conn: Any, resolution: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    columns = list(_SV9_REVIEW_RESOLUTION_COLUMNS)
+    values = [resolution[name] for name in columns]
+    if resolution.get("created_at") is None:
+        columns.pop()
+        values.pop()
+    row = conn.execute(
+        f"""
+        INSERT INTO {_SCHEMA}.evidence_vault_sv9_judgment_review_resolutions
+            ({', '.join(columns)})
+        VALUES ({', '.join(['%s'] * len(columns))})
+        RETURNING *
+        """,
+        tuple(values),
+    ).fetchone()
+    if row is None:
+        raise EvidenceVaultSv9JudgmentCandidateError(
+            "SV9 judgment review resolution could not be appended."
+        )
+    return row
 
 
 def _sv9_authority_fingerprint(value: Any, field: str, *, optional: bool = False) -> str | None:
@@ -13123,13 +13583,32 @@ def _sv9_authority_event(
     delta: Mapping[str, Any] | None,
     partition: Mapping[str, Any] | None = None,
     created_at: str | None = None,
+    review_resolution: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if (
         bool(candidate) == bool(delta)
         or (candidate is not None and partition is not None)
         or (partition is not None and delta is None)
+        or (review_resolution is not None and candidate is None)
+        or (review_resolution is not None and delta is not None)
     ):
         raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment authority event is invalid.")
+    review_link = None
+    if review_resolution is not None:
+        try:
+            review_link = {
+                "resolution_id": _sv9_authority_uuid(
+                    review_resolution["resolution_id"], "resolution_id"
+                ),
+                "resolution_key_hash": _sv9_authority_fingerprint(
+                    review_resolution["resolution_key_hash"],
+                    "resolution_key_hash",
+                ),
+            }
+        except (KeyError, TypeError) as exc:
+            raise EvidenceVaultSv9JudgmentCandidateError(
+                "SV9 judgment review link is invalid."
+            ) from exc
     head, active = (state["head"], state["active"]) if state else (None, None)
     kind = "reopen" if delta else ("supersede" if state else "adopt")
     if (
@@ -13166,6 +13645,8 @@ def _sv9_authority_event(
         if delta
         else {}
     )
+    if review_link is not None:
+        payload["sv9_review_resolution"] = review_link
     return {
         "id": event_id,
         "workspace_id": context["workspace_id"],
@@ -13174,6 +13655,9 @@ def _sv9_authority_event(
         "sequence": canonical["sequence"],
         "predecessor_event_id": head["id"] if head else None,
         "active_parent_event_id": active["id"] if active else None,
+        "active_parent_event_fingerprint": canonical[
+            "active_parent_event_fingerprint"
+        ],
         "candidate_id": candidate["id"] if candidate else None,
         "candidate_scan_run_id": candidate_row["scan_run_id"] if candidate_row else None,
         "candidate_capture_id": candidate_row["capture_id"] if candidate_row else None,
@@ -13221,7 +13705,9 @@ def _replay_sv9_judgment_authority(conn: Any, workspace_slug: str, workspace_id:
         if kind in {"adopt", "supersede"}:
             candidate, candidate_row = _sv9_authority_candidate(conn, _sv9_authority_uuid(row["candidate_id"], "candidate_id"), workspace_slug, workspace_id, brand_id)
             request = _sv9_authority_request("adopt_candidate", candidate["id"], predecessor, None, candidate_row["source_scan_id"])
+            review_link = payload.get("sv9_review_resolution")
         else:
+            review_link = None
             partition = _sv9_authority_partition(
                 payload.get("workset_partition"), payload.get("signed_delta")
             )
@@ -13237,7 +13723,7 @@ def _replay_sv9_judgment_authority(conn: Any, workspace_slug: str, workspace_id:
                 if source_context is None or source_context["workspace_id"] != workspace_id or source_context["brand_id"] != brand_id: raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment reopen source context is unavailable.")
                 _sv9_authority_reopen_binding(conn, state, source_context, delta)
         created_at = row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"])
-        event = _sv9_authority_event(context, state, request, _sv9_authority_fingerprint(row["idempotency_key_hash"], "idempotency_key_hash"), candidate, candidate_row, delta, partition, created_at)
+        event = _sv9_authority_event(context, state, request, _sv9_authority_fingerprint(row["idempotency_key_hash"], "idempotency_key_hash"), candidate, candidate_row, delta, partition, created_at, review_link)
         if any((row[key] is None) != (event[key] is None) or (row[key] is not None and (row[key] != event[key] if key == "event_payload" else str(row[key]) != str(event[key]))) for key in _SV9_AUTHORITY_COLUMNS):
             raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment authority replay is invalid.")
         events[event["id"]] = event
@@ -13245,6 +13731,31 @@ def _replay_sv9_judgment_authority(conn: Any, workspace_slug: str, workspace_id:
             state, overlay = {"head": event, "active": event, "candidate": candidate, "events": events, "overlay": None}, None
         else:
             state = {"head": event, "active": state["active"], "candidate": state["candidate"], "events": events, "overlay": {"review_state": "pending", "signed_delta": delta, "delta_fingerprint": delta["canonical_delta_fingerprint"]} | ({"workset_partition": partition, "workset_partition_fingerprint": partition["partition_fingerprint"]} if partition else {})}
+    if state is not None and state["overlay"] is not None:
+        resolutions = conn.execute(
+            f"""SELECT id, candidate_id, resolution_key_hash, decision
+                FROM {_SCHEMA}.evidence_vault_sv9_judgment_review_resolutions
+                WHERE workspace_id = %s
+                  AND brand_id = %s
+                  AND reopen_authority_event_id = %s""",
+            (workspace_id, brand_id, state["head"]["id"]),
+        ).fetchall()
+        if len(resolutions) > 1:
+            raise EvidenceVaultSv9JudgmentCandidateError(
+                "SV9 judgment authority has multiple resolutions for one reopen."
+            )
+        if resolutions:
+            resolution = resolutions[0]
+            if str(resolution["decision"]) != "reject":
+                raise EvidenceVaultSv9JudgmentCandidateError(
+                    "SV9 judgment authority resolution is inconsistent."
+                )
+            state["overlay"] = state["overlay"] | {
+                "review_state": "rejected",
+                "resolution_id": str(resolution["id"]),
+                "resolution_key_hash": str(resolution["resolution_key_hash"]),
+                "candidate_id": str(resolution["candidate_id"]),
+            }
     return state
 
 

@@ -47,6 +47,7 @@ from web.report_store import (
     list_report_payloads_for_index,
     list_reports_for_domain,
     load_report,
+    _postgres_repository,
     verify_postgres_runtime_ready,
     vault_sv9_shadow_diagnostics_enabled,
     vault_sv9_shadow_diagnostics_for_domain,
@@ -451,6 +452,85 @@ def _brand_profile(domain: str) -> dict:
         "not_detected": (current or {}).get("not_detected") or [],
         "visual_module": _moodboard_from_report(current) if current else {"available": False, "images": []},
         "vault_memory": _vault_tile_memory_profile(normalized_domain),
+        "sv9_authority": _vault_sv9_authority_tile_view(normalized_domain),
+    }
+
+
+def _vault_sv9_authority_tile_view(domain: str) -> dict[str, Any]:
+    """Expose accepted SV9 tiles and pending rescan deltas to the Vault UI."""
+
+    if os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() != "vault":
+        return {"enabled": False}
+    repository = _postgres_repository()
+    if repository is None:
+        return {
+            "enabled": True,
+            "available": False,
+            "status": "unavailable",
+            "message": "La autoridad SV9 no está disponible temporalmente.",
+        }
+    try:
+        authority = repository.get_evidence_vault_sv9_judgment_authority(domain)
+    except Exception:
+        _LOG.exception("failed to build SV9 authority tile view", extra={"domain": domain})
+        return {
+            "enabled": True,
+            "available": False,
+            "status": "unavailable",
+            "message": "La autoridad SV9 no está disponible temporalmente.",
+        }
+    if not isinstance(authority, dict):
+        return {"enabled": True, "available": False, "status": "absent"}
+
+    candidate = authority.get("accepted_candidate")
+    rows = candidate.get("candidate_tile_judgments") if isinstance(candidate, dict) else []
+    tiles = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        tiles.append(
+            {
+                "tile_id": str(row.get("tile_id") or ""),
+                "component_key": str(row.get("component_key") or ""),
+                "state": str(row.get("assessment_state") or "sin_evidencia"),
+                "evidence_count": len(row.get("supporting_evidence") or []),
+                "authority": "accepted",
+            }
+        )
+    overlay = authority.get("reopen_review_overlay")
+    is_pending = isinstance(overlay, dict) and overlay.get("review_state", "pending") == "pending"
+    is_rejected = isinstance(overlay, dict) and overlay.get("review_state") == "rejected"
+    signed_delta = overlay.get("signed_delta") if isinstance(overlay, dict) else {}
+    proposed = []
+    for relation in (signed_delta.get("authoritative_relations") or []) if is_pending else []:
+        if not isinstance(relation, dict):
+            continue
+        proposed.append(
+            {
+                "tile_id": str(relation.get("tile_id") or ""),
+                "component_key": str(relation.get("component_key") or ""),
+                "state": "review",
+                "proposed_state": str(relation.get("disposition") or ""),
+                "evidence_count": 1,
+                "authority": "pending",
+            }
+        )
+    return {
+        "enabled": True,
+        "available": True,
+        "status": "review_required" if is_pending else "rejected" if is_rejected else "accepted",
+        "score": (candidate.get("assessment") or {}).get("sv9_score") if isinstance(candidate, dict) else None,
+        "source_scan_id": (candidate or {}).get("source_scan_id") if isinstance(candidate, dict) else None,
+        "review_scan_id": ((overlay or {}).get("request") or {}).get("source_scan_id") if isinstance(overlay, dict) else None,
+        "tiles": tiles,
+        "pending_tiles": proposed,
+        "pending_count": len(proposed),
+        "rejected_review": {
+            "candidate_id": overlay.get("candidate_id"),
+            "resolution_id": overlay.get("resolution_id"),
+        } if is_rejected else None,
+        "accepted_count": len(tiles),
+        "authority": True,
     }
 
 

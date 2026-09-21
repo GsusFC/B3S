@@ -71,7 +71,7 @@ def _evidence(seed: str) -> tuple[dict, dict]:
     return value, row
 
 
-def _fixture():
+def _fixture(*, blind_tile: str | None = None):
     values = [_evidence("1"), _evidence("2")]
     by_tile = {"M1": values[0][0], "M2": values[1][0]}
 
@@ -96,7 +96,7 @@ def _fixture():
         build_candidate_tile(
             tile_id=str(tile["tile_id"]),
             basis=[basis(str(tile["tile_id"]), by_tile[str(tile["tile_id"])])]
-            if str(tile["tile_id"]) in by_tile
+            if str(tile["tile_id"]) in by_tile and str(tile["tile_id"]) != blind_tile
             else [],
         )
         for tile in build_tile_contract_registry()["tiles"]
@@ -181,23 +181,33 @@ def _fixture():
         capture_origin=capture,
         operation_origin=operation,
     )
+    candidate_tile_judgments = [
+        {
+            "tile_id": "M1",
+            "component_key": "mission",
+            "assessment_state": "no",
+            "supporting_evidence": [
+                {
+                    "evidence_ref": first_value["ref"],
+                    "evidence_fingerprint": first_row["content_hash"],
+                }
+            ],
+        }
+    ]
+    if blind_tile is not None:
+        candidate_tile_judgments.append(
+            {
+                "tile_id": blind_tile,
+                "component_key": "mission",
+                "assessment_state": "sin_evidencia",
+                "supporting_evidence": [],
+            }
+        )
     candidate = {
         "schema_version": "evidence-vault-sv9-judgment-candidate-v2",
         "source_scan_id": "historical-scan",
         "authoritative_relation_witness": witness,
-        "candidate_tile_judgments": [
-            {
-                "tile_id": "M1",
-                "component_key": "mission",
-                "assessment_state": "no",
-                "supporting_evidence": [
-                    {
-                        "evidence_ref": first_value["ref"],
-                        "evidence_fingerprint": first_row["content_hash"],
-                    }
-                ],
-            }
-        ],
+        "candidate_tile_judgments": candidate_tile_judgments,
     }
     context = {
         "workspace_id": "workspace",
@@ -212,6 +222,64 @@ def _fixture():
     }
     candidate_context = dict(context, source_scan_id="historical-scan")
     return packet_row, [first_row, values[1][1]], candidate, context, candidate_context, operational_witness
+
+
+def _rebind_packet_row(packet_row: dict, packet: dict) -> dict:
+    accepted_version = canonical_fingerprint(
+        packet["accepted_memory"]["schema_version"], packet["accepted_memory"]
+    )
+    packet["accepted_memory_candidate_version"] = accepted_version
+    packet["proposed_canonical_memory_version"] = accepted_version
+    packet["scoring_projection"]["accepted_memory_candidate_version"] = accepted_version
+    packet["candidate_packet_fingerprint"] = canonical_fingerprint(
+        packet["schema_version"],
+        {key: value for key, value in packet.items() if key != "candidate_packet_fingerprint"},
+    )
+    resolution = history._operational_storage_resolution(packet)
+    rebound = dict(packet_row)
+    rebound.update(
+        packet_payload=packet,
+        reference_resolution=resolution,
+        packet_fingerprint=packet["candidate_packet_fingerprint"],
+        accepted_memory_candidate_version=accepted_version,
+        reference_resolution_fingerprint=resolution["reference_resolution_fingerprint"],
+    )
+    return rebound
+
+
+def _rebind_candidate_witness(candidate: dict, packet: dict, capture: dict, operation: dict) -> None:
+    operational_witness = dict(candidate["authoritative_relation_witness"]["operational_witness"])
+    operational_witness["candidate_packet_fingerprint"] = packet["candidate_packet_fingerprint"]
+    relation = candidate["authoritative_relation_witness"]["authoritative_relations"][0]
+    payload = {
+        "operational_witness": operational_witness,
+        "authoritative_relations": [relation],
+    }
+    payload["projection_fingerprint"] = canonical_fingerprint(
+        "evidence-vault-sv9-authoritative-relation-projection-v1",
+        {
+            "source_scan_id": "historical-scan",
+            "capture_origin": capture,
+            "operation_origin": operation,
+            **payload,
+        },
+    )
+    candidate["authoritative_relation_witness"] = build_evidence_vault_sv9_authoritative_relation_witness(
+        source_scan_id="historical-scan",
+        projection={"status": "available", "reason_codes": [], **payload},
+        capture_origin=capture,
+        operation_origin=operation,
+    )
+
+
+def _reconstruct(monkeypatch, packet_row, evidence_rows, candidate, context, candidate_context):
+    connection = _Connection(packet_row, evidence_rows)
+    monkeypatch.setattr(history, "_vault_operation_row", lambda *args, **kwargs: {"row": True})
+    monkeypatch.setattr(history, "_sv9_judgment_context", lambda *args, **kwargs: candidate_context)
+    monkeypatch.setattr(history, "_replay_sv9_judgment_authority", lambda *args, **kwargs: {"candidate": candidate})
+    return history._sv9_judgment_accepted_result_authority(
+        connection, {"candidate": candidate}, context, "b3s"
+    )
 
 
 def test_repository_facts_uses_only_candidate_witness_basis_and_preserves_original_fields(monkeypatch):
@@ -250,3 +318,108 @@ def test_repository_facts_does_not_reuse_operational_only_basis_without_result(m
     facts = history._sv9_judgment_authoritative_relation_facts(connection, context, "b3s")
     assert facts["authority"] is None
     assert not any("canonical_memory_packets" in query for query, _ in connection.calls)
+
+
+def test_repository_reconstruction_preserves_accepted_blind_tile_without_relation(monkeypatch):
+    packet_row, evidence_rows, candidate, context, candidate_context, _ = _fixture(blind_tile="M2")
+    reconstructed = _reconstruct(
+        monkeypatch, packet_row, evidence_rows, candidate, context, candidate_context
+    )
+
+    assert {row["tile_id"] for row in reconstructed["accepted"]} == {"M1", "M2"}
+    assert next(row for row in reconstructed["accepted"] if row["tile_id"] == "M2") == {
+        "tile_id": "M2",
+        "component_key": "mission",
+        "assessment_state": "sin_evidencia",
+        "authority_state": "accepted",
+        "review_state": "resolved",
+        "lifecycle_state": "active",
+        "basis": [],
+    }
+
+
+def test_repository_reconstruction_does_not_preserve_blind_tile_with_supporting_evidence(monkeypatch):
+    packet_row, evidence_rows, candidate, context, candidate_context, _ = _fixture(blind_tile="M2")
+    candidate["candidate_tile_judgments"][1]["supporting_evidence"] = [
+        {
+            "evidence_ref": "evidence-2",
+            "evidence_fingerprint": evidence_rows[1]["content_hash"],
+        }
+    ]
+
+    reconstructed = _reconstruct(
+        monkeypatch, packet_row, evidence_rows, candidate, context, candidate_context
+    )
+
+    assert {row["tile_id"] for row in reconstructed["accepted"]} == {"M1"}
+
+
+@pytest.mark.parametrize("malformed", [{"evidence_ref": "evidence-2"}, None])
+def test_repository_reconstruction_rejects_malformed_blind_tile_support(monkeypatch, malformed):
+    packet_row, evidence_rows, candidate, context, candidate_context, _ = _fixture(blind_tile="M2")
+    candidate["candidate_tile_judgments"][1]["supporting_evidence"] = [malformed]
+
+    with pytest.raises(history.EvidenceVaultSv9JudgmentCandidateError, match="cannot be reconstructed"):
+        _reconstruct(monkeypatch, packet_row, evidence_rows, candidate, context, candidate_context)
+
+
+def test_repository_reconstruction_does_not_preserve_blind_tile_on_component_mismatch(monkeypatch):
+    packet_row, evidence_rows, candidate, context, candidate_context, _ = _fixture(blind_tile="M2")
+    candidate["candidate_tile_judgments"][1]["component_key"] = "identity"
+
+    reconstructed = _reconstruct(
+        monkeypatch, packet_row, evidence_rows, candidate, context, candidate_context
+    )
+
+    assert {row["tile_id"] for row in reconstructed["accepted"]} == {"M1"}
+
+
+def test_repository_reconstruction_does_not_autoaccept_changed_blind_verdict(monkeypatch):
+    packet_row, evidence_rows, candidate, context, candidate_context, _ = _fixture(blind_tile="M2")
+    candidate["candidate_tile_judgments"][1].update(
+        assessment_state="ok",
+        supporting_evidence=[
+            {
+                "evidence_ref": "evidence-2",
+                "evidence_fingerprint": evidence_rows[1]["content_hash"],
+            }
+        ],
+    )
+
+    reconstructed = _reconstruct(
+        monkeypatch, packet_row, evidence_rows, candidate, context, candidate_context
+    )
+
+    assert {row["tile_id"] for row in reconstructed["accepted"]} == {"M1"}
+
+
+def test_repository_reconstruction_rejects_sin_evidencia_with_nonempty_basis(monkeypatch):
+    packet_row, evidence_rows, candidate, context, candidate_context, _ = _fixture(blind_tile="M2")
+    packet = deepcopy(packet_row["packet_payload"])
+    blind = next(row for row in packet["accepted_memory"]["accepted_tiles"] if row["tile_id"] == "M2")
+    blind["basis"] = [
+        {
+            "relation_id": _sha("invalid-blind-relation"),
+            "evidence_id": _sha("invalid-blind-evidence"),
+            "source_identity_id": _sha("invalid-blind-source"),
+            "polarity": "supports",
+        }
+    ]
+    packet_row = _rebind_packet_row(packet_row, packet)
+    _rebind_candidate_witness(
+        candidate,
+        packet,
+        {
+            "capture_id": "00000000-0000-0000-0000-000000000009",
+            "capture_fingerprint": _sha("capture"),
+        },
+        {
+            "operation_id": "00000000-0000-0000-0000-000000000010",
+            "operation_fingerprint": _sha("operation"),
+        },
+    )
+
+    with pytest.raises(history.EvidenceVaultSv9JudgmentCandidateError, match="cannot be reconstructed"):
+        _reconstruct(
+            monkeypatch, packet_row, evidence_rows, candidate, context, candidate_context
+        )

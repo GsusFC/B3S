@@ -88,6 +88,19 @@ def test_selected_older_idempotent_occurrence_is_not_required_to_be_head():
     assert result["event"] != result["current_head"]
     assert authority_projection.validate_evidence_vault_sv9_authority_projection(result) == result
 
+def test_rejected_review_overlay_is_resolved_and_keeps_authority_bound():
+    result = _projection(pending=True)
+    result["reopen_review_overlay"] |= {
+        "review_state": "rejected",
+        "resolution_id": _U(901),
+        "resolution_key_hash": _H(902),
+        "candidate_id": result["accepted_candidate"]["id"],
+    }
+    validated = authority_projection.validate_evidence_vault_sv9_authority_projection(result)
+    assert validated["reopen_review_overlay"]["review_state"] == "rejected"
+    assert validated["reopen_review_overlay"]["resolution_id"] == _U(901)
+    assert validated["active_authority_event"] == result["active_authority_event"]
+
 @pytest.mark.parametrize("change", (
     lambda value: value.pop("authority"), lambda value: value.__setitem__("unknown", True), lambda value: value.__setitem__("authority_scope", "foreign"),
     lambda value: value.__setitem__("production_runtime_effect", True), lambda value: value.__setitem__("scanner_runtime_effect", True),

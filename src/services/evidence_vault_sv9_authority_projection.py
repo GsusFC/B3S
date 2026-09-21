@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from typing import Any
+from uuid import UUID
 
 from src.services import evidence_vault_sv9_authority_event as authority_event
 from src.services import evidence_vault_sv9_judgment_delta as judgment_delta
@@ -21,6 +22,7 @@ _ACTIVE_BINDINGS = (
 )
 _OVERLAY_FIELDS_V1 = frozenset({"review_state", "signed_delta", "delta_fingerprint"})
 _OVERLAY_FIELDS_V2 = _OVERLAY_FIELDS_V1 | {"workset_partition", "workset_partition_fingerprint"}
+_RESOLVED_OVERLAY_FIELDS = frozenset({"resolution_id", "resolution_key_hash", "candidate_id"})
 # fmt: on
 
 
@@ -90,8 +92,22 @@ def _overlay(value: Any, head: Mapping[str, Any], active: Mapping[str, Any]) -> 
     overlay = _mapping(value, "review overlay")
     v2 = head["schema_version"].endswith("v2")
     fields = _OVERLAY_FIELDS_V2 if v2 else _OVERLAY_FIELDS_V1
-    if set(overlay) != fields or overlay["review_state"] != "pending":
+    review_state = overlay.get("review_state")
+    if review_state not in {"pending", "rejected"}:
         _fail("review overlay")
+    expected_fields = fields if review_state == "pending" else fields | _RESOLVED_OVERLAY_FIELDS
+    if set(overlay) != expected_fields:
+        _fail("review overlay")
+    if review_state == "rejected":
+        try:
+            if str(UUID(overlay["resolution_id"])) != overlay["resolution_id"]:
+                raise ValueError
+            if str(UUID(overlay["candidate_id"])) != overlay["candidate_id"]:
+                raise ValueError
+            if type(overlay["resolution_key_hash"]) is not str or len(overlay["resolution_key_hash"]) != 64 or any(char not in "0123456789abcdef" for char in overlay["resolution_key_hash"]):
+                raise ValueError
+        except (AttributeError, TypeError, ValueError):
+            _fail("resolved review overlay")
     try:
         signed = judgment_delta.validate_evidence_vault_sv9_judgment_delta(overlay["signed_delta"])
     except judgment_delta.EvidenceVaultSV9JudgmentDeltaError as exc:

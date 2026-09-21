@@ -1849,6 +1849,90 @@ def test_brand_view_hides_vault_memory_outside_vault(monkeypatch):
     assert "memoria vault" not in response.text
 
 
+def test_brand_view_exposes_accepted_and_pending_sv9_tiles(monkeypatch):
+    from web.app import _vault_sv9_authority_tile_view
+
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setattr(
+        "web.app._postgres_repository",
+        lambda: type(
+            "Repository",
+            (),
+            {
+                "get_evidence_vault_sv9_judgment_authority": lambda _self, _domain: {
+                    "accepted_candidate": {
+                        "source_scan_id": "scan-accepted",
+                        "assessment": {"sv9_score": 72},
+                        "candidate_tile_judgments": [
+                            {
+                                "tile_id": "M1",
+                                "component_key": "mission",
+                                "assessment_state": "ok",
+                                "supporting_evidence": [{"evidence_ref": "e1"}],
+                            }
+                        ],
+                    },
+                    "reopen_review_overlay": {
+                        "request": {"source_scan_id": "scan-rescan"},
+                        "signed_delta": {
+                            "authoritative_relations": [
+                                {
+                                    "tile_id": "M1",
+                                    "component_key": "mission",
+                                    "disposition": "contradiction",
+                                }
+                            ]
+                        },
+                    },
+                }
+            },
+        )(),
+    )
+
+    view = _vault_sv9_authority_tile_view("example.com")
+
+    assert view["status"] == "review_required"
+    assert view["score"] == 72
+    assert view["review_scan_id"] == "scan-rescan"
+    assert view["tiles"][0]["state"] == "ok"
+    assert view["pending_tiles"][0]["state"] == "review"
+    assert view["pending_tiles"][0]["proposed_state"] == "contradiction"
+
+
+def test_brand_view_exposes_rejected_sv9_review_without_pending_tiles(monkeypatch):
+    from web.app import _vault_sv9_authority_tile_view
+
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setattr(
+        "web.app._postgres_repository",
+        lambda: type(
+            "Repository",
+            (),
+            {
+                "get_evidence_vault_sv9_judgment_authority": lambda _self, _domain: {
+                    "accepted_candidate": {
+                        "source_scan_id": "scan-accepted",
+                        "assessment": {"sv9_score": 72},
+                        "candidate_tile_judgments": [],
+                    },
+                    "reopen_review_overlay": {
+                        "review_state": "rejected",
+                        "candidate_id": "candidate-rejected",
+                        "resolution_id": "resolution-1",
+                        "signed_delta": {"authoritative_relations": [{"tile_id": "M1"}]},
+                    },
+                }
+            },
+        )(),
+    )
+
+    view = _vault_sv9_authority_tile_view("example.com")
+
+    assert view["status"] == "rejected"
+    assert view["pending_count"] == 0
+    assert view["pending_tiles"] == []
+    assert view["rejected_review"]["resolution_id"] == "resolution-1"
+
 def test_brand_view_counts_unreviewed_vault_mappings_as_pending(monkeypatch):
     from web.app import app
 

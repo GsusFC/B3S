@@ -215,6 +215,8 @@ def test_v2_reopen_payload_replays_only_the_immutable_partition(monkeypatch) -> 
 
         def execute(self, statement, *_args):
             self.queries.append(statement)
+            if "evidence_vault_sv9_judgment_review_resolutions" in statement:
+                return Result([])
             if not statement.lstrip().startswith("SELECT * FROM"):
                 raise AssertionError("replay must not write")
             return Result(self.rows)
@@ -232,7 +234,8 @@ def test_v2_reopen_payload_replays_only_the_immutable_partition(monkeypatch) -> 
     assert replayed["overlay"]["workset_partition"]["review_partition"][
         "evaluation_input_reopened_tile_ids"
     ] == ["M1"]
-    assert len(connection.queries) == 1
+    assert len(connection.queries) == 2
+    assert "evidence_vault_sv9_judgment_review_resolutions" in connection.queries[1]
 
     tampered = [row(adopted), row(reopened)]
     tampered[1]["event_payload"].pop("workset_partition")
