@@ -469,7 +469,13 @@ def _authority(value: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]], 
         ids = {"accepted_candidate_id": str(UUID(candidate["id"])), "active_event_id": str(UUID(value["active_authority_event"]["event_id"])), "current_head_event_fingerprint": value["current_head"]["event_fingerprint"]}
         if overlay is not None and overlay.get("review_state") == "rejected":
             ids["rejected_candidate_id"] = str(UUID(overlay["candidate_id"]))
-        snapshot = {"state": "accepted_authority", **ids, "candidate_complete_record_fingerprint": candidate["complete_record_fingerprint"], "canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"], "current_series_fingerprint": candidate["current_series_fingerprint"]}
+        snapshot = {
+            "state": "accepted_authority",
+            **{key: ids[key] for key in ("accepted_candidate_id", "active_event_id", "current_head_event_fingerprint")},
+            "candidate_complete_record_fingerprint": candidate["complete_record_fingerprint"],
+            "canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"],
+            "current_series_fingerprint": candidate["current_series_fingerprint"],
+        }
         return tiles, sentinels, ids, overlay is not None and overlay.get("review_state") == "pending", snapshot
     except (AttributeError, KeyError, TypeError, ValueError, memory.JudgmentMemoryContractError, planner.IncrementalPlannerError) as exc: raise EvidenceVaultSv9AuthorityEvaluationError("authority is invalid") from exc
 

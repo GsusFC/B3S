@@ -42,9 +42,10 @@ def publish_approved_sv9_review(
     if not isinstance(candidate, Mapping):
         raise Sv9ReviewPublicationError("approved SV9 resolution has no candidate")
     source_scan_id = str(resolution.get("source_scan_id") or "").strip()
-    report_id = f"sv9-review-{resolution.get('id')}"
-    if not source_scan_id or not report_id.endswith(str(resolution.get("id"))):
+    resolution_id = str(resolution.get("id") or "").strip()
+    if not source_scan_id or not resolution_id:
         raise Sv9ReviewPublicationError("approved SV9 resolution identity is invalid")
+    report_id = f"sv9-review-{resolution_id}"
 
     operation = repository.get_capture_operation_plan(source_scan_id)
     if not isinstance(operation, Mapping):

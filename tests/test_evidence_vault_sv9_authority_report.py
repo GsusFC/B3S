@@ -95,6 +95,7 @@ _GENERIC = _expression("_result('authority_conflict', outcome)")
 _CALLS = Counter({
     ("run_evidence_vault_sv9_authority_application", _expression("_result('authority_conflict', {'reason_codes': ['evaluation_failure']})")): 1,
     ("run_evidence_vault_sv9_authority_application", _GENERIC): 2, ("_apply_candidate", _GENERIC): 3, ("_candidate_readback", _GENERIC): 1, ("_apply_review", _GENERIC): 4,
+    ("_apply_candidate", _expression("_result('authority_retained', dict(outcome) | {'reason_codes': ['review_rejected']}, authority, candidate)")): 1,
     ("_candidate_review", _expression("_result('review_required', dict(outcome) | {'reason_codes': [reason]}, authority, candidate)")): 1,
     ("_apply_review", _expression("_result('authority_conflict', outcome, authority)")): 1, ("_apply_review", _expression("_result('review_required', outcome, authority, signed_delta=signed)")): 2,
     ("_apply_review", _expression("_result('first_run_unresolved', outcome)")): 1, ("_retain", _expression("_result('authority_retained', outcome, authority)")): 1,
@@ -103,6 +104,7 @@ _CALLS = Counter({
 _CALL_ROWS = {
     ("run_evidence_vault_sv9_authority_application", _expression("_result('authority_conflict', {'reason_codes': ['evaluation_failure']})")): {CONFLICT_NONE},
     ("run_evidence_vault_sv9_authority_application", _GENERIC): {CONFLICT_NO_SCORE, CONFLICT_NONE}, ("_apply_candidate", _GENERIC): {CONFLICT_CANDIDATE}, ("_candidate_readback", _GENERIC): {CONFLICT_CANDIDATE}, ("_apply_review", _GENERIC): {CONFLICT_REVIEW},
+    ("_apply_candidate", _expression("_result('authority_retained', dict(outcome) | {'reason_codes': ['review_rejected']}, authority, candidate)")): {RETAINED},
     ("_candidate_review", _expression("_result('review_required', dict(outcome) | {'reason_codes': [reason]}, authority, candidate)")): {REVIEWED, REVIEW_WITHOUT_AUTHORITY},
     ("_apply_review", _expression("_result('authority_conflict', outcome, authority)")): {CONFLICT_REVIEW_AUTHORITY}, ("_apply_review", _expression("_result('review_required', outcome, authority, signed_delta=signed)")): {PENDING},
     ("_apply_review", _expression("_result('first_run_unresolved', outcome)")): {FIRST_REVIEW}, ("_retain", _expression("_result('authority_retained', outcome, authority)")): {RETAINED},
@@ -126,7 +128,7 @@ def _result_calls(tree):
 
 def test_authority_application_result_inventory_is_complete_and_bounded():
     observed = _result_calls(ast.parse(Path(application.__file__).read_text()))
-    assert observed == _CALLS and sum(observed.values()) == 19 and set(observed) == set(_CALL_ROWS)
+    assert observed == _CALLS and sum(observed.values()) == 20 and set(observed) == set(_CALL_ROWS)
     assert all(rows <= EXPECTED_ROWS and rows for rows in _CALL_ROWS.values()) and set().union(*_CALL_ROWS.values()) == EXPECTED_ROWS
     assert publication.VALID_APPLICATION_ROWS == EXPECTED_ROWS and type(publication.VALID_APPLICATION_ROWS) is frozenset
 

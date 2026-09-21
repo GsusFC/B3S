@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from web.vault_sv9_review_publication import publish_approved_sv9_review
+import pytest
+
+from web.vault_sv9_review_publication import (
+    Sv9ReviewPublicationError,
+    publish_approved_sv9_review,
+)
 
 
 def _resolution(decision: str) -> dict:
@@ -87,6 +92,21 @@ def test_approved_resolution_publishes_new_immutable_report(monkeypatch):
     assert result["report_id"].startswith("sv9-review-")
     assert len(published) == 1
     assert published[0]["review_publication"]["authority"] is True
+
+
+def test_approved_resolution_requires_a_non_empty_identity():
+    resolution = _resolution("approve")
+    resolution["id"] = "   "
+
+    with pytest.raises(Sv9ReviewPublicationError, match="identity is invalid"):
+        publish_approved_sv9_review(
+            resolution_result={
+                "resolution": resolution,
+                "authority": {"accepted_candidate": {"id": "candidate"}},
+            },
+            domain="example.com",
+            repository=object(),
+        )
 
 
 def assert_application(application, current):
