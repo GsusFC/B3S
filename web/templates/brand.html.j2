@@ -28,7 +28,7 @@
       / {{ (brand.current.created_at or "")[:10] }}
     </span>
     <a class="source-link" href="/report/{{ brand.current.id }}">ver SV9</a>
-    <form method="post" action="/scan" class="brand-profile-scan-form" data-b3s-rescan-form>
+    <form method="post" action="/scan" class="brand-profile-scan-form" data-b3s-scan-form data-b3s-rescan-form>
       <input type="hidden" name="url" value="{{ brand.url }}">
       <input type="hidden" name="brand_name" value="{{ brand.display_name }}">
       <button type="submit">reescanear</button>
@@ -51,7 +51,7 @@
     {% else %}
     <strong class="brand-profile-score">—</strong>
     <span class="brand-profile-terminal-value is-empty">sin scan local</span>
-    <form method="post" action="/scan" class="brand-profile-scan-form">
+    <form method="post" action="/scan" class="brand-profile-scan-form" data-b3s-scan-form>
       <input type="hidden" name="url" value="{{ brand.url }}">
       <input type="hidden" name="brand_name" value="{{ brand.display_name }}">
       <button type="submit">escanear</button>
@@ -59,6 +59,9 @@
     {% endif %}
   </div>
 </section>
+
+<div hidden data-b3s-webmcp-surface="floc"></div>
+<script src="/static/vault_webmcp_loader.js" defer></script>
 
 <section class="brand-profile-summary">
   {% if brand.sv9_authority.enabled %}
