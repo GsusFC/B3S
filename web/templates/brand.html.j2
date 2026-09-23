@@ -28,6 +28,11 @@
       / {{ (brand.current.created_at or "")[:10] }}
     </span>
     <a class="source-link" href="/report/{{ brand.current.id }}">ver SV9</a>
+    <form method="post" action="/scan" class="brand-profile-scan-form" data-b3s-rescan-form>
+      <input type="hidden" name="url" value="{{ brand.url }}">
+      <input type="hidden" name="brand_name" value="{{ brand.display_name }}">
+      <button type="submit">reescanear</button>
+    </form>
     {% if brand.latest_attempt and brand.latest_attempt.id != brand.current.id %}
     <a class="source-link" href="/report/{{ brand.latest_attempt.id }}">último intento</a>
     {% endif %}

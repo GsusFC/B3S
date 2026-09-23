@@ -1785,6 +1785,9 @@ def test_brand_view_renders_profile_from_matching_reports(monkeypatch):
     assert "Stabolut" in response.text
     assert "Stablecoin platform." in response.text
     assert 'href="/report/report123"' in response.text
+    assert 'data-b3s-rescan-form' in response.text
+    assert 'name="url" value="https://stabolut.com"' in response.text
+    assert '>reescanear</button>' in response.text
     assert "79" in response.text
 
 
