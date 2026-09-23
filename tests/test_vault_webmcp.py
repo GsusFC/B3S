@@ -35,13 +35,18 @@ def _read(path: Path) -> str:
 
 def test_vault_webmcp_is_loaded_only_from_explicit_surfaces() -> None:
     index = _read(TEMPLATES / "index.html.j2")
+    brand = _read(TEMPLATES / "brand.html.j2")
     review = _read(TEMPLATES / "vault_review.html.j2")
 
     assert index.count('data-b3s-webmcp-surface="floc"') == 1
     assert index.count("data-b3s-scan-form") == 1
+    assert brand.count('data-b3s-webmcp-surface="floc"') == 1
+    assert brand.count("data-b3s-scan-form") == 2
+    assert brand.count("data-b3s-rescan-form") == 1
     assert review.count('data-b3s-webmcp-surface="review"') == 1
     assert 'data-b3s-webmcp-domain="{{ review.domain }}"' in review
     assert index.count('/static/vault_webmcp_loader.js') == 1
+    assert brand.count('/static/vault_webmcp_loader.js') == 1
     assert review.count('/static/vault_webmcp_loader.js') == 1
 
 
