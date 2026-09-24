@@ -11,7 +11,7 @@ from src.sv9 import incremental_planner as planner
 from src.sv9 import judgment_memory as memory
 from tests.test_evidence_vault_sv9_authoritative_relations import _Repository, _facts, _id, _sha
 from tests.test_sv9_judgment_memory import _series
-def _input(*, extras=(), hints=(), sin_evidencia=False, missing=()):
+def _input(*, extras=(), hints=(), sin_evidencia=False, missing=(), completed=()):
     facts = _facts(count=max(1, len(missing)))
     if sin_evidencia:
         facts["authority"]["accepted"][0].update(assessment_state="sin_evidencia", basis=[])
@@ -36,6 +36,14 @@ def _input(*, extras=(), hints=(), sin_evidencia=False, missing=()):
         }
         for label, tile, evidence in hints
     ]
+    if completed:
+        facts["processing_complete_evidence"] = sorted(
+            (
+                {"evidence_ref": row["evidence_ref"], "evidence_fingerprint": row["evidence_fingerprint"]}
+                for row in facts["evidence"] if row["evidence_ref"] in {f"evidence-{label}" for label in completed}
+            ),
+            key=lambda row: (row["evidence_ref"], row["evidence_fingerprint"]),
+        )
     result = project_evidence_vault_sv9_evaluation_input(repository=_Repository(facts), source_scan_id="scan-1")
     assert result["status"] == "available"
     return result
@@ -124,6 +132,34 @@ def test_hint_reusing_the_same_authoritative_tile_relation_is_filtered_before_pa
     assert source["non_authoritative_hints"] == []
     value = _build(source, signed_delta)
     assert value["healthy_workset"]["state"] == "evaluable"
+
+
+def test_hints_on_evidence_cited_by_accepted_judgments_route_without_relations():
+    # An empty relation witness is a valid accepted authority whose judgments
+    # still cite evidence; the delta counts that evidence as known, not unmapped.
+    source = _input(
+        extras=("other", "new", "done"),
+        hints=(("cross-tile-hint", "M2", "1"), ("same-tile-hint", "M1", "1"), ("new-evidence-hint", "M3", "new")),
+        sin_evidencia=True,
+        completed=("1", "done"),
+    )
+    assert source["authoritative_relations"] == []
+    prior = _prior(source)
+    index = next(index for index, row in enumerate(prior) if row["tile_id"] == "M2")
+    raw = {key: item for key, item in prior[index].items() if key not in {"schema_version", "series_fingerprint", "canonical_judgment_fingerprint"}}
+    other = next(row for row in source["current_evidence"] if row["evidence_ref"] == "evidence-other")
+    prior[index] = memory.build_tile_judgment(**(raw | {"supporting_evidence": [other]}))
+
+    value = _build(source, _delta(source, prior=prior))
+
+    healthy = {row["tile_id"]: row for row in value["healthy_workset"]["tiles"]}
+    bindings = {row["evidence_ref"]: row for row in source["current_identity_bindings"]}
+    hinted = {"signed_hint", "canonical_plan_and_signed_hint"}
+    assert healthy["M2"]["route_source"] in hinted and bindings["evidence-1"] in healthy["M2"]["current_evidence_bindings"]
+    assert healthy["M3"]["route_source"] in hinted and bindings["evidence-new"] in healthy["M3"]["current_evidence_bindings"]
+    assert healthy.get("M1", {}).get("route_source") not in hinted
+    assert [row["evidence_ref"] for row in value["processing_complete_evidence"]] == ["evidence-done"]
+    assert partition.validate_evidence_vault_sv9_workset_partition(json.loads(json.dumps(value))) == value
 
 
 def test_workset_partition_still_rejects_tampered_authoritative_overlap():
