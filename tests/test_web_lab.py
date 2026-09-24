@@ -2744,6 +2744,7 @@ def test_vault_pages_say_no_report_is_accepted_without_authority(monkeypatch, tm
     from web.app import _brand_profile, _report_rows_for_index, app
 
     reports, _pointer = _vault_history_with_pointer()
+    reports[0]["url"] = "https://www.example.com/product"
     _serve_vault_pages(monkeypatch, tmp_path, reports, {})
     history_score = score_publication_from_report(reports[0])["raw_value"]
     client = TestClient(app)
@@ -2756,6 +2757,9 @@ def test_vault_pages_say_no_report_is_accepted_without_authority(monkeypatch, tm
 
     assert profile["current"] is None
     assert [row["id"] for row in profile["reports"]] == ["latest", "accepted"]
+    # A new scan must target the brand's historical URL, not its bare domain.
+    assert (profile["display_name"], profile["url"]) == ("Example", "https://www.example.com/product")
+    assert '<input type="hidden" name="url" value="https://www.example.com/product">' in brand.text
     assert brand.status_code == 200
     assert brand.text.count("Vault aún no ha aceptado ningún informe") == 2
     assert "sin scan local" not in brand.text
@@ -2765,6 +2769,7 @@ def test_vault_pages_say_no_report_is_accepted_without_authority(monkeypatch, tm
     assert 'href="/report/accepted"' in brand.text
     assert len(rows) == 1
     assert rows[0]["brand_domain"] == "example.com"
+    assert (rows[0]["brand_name"], rows[0]["url"]) == ("Example", "https://www.example.com/product")
     assert "score_publication" not in rows[0]
     assert index.status_code == 200
     assert "Vault aún no ha aceptado ningún informe" in index.text

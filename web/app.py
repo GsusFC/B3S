@@ -424,6 +424,9 @@ def _brand_profile(domain: str) -> dict:
     current = next((report for report in reports if str(report.get("id") or "") == selected_id), None)
     latest_attempt = reports[0] if reports else None
     normalized_domain = domain_key(domain) or domain
+    # Without an accepted Vault report, history still names the brand and the
+    # URL a new scan must target.
+    identity = current or latest_attempt or {}
 
     components = list((current or {}).get("components") or [])
     detected = [component for component in components if component.get("status") == "scored"]
@@ -439,8 +442,8 @@ def _brand_profile(domain: str) -> dict:
     value = next((component for component in components if component.get("key") == "value_proposition"), {})
     return {
         "domain": normalized_domain,
-        "display_name": (current or {}).get("brand_name") or normalized_domain,
-        "url": (current or {}).get("url") or f"https://{normalized_domain}",
+        "display_name": identity.get("brand_name") or normalized_domain,
+        "url": identity.get("url") or f"https://{normalized_domain}",
         "current": current,
         "latest_attempt": latest_attempt,
         "is_vault": os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault",
@@ -1173,13 +1176,14 @@ def _report_rows_for_index() -> list[dict[str, Any]]:
             accepted_pointers=accepted_pointers,
         )
         if is_vault and selected is None:
-            # Keep the brand reachable without presenting a history report as
-            # its current one.
+            # Keep the brand reachable, named and linked as its history names
+            # it, without presenting a history report as its current one.
+            latest = classified[0] if classified else {}
             rows.append(
                 {
                     "brand_domain": domain,
-                    "brand_name": domain,
-                    "url": f"https://{domain}",
+                    "brand_name": latest.get("brand_name") or domain,
+                    "url": latest.get("url") or f"https://{domain}",
                     "vault_unaccepted": True,
                 }
             )
