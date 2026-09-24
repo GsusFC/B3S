@@ -26,7 +26,7 @@ from src.services.legal_identity import legal_name_aliases
 _TRANSIENT_SEARCH_ATTEMPTS = 2
 _TRANSIENT_SEARCH_DELAY_S = 1.5
 _MAX_BRAND_DATA_WORKERS = 4
-EXA_STRATEGY_VERSION = "precision_vnext_v2"
+EXA_STRATEGY_VERSION = "precision_vnext_v3"
 
 
 @dataclass
@@ -98,9 +98,11 @@ class ExaCollector:
             },
         },
         "external_profiles": {
+            # No "company" category: it returns company homepages (the brand's
+            # own site and namesakes), which the external filter rejects, and
+            # misses LinkedIn, Wikipedia and directory profile pages.
             "type": "auto",
             "num_results": 10,
-            "category": "company",
             "contents": {
                 "highlights": {"max_characters": 3000},
                 "text": {"max_characters": 4000},
