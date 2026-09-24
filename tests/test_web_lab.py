@@ -2739,6 +2739,53 @@ def test_vault_pages_display_the_accepted_authority_report(monkeypatch, tmp_path
     assert '<a class="source-link" href="/report/accepted">ver SV9</a>' in report.text
 
 
+def test_vault_brand_pages_show_no_comparator_verdict(monkeypatch, tmp_path):
+    from web import report_store
+    from web.app import _brand_profile, _report_rows_for_index, app
+
+    reports, pointer = _vault_history_with_pointer()
+    _serve_vault_pages(monkeypatch, tmp_path, reports, {"example.com": pointer})
+    temporal = report_store.selected_report_for_display
+    delta = {
+        "lost_urls": ["https://example.com/contact"],
+        "added_urls": ["https://example.com/work", "https://example.com/careers"],
+    }
+
+    def comparator_retains_every_scan(history, *, mode=None):
+        # Core's comparator retains scans that missed sources an earlier scan saw.
+        selected, classified, state = temporal(history, mode=mode)
+        for item in classified:
+            item["stability"] = {
+                **(item.get("stability") or {}),
+                "classification": "acquisition_regression",
+                "previous_comparison": {"delta": delta},
+            }
+            item["canonical_status"] = "non_canonical"
+        return selected, classified, state
+
+    monkeypatch.setattr("web.report_store.selected_report_for_display", comparator_retains_every_scan)
+    client = TestClient(app)
+
+    profile = _brand_profile("example.com")
+    rows = _report_rows_for_index()
+    brand = client.get("/brand/example.com?lang=es")
+    index = client.get("/")
+
+    accepted = next(report for report in profile["reports"] if report["id"] == "accepted")
+    assert profile["current"]["id"] == "accepted"
+    assert accepted["score_publication"]["publishable"] is True
+    assert accepted["score_publication"]["classification"] == "acquisition_regression"
+    assert [row["score_publication"]["publishable"] for row in rows] == [True]
+    assert brand.status_code == 200
+    for verdict in ("diagnóstico", "non_canonical", "acquisition_regression"):
+        assert verdict not in brand.text
+    assert brand.text.count("aceptado por Vault") == 3
+    # The acquisition difference stays visible as a neutral note.
+    assert brand.text.count("URLs no reobservadas: 1 · nuevas: 2") == 3
+    assert index.status_code == 200
+    assert "diagnóstico" not in index.text
+
+
 def test_vault_pages_say_no_report_is_accepted_without_authority(monkeypatch, tmp_path):
     from src.services.scanner_score_publication import score_publication_from_report
     from web.app import _brand_profile, _report_rows_for_index, app

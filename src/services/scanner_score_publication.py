@@ -23,7 +23,11 @@ RETAINED_SCORE_CLASSIFICATIONS = frozenset(
 )
 
 
-def score_publication_from_report(report: dict[str, Any]) -> dict[str, Any]:
+def score_publication_from_report(
+    report: dict[str, Any],
+    *,
+    comparator_retention: bool = True,
+) -> dict[str, Any]:
     try:
         if (
             "sv9_assessment" not in report
@@ -67,13 +71,19 @@ def score_publication_from_report(report: dict[str, Any]) -> dict[str, Any]:
     )
     classification = str(stability.get("classification") or "").strip()
     availability = str(assessment.get("availability") or "legacy")
+    # Vault disables comparator retention: its SV9 authority decides which
+    # report a brand shows and reviews coverage loss itself, while the temporal
+    # comparator only measures acquisition differences between scans.
     publishable = (
         availability == "available"
-        and classification
-        not in RETAINED_SCORE_CLASSIFICATIONS - {"candidate", "evaluation_drift"}
+        and (
+            not comparator_retention
+            or classification
+            not in RETAINED_SCORE_CLASSIFICATIONS - {"candidate", "evaluation_drift"}
+        )
     ) or (
         availability == "legacy"
-        and classification not in RETAINED_SCORE_CLASSIFICATIONS
+        and (not comparator_retention or classification not in RETAINED_SCORE_CLASSIFICATIONS)
     )
     raw_value = (
         report.get("score")
