@@ -412,13 +412,28 @@ def _brand_publication_for_report(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _acquisition_note(report: dict[str, Any]) -> str:
+    """Describe URL differences against the previous scan without judging the brand."""
+
+    stability = report.get("stability") if isinstance(report.get("stability"), dict) else {}
+    comparison = stability.get("previous_comparison")
+    delta = comparison.get("delta") if isinstance(comparison, dict) else None
+    if not isinstance(delta, dict):
+        return "sin escaneo previo"
+    lost = len(delta.get("lost_urls") or [])
+    added = len(delta.get("added_urls") or [])
+    return f"URLs no reobservadas: {lost} · nuevas: {added}"
+
+
 def _brand_profile(domain: str) -> dict:
     raw_reports = list_reports_for_domain(domain)
     selected, classified_reports, history_state = selected_report_for_brand(domain, raw_reports)
+    is_vault = os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault"
     reports = []
     for source_report in classified_reports:
         report = _sanitize_report_language(source_report)
-        report["score_publication"] = score_publication_from_report(report)
+        report["score_publication"] = score_publication_from_report(report, comparator_retention=not is_vault)
+        report["acquisition_note"] = _acquisition_note(report)
         reports.append(report)
     selected_id = str((selected or {}).get("id") or "")
     current = next((report for report in reports if str(report.get("id") or "") == selected_id), None)
@@ -446,7 +461,7 @@ def _brand_profile(domain: str) -> dict:
         "url": identity.get("url") or f"https://{normalized_domain}",
         "current": current,
         "latest_attempt": latest_attempt,
-        "is_vault": os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault",
+        "is_vault": is_vault,
         "reports": reports,
         "history_state": history_state,
         "enforcement_mode": canonical_enforcement_mode(),
@@ -1193,7 +1208,7 @@ def _report_rows_for_index() -> list[dict[str, Any]]:
             continue
         enriched = dict(source)
         enriched["brand_domain"] = domain
-        enriched["score_publication"] = score_publication_from_report(enriched)
+        enriched["score_publication"] = score_publication_from_report(enriched, comparator_retention=not is_vault)
         rows.append(enriched)
     return rows
 

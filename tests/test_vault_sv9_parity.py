@@ -562,6 +562,26 @@ def test_true_legacy_report_remains_compatible_without_assessment_markers() -> N
     assert publication["score_fingerprint"] is None
 
 
+def test_score_without_comparator_retention_ignores_acquisition_regression() -> None:
+    from src.services.scanner_score_publication import score_publication_from_report
+
+    report = _available_report("vault-after-regression")
+    report["stability"] = {"classification": "acquisition_regression"}
+    invalid = _available_report("vault-invalid-assessment")
+    invalid.pop("sv9_assessment")
+    invalid["raw"] = {}
+
+    retained = score_publication_from_report(report)
+    vault = score_publication_from_report(report, comparator_retention=False)
+
+    assert (retained["publishable"], retained["retention_reason"]) == (False, "acquisition_regression")
+    assert (vault["publishable"], vault["retention_reason"]) == (True, "")
+    assert vault["value"] is not None and vault["value"] == vault["sv9_score"]
+    assert vault["classification"] == "acquisition_regression"
+    # Without the comparator, an invalid assessment still fails closed.
+    assert score_publication_from_report(invalid, comparator_retention=False)["publishable"] is False
+
+
 def test_explicit_unavailable_assessment_remains_nonpublishable() -> None:
     from src.services.scanner_score_publication import score_publication_from_report
 
