@@ -128,7 +128,9 @@ def test_collect_brand_data_uses_precision_exa_queries_in_production():
     external_call = next(call for call in fake.calls if "press mention media coverage client testimonial case study review" in call["query"])
     news_call = next(call for call in fake.calls if "press release media coverage announcement featured in" in call["query"])
     assert owned_call["kwargs"]["include_domains"] == ["brand.com"]
-    assert profile_call["kwargs"]["category"] == "company"
+    # Exa's company category returns company homepages, which the external
+    # filter rejects; profile pages come back only without it.
+    assert "category" not in profile_call["kwargs"]
     assert external_call["kwargs"]["exclude_domains"] == ["brand.com"]
     assert news_call["kwargs"]["exclude_domains"] == ["brand.com"]
     assert len(data.mentions) == 1
