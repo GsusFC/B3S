@@ -49,6 +49,7 @@ def build_evidence_vault_sv9_workset_partition(
             bindings=bindings,
             unmapped=unmapped,
             hinted_records=hinted_records,
+            known_pairs={(evidence_ref, evidence_fingerprint) for _tile, evidence_ref, evidence_fingerprint in _known(delta)},
         )
         processing_records = {row["evidence_record_id"] for row in processing_complete}
         pending = [
@@ -164,12 +165,22 @@ def _unmapped(delta: Mapping[str, Any], bindings: list[dict[str, Any]]) -> set[s
     if len(pairs) != len(delta["unmapped_evidence"]) or not pairs <= set(by_pair):
         _fail("unmapped evidence")
     return {by_pair[pair] for pair in pairs}
+def _known(delta: Mapping[str, Any]) -> set[tuple[str, str, str]]:
+    # The delta counts evidence cited by accepted judgments as known, not
+    # unmapped, even when the accepted witness carries no relations.
+    return {
+        (row["tile_id"], value["evidence_ref"], value["evidence_fingerprint"])
+        for row in delta["prior_judgments"]
+        for value in row["supporting_evidence"]
+    }
 def _hints(source: Mapping[str, Any], delta: Mapping[str, Any], by_record: Mapping[str, dict[str, Any]], unmapped: set[str]):
     mapped = {
         (row["tile_id"], row["evidence_ref"], row["evidence_fingerprint"])
         for row in delta["authoritative_relations"]
     }
     mapped_pairs = {(evidence_ref, evidence_fingerprint) for _tile, evidence_ref, evidence_fingerprint in mapped}
+    known = _known(delta)
+    known_pairs = {(evidence_ref, evidence_fingerprint) for _tile, evidence_ref, evidence_fingerprint in known}
     hinted_tiles: dict[str, set[str]] = {}
     records = set()
     for hint in source["non_authoritative_hints"]:
@@ -178,8 +189,14 @@ def _hints(source: Mapping[str, Any], delta: Mapping[str, Any], by_record: Mappi
             _fail("hint is not delta-unmapped")
         pair = record["evidence_ref"], record["evidence_fingerprint"]
         relation = hint["tile_id"], *pair
-        if (hint["evidence_record_id"] not in unmapped and pair not in mapped_pairs) or relation in mapped:
+        if relation in mapped:
             _fail("hint is not delta-unmapped")
+        if hint["evidence_record_id"] not in unmapped and pair not in mapped_pairs:
+            if pair not in known_pairs:
+                _fail("hint is not delta-unmapped")
+            if relation in known:
+                # The tile's own accepted judgment already cites this evidence.
+                continue
         hinted_tiles.setdefault(hint["tile_id"], set()).add(hint["evidence_record_id"])
         records.add(hint["evidence_record_id"])
     return hinted_tiles, records
@@ -205,6 +222,7 @@ def _processing_complete(
     bindings: list[dict[str, Any]],
     unmapped: set[str],
     hinted_records: set[str],
+    known_pairs: set[tuple[str, str]],
 ) -> list[dict[str, Any]]:
     if type(value) is not list:
         _fail("processing completion evidence")
@@ -213,13 +231,20 @@ def _processing_complete(
         for row in bindings
     }
     selected: set[str] = set()
+    seen: set[str] = set()
     for raw in value:
         if type(raw) is not dict or set(raw) != {"evidence_ref", "evidence_fingerprint"}:
             _fail("processing completion evidence")
         row = by_pair.get((raw["evidence_ref"], raw["evidence_fingerprint"]))
-        if row is None or row["evidence_record_id"] not in unmapped - hinted_records or row["evidence_record_id"] in selected:
+        if row is None or row["evidence_record_id"] in seen:
             _fail("processing completion evidence")
+        seen.add(row["evidence_record_id"])
         if raw != {"evidence_ref": row["evidence_ref"], "evidence_fingerprint": row["evidence_fingerprint"]}:
+            _fail("processing completion evidence")
+        if row["evidence_record_id"] not in unmapped and (row["evidence_ref"], row["evidence_fingerprint"]) in known_pairs:
+            # Accepted judgments already account for this evidence.
+            continue
+        if row["evidence_record_id"] not in unmapped - hinted_records:
             _fail("processing completion evidence")
         selected.add(row["evidence_record_id"])
     expected = [
