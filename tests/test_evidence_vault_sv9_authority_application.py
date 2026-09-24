@@ -964,3 +964,108 @@ def test_accepted_input_reuse_does_not_hide_changed_or_nonauthoritative_work(mon
     if change == "hint":
         assert result["status"] == "authority_retained" and result["reason_codes"] == ["incomplete_candidate"]
         assert any(row["tile_id"] == "C2" and row["evidence"] for call in flow.calls for row in call["requested_tiles"])
+
+
+class _AcceptedResultAuthorityRepository(_ApplicationRepository):
+    """Mirror the production facts loader's first-scan / later-scan asymmetry.
+
+    `_sv9_judgment_authoritative_relation_facts` in src/history/repository.py
+    builds `facts["authority"]` two different ways.  With no SV9 judgment
+    authority yet it falls back to operational canonical memory.  Once
+    authority exists it reconstructs from the accepted SV9 result through
+    `_sv9_judgment_accepted_result_authority`, which either reconstructs or
+    raises EvidenceVaultSv9JudgmentCandidateError, and that raise is never
+    converted into the operational fallback.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.accepted_result_reconstruction_fails = False
+
+    def load_evidence_vault_sv9_authoritative_relation_facts(self, scan, **kwargs):
+        if self.authority is not None and self.accepted_result_reconstruction_fails:
+            raise history.EvidenceVaultSv9JudgmentCandidateError(
+                "accepted SV9 authority witness cannot be reconstructed"
+            )
+        return super().load_evidence_vault_sv9_authoritative_relation_facts(scan, **kwargs)
+
+
+def test_rescan_reconstruction_failure_keeps_source_unavailable_in_diagnostics():
+    """A re-scan that cannot reconstruct accepted authority must say why.
+
+    `accepted_result_reconstruction_fails` is an injected precondition standing
+    in for an unconfirmed production trigger.  The scan diagnostic must keep
+    the evaluator's `source_unavailable` reason.  Publication still records no
+    score and appends no authority event; that is current behavior, pending a
+    separate publication decision.
+    """
+    from src.services import evidence_vault_sv9_authority_report as report
+    from web import scan_runner
+
+    repo = _AcceptedResultAuthorityRepository(records=(9,))
+    first = _run(repo, _Flow(), current=(9,), source="scan")
+    assert first["status"] == "authority_established"
+    assert repo.mutations == ["adopt"]
+    assert repo.authority["reopen_review_overlay"] is None
+    assert repo.authority["current_head"]["event_type"] == "adopt"
+    assert repo.authority["current_head"]["sequence"] == 1
+    accepted = deepcopy(repo.authority)
+
+    # The re-scan itself is ordinary: same evidence, nothing conflicting, no
+    # coverage loss.  While the accepted-result reconstruction still answers,
+    # that same scan reuses authority instead of breaking.
+    repo.records = (9,)
+    repo.projection_relations = [_relation(repo, "M1", number=9)]
+    control = evaluation_service.run_evidence_vault_sv9_authority_evaluation(
+        repository=repo, flow=_Flow(), domain_or_url="example.test",
+        source_scan_id="scan-2", current_series_contract=_series(),
+        trusted_irrelevant_evidence=[],
+    )
+    assert (control["status"], control["reason_codes"]) == ("no_new_score", ["exact_reuse"])
+
+    repo.accepted_result_reconstruction_fails = True
+    diagnostics = []
+    with evaluation_service.observe_evidence_vault_sv9_authority_evaluation_diagnostics(
+        lambda event, exc: diagnostics.append((event, exc))
+    ):
+        outcome = evaluation_service.run_evidence_vault_sv9_authority_evaluation(
+            repository=repo, flow=_Flow(), domain_or_url="example.test",
+            source_scan_id="scan-2", current_series_contract=_series(),
+            trusted_irrelevant_evidence=[],
+        )
+
+    # The evaluation-input projection is not "available", so this outcome
+    # carries neither a signed delta nor a workset partition.
+    assert outcome["status"] == "review_required"
+    assert outcome["reason_codes"] == ["source_unavailable"]
+    assert outcome["signed_delta"] is None
+    assert "workset_partition" not in outcome
+    assert outcome["accepted_authority"]["accepted_candidate_id"] == accepted["accepted_candidate"]["id"]
+
+    event = next(row for row, _exc in diagnostics if row["boundary"] == "sv9_authority_evaluation")
+    assert (event["status"], event["reason_codes"], event["coverage"]) == (
+        "review_required", ["source_unavailable"], {},
+    )
+    assert scan_runner._safe_authority_result(event) == {
+        "status": "review_required", "reason_codes": ["source_unavailable"],
+    }
+
+    # _apply_review returns before reopen_evidence_vault_sv9_judgment_authority
+    # is reached, so no authority event is appended.
+    application_result = _run(repo, _Flow(), current=(9,), source="scan-2")
+    assert application_result["status"] == "authority_conflict"
+    assert application_result["evaluation_status"] == "review_required"
+    assert application_result["reason_codes"] == ["source_unavailable"]
+    assert application_result["signed_delta"] is None
+    assert repo.mutations == ["adopt"]
+    assert repo.authority == accepted
+
+    # project_vault_authority_publication has no authority_conflict branch, so
+    # publication falls through to _none().
+    publication = report.project_vault_authority_publication(application_result, "scan-2")
+    assert publication["action"] == "record_no_score"
+    assert publication["source_report_id"] is None
+    payload = publication["scanner_payload"]["sv9"]
+    assert payload["reliability_status"] == "broken"
+    assert payload["brand3_score"] is None
+    assert payload["components"] == {}

@@ -75,6 +75,7 @@ _DIAGNOSTIC_REASON_CODES = frozenset(
         "scan_start_failed",
         "series_rollover",
         "shared_analysis_failure",
+        "source_unavailable",
         "stale_authoritative_relation_witness",
         "unmapped_evidence",
         "unwitnessed_legacy_candidate",
