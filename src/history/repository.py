@@ -6394,6 +6394,67 @@ class PostgresHistoryRepository:
             state = _replay_sv9_judgment_authority(conn, workspace_slug, brand["workspace_id"], brand["id"]) if brand else None
         return _project_sv9_judgment_authority(state) if state else None
 
+    def get_evidence_vault_sv9_accepted_pointers(
+        self,
+        domains: Iterable[str] | None = None,
+        *,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, dict[str, Any]]:
+        """Return each brand's accepted SV9 candidate identity without replay.
+
+        Display only needs to know which report the accepted candidate points
+        at.  As in replay, the accepted candidate belongs to the last adopt or
+        supersede event; a later reopen leaves it unchanged.  Callers must
+        still validate the report they bind to these fingerprints.
+        """
+
+        self._ensure_migrated()
+        normalized = None
+        if domains is not None:
+            normalized = sorted({normalize_domain(domain) for domain in domains} - {""})
+            if not normalized:
+                return {}
+        domain_filter = "" if normalized is None else "AND brands.canonical_domain = ANY(%s)"
+        params = (workspace_slug,) if normalized is None else (workspace_slug, normalized)
+        with self._connect() as conn:
+            _verify_exact_migration_head_under_shared_lock(conn)
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT ON (events.brand_id)
+                    brands.canonical_domain,
+                    candidates.id AS candidate_id,
+                    candidates.source_scan_id,
+                    candidates.assessment_fingerprint,
+                    candidates.score_fingerprint,
+                    events.sequence AS event_sequence
+                FROM {_SCHEMA}.evidence_vault_sv9_judgment_authority_events AS events
+                JOIN {_SCHEMA}.brands AS brands
+                  ON brands.workspace_id = events.workspace_id
+                 AND brands.id = events.brand_id
+                JOIN {_SCHEMA}.workspaces AS workspaces
+                  ON workspaces.id = brands.workspace_id
+                JOIN {_SCHEMA}.evidence_vault_sv9_judgment_candidates AS candidates
+                  ON candidates.id = events.candidate_id
+                 AND candidates.workspace_id = events.workspace_id
+                 AND candidates.brand_id = events.brand_id
+                WHERE workspaces.slug = %s
+                  AND events.event_type IN ('adopt', 'supersede')
+                  {domain_filter}
+                ORDER BY events.brand_id, events.sequence DESC
+                """,
+                params,
+            ).fetchall()
+        return {
+            str(row["canonical_domain"]): {
+                "candidate_id": str(row["candidate_id"]),
+                "source_scan_id": str(row["source_scan_id"]),
+                "assessment_fingerprint": str(row["assessment_fingerprint"]),
+                "score_fingerprint": str(row["score_fingerprint"]),
+                "event_sequence": int(row["event_sequence"]),
+            }
+            for row in rows
+        }
+
     def adopt_evidence_vault_sv9_judgment_candidate(self, source_scan_id: str, candidate_id: str, *, expected_predecessor_event_fingerprint: str | None, idempotency_key_hash: str, workspace_slug: str = "b3s") -> tuple[dict[str, Any], bool]:
         candidate = _sv9_authority_uuid(candidate_id, "candidate_id")
         predecessor = _sv9_authority_fingerprint(expected_predecessor_event_fingerprint, "expected_predecessor_event_fingerprint", optional=True)

@@ -22,7 +22,7 @@
     {% if brand.current %}
     <strong class="brand-profile-score">{{ brand.current.score_publication.raw_value if brand.current.score_publication.raw_value is not none else "—" }}</strong>
     <span class="brand-profile-terminal-value">
-      {{ brand.current.canonical_status or "sin_clasificar" }}
+      {{ "aceptado por Vault" if brand.is_vault else (brand.current.canonical_status or "sin_clasificar") }}
       · {{ brand.current.reliability_status or "unknown" }}
       {% if not brand.current.score_publication.publishable %} · diagnóstico{% endif %}
       / {{ (brand.current.created_at or "")[:10] }}
@@ -50,7 +50,7 @@
     {% endif %}
     {% else %}
     <strong class="brand-profile-score">—</strong>
-    <span class="brand-profile-terminal-value is-empty">sin scan local</span>
+    <span class="brand-profile-terminal-value is-empty">{{ "Vault aún no ha aceptado ningún informe" if brand.is_vault and brand.reports else "sin scan local" }}</span>
     <form method="post" action="/scan" class="brand-profile-scan-form" data-b3s-scan-form>
       <input type="hidden" name="url" value="{{ brand.url }}">
       <input type="hidden" name="brand_name" value="{{ brand.display_name }}">
@@ -359,7 +359,7 @@
       {% if brand.summary %}<p class="prose">{{ brand.summary }}</p>{% endif %}
       {% if brand.outcome %}<p class="muted">{{ brand.outcome }}</p>{% endif %}
       {% else %}
-      <p class="muted">No hay scan local para este dominio.</p>
+      <p class="muted">{{ "Vault aún no ha aceptado ningún informe." if brand.is_vault and brand.reports and not brand.current else "No hay scan local para este dominio." }}</p>
       {% endif %}
     </section>
 

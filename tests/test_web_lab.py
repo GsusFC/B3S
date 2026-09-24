@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import stat
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -1455,8 +1456,10 @@ def test_home_renders_report_list(monkeypatch):
 
 
 def test_home_groups_one_bulk_payload_collection_without_domain_loaders(monkeypatch):
+    from src.services.scanner_evidence_comparison import (
+        selected_report_for_display as select_reports,
+    )
     from web.app import _report_rows_for_index
-    from web.app import selected_report_for_display as select_reports
 
     reports = [
         {
@@ -1503,7 +1506,7 @@ def test_home_groups_one_bulk_payload_collection_without_domain_loaders(monkeypa
         "web.app.list_reports_for_domain",
         lambda _domain: pytest.fail("index must not load reports per domain"),
     )
-    monkeypatch.setattr("web.app.selected_report_for_display", select_once)
+    monkeypatch.setattr("web.report_store.selected_report_for_display", select_once)
 
     rows = _report_rows_for_index()
 
@@ -1794,20 +1797,9 @@ def test_brand_view_renders_profile_from_matching_reports(monkeypatch):
 def test_brand_view_exposes_persistent_tile_memory_only_in_vault(monkeypatch):
     from web.app import app
 
-    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
-    monkeypatch.setattr(
-        "web.app.list_reports_for_domain",
-        lambda _domain: [
-            {
-                "id": "latest",
-                "brand_name": "Example",
-                "url": "https://example.com",
-                "created_at": "2026-07-31T12:00:00+00:00",
-                "score": 64,
-                "components": [],
-            }
-        ],
-    )
+    reports, pointer = _vault_history_with_pointer()
+    _serve_vault_pointers(monkeypatch, {"example.com": pointer})
+    monkeypatch.setattr("web.app.list_reports_for_domain", lambda _domain: reports)
     monkeypatch.setattr(
         "web.app.evidence_scoring_memory_preview_for_domain",
         lambda _domain: {
@@ -2358,6 +2350,434 @@ def test_brand_view_handles_missing_scan(monkeypatch):
     assert "stabolut.com" in response.text
     assert "sin scan local" in response.text
     assert 'name="url" value="https://stabolut.com"' in response.text
+
+
+def _vault_history_with_pointer():
+    from src.services.scanner_report_assessment import assessment_projection_from_report
+    from tests.test_vault_sv9_parity import _available_report
+
+    accepted = _available_report("accepted")
+    accepted["created_at"] = "2026-09-08T12:00:00+00:00"
+    latest = _available_report("latest")
+    latest["created_at"] = "2026-09-08T13:00:00+00:00"
+    assessment = assessment_projection_from_report(accepted, required=True)
+    pointer = {
+        "candidate_id": "00000000-0000-0000-0000-0000000000a1",
+        "source_scan_id": "accepted",
+        "assessment_fingerprint": assessment["assessment_fingerprint"],
+        "score_fingerprint": assessment["score_fingerprint"],
+        "event_sequence": 1,
+    }
+    return [latest, accepted], pointer
+
+
+def _exact_resume_report(source_scan_id, digit, created_at):
+    from tests.test_vault_sv9_parity import _available_report
+
+    report = _available_report(f"exact-resume-{digit * 64}")
+    report["created_at"] = created_at
+    report["raw"]["source_capture"] = {
+        "source_scan_id": source_scan_id,
+        "observation_hash": "a" * 64,
+        "capture_hash": "b" * 64,
+    }
+    return report
+
+
+def _no_score_report(scan_id, created_at):
+    from src.services.evidence_vault_sv9_authority_report import (
+        project_vault_authority_publication,
+    )
+    from web.scan_runner import _compose_report
+
+    publication = project_vault_authority_publication(
+        {
+            "status": "authority_conflict",
+            "reason_codes": [],
+            "evaluation_status": None,
+            "candidate": None,
+            "signed_delta": None,
+            "authority": None,
+        },
+        scan_id,
+    )
+    assert publication["action"] == "record_no_score"
+    report = _compose_report(
+        scan_id,
+        "https://example.com",
+        "Example",
+        publication["scanner_payload"],
+    )
+    report["created_at"] = created_at
+    return report
+
+
+def _serve_vault_pointers(monkeypatch, pointers):
+    """Serve accepted SV9 pointers and record every repository read."""
+
+    calls = {"pointers": [], "authority": []}
+
+    class Repository:
+        def get_evidence_vault_sv9_accepted_pointers(
+            self,
+            domains=None,
+            *,
+            workspace_slug="b3s",
+        ):
+            calls["pointers"].append(
+                (None if domains is None else list(domains), workspace_slug)
+            )
+            if isinstance(pointers, Exception):
+                raise pointers
+            return {
+                domain: dict(pointer)
+                for domain, pointer in pointers.items()
+                if domains is None or domain in domains
+            }
+
+        def get_evidence_vault_sv9_judgment_authority(self, domain, **_kwargs):
+            # Only the SV9 authority tile view still replays the full authority.
+            calls["authority"].append(domain)
+            return None
+
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setattr("web.report_store._postgres_repository", Repository)
+    monkeypatch.setattr("web.app._postgres_repository", Repository)
+    return calls
+
+
+def _serve_vault_pages(monkeypatch, tmp_path, reports, pointers):
+    calls = _serve_vault_pointers(monkeypatch, pointers)
+    by_id = {report["id"]: report for report in reports}
+    monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr("web.app.list_reports_for_domain", lambda _domain: list(reports))
+    monkeypatch.setattr("web.app.list_report_payloads_for_index", lambda: list(reports))
+    monkeypatch.setattr("web.app.load_report", by_id.get)
+    monkeypatch.setattr(
+        "web.app.evidence_scoring_memory_preview_for_domain",
+        lambda _domain: {
+            "report_count": len(reports),
+            "summary": {},
+            "tile_evolution": {"summary": {}, "changes": []},
+        },
+    )
+    monkeypatch.setattr(
+        "web.app.evidence_claim_tile_ledger_for_domain",
+        lambda _domain: {"summary": {}, "reviewed_memory": {"available": False}},
+    )
+    return calls
+
+
+def test_vault_display_selects_accepted_report_over_temporal_history(monkeypatch):
+    from src.services.scanner_evidence_comparison import selected_report_for_display
+    from web import report_store
+
+    reports, pointer = _vault_history_with_pointer()
+    temporal, _classified, _state = selected_report_for_display(reports)
+    calls = _serve_vault_pointers(monkeypatch, {"example.com": pointer})
+    monkeypatch.setattr(report_store, "list_reports_for_domain", lambda _domain: reports)
+
+    selected, classified, state = report_store.selected_report_for_brand(
+        "example.com",
+        reports,
+    )
+
+    assert temporal["id"] == "latest"
+    assert selected["id"] == "accepted"
+    assert selected == classified[1]
+    assert [item["id"] for item in classified] == ["latest", "accepted"]
+    assert state["selected_report_id"] == "accepted"
+    assert state["canonical_report_id"] == "accepted"
+    assert state["provisional_report_id"] is None
+    assert report_store.current_report_for_domain("example.com")[0]["id"] == "accepted"
+    assert calls == {"pointers": [(["example.com"], "b3s")] * 2, "authority": []}
+
+
+@pytest.mark.parametrize(
+    "pointers",
+    [
+        pytest.param({}, id="no-pointer"),
+        pytest.param(RuntimeError("database unavailable"), id="pointer-error"),
+    ],
+)
+def test_vault_display_fails_closed_without_pointer(monkeypatch, caplog, pointers):
+    from web import report_store
+
+    reports, _pointer = _vault_history_with_pointer()
+    _serve_vault_pointers(monkeypatch, pointers)
+
+    with caplog.at_level(logging.ERROR, logger="web.report_store"):
+        selected, classified, state = report_store.selected_report_for_brand(
+            "example.com",
+            reports,
+        )
+
+    assert selected is None
+    assert [item["id"] for item in classified] == ["latest", "accepted"]
+    assert state["selected_report_id"] is None
+    assert state["canonical_report_id"] is None
+    assert state["provisional_report_id"] is None
+    assert ("failed to load Vault SV9 accepted pointers" in caplog.text) is isinstance(
+        pointers, Exception
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"source_scan_id": "missing"}, id="scan-not-in-history"),
+        pytest.param(
+            {"assessment_fingerprint": "f" * 64},
+            id="assessment-fingerprint-mismatch",
+        ),
+        pytest.param({"score_fingerprint": "f" * 64}, id="score-fingerprint-mismatch"),
+    ],
+)
+def test_vault_display_fails_closed_on_inconsistent_pointer(monkeypatch, overrides):
+    from web import report_store
+
+    reports, pointer = _vault_history_with_pointer()
+    _serve_vault_pointers(monkeypatch, {"example.com": pointer | overrides})
+
+    selected, classified, state = report_store.selected_report_for_brand(
+        "example.com",
+        reports,
+    )
+
+    assert selected is None
+    assert [item["id"] for item in classified] == ["latest", "accepted"]
+    assert state["selected_report_id"] is None
+    assert state["canonical_report_id"] is None
+    assert state["provisional_report_id"] is None
+
+
+@pytest.mark.parametrize(
+    ("original", "expected"),
+    [
+        pytest.param("absent", "exact-resume-" + "1" * 64, id="original-absent"),
+        pytest.param("no-score", "exact-resume-" + "1" * 64, id="original-without-score"),
+        pytest.param("accepted", "accepted", id="direct-match-preferred"),
+    ],
+)
+def test_vault_display_matches_exact_resume_successor(monkeypatch, original, expected):
+    from web import report_store
+
+    (latest, accepted), pointer = _vault_history_with_pointer()
+    # The newest successor has the lower id, so the choice is by recency.
+    history = [
+        latest,
+        _exact_resume_report("accepted", "1", "2026-09-08T12:45:00+00:00"),
+        _exact_resume_report("accepted", "2", "2026-09-08T12:30:00+00:00"),
+    ]
+    if original == "no-score":
+        history.append(_no_score_report("accepted", "2026-09-08T12:00:00+00:00"))
+    elif original == "accepted":
+        history.append(accepted)
+    _serve_vault_pointers(monkeypatch, {"example.com": pointer})
+
+    selected, _classified, state = report_store.selected_report_for_brand(
+        "example.com",
+        history,
+    )
+
+    assert selected["id"] == expected
+    assert state["selected_report_id"] == expected
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param(
+            lambda report: report["raw"]["source_capture"].update(source_scan_id="other"),
+            id="other-source-scan",
+        ),
+        pytest.param(
+            lambda report: report["raw"]["source_capture"].pop("capture_hash"),
+            id="incomplete-source-capture",
+        ),
+        pytest.param(
+            lambda report: report.update(id="exact-resume-invalid"),
+            id="malformed-successor-id",
+        ),
+    ],
+)
+def test_vault_display_rejects_exact_resume_without_bound_provenance(monkeypatch, tamper):
+    from web import report_store
+
+    (latest, _accepted), pointer = _vault_history_with_pointer()
+    resumed = _exact_resume_report("accepted", "1", "2026-09-08T12:45:00+00:00")
+    tamper(resumed)
+    _serve_vault_pointers(monkeypatch, {"example.com": pointer})
+
+    selected, _classified, _state = report_store.selected_report_for_brand(
+        "example.com",
+        [latest, resumed],
+    )
+
+    assert selected is None
+
+
+def test_core_display_keeps_temporal_selection_without_authority_reads(monkeypatch):
+    from src.services.scanner_evidence_comparison import selected_report_for_display
+    from web import report_store
+
+    reports, _pointer = _vault_history_with_pointer()
+
+    class Repository:
+        def get_evidence_vault_sv9_accepted_pointers(self, *_args, **_kwargs):
+            pytest.fail("core must not read Vault SV9 pointers")
+
+        def get_evidence_vault_sv9_judgment_authority(self, *_args, **_kwargs):
+            pytest.fail("core must not read Vault SV9 authority")
+
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "production")
+    monkeypatch.setattr("web.report_store._postgres_repository", Repository)
+
+    selection = report_store.selected_report_for_brand("example.com", reports)
+
+    assert selection == selected_report_for_display(reports)
+    assert selection[0]["id"] == "latest"
+
+
+@pytest.mark.parametrize(
+    ("pointer_read_fails", "expected"),
+    [
+        pytest.param(
+            False,
+            [
+                ("example.com", "accepted"),
+                ("alpha.test", "alpha-accepted"),
+                ("beta.test", None),
+            ],
+            id="pointers",
+        ),
+        pytest.param(
+            True,
+            [("example.com", None), ("alpha.test", None), ("beta.test", None)],
+            id="pointer-read-error",
+        ),
+    ],
+)
+def test_vault_index_reads_every_accepted_pointer_in_one_call(
+    monkeypatch,
+    pointer_read_fails,
+    expected,
+):
+    from tests.test_vault_sv9_parity import _available_report
+    from web.app import _report_rows_for_index
+
+    history, pointer = _vault_history_with_pointer()
+    for domain, scan_id in (("alpha.test", "alpha-accepted"), ("beta.test", "beta-latest")):
+        report = _available_report(scan_id)
+        report["url"] = f"https://{domain}"
+        history.append(report)
+    pointers = {
+        "example.com": pointer,
+        "alpha.test": pointer | {"source_scan_id": "alpha-accepted"},
+    }
+    calls = _serve_vault_pointers(
+        monkeypatch,
+        RuntimeError("database unavailable") if pointer_read_fails else pointers,
+    )
+    monkeypatch.setattr("web.app.list_report_payloads_for_index", lambda: list(history))
+    monkeypatch.setattr(
+        "web.app.list_reports_for_domain",
+        lambda _domain: pytest.fail("index must not load reports per domain"),
+    )
+
+    rows = _report_rows_for_index()
+
+    assert calls == {
+        "pointers": [(["example.com", "alpha.test", "beta.test"], "b3s")],
+        "authority": [],
+    }
+    assert [(row["brand_domain"], row.get("id")) for row in rows] == expected
+    assert [bool(row.get("vault_unaccepted")) for row in rows] == [
+        report_id is None for _domain, report_id in expected
+    ]
+
+
+def test_vault_brand_and_report_pages_read_one_pointer_per_request(monkeypatch, tmp_path):
+    from web.app import app
+
+    reports, pointer = _vault_history_with_pointer()
+    calls = _serve_vault_pages(monkeypatch, tmp_path, reports, {"example.com": pointer})
+    client = TestClient(app)
+
+    brand = client.get("/brand/example.com?lang=es")
+    brand_reads = list(calls["pointers"])
+    report = client.get("/report/latest")
+
+    assert brand.status_code == 200
+    assert report.status_code == 200
+    assert brand_reads == [(["example.com"], "b3s")]
+    assert calls["pointers"] == [(["example.com"], "b3s")] * 2
+
+
+def test_vault_pages_display_the_accepted_authority_report(monkeypatch, tmp_path):
+    from web.app import _brand_profile, _report_rows_for_index, app
+
+    reports, pointer = _vault_history_with_pointer()
+    _serve_vault_pages(monkeypatch, tmp_path, reports, {"example.com": pointer})
+    client = TestClient(app)
+
+    profile = _brand_profile("example.com")
+    brand = client.get("/brand/example.com?lang=es")
+    rows = _report_rows_for_index()
+    report = client.get("/report/latest")
+
+    assert profile["current"]["id"] == "accepted"
+    assert profile["latest_attempt"]["id"] == "latest"
+    assert [row["id"] for row in profile["reports"]] == ["latest", "accepted"]
+    assert brand.status_code == 200
+    assert '<a class="source-link" href="/report/accepted">ver SV9</a>' in brand.text
+    assert '<a class="source-link" href="/report/latest">último intento</a>' in brand.text
+    assert "aceptado por Vault" in brand.text
+    assert [row["id"] for row in rows] == ["accepted"]
+    assert report.status_code == 200
+    assert '<span class="chip warn">último intento</span>' in report.text
+    assert '<a class="source-link" href="/report/accepted">ver SV9</a>' in report.text
+
+
+def test_vault_pages_say_no_report_is_accepted_without_authority(monkeypatch, tmp_path):
+    from src.services.scanner_score_publication import score_publication_from_report
+    from web.app import _brand_profile, _report_rows_for_index, app
+
+    reports, _pointer = _vault_history_with_pointer()
+    reports[0]["url"] = "https://www.example.com/product"
+    _serve_vault_pages(monkeypatch, tmp_path, reports, {})
+    history_score = score_publication_from_report(reports[0])["raw_value"]
+    client = TestClient(app)
+
+    profile = _brand_profile("example.com")
+    brand = client.get("/brand/example.com?lang=es")
+    rows = _report_rows_for_index()
+    index = client.get("/")
+    report = client.get("/report/latest")
+
+    assert profile["current"] is None
+    assert [row["id"] for row in profile["reports"]] == ["latest", "accepted"]
+    # A new scan must target the brand's historical URL, not its bare domain.
+    assert (profile["display_name"], profile["url"]) == ("Example", "https://www.example.com/product")
+    assert '<input type="hidden" name="url" value="https://www.example.com/product">' in brand.text
+    assert brand.status_code == 200
+    assert brand.text.count("Vault aún no ha aceptado ningún informe") == 2
+    assert "sin scan local" not in brand.text
+    assert "No hay scan local" not in brand.text
+    assert "ver SV9" not in brand.text
+    assert 'href="/report/latest"' in brand.text
+    assert 'href="/report/accepted"' in brand.text
+    assert len(rows) == 1
+    assert rows[0]["brand_domain"] == "example.com"
+    assert (rows[0]["brand_name"], rows[0]["url"]) == ("Example", "https://www.example.com/product")
+    assert "score_publication" not in rows[0]
+    assert index.status_code == 200
+    assert "Vault aún no ha aceptado ningún informe" in index.text
+    assert 'href="/brand/example.com?lang=es"' in index.text
+    assert f"<strong>{history_score}</strong>" not in index.text
+    assert report.status_code == 200
+    assert '<span class="chip ok">SV9</span>' not in report.text
+    assert "ver SV9" not in report.text
 
 
 def test_api_health_page_renders_config_without_secrets(monkeypatch):

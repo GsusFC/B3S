@@ -27,7 +27,6 @@ from pydantic import ValidationError
 from src.build_info import current_build_sha
 from src.services.scanner_evidence_comparison import (
     canonical_enforcement_mode,
-    selected_report_for_display,
 )
 from src.services.scanner_content_sampling import content_sampling_from_report
 from src.services.scanner_report_assessment import assessment_projection_from_report
@@ -48,6 +47,8 @@ from web.report_store import (
     list_reports_for_domain,
     load_report,
     _postgres_repository,
+    selected_report_for_brand,
+    vault_accepted_pointers,
     verify_postgres_runtime_ready,
     vault_sv9_shadow_diagnostics_enabled,
     vault_sv9_shadow_diagnostics_for_domain,
@@ -397,8 +398,9 @@ def _brand_publication_for_report(report: dict[str, Any]) -> dict[str, Any]:
     }
     if not report_id or not domain:
         return empty
-    selected, classified, _state = selected_report_for_display(
-        list_reports_for_domain(domain)
+    selected, classified, _state = selected_report_for_brand(
+        domain,
+        list_reports_for_domain(domain),
     )
     selected_id = str((selected or {}).get("id") or "")
     latest_id = str((classified[0].get("id") if classified else "") or "")
@@ -412,7 +414,7 @@ def _brand_publication_for_report(report: dict[str, Any]) -> dict[str, Any]:
 
 def _brand_profile(domain: str) -> dict:
     raw_reports = list_reports_for_domain(domain)
-    selected, classified_reports, history_state = selected_report_for_display(raw_reports)
+    selected, classified_reports, history_state = selected_report_for_brand(domain, raw_reports)
     reports = []
     for source_report in classified_reports:
         report = _sanitize_report_language(source_report)
@@ -422,6 +424,9 @@ def _brand_profile(domain: str) -> dict:
     current = next((report for report in reports if str(report.get("id") or "") == selected_id), None)
     latest_attempt = reports[0] if reports else None
     normalized_domain = domain_key(domain) or domain
+    # Without an accepted Vault report, history still names the brand and the
+    # URL a new scan must target.
+    identity = current or latest_attempt or {}
 
     components = list((current or {}).get("components") or [])
     detected = [component for component in components if component.get("status") == "scored"]
@@ -437,10 +442,11 @@ def _brand_profile(domain: str) -> dict:
     value = next((component for component in components if component.get("key") == "value_proposition"), {})
     return {
         "domain": normalized_domain,
-        "display_name": (current or {}).get("brand_name") or normalized_domain,
-        "url": (current or {}).get("url") or f"https://{normalized_domain}",
+        "display_name": identity.get("brand_name") or normalized_domain,
+        "url": identity.get("url") or f"https://{normalized_domain}",
         "current": current,
         "latest_attempt": latest_attempt,
+        "is_vault": os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault",
         "reports": reports,
         "history_state": history_state,
         "enforcement_mode": canonical_enforcement_mode(),
@@ -1161,8 +1167,27 @@ def _report_rows_for_index() -> list[dict[str, Any]]:
             grouped[domain] = []
         grouped[domain].append(row)
     rows: list[dict[str, Any]] = []
+    is_vault = os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault"
+    accepted_pointers = vault_accepted_pointers(domain_order) if is_vault else None
     for domain in domain_order:
-        selected, classified, _state = selected_report_for_display(grouped[domain])
+        selected, classified, _state = selected_report_for_brand(
+            domain,
+            grouped[domain],
+            accepted_pointers=accepted_pointers,
+        )
+        if is_vault and selected is None:
+            # Keep the brand reachable, named and linked as its history names
+            # it, without presenting a history report as its current one.
+            latest = classified[0] if classified else {}
+            rows.append(
+                {
+                    "brand_domain": domain,
+                    "brand_name": latest.get("brand_name") or domain,
+                    "url": latest.get("url") or f"https://{domain}",
+                    "vault_unaccepted": True,
+                }
+            )
+            continue
         source = selected or (classified[0] if classified else None)
         if source is None:
             continue

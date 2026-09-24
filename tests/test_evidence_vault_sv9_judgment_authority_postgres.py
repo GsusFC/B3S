@@ -393,6 +393,8 @@ def test_repository_authority_adopts_replays_competes_and_reopens(monkeypatch) -
         assert replayed and older_replay["event"] == reopened["event"] and older_replay["event"] != older_replay["current_head"]
         loaded = repository.get_evidence_vault_sv9_judgment_authority("example.com")
         assert loaded and loaded["current_head"]["event_type"] == "reopen" and loaded["active_authority_event"]["event_type"] == "adopt" and loaded["accepted_candidate"]["source_scan_id"] == "authority-a" and loaded["current_head"]["request"]["source_scan_id"] == "authority-next" and loaded["reopen_review_overlay"]["delta_fingerprint"] == next_delta["canonical_delta_fingerprint"]
+        active = loaded["active_authority_event"]
+        assert repository.get_evidence_vault_sv9_accepted_pointers(["example.com"]) == {"example.com": {"candidate_id": active["candidate_id"], "source_scan_id": loaded["accepted_candidate"]["source_scan_id"], "assessment_fingerprint": active["assessment_fingerprint"], "score_fingerprint": active["score_fingerprint"], "event_sequence": active["sequence"]}}
         for projection in (winner, reopened, newest, older_replay, loaded):
             assert authority_projection.validate_persisted_evidence_vault_sv9_authority_projection(projection) == json.loads(json.dumps(projection))
             for name in ("active_authority_event", "current_head", "event"):
@@ -511,6 +513,99 @@ def test_authority_application_retains_historical_witnessed_candidate_and_replay
             and authority["accepted_candidate"]["id"] == stored["id"]
             and authority["reopen_review_overlay"] is None
         )
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+            if not existed:
+                conn.execute("DROP ROLE b3s_history_vault_provenance_owner")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL")
+    or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1",
+    reason="requires disposable PostgreSQL",
+)
+def test_accepted_pointers_follow_the_last_adopted_candidate_per_workspace() -> None:
+    import psycopg
+    from psycopg.rows import dict_row
+    from src.history.repository import PostgresHistoryRepository
+
+    dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    workspace, brand, scan, capture, plan = (
+        "00000000-0000-0000-0000-000000000101",
+        "00000000-0000-0000-0000-000000000102",
+        "00000000-0000-0000-0000-000000000103",
+        "00000000-0000-0000-0000-000000000104",
+        "00000000-0000-0000-0000-000000000105",
+    )
+    candidate_one = _candidate("00000000-0000-0000-0000-000000000106", "a", "b", "c", "d", "e", "f")
+    candidate_two = _candidate("00000000-0000-0000-0000-000000000107", "0", "b", "1", "2", "3", "4")
+    # _insert_event derives each idempotency key from the id's last digit.
+    adopted, reopened, superseded, reopened_again = (
+        "00000000-0000-0000-0000-000000000108",
+        "00000000-0000-0000-0000-000000000109",
+        "00000000-0000-0000-0000-000000000110",
+        "00000000-0000-0000-0000-000000000111",
+    )
+    other_workspace, other_brand, empty_brand = (
+        "00000000-0000-0000-0000-000000000201",
+        "00000000-0000-0000-0000-000000000202",
+        "00000000-0000-0000-0000-000000000203",
+    )
+
+    def pointer(candidate: dict[str, str], sequence: int) -> dict[str, object]:
+        return {
+            "candidate_id": candidate["id"],
+            "source_scan_id": "authority-scan",
+            "assessment_fingerprint": candidate["assessment"],
+            "score_fingerprint": candidate["score"],
+            "event_sequence": sequence,
+        }
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        existed = bool(
+            conn.execute("SELECT 1 FROM pg_roles WHERE rolname = 'b3s_history_vault_provenance_owner'").fetchone()
+        )
+        if not existed:
+            conn.execute("CREATE ROLE b3s_history_vault_provenance_owner NOLOGIN")
+        conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+    try:
+        repository = PostgresHistoryRepository(dsn)
+        repository.migrate()
+        pointers = repository.get_evidence_vault_sv9_accepted_pointers
+        with psycopg.connect(dsn, autocommit=True, row_factory=dict_row) as conn:
+            _seed_candidate_parent(conn, workspace, brand, scan, capture, plan)
+            _insert_candidate(conn, candidate_one, workspace, brand, scan, capture, plan, Jsonb({"candidate_component_sentinels": [{"status": "not_detected"}], "candidate_tile_judgments": []}))
+            _insert_candidate(conn, candidate_two, workspace, brand, scan, capture, plan, Jsonb({"candidate_component_sentinels": [{"status": "not_detected", "review": "new"}], "candidate_tile_judgments": []}))
+            # The same domain in another workspace, and a brand without events.
+            conn.execute("INSERT INTO b3s_history.workspaces (id, slug, name) VALUES (%s, 'other', 'Other')", (other_workspace,))
+            for brand_id, workspace_id, domain in (
+                (other_brand, other_workspace, "authority.test"),
+                (empty_brand, workspace, "empty.test"),
+            ):
+                conn.execute(
+                    "INSERT INTO b3s_history.brands (id, workspace_id, canonical_domain, display_name, canonical_url, first_observed_at, latest_observed_at) VALUES (%s, %s, %s, 'Brand', %s, now(), now())",
+                    (brand_id, workspace_id, domain, f"https://{domain}"),
+                )
+            assert pointers(workspace_slug="authority") == {}
+
+            _insert_event(conn, adopted, "adopt", 1, workspace, brand, None, None, candidate_one)
+            assert pointers(workspace_slug="authority") == {"authority.test": pointer(candidate_one, 1)}
+
+            _insert_event(conn, reopened, "reopen", 2, workspace, brand, adopted, adopted, None, candidate_one["current"])
+            assert pointers(["https://www.Authority.test/brand"], workspace_slug="authority") == {
+                "authority.test": pointer(candidate_one, 1)
+            }
+
+            _insert_event(conn, superseded, "supersede", 3, workspace, brand, reopened, adopted, candidate_two)
+            _insert_event(conn, reopened_again, "reopen", 4, workspace, brand, superseded, superseded, None, candidate_two["current"])
+            assert pointers(["authority.test", "empty.test"], workspace_slug="authority") == {
+                "authority.test": pointer(candidate_two, 3)
+            }
+            assert pointers(["empty.test"], workspace_slug="authority") == {}
+            assert pointers([], workspace_slug="authority") == {}
+            assert pointers(workspace_slug="other") == {}
+            assert pointers(["authority.test"], workspace_slug="other") == {}
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
