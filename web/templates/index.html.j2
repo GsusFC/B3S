@@ -51,7 +51,8 @@
           {% endif %}
           <span class="brand-cell-url">{{ row.url }}</span>
         </div>
-      </td>
+      </td>{% if row.vault_unaccepted %}
+      <td class="muted" colspan="4">Vault aún no ha aceptado ningún informe</td>{% else %}
       <td class="mono">
         <strong>{{ row.score_publication.raw_value if row.score_publication.raw_value is not none else "—" }}</strong>
         {% if not row.score_publication.publishable %}<span class="muted"> diagnóstico</span>{% endif %}
@@ -60,7 +61,7 @@
       <td>
         {% for name in row.not_detected %}{{ ui.tag(name, "warn") }} {% else %}{{ ui.tag("none", "ok") }}{% endfor %}
       </td>
-      <td class="muted mono">{{ (row.created_at or "")[8:10] if row.created_at else "—" }}</td>
+      <td class="muted mono">{{ (row.created_at or "")[8:10] if row.created_at else "—" }}</td>{% endif %}
     </tr>
   {% endfor %}
   </tbody>

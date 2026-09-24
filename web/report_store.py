@@ -10,13 +10,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import uuid
 from contextlib import nullcontext
 from functools import lru_cache
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import monotonic
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
 from src.history.models import ReportConflictError
@@ -1169,6 +1170,148 @@ def list_evidence_memory_adjudications_for_domain(
         ) from exc
 
 
+_EXACT_RESUME_REPORT_ID = re.compile(r"exact-resume-[0-9a-f]{64}")
+_EXACT_RESUME_CAPTURE_KEYS = frozenset({"source_scan_id", "observation_hash", "capture_hash"})
+
+
+def vault_accepted_pointers(domains: Iterable[str]) -> dict[str, Mapping[str, Any]]:
+    """Read Vault's accepted SV9 report pointers with one repository call.
+
+    Display needs only the accepted candidate's report identity, not the
+    replayed authority.  A failed read returns no pointers, so every brand
+    fails closed to showing no accepted report.
+    """
+
+    repository = _postgres_repository()
+    if repository is None:
+        return {}
+    try:
+        pointers = repository.get_evidence_vault_sv9_accepted_pointers(
+            [domain_key(domain) for domain in domains],
+            workspace_slug="b3s",
+        )
+    except Exception:
+        _LOG.exception("failed to load Vault SV9 accepted pointers for report display")
+        return {}
+    return dict(pointers) if isinstance(pointers, Mapping) else {}
+
+
+def _is_exact_resume_of(report: Mapping[str, Any], source_scan_id: str) -> bool:
+    """Apply the authority report's provenance rule for resume successors."""
+
+    report_id = report.get("id")
+    raw = report.get("raw")
+    capture = raw.get("source_capture") if isinstance(raw, Mapping) else None
+    return (
+        isinstance(report_id, str)
+        and _EXACT_RESUME_REPORT_ID.fullmatch(report_id) is not None
+        and isinstance(capture, dict)
+        and set(capture) == _EXACT_RESUME_CAPTURE_KEYS
+        and capture["source_scan_id"] == source_scan_id
+        and all(
+            isinstance(capture[key], str) and capture[key] and capture[key] == capture[key].strip()
+            for key in ("observation_hash", "capture_hash")
+        )
+    )
+
+
+def vault_accepted_report_for_domain(
+    domain: str,
+    *,
+    reports: list[dict[str, Any]],
+    pointer: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Resolve the report bound to Vault's accepted SV9 pointer.
+
+    Vault must not infer its current report from temporal history.  The
+    accepted scan's own report is tried first, then its exact-resume
+    successors, newest first: a successor exists only when the original report
+    is missing or has no score.  A report is usable only when its domain and
+    validated assessment and score fingerprints all agree with the accepted
+    candidate.  Any unavailable or inconsistent input is a deliberate
+    fail-closed result.
+    """
+
+    target = domain_key(domain)
+    if not target or not isinstance(pointer, Mapping):
+        return None
+    source_scan_id = str(pointer.get("source_scan_id") or "")
+    assessment_fingerprint = str(pointer.get("assessment_fingerprint") or "")
+    score_fingerprint = str(pointer.get("score_fingerprint") or "")
+    if not source_scan_id or not assessment_fingerprint or not score_fingerprint:
+        return None
+    reports = [item for item in reports if isinstance(item, Mapping)]
+    direct = [item for item in reports if str(item.get("id") or "") == source_scan_id]
+    resumed = sorted(
+        (item for item in reports if _is_exact_resume_of(item, source_scan_id)),
+        key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")),
+        reverse=True,
+    )
+    for report in [*direct, *resumed]:
+        if domain_key(str(report.get("url") or "")) != target:
+            continue
+        try:
+            assessment = assessment_projection_from_report(report, required=True)
+        except Exception:
+            _LOG.exception(
+                "accepted Vault report failed assessment validation",
+                extra={"domain": target, "report_id": str(report.get("id") or "")},
+            )
+            continue
+        if (
+            assessment.get("availability") == "available"
+            and assessment.get("assessment_fingerprint") == assessment_fingerprint
+            and assessment.get("score_fingerprint") == score_fingerprint
+        ):
+            return dict(report)
+    return None
+
+
+def selected_report_for_brand(
+    domain: str,
+    reports: list[dict[str, Any]],
+    *,
+    mode: str | None = None,
+    accepted_pointers: Mapping[str, Mapping[str, Any]] | None = None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any]]:
+    """Select the report a brand displays as current.
+
+    Core keeps the temporal history selection.  Vault displays only the report
+    bound to its accepted SV9 pointer, or none at all; history stays listed.
+    Callers selecting many brands pass ``accepted_pointers`` from one
+    :func:`vault_accepted_pointers` read; ``None`` reads this brand's pointer.
+    """
+
+    selected, classified, state = selected_report_for_display(reports, mode=mode)
+    if os.environ.get("BRAND3_ENVIRONMENT", "").strip().casefold() != "vault":
+        return selected, classified, state
+    if accepted_pointers is None:
+        accepted_pointers = vault_accepted_pointers([domain])
+    accepted = vault_accepted_report_for_domain(
+        domain,
+        reports=reports,
+        pointer=accepted_pointers.get(domain_key(domain)),
+    )
+    accepted_id = str((accepted or {}).get("id") or "")
+    selected = next(
+        (
+            item
+            for item in classified
+            if accepted_id and str(item.get("id") or "") == accepted_id
+        ),
+        None,
+    )
+    selected_id = str((selected or {}).get("id") or "") or None
+    # Keep the history state shape, but its selected identity must describe the
+    # accepted Vault report rather than the temporal choice.
+    return selected, classified, {
+        **state,
+        "selected_report_id": selected_id,
+        "canonical_report_id": selected_id,
+        "provisional_report_id": None,
+    }
+
+
 def current_report_for_domain(
     domain: str,
     *,
@@ -1176,7 +1319,11 @@ def current_report_for_domain(
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any]]:
     """Select the visible canonical/provisional report for one brand."""
 
-    return selected_report_for_display(list_reports_for_domain(domain), mode=mode)
+    return selected_report_for_brand(
+        domain,
+        list_reports_for_domain(domain),
+        mode=mode,
+    )
 
 
 def _summary_row(report: dict[str, Any], *, fallback_id: str = "") -> dict[str, Any]:
