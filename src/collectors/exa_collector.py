@@ -21,12 +21,26 @@ from urllib.parse import urlparse
 from src.api_key_pool import ApiKeySource, shared_api_key_pool
 from src.config import EXA_API_KEYS
 from src.external_identity_provenance import build_external_identity_provenance
+from src.services.exa_brand_identity import (
+    BrandIdentity,
+    IdentityCandidate,
+    IdentityCheckError,
+    brand_domain,
+    derive_brand_identity,
+    llm_identity_check,
+)
 from src.services.legal_identity import legal_name_aliases
 
 _TRANSIENT_SEARCH_ATTEMPTS = 2
 _TRANSIENT_SEARCH_DELAY_S = 1.5
 _MAX_BRAND_DATA_WORKERS = 4
-EXA_STRATEGY_VERSION = "precision_vnext_v3"
+_IDENTITY_CHECKED_INTENTS = frozenset({"external_profiles", "external_mentions", "news"})
+_IDENTITY_SNIPPET_CHARS = 300
+EXA_STRATEGY_VERSION = "precision_vnext_v4"
+
+# Returns the indices of the candidates about the brand; raises or returns None
+# when it cannot decide.
+IdentityChecker = Callable[[BrandIdentity, list[IdentityCandidate]], set[int] | None]
 
 
 @dataclass
@@ -210,10 +224,11 @@ class ExaCollector:
         "category",
     )
 
-    def __init__(self, api_key: ApiKeySource = None):
+    def __init__(self, api_key: ApiKeySource = None, *, identity_checker: IdentityChecker | None = None):
         configured_keys = api_key if api_key is not None else EXA_API_KEYS
         self._api_keys = shared_api_key_pool("exa", configured_keys)
         self.api_key = api_key
+        self._identity_checker = identity_checker or llm_identity_check
         self._client = None
         self._search_events: list[dict] = []
         self._search_events_lock = threading.Lock()
@@ -267,56 +282,38 @@ class ExaCollector:
 
     @staticmethod
     def _domain_anchor(brand_url: str | None) -> str:
-        if not brand_url:
-            return ""
-        parsed = urlparse(brand_url)
-        hostname = (parsed.netloc or parsed.path or "").lower()
-        hostname = hostname.replace("www.", "").strip("/")
-        return hostname
+        return brand_domain(brand_url)
 
-    def _brand_query(
-        self,
-        brand_name: str,
-        brand_url: str | None,
-        suffix: str,
-        *,
-        legal_name: str | None = None,
-    ) -> str:
+    def _brand_query(self, brand_name: str, brand_url: str | None, suffix: str) -> str:
         domain_anchor = self._domain_anchor(brand_url)
         parts = [f'"{brand_name}"']
         if domain_anchor:
             parts.append(f'"{domain_anchor}"')
-        if legal_name:
-            parts.append(f'"{legal_name}"')
         parts.append(suffix)
         return " ".join(part for part in parts if part)
 
     def _owned_confirmation_query(self, brand_name: str, brand_url: str | None) -> str:
         return self._brand_query(brand_name, brand_url, "official website product company about services")
 
-    def _external_profiles_query(self, brand_name: str, brand_url: str | None, legal_name: str | None = None) -> str:
-        return self._brand_query(
-            brand_name,
-            brand_url,
-            "company profile linkedin crunchbase business directory services",
-            legal_name=legal_name,
+    @staticmethod
+    def _identity_subject(identity: BrandIdentity) -> str:
+        return f"{identity.name} ({identity.domain})" if identity.domain else identity.name
+
+    def _external_profiles_query(self, identity: BrandIdentity) -> str:
+        return (
+            f"Company profile pages about {self._identity_subject(identity)} "
+            "on LinkedIn, Crunchbase, Wikipedia and business directories"
         )
 
-    def _external_mentions_query(self, brand_name: str, brand_url: str | None, legal_name: str | None = None) -> str:
-        return self._brand_query(
-            brand_name,
-            brand_url,
-            "press mention media coverage client testimonial case study review",
-            legal_name=legal_name,
-        )
+    def _external_mentions_query(self, identity: BrandIdentity) -> str:
+        query = f"Articles, case studies and reviews on other websites that mention {self._identity_subject(identity)}"
+        return f"{query}, {identity.description}" if identity.description else query
 
-    def _news_query(self, brand_name: str, brand_url: str | None, legal_name: str | None = None) -> str:
-        return self._brand_query(
-            brand_name,
-            brand_url,
-            "press release media coverage announcement featured in",
-            legal_name=legal_name,
-        )
+    def _news_query(self, identity: BrandIdentity) -> str:
+        query = f"News coverage and press releases about {self._identity_subject(identity)}"
+        if identity.description:
+            query += f", {identity.description}"
+        return f"{query}, from the last 12 months"
 
     def _ai_visibility_query(self, brand_name: str, brand_url: str | None) -> str:
         return self._brand_query(
@@ -496,14 +493,14 @@ class ExaCollector:
                 return True, "owned_surface", 1.0
             return False, "owned_confirmation_requires_owned_surface", match_score
 
-        if intent in {"external_profiles", "external_mentions", "news"}:
+        if intent in _IDENTITY_CHECKED_INTENTS:
             if source_class == "owned":
                 return False, "owned_surface_excluded_from_external_intent", match_score
             if source_class in {"technical_internal", "noise", "person_profile"}:
                 return False, "non_market_source_class", match_score
-            if match_score >= 0.95:
-                return True, match_reason, match_score
-            return False, f"weak_entity_match:{match_reason}", match_score
+            # search() decides identity for the survivors in one batch; the alias
+            # match is kept only as reproducible provenance.
+            return True, match_reason, match_score
 
         if intent == "ai_visibility":
             if source_class == "owned" and match_score >= 0.95:
@@ -706,6 +703,7 @@ class ExaCollector:
         brand_name: str = "",
         brand_url: str | None = None,
         legal_name: str | None = None,
+        identity: BrandIdentity | None = None,
         **kwargs,
     ) -> list[ExaResult]:
         """Run a search query via Exa."""
@@ -743,7 +741,7 @@ class ExaCollector:
             )
             return []
 
-        results = []
+        candidates = []
         filtered_empty_content_count = 0
         filtered_irrelevant_count = 0
         for r in response.results:
@@ -765,6 +763,20 @@ class ExaCollector:
             if not accepted:
                 filtered_irrelevant_count += 1
                 continue
+            candidates.append((r, source_class, relation, reason, requires_review, acceptance_reason, match_score))
+
+        identity_event: dict = {}
+        identity_reason = ""
+        if intent in _IDENTITY_CHECKED_INTENTS and candidates:
+            identity_accepted, identity_reason, identity_event = self._check_identity(
+                identity or derive_brand_identity(brand_name=brand_name, brand_url=brand_url, web_data=None),
+                [candidate[0] for candidate in candidates],
+            )
+            filtered_irrelevant_count += len(candidates) - len(identity_accepted)
+            candidates = [candidate for index, candidate in enumerate(candidates) if index in identity_accepted]
+
+        results = []
+        for r, source_class, relation, reason, requires_review, acceptance_reason, match_score in candidates:
             matched_alias = self._matched_alias(
                 result=r,
                 match_method=acceptance_reason,
@@ -774,7 +786,7 @@ class ExaCollector:
             )
             result_metadata = {
                 "entity_match_score": match_score,
-                "entity_match_reason": acceptance_reason,
+                "entity_match_reason": identity_reason or acceptance_reason,
             }
             if source_class != "owned":
                 result_metadata["external_identity_provenance"] = (
@@ -830,9 +842,73 @@ class ExaCollector:
                 "unresolved_collision_count": sum(
                     1 for item in results if item.source_class == "related_unresolved"
                 ),
+                **identity_event,
             }
         )
         return results
+
+    def _check_identity(self, identity: BrandIdentity, results: list) -> tuple[set[int], str, dict]:
+        """One identity verdict per search, or the strong-alias fallback when there is none."""
+        candidates = [
+            IdentityCandidate(
+                url=str(getattr(r, "url", "") or ""),
+                title=str(getattr(r, "title", "") or ""),
+                text=" ".join(self._result_text(r).split())[:_IDENTITY_SNIPPET_CHARS],
+            )
+            for r in results
+        ]
+        verdict = None
+        error = ""
+        try:
+            verdict = self._identity_checker(identity, candidates)
+        except IdentityCheckError as exc:
+            error = exc.reason
+        except Exception as exc:
+            error = type(exc).__name__
+        if verdict is None:
+            error = error or "no_verdict"
+        elif not self._is_valid_identity_verdict(verdict, len(candidates)):
+            verdict, error = None, "invalid_output"
+
+        if verdict is not None:
+            accepted, method, reason = set(verdict), "llm", "identity_check"
+        else:
+            accepted = {
+                index for index, r in enumerate(results) if self._has_strong_alias(r, identity.strong_aliases)
+            }
+            method = reason = "strong_alias_fallback"
+        return accepted, reason, {
+            "identity_method": method,
+            "identity_checked_count": len(candidates),
+            "identity_rejected_count": len(candidates) - len(accepted),
+            "identity_error": error,
+        }
+
+    @staticmethod
+    def _is_valid_identity_verdict(verdict, candidate_count: int) -> bool:
+        return isinstance(verdict, (set, frozenset, list, tuple)) and all(
+            isinstance(index, int) and not isinstance(index, bool) and 0 <= index < candidate_count
+            for index in verdict
+        )
+
+    @staticmethod
+    def _result_text(result) -> str:
+        parts = [getattr(result, "text", ""), getattr(result, "summary", "")]
+        highlights = getattr(result, "highlights", None)
+        if isinstance(highlights, list):
+            parts.extend(highlights)
+        return " ".join(str(part) for part in parts if part)
+
+    @classmethod
+    def _has_strong_alias(cls, result, strong_aliases: tuple[str, ...]) -> bool:
+        url = str(getattr(result, "url", "") or "")
+        fields = (
+            cls._host(url),
+            urlparse(url if "://" in url else f"https://{url}").path,
+            str(getattr(result, "title", "") or ""),
+            cls._result_text(result),
+        )
+        return any(cls._contains_alias(field, alias) for alias in strong_aliases for field in fields)
 
     def collect_brand_data(
         self,
@@ -840,12 +916,14 @@ class ExaCollector:
         brand_url: str = None,
         *,
         legal_name: str | None = None,
+        identity: BrandIdentity | None = None,
     ) -> ExaData:
         """Collect all Exa data for a brand."""
         with self._search_events_lock:
             self._search_events = []
         data = ExaData(brand_name=brand_name)
         domain_anchor = self._domain_anchor(brand_url)
+        identity = identity or derive_brand_identity(brand_name=brand_name, brand_url=brand_url, web_data=None)
 
         tasks = {
             "owned_confirmation": lambda: self.search(
@@ -857,26 +935,29 @@ class ExaCollector:
                 include_domains=[domain_anchor] if domain_anchor else None,
             ),
             "external_profiles": lambda: self.search(
-                self._external_profiles_query(brand_name, brand_url, legal_name),
+                self._external_profiles_query(identity),
                 intent="external_profiles",
                 brand_name=brand_name,
                 brand_url=brand_url,
                 legal_name=legal_name,
+                identity=identity,
             ),
             "external_mentions": lambda: self.search(
-                self._external_mentions_query(brand_name, brand_url, legal_name),
+                self._external_mentions_query(identity),
                 intent="external_mentions",
                 brand_name=brand_name,
                 brand_url=brand_url,
                 legal_name=legal_name,
+                identity=identity,
                 exclude_domains=[domain_anchor] if domain_anchor else None,
             ),
             "news": lambda: self.search(
-                self._news_query(brand_name, brand_url, legal_name),
+                self._news_query(identity),
                 intent="news",
                 brand_name=brand_name,
                 brand_url=brand_url,
                 legal_name=legal_name,
+                identity=identity,
                 exclude_domains=[domain_anchor] if domain_anchor else None,
             ),
             "ai_visibility": lambda: self.probe_ai_visibility(
@@ -979,6 +1060,10 @@ class ExaCollector:
                 "elapsed_ms": int(event.get("elapsed_ms") or 0),
                 "latency_bucket": event.get("latency_bucket") or "",
                 "unresolved_collision_count": int(event.get("unresolved_collision_count") or 0),
+                "identity_method": event.get("identity_method") or "",
+                "identity_checked_count": int(event.get("identity_checked_count") or 0),
+                "identity_rejected_count": int(event.get("identity_rejected_count") or 0),
+                "identity_error": event.get("identity_error") or "",
             }
             unresolved_collision_count += int(event.get("unresolved_collision_count") or 0)
             bucket = str(event.get("latency_bucket") or "")

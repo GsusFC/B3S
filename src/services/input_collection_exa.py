@@ -6,6 +6,7 @@ import logging
 
 from src.collectors.exa_collector import ExaCollector, ExaData
 from src.config import BRAND3_CACHE_TTL_HOURS, EXA_API_KEYS
+from src.services.exa_brand_identity import derive_brand_identity
 from src.services.legal_identity import derive_legal_name
 from src.services.exa_diagnostics import exa_external_proof_empty
 from src.services.input_collection_payloads import from_exa_payload
@@ -82,10 +83,12 @@ def _collect_exa_input(
         eligible=True,
     )
     legal_name = derive_legal_name(brand_name=brand_name, web_data=web_data)
+    identity = derive_brand_identity(brand_name=brand_name, brand_url=effective_brand_url, web_data=web_data)
     exa_data = exa_collector.collect_brand_data(
         brand_name,
         effective_brand_url,
         legal_name=legal_name,
+        identity=identity,
     )
     diagnostics = dict(exa_data.diagnostics or {})
     failed_intents = diagnostics.get("failed_intents") or []

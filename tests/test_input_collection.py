@@ -92,13 +92,15 @@ def test_set_acquisition_state_updates_cache_and_preserves_existing_details():
 class _FakeExaCollector:
     calls = 0
     legal_names: list[str | None] = []
+    identities: list[object] = []
 
     def __init__(self, api_key=None):
         self.api_key = api_key
 
-    def collect_brand_data(self, brand_name: str, brand_url: str, *, legal_name: str | None = None):
+    def collect_brand_data(self, brand_name: str, brand_url: str, *, legal_name: str | None = None, identity=None):
         type(self).calls += 1
         type(self).legal_names.append(legal_name)
+        type(self).identities.append(identity)
         return ExaData(
             brand_name=brand_name,
             mentions=[],
@@ -119,7 +121,7 @@ class _MatrixExaCollector:
     def __init__(self, api_key=None):
         self.api_key = api_key
 
-    def collect_brand_data(self, brand_name: str, brand_url: str, *, legal_name: str | None = None):
+    def collect_brand_data(self, brand_name: str, brand_url: str, *, legal_name: str | None = None, identity=None):
         type(self).calls += 1
         return ExaData(
             brand_name=brand_name,
@@ -205,11 +207,12 @@ def test_collect_web_input_records_raw_payload_ref_after_successful_storage():
     }
 
 
-def test_collect_exa_input_derives_legal_name_from_owned_web_content():
+def test_collect_exa_input_derives_legal_name_and_identity_from_owned_web_content():
     acquisition_steps: dict[str, object] = {}
     raw_input_cache: dict[str, str] = {}
     _FakeExaCollector.calls = 0
     _FakeExaCollector.legal_names = []
+    _FakeExaCollector.identities = []
 
     exa_data, _collector = _collect_exa_input(
         store=None,
@@ -218,6 +221,7 @@ def test_collect_exa_input_derives_legal_name_from_owned_web_content():
         effective_brand_url="https://www.cofisolutions.com",
         web_data=WebData(
             url="https://www.cofisolutions.com",
+            title="COFI Solutions | Asesoría financiera",
             markdown_content="Aviso legal\nRazón social: COFI SOLUTIONS, S.L.\nCIF: B12345678",
         ),
         cache_read=lambda *_args, **_kwargs: None,
@@ -229,6 +233,10 @@ def test_collect_exa_input_derives_legal_name_from_owned_web_content():
     assert exa_data.brand_name == "www.cofisolutions.com"
     assert _FakeExaCollector.calls == 1
     assert _FakeExaCollector.legal_names == ["COFI SOLUTIONS, S.L."]
+    [identity] = _FakeExaCollector.identities
+    assert identity.name == "COFI Solutions"
+    assert identity.domain == "cofisolutions.com"
+    assert identity.description == "Asesoría financiera"
 
 
 def test_collect_web_input_preserves_cache_read_error_in_acquisition_details():
