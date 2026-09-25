@@ -4,12 +4,100 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from src.collectors.exa_collector import EXA_STRATEGY_VERSION, ExaCollector
 from src.collectors.web_collector import WebData
 from src.services.legal_identity import derive_legal_name
 
 
-def test_exa_identity_matching_rejects_near_name_and_person_collisions():
+def _identity_checker_unavailable(identity, candidates):
+    raise RuntimeError("identity checker is not available in unit tests")
+
+
+@pytest.fixture(autouse=True)
+def _no_default_identity_checker(monkeypatch):
+    # src.config loads .env, so the default LLM checker could reach a real provider.
+    monkeypatch.setattr(
+        "src.collectors.exa_collector.llm_identity_check",
+        _identity_checker_unavailable,
+        raising=False,
+    )
+
+
+class _RecordingChecker:
+    """Stands in for the LLM identity check and records every batch it gets."""
+
+    def __init__(self, decide=lambda candidates: set(range(len(candidates)))):
+        self.decide = decide
+        self.calls: list[tuple] = []
+
+    def __call__(self, identity, candidates):
+        self.calls.append((identity, list(candidates)))
+        return self.decide(candidates)
+
+
+def _accept_urls(*urls: str):
+    return lambda candidates: {index for index, item in enumerate(candidates) if item.url in urls}
+
+
+def _raise(error: Exception):
+    def decide(candidates):
+        raise error
+
+    return decide
+
+
+def _raise_identity_check_error(reason: str):
+    def decide(candidates):
+        from src.services.exa_brand_identity import IdentityCheckError
+
+        raise IdentityCheckError(reason)
+
+    return decide
+
+
+def _result(url: str, title: str, text: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        url=url,
+        title=title,
+        text=text,
+        highlights=[],
+        summary="",
+        score=0.5,
+        published_date="2026-05-15",
+    )
+
+
+class _StaticClient:
+    def __init__(self, results: list[SimpleNamespace]):
+        self.results = results
+
+    def search(self, query: str, **kwargs):
+        return SimpleNamespace(results=list(self.results))
+
+
+_PRIMARY_URL = "https://primary.studio"
+_PRIMARY_NAMESAKES = [
+    _result(
+        "https://www.primary.com/kids-basics",
+        "Primary | Kids clothing basics",
+        "Primary makes soft, colorful basics for kids.",
+    ),
+    _result(
+        "https://www.primarywave.com/news/catalog-deal",
+        "Primary Wave signs a new catalog deal",
+        "Primary Wave Music announced another catalog acquisition. " * 20,
+    ),
+]
+_PRIMARY_GENUINE = _result(
+    "https://www.itsnicethat.com/articles/primary-brand-sprints",
+    "Primary rethinks the brand sprint",
+    "The London design studio Primary (primary.studio) runs week-long brand sprints.",
+)
+
+
+def test_external_intents_exclude_person_profiles_and_defer_near_names_to_identity_check():
     collector = ExaCollector(api_key="test")
 
     near_name = SimpleNamespace(
@@ -30,13 +118,113 @@ def test_exa_identity_matching_rejects_near_name_and_person_collisions():
         intent="external_profiles",
         brand_name="Movyn",
         brand_url="https://movyn.ai",
-    )[0] is False
+    ) == (True, "no_alias_match", 0.0)
     assert collector._should_accept_result(
         result=person,
         intent="external_mentions",
         brand_name="Movyn",
         brand_url="https://movyn.ai",
     )[0] is False
+
+
+def test_identity_check_rejects_namesakes_and_keeps_the_genuine_result():
+    checker = _RecordingChecker(decide=_accept_urls(_PRIMARY_GENUINE.url))
+    collector = ExaCollector(api_key="test", identity_checker=checker)
+    collector._client = _StaticClient([*_PRIMARY_NAMESAKES, _PRIMARY_GENUINE])
+
+    results = collector.search(
+        "brand query",
+        intent="external_mentions",
+        brand_name="Primary",
+        brand_url=_PRIMARY_URL,
+    )
+
+    assert [item.url for item in results] == [_PRIMARY_GENUINE.url]
+    assert results[0].metadata["entity_match_reason"] == "identity_check"
+    assert len(checker.calls) == 1
+    identity, candidates = checker.calls[0]
+    assert (identity.name, identity.domain) == ("Primary", "primary.studio")
+    assert [item.url for item in candidates] == [
+        *(namesake.url for namesake in _PRIMARY_NAMESAKES),
+        _PRIMARY_GENUINE.url,
+    ]
+    assert candidates[0].title == "Primary | Kids clothing basics"
+    assert all(0 < len(item.text) <= 300 for item in candidates)
+    intent_result = collector._build_diagnostics()["intent_results"]["external_mentions"]
+    assert intent_result["identity_method"] == "llm"
+    assert intent_result["identity_checked_count"] == 3
+    assert intent_result["identity_rejected_count"] == 2
+    assert intent_result["identity_error"] == ""
+    assert intent_result["filtered_irrelevant_count"] == 2
+    assert intent_result["result_count"] == 1
+
+
+def test_owned_surfaces_are_excluded_before_the_identity_check():
+    checker = _RecordingChecker()
+    collector = ExaCollector(api_key="test", identity_checker=checker)
+    collector._client = _StaticClient(
+        [
+            _result("https://primary.studio/work", "Primary work", "Our brand sprint work."),
+            _result(
+                "https://www.linkedin.com/posts/primary-studio_brand-sprint-activity-1",
+                "Primary on LinkedIn",
+                "We just wrapped another brand sprint.",
+            ),
+            _PRIMARY_GENUINE,
+        ]
+    )
+
+    results = collector.search(
+        "brand query",
+        intent="news",
+        brand_name="Primary",
+        brand_url=_PRIMARY_URL,
+    )
+
+    assert [item.url for item in results] == [_PRIMARY_GENUINE.url]
+    assert [item.url for item in checker.calls[0][1]] == [_PRIMARY_GENUINE.url]
+    intent_result = collector._build_diagnostics()["intent_results"]["news"]
+    assert intent_result["identity_checked_count"] == 1
+    assert intent_result["identity_rejected_count"] == 0
+    assert intent_result["filtered_irrelevant_count"] == 2
+
+
+@pytest.mark.parametrize(
+    ("decide", "identity_error"),
+    [
+        (_raise(RuntimeError("provider said: secret detail")), "RuntimeError"),
+        (_raise_identity_check_error("llm_timeout"), "llm_timeout"),
+        (lambda candidates: None, "no_verdict"),
+        (lambda candidates: {len(candidates)}, "invalid_output"),
+    ],
+    ids=["raises", "reason_code", "none", "out_of_range"],
+)
+def test_identity_check_failure_falls_back_to_strong_aliases(decide, identity_error):
+    strong_title = _result(
+        "https://www.designweek.co.uk/news/studio-opening",
+        "Primary Studio opens in Lisbon",
+        "The team expands to a second city.",
+    )
+    collector = ExaCollector(api_key="test", identity_checker=_RecordingChecker(decide=decide))
+    collector._client = _StaticClient([*_PRIMARY_NAMESAKES, _PRIMARY_GENUINE, strong_title])
+
+    results = collector.search(
+        "brand query",
+        intent="external_profiles",
+        brand_name="Primary",
+        brand_url=_PRIMARY_URL,
+    )
+
+    assert [item.url for item in results] == [_PRIMARY_GENUINE.url, strong_title.url]
+    assert {item.metadata["entity_match_reason"] for item in results} == {"strong_alias_fallback"}
+    diagnostics = collector._build_diagnostics()
+    intent_result = diagnostics["intent_results"]["external_profiles"]
+    assert intent_result["identity_method"] == "strong_alias_fallback"
+    assert intent_result["identity_error"] == identity_error
+    assert intent_result["identity_checked_count"] == 4
+    assert intent_result["identity_rejected_count"] == 2
+    assert intent_result["filtered_irrelevant_count"] == 2
+    assert "secret detail" not in str(diagnostics)
 
 
 class _FakeExaClient:
@@ -47,7 +235,7 @@ class _FakeExaClient:
         self.calls.append({"query": query, "kwargs": kwargs})
         if "competitors" in query:
             raise RuntimeError("fixture competitor failure")
-        if "press release media coverage announcement featured in" in query:
+        if query.startswith("News coverage and press releases about"):
             return SimpleNamespace(results=[])
         return SimpleNamespace(
             results=[
@@ -109,33 +297,39 @@ def test_collect_brand_data_emits_structured_diagnostics_for_failed_and_empty_in
 
 
 def test_collect_brand_data_uses_precision_exa_queries_in_production():
-    collector = ExaCollector(api_key="test")
+    checker = _RecordingChecker()
+    collector = ExaCollector(api_key="test", identity_checker=checker)
     fake = _FakeExaClient()
     collector._client = fake
 
-    data = collector.collect_brand_data("Brand", "https://brand.com")
-    queries = [call["query"] for call in fake.calls]
+    data = collector.collect_brand_data("Brand", "https://brand.com", legal_name="Brand Inc")
+    calls = {call["query"]: call["kwargs"] for call in fake.calls}
 
-    assert any("official website product company about services" in query for query in queries)
-    assert any("company profile linkedin crunchbase business directory services" in query for query in queries)
-    assert any("press mention media coverage client testimonial case study review" in query for query in queries)
-    assert any("press release media coverage announcement featured in" in query for query in queries)
-    assert any("what is this company services expertise overview" in query for query in queries)
-    assert not any("alternatives competitors similar to Brand brand.com category" in query for query in queries)
+    owned_query = '"Brand" "brand.com" official website product company about services'
+    profiles_query = (
+        "Company profile pages about Brand (brand.com) on LinkedIn, Crunchbase, Wikipedia and business directories"
+    )
+    mentions_query = "Articles, case studies and reviews on other websites that mention Brand (brand.com)"
+    news_query = "News coverage and press releases about Brand (brand.com), from the last 12 months"
+    ai_visibility_query = '"Brand" "brand.com" what is this company services expertise overview'
+    assert set(calls) == {owned_query, profiles_query, mentions_query, news_query, ai_visibility_query}
+    assert not any("Brand Inc" in query for query in calls)
 
-    owned_call = next(call for call in fake.calls if "official website product company about services" in call["query"])
-    profile_call = next(call for call in fake.calls if "company profile linkedin crunchbase business directory services" in call["query"])
-    external_call = next(call for call in fake.calls if "press mention media coverage client testimonial case study review" in call["query"])
-    news_call = next(call for call in fake.calls if "press release media coverage announcement featured in" in call["query"])
-    assert owned_call["kwargs"]["include_domains"] == ["brand.com"]
+    assert calls[owned_query]["include_domains"] == ["brand.com"]
     # Exa's company category returns company homepages, which the external
     # filter rejects; profile pages come back only without it.
-    assert "category" not in profile_call["kwargs"]
-    assert external_call["kwargs"]["exclude_domains"] == ["brand.com"]
-    assert news_call["kwargs"]["exclude_domains"] == ["brand.com"]
+    assert "category" not in calls[profiles_query]
+    assert calls[mentions_query]["exclude_domains"] == ["brand.com"]
+    assert calls[news_query]["exclude_domains"] == ["brand.com"]
+    assert calls[news_query]["category"] == "news"
+    assert "start_published_date" in calls[news_query]
+    # Profiles and mentions are identity-checked; news came back empty, and
+    # owned_confirmation and ai_visibility keep their deterministic rules.
+    assert len(checker.calls) == 2
     assert len(data.mentions) == 1
     assert len(data.profiles) == 1
     assert data.competitors == []
+    assert EXA_STRATEGY_VERSION == "precision_vnext_v4"
     assert data.diagnostics["strategy"] == EXA_STRATEGY_VERSION
     assert data.diagnostics["competitor_intent_enabled"] is False
     assert data.diagnostics["planned_intents"] == [
@@ -149,6 +343,39 @@ def test_collect_brand_data_uses_precision_exa_queries_in_production():
     assert "external_profiles" in data.diagnostics["intent_results"]
     assert "external_mentions" in data.diagnostics["intent_results"]
     assert "competitors" not in data.diagnostics["intent_results"]
+
+
+def test_collect_brand_data_describes_the_brand_with_its_owned_site_identity():
+    from src.services.exa_brand_identity import BrandIdentity
+
+    collector = ExaCollector(api_key="test", identity_checker=_RecordingChecker())
+    fake = _FakeExaClient()
+    collector._client = fake
+
+    collector.collect_brand_data(
+        "sensesbit.com",
+        "https://sensesbit.com",
+        identity=BrandIdentity(
+            name="Sensesbit",
+            domain="sensesbit.com",
+            description="Sensory analysis software for food teams",
+            strong_aliases=("sensesbitcom",),
+        ),
+    )
+    queries = {call["query"] for call in fake.calls}
+
+    assert (
+        "Company profile pages about Sensesbit (sensesbit.com) on LinkedIn, Crunchbase, Wikipedia and business directories"
+        in queries
+    )
+    assert (
+        "Articles, case studies and reviews on other websites that mention Sensesbit (sensesbit.com), "
+        "Sensory analysis software for food teams"
+    ) in queries
+    assert (
+        "News coverage and press releases about Sensesbit (sensesbit.com), "
+        "Sensory analysis software for food teams, from the last 12 months"
+    ) in queries
 
 
 def test_collect_brand_data_promotes_profile_like_external_mentions_into_profiles():
@@ -172,7 +399,7 @@ def test_collect_brand_data_promotes_profile_like_external_mentions_into_profile
                         )
                     ]
                 )
-            if "press mention media coverage client testimonial case study review" in query:
+            if query.startswith("Articles, case studies and reviews on other websites that mention"):
                 return SimpleNamespace(
                     results=[
                         SimpleNamespace(
@@ -197,7 +424,7 @@ def test_collect_brand_data_promotes_profile_like_external_mentions_into_profile
                 )
             return SimpleNamespace(results=[])
 
-    collector = ExaCollector(api_key="test")
+    collector = ExaCollector(api_key="test", identity_checker=_RecordingChecker())
     collector._client = MixedClient()
 
     data = collector.collect_brand_data("Brand", "https://brand.com")
@@ -214,7 +441,7 @@ def test_collect_brand_data_promotes_profile_like_external_mentions_into_profile
 def test_collect_brand_data_promotes_insurtechcommunityhub_mentions_into_profiles():
     class HubClient:
         def search(self, query: str, **kwargs):
-            if "press mention media coverage client testimonial case study review" in query:
+            if query.startswith("Articles, case studies and reviews on other websites that mention"):
                 return SimpleNamespace(
                     results=[
                         SimpleNamespace(
@@ -230,7 +457,7 @@ def test_collect_brand_data_promotes_insurtechcommunityhub_mentions_into_profile
                 )
             return SimpleNamespace(results=[])
 
-    collector = ExaCollector(api_key="test")
+    collector = ExaCollector(api_key="test", identity_checker=_RecordingChecker())
     collector._client = HubClient()
 
     data = collector.collect_brand_data("Brand", "https://brand.com")
@@ -253,7 +480,7 @@ def test_derive_legal_name_prefers_explicit_legal_notice_signal():
     assert legal_name == "COFI SOLUTIONS, S.L."
 
 
-def test_external_mentions_accept_legal_name_exact_match():
+def test_identity_checked_result_keeps_deterministic_legal_name_provenance():
     class DirectoryClient:
         def search(self, query: str, **kwargs):
             return SimpleNamespace(
@@ -279,7 +506,12 @@ def test_external_mentions_accept_legal_name_exact_match():
                 ]
             )
 
-    collector = ExaCollector(api_key="test")
+    collector = ExaCollector(
+        api_key="test",
+        identity_checker=_RecordingChecker(
+            decide=_accept_urls("https://www.einforma.com/informacion-empresa/cofi-solutions")
+        ),
+    )
     collector._client = DirectoryClient()
 
     results = collector.search(
@@ -291,15 +523,18 @@ def test_external_mentions_accept_legal_name_exact_match():
     )
 
     assert [item.url for item in results] == ["https://www.einforma.com/informacion-empresa/cofi-solutions"]
-    assert results[0].metadata["entity_match_reason"] in {"alias_in_title", "alias_in_text", "alias_in_host"}
+    assert results[0].metadata["entity_match_reason"] == "identity_check"
+    # The LLM verdict never becomes provenance: downstream reproduces only the
+    # deterministic alias match.
     provenance = results[0].metadata["external_identity_provenance"]
     assert provenance["subject_domain"] == "cofisolutions.com"
     assert provenance["source_domain"] == "einforma.com"
     assert provenance["matched_alias"] == "cofisolutionssl"
+    assert provenance["match_method"] == "alias_in_title"
     assert provenance["candidate_strength"] == "strong"
 
 
-def test_external_mentions_filters_collision_results_without_exact_entity_match():
+def test_external_mentions_counts_identity_rejected_collisions_as_filtered():
     class CollisionClient:
         def search(self, query: str, **kwargs):
             return SimpleNamespace(
@@ -325,7 +560,12 @@ def test_external_mentions_filters_collision_results_without_exact_entity_match(
                 ]
             )
 
-    collector = ExaCollector(api_key="test")
+    collector = ExaCollector(
+        api_key="test",
+        identity_checker=_RecordingChecker(
+            decide=_accept_urls("https://www.einforma.com/informacion-empresa/cofi-solutions")
+        ),
+    )
     collector._client = CollisionClient()
 
     results = collector.search(
@@ -340,7 +580,7 @@ def test_external_mentions_filters_collision_results_without_exact_entity_match(
     assert diagnostics["intent_results"]["external_mentions"]["filtered_irrelevant_count"] == 1
 
 
-def test_news_filters_results_without_exact_brand_alias():
+def test_news_counts_identity_rejected_collisions_as_filtered():
     class NewsClient:
         def search(self, query: str, **kwargs):
             return SimpleNamespace(
@@ -366,7 +606,10 @@ def test_news_filters_results_without_exact_brand_alias():
                 ]
             )
 
-    collector = ExaCollector(api_key="test")
+    collector = ExaCollector(
+        api_key="test",
+        identity_checker=_RecordingChecker(decide=_accept_urls("https://press.example.com/cofisolutions-expands")),
+    )
     collector._client = NewsClient()
 
     results = collector.search(
@@ -523,7 +766,8 @@ def test_search_filters_url_results_without_content_body():
                 ]
             )
 
-    collector = ExaCollector(api_key="test")
+    checker = _RecordingChecker()
+    collector = ExaCollector(api_key="test", identity_checker=checker)
     collector._client = EmptyContentClient()
 
     results = collector.search(
@@ -534,6 +778,7 @@ def test_search_filters_url_results_without_content_body():
     )
 
     assert [item.url for item in results] == ["https://press.example.com/body"]
+    assert [item.url for item in checker.calls[0][1]] == ["https://press.example.com/body"]
     diagnostics = collector._build_diagnostics()
     assert diagnostics["intent_results"]["external_mentions"]["filtered_empty_content_count"] == 1
 
