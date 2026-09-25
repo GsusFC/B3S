@@ -149,7 +149,8 @@ def test_supersede_and_consecutive_reopens_are_single_append_state_transitions()
     assert review["status"] == "review_required" and repo.mutations[-1] == "reopen" and repo.authority["accepted_candidate"]["id"] != prior
     again = _run(repo, _Flow(), current=(9,), relations=[_relation(repo, "M1", number=9)], source="scan-3")
     assert again["status"] == "review_required" and len(repo.mutations) == events
-    repo.records = (3,); next_reopen = _run(repo, _Flow(), current=(3,), relations=[_relation(repo, "M1", number=3)], source="scan-4")
+    # scan-3's overlay no longer holds scan-4, so scan-4 reopens on its own coverage loss.
+    repo.records = (9,); next_reopen = _run(repo, _Flow(), current=(9,), relations=[_relation(repo, "M1", number=9)], source="scan-4")
     head = repo.authority["current_head"]
     assert next_reopen["status"] == "review_required" and repo.mutations[-2:] == ["reopen", "reopen"] and head["active_parent_event_id"] == repo.authority["active_authority_event"]["event_id"]
     assert head["schema_version"] == "evidence-vault-sv9-judgment-authority-event-v2" and head["request"]["workset_partition_fingerprint"] == repo.authority["reopen_review_overlay"]["workset_partition_fingerprint"]
@@ -293,16 +294,37 @@ def test_selected_older_event_uses_current_head_for_stable_authority():
     repo.authority["event"] = older
     assert application._authority(repo.authority)["head"] == evaluation_service._authority(repo.authority)[2]["current_head_event_fingerprint"] == repo.authority["current_head"]["event_fingerprint"]
 
-def test_pending_overlay_blocks_adoption_stable_success_and_retention(monkeypatch):
+def test_pending_overlay_blocks_its_own_scan_and_the_accepted_candidate(monkeypatch):
     repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"; repo.records = (3, 9)
     relations = [_relation(repo, "M1", number=3), _relation(repo, "M1", number=9)]; assert _run(repo, _Flow(), current=(3, 9), relations=relations, source="scan-2")["status"] == "authority_advanced"
     repo.records = (9,); assert _run(repo, _Flow(), current=(9,), relations=[_relation(repo, "M1", number=9)], source="scan-3")["status"] == "review_required"; accepted = deepcopy(repo.authority["accepted_candidate"]); older = next(deepcopy(row) for row in repo.candidates.values() if row["id"] != accepted["id"]); before = list(repo.mutations)
     def candidate_outcome(candidate): return {"status": "candidate_available", "reason_codes": [], "candidate": candidate, "accepted_authority": {"current_head_event_fingerprint": repo.authority["current_head"]["event_fingerprint"]}}
-    for candidate in (older, accepted):
+    # scan-3 waits for its own review, and re-adopting the accepted candidate cannot clear the overlay.
+    for candidate in (older | {"source_scan_id": "scan-3"}, accepted):
         monkeypatch.setattr(evaluation_service, "run_evidence_vault_sv9_authority_evaluation", lambda **_kwargs: candidate_outcome(candidate))
         assert _run(repo, _Flow(), source=candidate["source_scan_id"])["status"] == "authority_conflict" and repo.mutations == before
+    # Scan order is the repository's decision; its refusal of an older scan fails closed.
+    repo.adopt_error = history.EvidenceVaultSv9JudgmentCandidateConflictError("older scan")
+    monkeypatch.setattr(evaluation_service, "run_evidence_vault_sv9_authority_evaluation", lambda **_kwargs: candidate_outcome(older))
+    assert _run(repo, _Flow(), source=older["source_scan_id"])["status"] == "authority_conflict" and repo.mutations == before and repo.authority["accepted_candidate"] == accepted
     monkeypatch.setattr(evaluation_service, "run_evidence_vault_sv9_authority_evaluation", lambda **_kwargs: {"status": "no_new_score", "reason_codes": ["exact_reuse"]})
-    assert _run(repo, _Flow())["status"] == "authority_conflict" and repo.mutations == before
+    assert _run(repo, _Flow(), source="scan-3")["status"] == "authority_conflict"
+    assert _run(repo, _Flow(), source="scan-4")["status"] == "authority_retained" and repo.mutations == before
+
+@pytest.mark.parametrize("review_state", ("pending", "rejected"))
+def test_newer_scan_supersedes_another_scans_review_overlay(review_state):
+    repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"
+    assert _run(repo, _Flow(), current=(3,), source="scan-2")["status"] == "review_required"
+    if review_state == "rejected":
+        repo.authority["reopen_review_overlay"] |= {"review_state": "rejected", "resolution_id": _uuid(901), "resolution_key_hash": _hash(902), "candidate_id": _uuid(903)}
+    accepted, reopen = deepcopy(repo.authority), repo.authority["current_head"]["event_id"]
+    retained = _run(repo, _Flow(), current=(9,), source="scan-3")
+    assert (retained["status"], retained["reason_codes"]) == ("authority_retained", ["exact_reuse"]) and repo.authority == accepted
+    advanced = _run(repo, _Flow(), current=(3, 9), source="scan-4")
+    assert (advanced["status"], advanced["evaluation_status"]) == ("authority_advanced", "candidate_available")
+    head = repo.authority["current_head"]
+    assert repo.mutations[-2:] == ["reopen", "adopt"] and repo.authority["reopen_review_overlay"] is None
+    assert head["event_type"] == "supersede" and head["predecessor_event_id"] == reopen and repo.authority["accepted_candidate"]["source_scan_id"] == "scan-4"
 
 def test_rejected_overlay_retains_authority_and_blocks_exact_candidate_readoption(monkeypatch):
     repo = _ApplicationRepository(records=(9,))
@@ -955,7 +977,8 @@ def test_accepted_input_reuse_does_not_hide_changed_or_nonauthoritative_work(mon
         )
     elif change == "overlay":
         assert _run(repo, _Flow(), current=(9,), source="scan-3")["status"] == "review_required"
-        source = "scan-4"
+        # A pending overlay holds only the scan that reopened it.
+        current, source = (9,), "scan-3"
     flow = _Flow()
     result = _run(repo, flow, current=current, source=source, trusted=trusted)
     assert result["reason_codes"] != ["exact_reuse"] and not repo.proof_reads
@@ -964,6 +987,19 @@ def test_accepted_input_reuse_does_not_hide_changed_or_nonauthoritative_work(mon
     if change == "hint":
         assert result["status"] == "authority_retained" and result["reason_codes"] == ["incomplete_candidate"]
         assert any(row["tile_id"] == "C2" and row["evidence"] for call in flow.calls for row in call["requested_tiles"])
+
+
+def test_accepted_input_reuse_ignores_another_scans_review_overlay():
+    repo = _CheckpointReplayRepository(records=(9,))
+    _run(repo, _Flow())
+    assert _run(repo, _Flow(), current=(3, 9), source="scan-2")["status"] == "authority_advanced"
+    assert _run(repo, _Flow(), current=(9,), source="scan-3")["status"] == "review_required"
+    accepted, flow = deepcopy(repo.authority), _Flow()
+
+    result = _run(repo, flow, current=(3, 9), source="scan-2")
+
+    assert result["status"] == "authority_retained" and result["reason_codes"] == ["exact_reuse"]
+    assert repo.proof_reads and not flow.calls and repo.authority == accepted
 
 
 class _AcceptedResultAuthorityRepository(_ApplicationRepository):

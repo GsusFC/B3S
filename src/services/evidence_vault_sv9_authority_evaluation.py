@@ -90,10 +90,10 @@ def emit_evidence_vault_sv9_component_evaluation_diagnostic(
 def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9AuthorityEvaluationRepository, flow: evaluation.Sv9StrictComponentFlowPort, domain_or_url: str, source_scan_id: str, current_series_contract: Mapping[str, Any], workspace_slug: str = "b3s", trusted_irrelevant_evidence: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
     """Evaluate exact trusted deltas without adopting, reopening, or superseding authority."""
     try:
-        domain = normalize_domain(_text(domain_or_url)); _text(source_scan_id); _text(workspace_slug)
+        domain = normalize_domain(_text(domain_or_url)); scan = _text(source_scan_id); _text(workspace_slug)
         if not domain: raise EvidenceVaultSv9AuthorityEvaluationError("domain is invalid")
         authority = repository.get_evidence_vault_sv9_judgment_authority(domain, workspace_slug=workspace_slug)
-        prior, sentinels, authority_ids, overlay, authority_snapshot = _authority(authority)
+        prior, sentinels, authority_ids, overlay, authority_snapshot = _authority(authority, scan)
         try:
             evaluation_input = project_evidence_vault_sv9_evaluation_input(
                 repository=repository,
@@ -458,7 +458,7 @@ def _accepted(value: Mapping[str, Any], sentinel=False) -> dict[str, Any]:
     omit = {"schema_version", "series_fingerprint", "canonical_component_sentinel_fingerprint" if sentinel else "canonical_judgment_fingerprint", "authority_state"}
     return (planner.build_component_not_detected_sentinel if sentinel else memory.build_tile_judgment)(**({key: row for key, row in value.items() if key not in omit} | {"authority_state": "accepted"}))
 def _capacity(tiles: Sequence[Mapping[str, Any]], sentinels: Sequence[Mapping[str, Any]]) -> int: return len(tiles) + sum(len(planner._COMPONENT_TILES[row["component_key"]]) for row in sentinels)
-def _authority(value: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str] | None, bool, dict[str, str]]:
+def _authority(value: Any, source_scan_id: str | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str] | None, bool, dict[str, str]]:
     if value is None: return [], [], None, False, {"state": "bootstrap_absent"}
     try:
         value = validate_persisted_evidence_vault_sv9_authority_projection(value)
@@ -476,7 +476,10 @@ def _authority(value: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]], 
             "canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"],
             "current_series_fingerprint": candidate["current_series_fingerprint"],
         }
-        return tiles, sentinels, ids, overlay is not None and overlay.get("review_state") == "pending", snapshot
+        # A pending overlay holds only the scan it reopened. Other scans evaluate
+        # normally; the repository refuses adoption from a scan that is not newer.
+        own_overlay = overlay is not None and overlay.get("review_state") == "pending" and value["current_head"]["request"]["source_scan_id"] == source_scan_id
+        return tiles, sentinels, ids, own_overlay, snapshot
     except (AttributeError, KeyError, TypeError, ValueError, memory.JudgmentMemoryContractError, planner.IncrementalPlannerError) as exc: raise EvidenceVaultSv9AuthorityEvaluationError("authority is invalid") from exc
 
 
@@ -884,7 +887,11 @@ def _accepted_input_replays(repository, authority, current, plan, witness, recor
     """Reuse accepted authority only with its original, complete checkpoint input proof."""
     candidate = authority["accepted_candidate"]
     if (
-        authority["reopen_review_overlay"] is not None
+        (
+            authority["reopen_review_overlay"] is not None
+            and authority["current_head"]["request"]["source_scan_id"]
+            == current["source_identity"]["source_scan_id"]
+        )
         or (current["non_authoritative_hints"] and not allow_hints)
         or candidate["source_scan_id"] != current["source_identity"]["source_scan_id"]
         or candidate["current_series_fingerprint"] != plan["current_series_fingerprint"]
