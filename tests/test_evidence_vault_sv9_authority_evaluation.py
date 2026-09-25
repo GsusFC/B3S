@@ -478,6 +478,22 @@ def test_first_baseline_adoption_retry_publishes_and_recapture_retains_accepted_
     assert repo.authority["score"] == accepted["score"] and report == before
 
 
+def test_first_baseline_replay_ignores_another_scans_review_overlay():
+    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
+
+    repo = _first_baseline(_ApplicationRepository(records=(3, 9)))
+    assert _baseline_application(repo, _SelectiveFlow())["status"] == "authority_established"
+    assert _baseline_application(repo, _SelectiveFlow(), source="scan-2")["status"] == "review_required"
+    assert repo.authority["current_head"]["request"]["source_scan_id"] == "scan-2"
+    assert repo.authority["reopen_review_overlay"]["review_state"] == "pending"
+    accepted, flow = deepcopy(repo.authority), _SelectiveFlow(fail=1)
+
+    retry = _baseline_application(repo, flow)
+
+    assert (retry["status"], retry["reason_codes"]) == ("authority_retained", ["exact_reuse"])
+    assert not flow.calls and repo.authority == accepted
+
+
 @pytest.mark.parametrize("failure", ("provider", "omitted_tile", "coherencia", "interrupted", "invalid_witness", "stale_witness"))
 @pytest.mark.parametrize("empty_basis", [False, True])
 def test_first_baseline_failed_complete_analysis_never_adopts_or_publishes_score(failure, empty_basis):
@@ -706,6 +722,64 @@ def test_bootstrap_reopen_coverage_loss_uses_partition_reasons_without_candidate
     assert outcome["status"] == "review_required" and "coverage_loss" in outcome["reason_codes"] and "incomplete_candidate" not in outcome["reason_codes"] and not flow.calls and repo.get_calls == repo.append_calls == 0
     assert partition["review_partition"] == value and partition["judgment_delta"] == outcome["signed_delta"] and outcome["candidate"] is None
     assert not ({"assessment", "score", "adoption", "publication"} & set(outcome))
+
+
+@pytest.mark.parametrize(
+    ("overlay_scan", "status"),
+    (("scan-3", "candidate_available"), ("scan-4", "review_required")),
+)
+def test_pending_review_overlay_holds_only_its_own_scan(monkeypatch, overlay_scan, status):
+    from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository
+    from tests.test_evidence_vault_sv9_authority_application import _run as _apply
+
+    # These flows read the fake repository's own relation facts.
+    monkeypatch.setattr(
+        service,
+        "project_evidence_vault_sv9_evaluation_input",
+        project_evidence_vault_sv9_evaluation_input,
+    )
+    repo = _ApplicationRepository(records=(9,))
+    assert _apply(repo, _Flow())["status"] == "authority_established"
+    assert _apply(repo, _Flow(), current=(3, 9), source="scan-2")["status"] == "authority_advanced"
+
+    def evaluate(scan, current):
+        repo.records = current
+        repo.projection_relations = [_relation(repo, "M1", number=number) for number in current]
+        return service.run_evidence_vault_sv9_authority_evaluation(
+            repository=repo,
+            flow=_Flow(),
+            domain_or_url="example.test",
+            source_scan_id=scan,
+            current_series_contract=_series(),
+        )
+
+    review = evaluate("scan-3", (9,))
+    assert review["status"] == "review_required"
+    predecessor = repo.authority["current_head"]["event_fingerprint"]
+    request = authority_event.build_evidence_vault_sv9_authority_request(
+        action="reopen_authority",
+        candidate_id=None,
+        expected_predecessor_event_fingerprint=predecessor,
+        delta_fingerprint=review["signed_delta"]["canonical_delta_fingerprint"],
+        source_scan_id=overlay_scan,
+        workset_partition_fingerprint=review["workset_partition"]["partition_fingerprint"],
+    )
+    # The cases differ only in which scan owns the pending overlay.
+    repo.reopen_evidence_vault_sv9_judgment_authority(
+        overlay_scan,
+        review["signed_delta"],
+        expected_predecessor_event_fingerprint=predecessor,
+        idempotency_key_hash=authority_event.authority_application_idempotency_fingerprint(request),
+        workset_partition=review["workset_partition"],
+    )
+    assert repo.authority["reopen_review_overlay"]["review_state"] == "pending"
+
+    outcome = evaluate("scan-4", (3, 7, 9))
+
+    own_overlay = overlay_scan == "scan-4"
+    assert outcome["status"] == status
+    assert ("active_review_overlay" in outcome["reason_codes"]) is own_overlay
+    assert (outcome["candidate"] is None) is own_overlay
 
 
 @pytest.mark.parametrize(

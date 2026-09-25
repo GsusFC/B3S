@@ -245,6 +245,85 @@ def test_v2_reopen_payload_replays_only_the_immutable_partition(monkeypatch) -> 
         )
 
 
+def test_candidate_after_reopen_must_come_from_a_strictly_newer_scan(monkeypatch) -> None:
+    from src.history import repository as history
+
+    class CandidateChecksReached(Exception):
+        pass
+
+    reopen = {
+        "event_type": "reopen",
+        "event_fingerprint": _hash("a"),
+        "request": {"source_scan_id": "scan-reopened"},
+    }
+    scan_order_queries = []
+
+    class Connection:
+        newer = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, statement, parameters=()):
+            self.row = None
+            if "scan_runs" in statement:
+                scan_order_queries.append(parameters)
+                self.row = None if self.newer is None else {"newer": self.newer}
+            return self
+
+        def fetchone(self):
+            return self.row
+
+    connection = Connection()
+    repository = history.PostgresHistoryRepository(
+        "postgresql://unused", connect=lambda *_args, **_kwargs: connection
+    )
+    repository._migrated = True
+    monkeypatch.setattr(history, "_verify_exact_migration_head_under_shared_lock", lambda _conn: None)
+    monkeypatch.setattr(
+        history,
+        "_sv9_judgment_context",
+        lambda _conn, scan, *_args: {
+            "workspace_id": "workspace",
+            "brand_id": "brand",
+            "scan_run_id": f"run-{scan}",
+            "source_scan_id": scan,
+        },
+    )
+    monkeypatch.setattr(
+        history, "_replay_sv9_judgment_authority", lambda *_args: {"head": reopen, "events": {}}
+    )
+
+    def candidate_checks(*_args):
+        raise CandidateChecksReached
+
+    monkeypatch.setattr(history, "_sv9_authority_candidate", candidate_checks)
+
+    def adopt(scan):
+        return repository.adopt_evidence_vault_sv9_judgment_candidate(
+            scan,
+            "00000000-0000-0000-0000-000000000301",
+            expected_predecessor_event_fingerprint=reopen["event_fingerprint"],
+            idempotency_key_hash=_hash("b"),
+        )
+
+    # The reopened scan itself is refused even when its timestamp would pass.
+    for scan, newer in (("scan-reopened", True), ("scan-older", False), ("scan-unknown", None)):
+        connection.newer = newer
+        with pytest.raises(history.EvidenceVaultSv9JudgmentCandidateConflictError, match="newer"):
+            adopt(scan)
+    connection.newer = True
+    with pytest.raises(CandidateChecksReached):
+        adopt("scan-newer")
+    assert scan_order_queries == [
+        ("workspace", "brand", f"run-{scan}", "scan-reopened")
+        for scan in ("scan-older", "scan-unknown", "scan-newer")
+    ]
+
+
 # fmt: off
 @pytest.mark.skipif(
     not os.environ.get("B3S_TEST_DATABASE_URL")
@@ -606,6 +685,160 @@ def test_accepted_pointers_follow_the_last_adopted_candidate_per_workspace() -> 
             assert pointers([], workspace_slug="authority") == {}
             assert pointers(workspace_slug="other") == {}
             assert pointers(["authority.test"], workspace_slug="other") == {}
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+            if not existed:
+                conn.execute("DROP ROLE b3s_history_vault_provenance_owner")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL")
+    or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1",
+    reason="requires disposable PostgreSQL",
+)
+def test_repository_supersedes_a_reopen_only_from_a_newer_scan(monkeypatch) -> None:
+    import psycopg
+    from src.history.repository import (
+        EvidenceVaultSv9JudgmentCandidateConflictError,
+        PostgresHistoryRepository,
+    )
+    from src.services import evidence_vault_sv9_authority_event as authority_event
+    from src.services import evidence_vault_sv9_judgment_delta as delta
+    from src.sv9 import judgment_memory as memory
+    from tests.test_evidence_vault_sv9_judgment_candidates_postgres import (
+        _captured_candidate,
+        _operational,
+    )
+    from tests.test_sv9_judgment_memory import _series
+
+    dsn = os.environ["B3S_TEST_DATABASE_URL"]
+    scans = ("order-accepted", "order-older", "order-reopened", "order-newer")
+
+    def key(action, scan, candidate=None, fingerprint=None, predecessor=None):
+        request = authority_event.build_evidence_vault_sv9_authority_request(
+            action=action,
+            candidate_id=candidate,
+            expected_predecessor_event_fingerprint=predecessor,
+            delta_fingerprint=fingerprint,
+            source_scan_id=scan,
+        )
+        return authority_event.authority_application_idempotency_fingerprint(request)
+
+    def head():
+        with psycopg.connect(dsn) as conn:
+            return conn.execute(
+                "SELECT count(*), (SELECT event_fingerprint FROM b3s_history.evidence_vault_sv9_judgment_authority_events ORDER BY sequence DESC LIMIT 1) FROM b3s_history.evidence_vault_sv9_judgment_authority_events"
+            ).fetchone()
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        existed = bool(
+            conn.execute("SELECT 1 FROM pg_roles WHERE rolname = 'b3s_history_vault_provenance_owner'").fetchone()
+        )
+        if not existed:
+            conn.execute("CREATE ROLE b3s_history_vault_provenance_owner NOLOGIN")
+        conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+    try:
+        repository = PostgresHistoryRepository(dsn)
+        repository.migrate()
+        current = _operational(repository, scans[0])
+        raw, _, _ = _captured_candidate(monkeypatch, repository, scans[0], _series())
+        accepted = repository.append_evidence_vault_sv9_judgment_candidate(scans[0], raw)[0]
+        adopted, _ = repository.adopt_evidence_vault_sv9_judgment_candidate(
+            scans[0],
+            accepted["id"],
+            expected_predecessor_event_fingerprint=None,
+            idempotency_key_hash=key("adopt_candidate", scans[0], accepted["id"]),
+        )
+        omitted = {"schema_version", "series_fingerprint", "canonical_judgment_fingerprint", "authority_state"}
+        prior = [
+            memory.build_tile_judgment(
+                **({name: value for name, value in row.items() if name not in omitted} | {"authority_state": "accepted"})
+            )
+            for row in adopted["accepted_candidate"]["candidate_tile_judgments"]
+        ]
+        candidates, sources = {}, {}
+        for scan in scans[1:]:
+            current = _operational(repository, scan, current)
+            sources[scan] = repository.resolve_evidence_vault_sv9_judgment_evidence(
+                scan, [row["ref"] for row in current]
+            )
+            # Checkpoint proofs are irrelevant to adoption order and would pin a stale snapshot.
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    repository,
+                    "append_evidence_vault_sv9_evaluation_checkpoint",
+                    lambda _scan, checkpoint, **_kwargs: (checkpoint, False),
+                )
+                raw, _, _ = _captured_candidate(monkeypatch, repository, scan, _series())
+            candidates[scan] = repository.append_evidence_vault_sv9_judgment_candidate(scan, raw)[0]
+
+        predecessor = adopted["current_head"]["event_fingerprint"]
+        # A reopen may follow another reopen; the latest one owns the pending overlay.
+        for scan in ("order-older", "order-reopened"):
+            evidence = [
+                {name: row[name] for name in ("evidence_ref", "evidence_fingerprint")}
+                for row in sources[scan]["evidence"]
+            ]
+            relation = delta.build_authoritative_evidence_tile_relation(
+                tile_id="M1",
+                component_key="mission",
+                disposition="contradiction",
+                evidence_ref=evidence[0]["evidence_ref"],
+                evidence_fingerprint=evidence[0]["evidence_fingerprint"],
+                capture_origin=sources[scan]["capture_origin"],
+                operation_origin=sources[scan]["operation_origin"],
+            )
+            signed = delta.build_evidence_vault_sv9_judgment_delta(
+                current_evidence=delta.build_evidence_identity_set(evidence),
+                prior_judgments=prior,
+                authoritative_relations=[relation],
+                current_series_contract=_series(),
+            )
+            reopened, replayed = repository.reopen_evidence_vault_sv9_judgment_authority(
+                scan,
+                signed,
+                expected_predecessor_event_fingerprint=predecessor,
+                idempotency_key_hash=key(
+                    "reopen_authority", scan, fingerprint=signed["canonical_delta_fingerprint"], predecessor=predecessor
+                ),
+            )
+            assert not replayed and reopened["current_head"]["event_type"] == "reopen"
+            assert reopened["current_head"]["request"]["source_scan_id"] == scan
+            assert reopened["reopen_review_overlay"]["review_state"] == "pending"
+            predecessor = reopened["current_head"]["event_fingerprint"]
+
+        # The fixtures share one observed_at, so order the scans explicitly.
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            for hour, scan in enumerate(scans, 10):
+                conn.execute(
+                    "UPDATE b3s_history.scan_runs SET requested_at = %s WHERE source_scan_id = %s",
+                    (f"2026-08-07T{hour}:00:00Z", scan),
+                )
+
+        def adopt(scan):
+            candidate = candidates[scan]["id"]
+            return repository.adopt_evidence_vault_sv9_judgment_candidate(
+                scan,
+                candidate,
+                expected_predecessor_event_fingerprint=predecessor,
+                idempotency_key_hash=key("adopt_candidate", scan, candidate, predecessor=predecessor),
+            )
+
+        before = head()
+        for scan in ("order-reopened", "order-older"):
+            with pytest.raises(EvidenceVaultSv9JudgmentCandidateConflictError, match="newer"):
+                adopt(scan)
+            assert head() == before
+        superseded, replayed = adopt("order-newer")
+        assert not replayed and superseded["event"]["event_type"] == "supersede"
+        assert superseded["current_head"] == superseded["event"] and superseded["reopen_review_overlay"] is None
+        assert superseded["current_head"]["predecessor_event_fingerprint"] == predecessor
+        assert superseded["accepted_candidate"]["id"] == candidates["order-newer"]["id"]
+        loaded = repository.get_evidence_vault_sv9_judgment_authority("example.com")
+        assert loaded["current_head"] == superseded["current_head"] and loaded["reopen_review_overlay"] is None
+        same, replayed = adopt("order-newer")
+        assert replayed and same["event"] == superseded["event"]
     finally:
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")

@@ -6485,6 +6485,7 @@ class PostgresHistoryRepository:
             if request["expected_predecessor_event_fingerprint"] != (state["head"]["event_fingerprint"] if state else None): raise EvidenceVaultSv9JudgmentCandidateConflictError("SV9 judgment authority predecessor is stale.")
             candidate = candidate_row = None
             if candidate_id:
+                if state is not None and state["head"]["event_type"] == "reopen": _sv9_authority_require_newer_scan_than_reopen(conn, state["head"], context)
                 candidate, candidate_row = _sv9_authority_candidate(conn, candidate_id, workspace_slug, context["workspace_id"], context["brand_id"])
                 if str(candidate_row["source_scan_id"]) != context["source_scan_id"] or any(candidate_row[field] != context[field] for field in ("scan_run_id", "capture_id", "operation_plan_id")): raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment candidate does not match the source scan context.")
                 if candidate["schema_version"].endswith("v1"): raise EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError("SV9 judgment candidate v1 cannot establish new authority.")
@@ -13618,6 +13619,26 @@ def _sv9_authority_reopen_binding(conn: Any, state: Mapping[str, Any], context: 
     if len(evidence) != len(rows) or evidence != set(records): raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment reopen evidence is not the Vault capture.")
     capture = {"capture_id": str(context["capture_id"]), "capture_fingerprint": str(context["capture_fingerprint"])}; operation = {"operation_id": str(context["operation_plan_id"]), "operation_fingerprint": str(context["operation_fingerprint"])}
     if any((row["evidence_ref"], row["evidence_fingerprint"]) not in records or row["capture_origin"] != capture or row["operation_origin"] != operation for row in delta["authoritative_relations"]): raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment reopen relations are not the Vault source.")
+
+
+def _sv9_authority_require_newer_scan_than_reopen(conn: Any, reopen: Mapping[str, Any], context: Mapping[str, Any]) -> None:
+    # A pending or rejected review stays with the scan it reopened. Only a strictly
+    # newer scan may supersede it, so a retried older scan cannot bury that review.
+    reopened_scan = reopen["request"]["source_scan_id"]
+    row = None if reopened_scan == context["source_scan_id"] else conn.execute(
+        f"""SELECT candidate_scan.requested_at > reopened_scan.requested_at AS newer
+            FROM {_SCHEMA}.scan_runs AS candidate_scan
+            JOIN {_SCHEMA}.scan_runs AS reopened_scan
+              ON reopened_scan.workspace_id = candidate_scan.workspace_id
+             AND reopened_scan.brand_id = candidate_scan.brand_id
+            WHERE candidate_scan.workspace_id = %s
+              AND candidate_scan.brand_id = %s
+              AND candidate_scan.id = %s
+              AND reopened_scan.source_scan_id = %s""",
+        (context["workspace_id"], context["brand_id"], context["scan_run_id"], reopened_scan),
+    ).fetchone()
+    if row is None or row["newer"] is not True:
+        raise EvidenceVaultSv9JudgmentCandidateConflictError("SV9 judgment candidate scan is not newer than the reopened scan awaiting review.")
 
 
 def _sv9_authority_candidate(

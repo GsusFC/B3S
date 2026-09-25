@@ -46,7 +46,7 @@ def run_evidence_vault_sv9_authority_application(*, repository: EvidenceVaultSv9
     if status == "review_required":
         return _apply_review(repository, domain_or_url, source_scan_id, workspace_slug, outcome)
     if status == "no_new_score":
-        return _result("authority_conflict", outcome) if any(reason in outcome.get("reason_codes", []) for reason in ("invalid_source_identity", "invalid_input")) else _retain(repository, domain_or_url, workspace_slug, outcome)
+        return _result("authority_conflict", outcome) if any(reason in outcome.get("reason_codes", []) for reason in ("invalid_source_identity", "invalid_input")) else _retain(repository, domain_or_url, source_scan_id, workspace_slug, outcome)
     return _result("authority_conflict", outcome)
 
 def _apply_candidate(repository, domain: str, source: str, workspace: str, outcome: Mapping[str, Any]) -> dict[str, Any]:
@@ -57,7 +57,9 @@ def _apply_candidate(repository, domain: str, source: str, workspace: str, outco
     state, authority, details = _read(repository, domain, workspace)
     if state == "authority" and details.get("rejected_candidate_id") == candidate["id"]:
         return _result("authority_retained", dict(outcome) | {"reason_codes": ["review_rejected"]}, authority, candidate)
-    if state == "conflict" or (state == "authority" and details["overlay"] is not None):
+    # The overlay's own scan waits for human review, and re-adopting the accepted
+    # candidate cannot clear it. The repository decides whether this scan is newer.
+    if state == "conflict" or (state == "authority" and details["overlay"] is not None and (details["review_scan_id"] == source or _matches(details, candidate))):
         return _result("authority_conflict", outcome)
     if state == "authority" and _matches(details, candidate):
         return _success(outcome, authority, details, candidate)
@@ -122,9 +124,9 @@ def _apply_review(repository, domain: str, source: str, workspace: str, outcome:
         return _result("review_required", outcome, authority, signed_delta=signed)
     return _result("authority_conflict", outcome)
 
-def _retain(repository, domain: str, workspace: str, outcome: Mapping[str, Any]) -> dict[str, Any]:
+def _retain(repository, domain: str, source: str, workspace: str, outcome: Mapping[str, Any]) -> dict[str, Any]:
     state, authority, _details = _read(repository, domain, workspace)
-    if state == "authority" and (_details["overlay"] is None or _details.get("review_state") == "rejected"):
+    if state == "authority" and (_details["overlay"] is None or _details.get("review_state") == "rejected" or _details["review_scan_id"] != source):
         return _result("authority_retained", outcome, authority)
     return _result("first_run_unresolved" if state == "absent" else "authority_conflict", outcome)
 
@@ -168,6 +170,8 @@ def _authority(value: Any) -> dict[str, Any]:
             "workset_partition_fingerprint": overlay.get("workset_partition_fingerprint"),
         },
         "review_state": None if overlay is None else overlay["review_state"],
+        # Kept beside the overlay: _same_review_overlay compares the overlay dict exactly.
+        "review_scan_id": None if overlay is None else head["request"]["source_scan_id"],
         "rejected_candidate_id": None if overlay is None else overlay.get("candidate_id"),
     }
 
