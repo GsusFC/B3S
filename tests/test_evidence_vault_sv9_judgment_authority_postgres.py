@@ -844,3 +844,122 @@ def test_repository_supersedes_a_reopen_only_from_a_newer_scan(monkeypatch) -> N
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
             if not existed:
                 conn.execute("DROP ROLE b3s_history_vault_provenance_owner")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL")
+    or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1",
+    reason="requires disposable PostgreSQL",
+)
+def test_repository_persists_and_replays_a_support_continuity_reopen(monkeypatch) -> None:
+    import psycopg
+    from src.history.repository import PostgresHistoryRepository
+    from src.services import evidence_vault_sv9_authority_event as authority_event
+    from src.services import evidence_vault_sv9_authority_projection as authority_projection
+    from src.services import evidence_vault_sv9_judgment_delta as delta
+    from src.services import evidence_vault_sv9_support_continuity as continuity
+    from src.sv9 import judgment_memory as memory
+    from tests.test_evidence_vault_sv9_judgment_candidates_postgres import (
+        _captured_candidate,
+        _operational,
+    )
+    from tests.test_sv9_judgment_memory import _series
+
+    dsn = os.environ["B3S_TEST_DATABASE_URL"]
+
+    def key(action, scan, candidate=None, fingerprint=None, predecessor=None):
+        request = authority_event.build_evidence_vault_sv9_authority_request(
+            action=action,
+            candidate_id=candidate,
+            expected_predecessor_event_fingerprint=predecessor,
+            delta_fingerprint=fingerprint,
+            source_scan_id=scan,
+        )
+        return authority_event.authority_application_idempotency_fingerprint(request)
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        existed = bool(
+            conn.execute("SELECT 1 FROM pg_roles WHERE rolname = 'b3s_history_vault_provenance_owner'").fetchone()
+        )
+        if not existed:
+            conn.execute("CREATE ROLE b3s_history_vault_provenance_owner NOLOGIN")
+        conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+    try:
+        repository = PostgresHistoryRepository(dsn)
+        repository.migrate()
+        current = _operational(repository, "carry-accepted")
+        raw, _, _ = _captured_candidate(monkeypatch, repository, "carry-accepted", _series())
+        accepted = repository.append_evidence_vault_sv9_judgment_candidate("carry-accepted", raw)[0]
+        adopted, _ = repository.adopt_evidence_vault_sv9_judgment_candidate(
+            "carry-accepted",
+            accepted["id"],
+            expected_predecessor_event_fingerprint=None,
+            idempotency_key_hash=key("adopt_candidate", "carry-accepted", accepted["id"]),
+        )
+        # The historical facts expose the identity-derived source class the matcher reads.
+        historical = repository.load_evidence_vault_sv9_authoritative_relation_facts("carry-accepted")
+        assert {row["source_class"] for row in historical["evidence"]} == {"owned_copy"}
+        next_current = _operational(repository, "carry-next", current)
+        source = repository.resolve_evidence_vault_sv9_judgment_evidence(
+            "carry-next", [row["ref"] for row in next_current]
+        )
+        omitted = {"schema_version", "series_fingerprint", "canonical_judgment_fingerprint", "authority_state"}
+        prior = [
+            memory.build_tile_judgment(
+                **({name: value for name, value in row.items() if name not in omitted} | {"authority_state": "accepted"})
+            )
+            for row in adopted["accepted_candidate"]["candidate_tile_judgments"]
+        ]
+        evidence = [
+            {name: row[name] for name in ("evidence_ref", "evidence_fingerprint")} for row in source["evidence"]
+        ]
+        relation = delta.build_authoritative_evidence_tile_relation(
+            tile_id="M1",
+            component_key="mission",
+            disposition="contradiction",
+            evidence_ref=evidence[0]["evidence_ref"],
+            evidence_fingerprint=evidence[0]["evidence_fingerprint"],
+            capture_origin=source["capture_origin"],
+            operation_origin=source["operation_origin"],
+        )
+        signed = delta.build_evidence_vault_sv9_judgment_delta(
+            current_evidence=delta.build_evidence_identity_set(evidence),
+            prior_judgments=prior,
+            authoritative_relations=[relation],
+            current_series_contract=_series(),
+            support_continuity={
+                "rule_version": continuity.SUPPORT_CONTINUITY_RULE_VERSION,
+                "capture_origin": source["capture_origin"],
+                "operation_origin": source["operation_origin"],
+                "carried": [],
+            },
+        )
+        assert signed["schema_version"] == delta.SUPPORT_CONTINUITY_JUDGMENT_DELTA_VERSION
+        predecessor = adopted["current_head"]["event_fingerprint"]
+        reopen_key = key(
+            "reopen_authority", "carry-next", fingerprint=signed["canonical_delta_fingerprint"], predecessor=predecessor
+        )
+        reopened, replayed = repository.reopen_evidence_vault_sv9_judgment_authority(
+            "carry-next", signed, expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash=reopen_key
+        )
+        assert not replayed and reopened["current_head"]["event_type"] == "reopen"
+        assert reopened["reopen_review_overlay"]["signed_delta"] == signed
+        same, replayed = repository.reopen_evidence_vault_sv9_judgment_authority(
+            "carry-next", signed, expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash=reopen_key
+        )
+        assert replayed and same["event"] == reopened["event"]
+        loaded = repository.get_evidence_vault_sv9_judgment_authority("example.com")
+        overlay = loaded["reopen_review_overlay"]
+        assert overlay["review_state"] == "pending"
+        assert overlay["delta_fingerprint"] == signed["canonical_delta_fingerprint"]
+        assert overlay["signed_delta"]["schema_version"] == delta.SUPPORT_CONTINUITY_JUDGMENT_DELTA_VERSION
+        assert overlay["signed_delta"]["support_continuity"] == signed["support_continuity"]
+        assert delta.validate_evidence_vault_sv9_judgment_delta(json.loads(json.dumps(overlay["signed_delta"]))) == signed
+        assert authority_projection.validate_persisted_evidence_vault_sv9_authority_projection(loaded) == json.loads(
+            json.dumps(loaded)
+        )
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
+            if not existed:
+                conn.execute("DROP ROLE b3s_history_vault_provenance_owner")

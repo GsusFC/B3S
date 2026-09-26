@@ -1,7 +1,9 @@
 from copy import deepcopy
 import json
+from pathlib import Path
 import pytest
 from src.services import evidence_vault_sv9_judgment_delta as delta
+from src.services import evidence_vault_sv9_support_continuity as continuity
 from src.services.evidence_vault_canonical_core import canonical_fingerprint, canonical_json
 from src.services.evidence_vault_sv9_authoritative_relations import (
     project_evidence_vault_sv9_evaluation_input,
@@ -68,13 +70,32 @@ def _sentinel(value, component="mission"):
         operation_origin={"operation_id": source["operation_plan_id"], "operation_fingerprint": source["operation_fingerprint"]},
         series_contract=_series(), authority_state="accepted", review_state="none", lifecycle_state="active", lifecycle_reason="",
     )
-def _delta(value, *, prior=None, sentinels=(), relations=None):
+def _delta(value, *, prior=None, sentinels=(), relations=None, support_continuity=None):
     return delta.build_evidence_vault_sv9_judgment_delta(
         current_evidence=delta.build_evidence_identity_set(value["current_evidence"]),
         prior_judgments=_prior(value) if prior is None else prior,
         prior_component_sentinels=list(sentinels), authoritative_relations=value["authoritative_relations"] if relations is None else relations,
         current_series_contract=_series(),
+        **({} if support_continuity is None else {"support_continuity": support_continuity}),
     )
+def _continuity(value, *carried, capture_origin=None):
+    source = value["source_identity"]
+    return {
+        "rule_version": continuity.SUPPORT_CONTINUITY_RULE_VERSION,
+        "capture_origin": {key: source[key] for key in ("capture_id", "capture_fingerprint")} if capture_origin is None else capture_origin,
+        "operation_origin": {"operation_id": source["operation_plan_id"], "operation_fingerprint": source["operation_fingerprint"]},
+        "carried": list(carried),
+    }
+def _moved_support(value, label="moved"):
+    # M1's accepted support left the capture; the same text now lives under another ref.
+    old = {"evidence_ref": "evidence-old", "evidence_fingerprint": _sha("old")}
+    prior = _prior(value)
+    index = next(index for index, row in enumerate(prior) if row["tile_id"] == "M1")
+    raw = {key: item for key, item in prior[index].items() if key not in {"schema_version", "series_fingerprint", "canonical_judgment_fingerprint"}}
+    prior[index] = memory.build_tile_judgment(**(raw | {"supporting_evidence": [old]}))
+    target = next(row for row in value["current_identity_bindings"] if row["evidence_ref"] == f"evidence-{label}")
+    carried = {"tile_id": "M1", "source": old, "tier": "canonical", "targets": [{key: target[key] for key in ("evidence_ref", "evidence_fingerprint")}]}
+    return prior, carried, target
 def _build(value, signed_delta, trusted=None):
     return partition.build_evidence_vault_sv9_workset_partition(
         evaluation_input=value, judgment_delta=signed_delta, trusted_irrelevant_evidence=trusted,
@@ -229,6 +250,41 @@ def test_review_causes_tampering_and_ordering_fail_closed():
     assert duplicate["status"] == "review_required" and duplicate["reason_codes"] == ["ambiguous_current_evidence"]
     with pytest.raises(partition.EvidenceVaultSv9WorksetPartitionError):
         _build(source, _delta(source, relations=[]))
+
+
+def test_v4_carried_targets_are_known_to_hints_and_completion_markers_while_v2_still_fails():
+    source = _input(extras=("moved",), hints=(("hint", "M2", "moved"),), completed=("moved",))
+    prior, carried, target = _moved_support(source)
+    signed = _delta(source, prior=prior, support_continuity=_continuity(source, carried))
+    assert signed["schema_version"] == delta.SUPPORT_CONTINUITY_JUDGMENT_DELTA_VERSION
+
+    value = _build(source, signed)
+
+    healthy = {row["tile_id"]: row for row in value["healthy_workset"]["tiles"]}
+    review = value["review_partition"]
+    assert review["judgment_delta_coverage_loss_tile_ids"] == [] and "M1" not in review["tile_ids"]
+    assert healthy["M1"]["route_source"] == "canonical_plan" and target in healthy["M1"]["current_evidence_bindings"]
+    assert healthy["M2"]["route_source"] == "signed_hint" and healthy["M2"]["current_evidence_bindings"] == [target]
+    assert value["pending_evidence"] == [] and value["processing_complete_evidence"] == []
+    assert partition.validate_evidence_vault_sv9_workset_partition(json.loads(json.dumps(value))) == value
+    with pytest.raises(partition.EvidenceVaultSv9WorksetPartitionError):
+        _build(source, _delta(source, prior=prior))
+    plain = _input(extras=("moved",))
+    prior, _carried, target = _moved_support(plain)
+    legacy = _build(plain, _delta(plain, prior=prior))
+    assert legacy["review_partition"]["judgment_delta_coverage_loss_tile_ids"] == ["M1"] and legacy["pending_evidence"] == [target]
+    fixture = json.loads(Path("tests/fixtures/evidence_vault_sv9_judgment_delta_v1_rollover_review.json").read_text())
+    assert delta.validate_evidence_vault_sv9_judgment_delta(fixture) == fixture
+
+
+def test_v4_support_continuity_origins_must_match_the_source_identity():
+    source = _input(extras=("moved",))
+    prior, carried, _target = _moved_support(source)
+    foreign = _continuity(source, carried, capture_origin={"capture_id": _id("other-capture"), "capture_fingerprint": _sha("other")})
+    signed = _delta(source, prior=prior, support_continuity=foreign)
+    assert delta.validate_evidence_vault_sv9_judgment_delta(signed) == signed
+    with pytest.raises(partition.EvidenceVaultSv9WorksetPartitionError):
+        _build(source, signed)
 
 
 def test_legacy_compatible_delta_and_plan_are_rejected_at_workset_boundary():

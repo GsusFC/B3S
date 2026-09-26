@@ -1,4 +1,5 @@
 from copy import deepcopy
+import hashlib
 import pytest
 
 from src.services import evidence_vault_sv9_authority_event as authority_event
@@ -23,13 +24,14 @@ from tests.test_evidence_vault_sv9_authoritative_relations import _facts, _Repos
 # fmt: off
 _ID = "00000000-0000-0000-0000-000000000201"
 def _identity(number): return {"evidence_ref": f"evidence:{number}", "evidence_fingerprint": _hash(number)}
+def _uuid(number): return f"00000000-0000-0000-0000-{number:012d}"
 def _pending(row): return memory.build_tile_judgment(**({key: value for key, value in row.items() if key not in {"schema_version", "series_fingerprint", "canonical_judgment_fingerprint", "authority_state"}} | {"authority_state": "pending"}))
 def _sentinel(series):
     row = _judgment(tile_id="M1", component_key="mission", series=series)
     value = {"component_key": "mission", "status": "not_detected", "supporting_evidence": [], "capture_origin": row["capture_origin"], "operation_origin": row["operation_origin"], "series_contract": series, "authority_state": "pending", "review_state": "none", "lifecycle_state": "active", "lifecycle_reason": ""}
     return planner.build_component_not_detected_sentinel(**value)
-def _authority(series=None, sentinel=False):
-    series = _series() if series is None else series; rows = [_pending(_judgment(tile_id=tile, component_key=component, series=series)) for tile, component in planner._REGISTRY]
+def _authority(series=None, sentinel=False, support=None):
+    series = _series() if series is None else series; support = {} if support is None else support; rows = [_pending(_judgment(tile_id=tile, component_key=component, series=series, **({"evidence": support[tile]} if tile in support else {}))) for tile, component in planner._REGISTRY]
     sentinels = []
     if sentinel: rows = [row for row in rows if row["component_key"] != "mission"]; sentinels = [_sentinel(series)]
     partition = {"candidate_tile_judgments": rows, "candidate_component_sentinels": sentinels}
@@ -44,11 +46,19 @@ class _Repository:
     def __init__(self, authority=None, records=(3,), bad_reload=False):
         self.authority, self.records, self.bad_reload = authority, tuple(records), bad_reload; self.append_calls = self.get_calls = self.authority_calls = self.context_calls = self.evidence_calls = 0; self.candidates = {}; self.mutations = []; self.checkpoints = {}; self.checkpoint_gets = []; self.checkpoint_appends = []; self.shared_analysis_payloads = []; self.shared_processes = {}; self.fail_checkpoint_append = self.checkpoint_conflict = self.unmapped = self.hint_only = self.bootstrap_hint_only = self.reopen = False; self.processing_complete = ()
         self.context = {"capture_origin": {"capture_id": "00000000-0000-0000-0000-000000000009", "capture_fingerprint": _hash(9)}, "operation_origin": {"operation_id": "00000000-0000-0000-0000-000000000010", "operation_fingerprint": _hash(10)}}; self.projection_relations = None; self.projection_status = "available"; self.projection_calls = 0; self.witness_seed = 300
+        # Per-scan capture rows let the historical and current captures differ; see _capture_row.
+        self.captures = {}; self.operational_basis = {}
     def get_evidence_vault_sv9_judgment_authority(self, _domain, **_kwargs): self.authority_calls += 1; return deepcopy(self.authority)
     def load_evidence_vault_sv9_judgment_context(self, _scan, **_kwargs): self.context_calls += 1; return {"canonical_domain": "example.test", "capture_id": self.context["capture_origin"]["capture_id"], "capture_fingerprint": self.context["capture_origin"]["capture_fingerprint"], "operation_plan_id": self.context["operation_origin"]["operation_id"], "operation_fingerprint": self.context["operation_origin"]["operation_fingerprint"]}
-    def resolve_evidence_vault_sv9_judgment_evidence(self, _scan, refs, **_kwargs):
-        self.evidence_calls += 1; assert refs == sorted(refs); rows = [{"evidence_record_id": f"00000000-0000-0000-0000-{number:012d}", **_identity(number), "content": {"evidence": number}} for number in self.records]
-        assert {row["evidence_ref"] for row in rows} == set(refs); return {**self.context, "evidence": rows}
+    def resolve_evidence_vault_sv9_judgment_evidence(self, scan, refs, **_kwargs):
+        self.evidence_calls += 1; assert refs == sorted(refs)
+        if scan in self.captures:
+            by_ref = {row["ref"]: row for row in self.captures[scan]}; assert set(refs) <= set(by_ref)
+            rows = [{"evidence_record_id": _uuid(by_ref[ref]["record"]), "evidence_ref": ref, "evidence_fingerprint": by_ref[ref]["evidence_fingerprint"], "content": by_ref[ref]["content"]} for ref in refs]
+        else:
+            rows = [{"evidence_record_id": _uuid(number), **_identity(number), "content": {"evidence": number}} for number in self.records]
+            assert {row["evidence_ref"] for row in rows} == set(refs)
+        return {**self.context, "evidence": rows}
     def get_evidence_vault_sv9_judgment_candidate(self, _scan, *, canonical_plan_fingerprint, **_kwargs):
         self.get_calls += 1; row = deepcopy(self.candidates.get(canonical_plan_fingerprint))
         if row and self.bad_reload and self.get_calls > 1: row["complete_record_fingerprint"] = _hash(999)
@@ -92,10 +102,24 @@ class _Repository:
             "operation_fingerprint": _hash(10),
             "operation_status": "completed",
         }
+        if scan in self.captures:
+            evidence = [
+                source
+                | {
+                    "evidence_record_id": _uuid(row["record"]),
+                    "evidence_ref": row["ref"],
+                    "evidence_fingerprint": row["evidence_fingerprint"],
+                    "evidence_id": row["evidence_id"],
+                    "source_identity_id": row["source_identity_id"],
+                    "source_class": row["source_class"],
+                }
+                for row in self.captures[scan]
+            ]
+            return {"source": source, "evidence": evidence, "authority": None}
         evidence = [
             source
             | {
-                "evidence_record_id": f"00000000-0000-0000-0000-{number:012d}",
+                "evidence_record_id": _uuid(number),
                 **_identity(number),
                 "evidence_id": _hash(100 + number),
                 "source_identity_id": _hash(200 + number),
@@ -118,7 +142,8 @@ class _Repository:
         if getattr(self, "baseline_plan", None):
             source["operation_fingerprint"] = self.baseline_plan["operation_plan_fingerprint"]
             self.context["operation_origin"]["operation_fingerprint"] = source["operation_fingerprint"]
-        rows = [dict(facts["evidence"][0], source_scan_id=scan, canonical_domain="example.test", evidence_record_id=f"00000000-0000-0000-0000-{number:012d}", **_identity(number), evidence_id=_hash(100 + number), source_identity_id=_hash(200 + number)) for number in self.records]
+        if scan in self.captures: return self._capture_evaluation_input(scan, workspace, facts)
+        rows = [dict(facts["evidence"][0], source_scan_id=scan, canonical_domain="example.test", evidence_record_id=_uuid(number), **_identity(number), evidence_id=_hash(100 + number), source_identity_id=_hash(200 + number)) for number in self.records]
         facts["evidence"] = rows
         for index, row in enumerate(rows): facts["authority"]["accepted"][index]["basis"][0].update(evidence_id=row["evidence_id"], source_identity_id=row["source_identity_id"])
         facts["authority"]["witness"] = {"canonical_memory_version": _hash(self.witness_seed), "adoption_event_id": f"00000000-0000-0000-0000-{self.witness_seed:012d}", "adoption_sequence": 1, "candidate_packet_fingerprint": _hash(self.witness_seed + 1), "request_fingerprint": _hash(self.witness_seed + 2)}
@@ -147,6 +172,15 @@ class _Repository:
         ]
         return project_evidence_vault_sv9_evaluation_input(repository=_FactsRepository(facts), source_scan_id=scan, workspace_slug=workspace)
 
+    def _capture_evaluation_input(self, scan, workspace, facts):
+        capture, components = self.captures[scan], dict(planner._REGISTRY); by_ref = {row["ref"]: row for row in capture}
+        facts["evidence"] = [dict(facts["evidence"][0], source_scan_id=scan, canonical_domain="example.test", evidence_record_id=_uuid(row["record"]), evidence_ref=row["ref"], evidence_fingerprint=row["evidence_fingerprint"], evidence_id=row["evidence_id"], source_identity_id=row["source_identity_id"]) for row in capture]
+        # The operational authority witnesses only the identities the test names; everything else is SV9-only support.
+        facts["authority"]["accepted"] = [{"tile_id": tile, "component_key": components[tile], "assessment_state": "ok", "authority_state": "accepted", "review_state": "resolved", "lifecycle_state": "active", "basis": [{"relation_id": _hash(700 + 10 * index + offset), "evidence_id": by_ref[ref]["evidence_id"], "source_identity_id": by_ref[ref]["source_identity_id"], "polarity": "supports"} for offset, ref in enumerate(refs)]} for index, (tile, refs) in enumerate(self.operational_basis.items())]
+        facts["authority"]["witness"] = {"canonical_memory_version": _hash(self.witness_seed), "adoption_event_id": _uuid(self.witness_seed), "adoption_sequence": 1, "candidate_packet_fingerprint": _hash(self.witness_seed + 1), "request_fingerprint": _hash(self.witness_seed + 2)}
+        facts["evaluation_hint_seeds"] = []; facts["processing_complete_evidence"] = []
+        return project_evidence_vault_sv9_evaluation_input(repository=_FactsRepository(facts), source_scan_id=scan, workspace_slug=workspace)
+
 class _Flow:
     def __init__(self, fail=None, sentinel=False, malformed=False, shared_analysis=None): self.fail, self.sentinel, self.malformed, self.calls = fail, sentinel, malformed, []; self.shared_analysis = shared_analysis; self.shared_analysis_calls = []; self.shared_components = {}
     def evaluate_component(self, request):
@@ -171,9 +205,9 @@ def _relation(repo, tile, disposition="relevant", number=9): return delta.build_
 def _authoritative_projection(monkeypatch):
     monkeypatch.setattr(service, "project_evidence_vault_sv9_evaluation_input", lambda *, repository, source_scan_id, workspace_slug: repository.evaluation_input(source_scan_id, workspace_slug))
 
-def _run(repo, flow, current=(3,), relations=None, series=None, trusted=(), projection_relations=None):
+def _run(repo, flow, current=(3,), relations=None, series=None, trusted=(), projection_relations=None, scan="scan"):
     relations = [_relation(repo, "M1", number=number) for number in current] if relations is None else list(relations); repo.records = tuple(current); repo.projection_relations = relations if projection_relations is None else list(projection_relations)
-    result = service.run_evidence_vault_sv9_authority_evaluation(repository=repo, flow=flow, domain_or_url="example.test", source_scan_id="scan", current_series_contract=_series() if series is None else series, trusted_irrelevant_evidence=[_identity(number) for number in trusted])
+    result = service.run_evidence_vault_sv9_authority_evaluation(repository=repo, flow=flow, domain_or_url="example.test", source_scan_id=scan, current_series_contract=_series() if series is None else series, trusted_irrelevant_evidence=[_identity(number) for number in trusted])
     assert not repo.mutations; return result
 
 def test_accepted_sin_evidencia_with_authoritative_first_light_routes_to_evaluation():
@@ -907,3 +941,140 @@ def test_invalid_persisted_event_audit_metadata_stops_all_evaluation_effects(nam
     assert (result["status"], result["reason_codes"], result["accepted_authority"], result["candidate"], result["signed_delta"]) == ("no_new_score", ["invalid_input"], None, None, None)
     assert (repo.authority_calls, repo.projection_calls, repo.context_calls, repo.evidence_calls, repo.get_calls, repo.append_calls, flow.calls) == (1, 0, 0, 0, 0, 0, [])
 # fmt: on
+
+
+_HOME, _ABOUT, _WORK, _EXA = (_hash(0x5000 + index) for index in range(1, 5))
+_ABOUT_TEXT = "Primary is an independent design studio " + " ".join(f"a{index}" for index in range(30))
+_MENTION_TEXT = "Primary was named a top design studio by the trade press this spring."
+
+
+def _capture_row(record, ref, content, *, source, source_class="owned_copy"):
+    return {
+        "record": record,
+        "ref": ref,
+        "content": content,
+        "source_identity_id": source,
+        "source_class": source_class,
+        "evidence_fingerprint": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "evidence_id": hashlib.sha256(f"{source_class}|{source}|{content}".encode("utf-8")).hexdigest(),
+    }
+
+
+def _pair(row):
+    return {"evidence_ref": row["ref"], "evidence_fingerprint": row["evidence_fingerprint"]}
+
+
+def _primary_repository(*, truncated):
+    """Primary's re-scan shape: a moved Exa ref, a re-chunked /work page and a truncated homepage."""
+    home = " ".join(f"h{index}" for index in range(340))
+    work = [f"k{index}" for index in range(120)]
+    historical = [
+        _capture_row(1, "raw_inputs.0.chunk.0", home, source=_HOME),
+        _capture_row(2, "raw_inputs.1.chunk.0", _ABOUT_TEXT, source=_ABOUT),
+        _capture_row(3, "raw_inputs.3.subpage.2.chunk.0", " ".join(work[:40]), source=_WORK),
+        _capture_row(4, "raw_inputs.3.subpage.2.chunk.1", " ".join(work[40:80]), source=_WORK),
+        _capture_row(5, "raw_inputs.3.subpage.2.chunk.2", " ".join(work[80:]), source=_WORK),
+        _capture_row(6, "raw_inputs.5.exa.mentions.7", _MENTION_TEXT, source=_EXA, source_class="external_proof"),
+    ]
+    current = [
+        _capture_row(11, "raw_inputs.0.chunk.0", " ".join(home.split()[:67]) if truncated else home, source=_HOME),
+        _capture_row(12, "raw_inputs.1.chunk.0", _ABOUT_TEXT, source=_ABOUT),
+        _capture_row(13, "raw_inputs.4.subpage.1.chunk.0", " ".join(work[:70]), source=_WORK),
+        _capture_row(14, "raw_inputs.4.subpage.1.chunk.1", " ".join(work[70:]) + " new closing line", source=_WORK),
+        _capture_row(16, "raw_inputs.6.exa.mentions.2", _MENTION_TEXT, source=_EXA, source_class="external_proof"),
+    ]
+    support = {"M1": [_pair(historical[0])], "M2": [_pair(historical[5])], "A1": [_pair(historical[3])]}
+    support |= {tile: [_pair(historical[1])] for tile, _component in planner._REGISTRY if tile not in support}
+    repo = _Repository(_authority(support=support))
+    repo.captures = {"scan": historical, "scan-2": current}
+    return repo
+
+
+class _DroppingFlow(_Flow):
+    def __init__(self, *, tile, drop):
+        super().__init__()
+        self.tile, self.drop = tile, drop
+
+    def evaluate_component(self, request):
+        self.calls.append(request)
+        rows = [
+            {
+                "tile_id": row["tile_id"],
+                "assessment_state": "ok" if row["evidence"] else "sin_evidencia",
+                "supporting_evidence": [
+                    {key: item[key] for key in ("evidence_ref", "evidence_fingerprint")}
+                    for item in row["evidence"]
+                    if not (row["tile_id"] == self.tile and item["evidence_ref"] == self.drop)
+                ],
+            }
+            for row in request["requested_tiles"]
+        ]
+        return evaluation.ComponentEvaluationOutcome.success(
+            evaluation.build_component_evaluation(
+                component_key=request["component_key"],
+                series_fingerprint=request["current_series_fingerprint"],
+                request_fingerprint=request["canonical_request_fingerprint"],
+                status="evaluated",
+                tile_results=rows,
+            )
+        )
+
+
+def test_next_scan_carries_moved_and_rechunked_support_and_reviews_only_the_truncated_page():
+    repo, flow = _primary_repository(truncated=True), _Flow()
+
+    outcome = _run(repo, flow, scan="scan-2")
+
+    signed = outcome["signed_delta"]
+    assert outcome["status"] == "review_required" and "coverage_loss" in outcome["reason_codes"]
+    assert [row["tile_id"] for row in signed["coverage_loss"]] == ["M1"]
+    carried = {row["tile_id"]: row for row in signed["support_continuity"]["carried"]}
+    assert {tile: row["tier"] for tile, row in carried.items()} == {"M2": "canonical", "A1": "owned_page_similarity"}
+    current = {row["ref"]: row for row in repo.captures["scan-2"]}
+    assert carried["M2"]["targets"] == [_pair(current["raw_inputs.6.exa.mentions.2"])]
+    assert carried["A1"]["targets"] == [_pair(current["raw_inputs.4.subpage.1.chunk.0"]), _pair(current["raw_inputs.4.subpage.1.chunk.1"])]
+    items = {row["tile_id"]: row for row in signed["plan"]["items"]}
+    assert {"M2", "A1"} <= set(signed["plan"]["tile_workset"])
+    assert items["M2"]["evidence"] == carried["M2"]["targets"] and items["A1"]["evidence"] == carried["A1"]["targets"]
+    targets = {(pair["evidence_ref"], pair["evidence_fingerprint"]) for row in carried.values() for pair in row["targets"]}
+    unmapped = {(row["evidence_ref"], row["evidence_fingerprint"]) for row in signed["unmapped_evidence"]}
+    assert not targets & unmapped and [row["evidence_ref"] for row in signed["unmapped_evidence"]] == ["raw_inputs.0.chunk.0"]
+    partition = outcome["workset_partition"]
+    healthy = {row["tile_id"] for row in partition["healthy_workset"]["tiles"]}
+    assert {"M2", "A1"} <= healthy and partition["review_partition"]["judgment_delta_coverage_loss_tile_ids"] == ["M1"]
+    requested = {(row["tile_id"], item["evidence_ref"]) for call in flow.calls for row in call["requested_tiles"] for item in row["evidence"]}
+    assert {("M2", "raw_inputs.6.exa.mentions.2"), ("A1", "raw_inputs.4.subpage.1.chunk.0"), ("A1", "raw_inputs.4.subpage.1.chunk.1")} <= requested
+    assert not any(ref.startswith(("raw_inputs.3.", "raw_inputs.5.")) for _tile, ref in requested)
+    assert outcome["candidate"] is None and repo.append_calls == 0
+
+
+def test_next_scan_without_truncation_produces_a_candidate_citing_only_current_records():
+    repo, flow = _primary_repository(truncated=False), _Flow()
+
+    outcome = _run(repo, flow, scan="scan-2")
+
+    assert outcome["status"] == "candidate_available" and outcome["reason_codes"] == []
+    candidate = next(iter(repo.candidates.values()))
+    current_pairs = {(row["ref"], row["evidence_fingerprint"]) for row in repo.captures["scan-2"]}
+    cited = {(item["evidence_ref"], item["evidence_fingerprint"]) for row in candidate["candidate_tile_judgments"] for item in row["supporting_evidence"]}
+    assert cited and cited <= current_pairs
+    assert {(row["evidence_ref"], row["evidence_fingerprint"]) for row in candidate["evidence_bindings"]} <= current_pairs
+    judgments = {row["tile_id"]: row for row in candidate["candidate_tile_judgments"]}
+    assert [item["evidence_ref"] for item in judgments["A1"]["supporting_evidence"]] == ["raw_inputs.4.subpage.1.chunk.0", "raw_inputs.4.subpage.1.chunk.1"]
+    assert [item["evidence_ref"] for item in judgments["M2"]["supporting_evidence"]] == ["raw_inputs.6.exa.mentions.2"]
+    assert len(candidate["candidate_tile_judgments"]) == 80
+
+
+def test_carried_tile_dropping_a_witnessed_pair_reviews_instead_of_publishing_a_candidate():
+    kept = _primary_repository(truncated=False)
+    kept.operational_basis = {"A1": ["raw_inputs.1.chunk.0"]}
+    assert _run(kept, _Flow(), scan="scan-2")["status"] == "candidate_available"
+    repo = _primary_repository(truncated=False)
+    repo.operational_basis = {"A1": ["raw_inputs.1.chunk.0"]}
+    flow = _DroppingFlow(tile="A1", drop="raw_inputs.1.chunk.0")
+
+    outcome = _run(repo, flow, scan="scan-2")
+
+    assert outcome["status"] == "review_required" and "coverage_loss" in outcome["reason_codes"]
+    assert flow.calls and outcome["candidate"] is None and repo.append_calls == 0 and not repo.candidates
+    assert outcome["signed_delta"]["coverage_loss"] == []
