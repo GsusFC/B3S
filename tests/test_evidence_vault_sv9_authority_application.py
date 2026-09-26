@@ -11,7 +11,7 @@ from src.services import evidence_vault_sv9_authority_projection as authority_pr
 from src.services import evidence_vault_sv9_judgment_delta as delta
 from src.services import evidence_vault_sv9_workset_partition as partitioning
 from src.services.evidence_vault_canonical_core import canonical_fingerprint
-from tests.test_evidence_vault_sv9_authority_evaluation import _Flow, _Repository, _authority, _hash, _identity, _relation, _series
+from tests.test_evidence_vault_sv9_authority_evaluation import _DroppingFlow, _Flow, _Repository, _authority, _hash, _identity, _primary_repository, _relation, _series
 from tests.test_sv9_judgment_memory import _judgment
 
 def _uuid(number): return f"00000000-0000-0000-0000-{number:012d}"
@@ -76,7 +76,8 @@ class _ApplicationRepository(_Repository):
         return deepcopy(self.authority), False
 
 def _run(repo, flow, *, current=(9,), relations=None, trusted=(), source="scan", domain="example.test"):
-    repo.records = tuple(current)
+    # The scan under evaluation is captured as the test declares it now; earlier scans keep their pinned records.
+    repo.records = tuple(current); repo.records_by_scan[source] = repo.records
     relations = [_relation(repo, "M1", number=value) for value in current] if relations is None else list(relations)
     repo.projection_relations = relations
     return application.run_evidence_vault_sv9_authority_application(
@@ -1105,3 +1106,27 @@ def test_rescan_reconstruction_failure_keeps_source_unavailable_in_diagnostics()
     assert payload["reliability_status"] == "broken"
     assert payload["brand3_score"] is None
     assert payload["components"] == {}
+
+class _CarryReopenRepository(_ApplicationRepository):
+    """Serve captured facts through the real projection and authorize reopens the way the repository does."""
+    def load_evidence_vault_sv9_authoritative_relation_facts(self, scan, *, workspace_slug="b3s"):
+        if scan == self.authority["accepted_candidate"]["source_scan_id"]:
+            return _Repository.load_evidence_vault_sv9_authoritative_relation_facts(self, scan, workspace_slug=workspace_slug)
+        return self.evaluation_facts(scan, workspace_slug)
+    def reopen_evidence_vault_sv9_judgment_authority(self, scan, signed, **kwargs):
+        history._sv9_authority_partition_reopen_tile_ids(kwargs["workset_partition"], signed)
+        return super().reopen_evidence_vault_sv9_judgment_authority(scan, signed, **kwargs)
+
+def test_carried_tile_dropping_a_witnessed_pair_persists_a_reopen_overlay():
+    repo = _primary_repository(truncated=False, repository=_CarryReopenRepository)
+    repo.operational_basis = {"A1": ["raw_inputs.1.chunk.0"]}
+    flow = _DroppingFlow(tile="A1", drop="raw_inputs.1.chunk.0")
+
+    result = _run(repo, flow, source="scan-2")
+
+    assert result["status"] == result["evaluation_status"] == "review_required" and "coverage_loss" in result["reason_codes"]
+    assert repo.mutations == ["reopen"] and flow.calls
+    overlay = repo.authority["reopen_review_overlay"]
+    assert overlay["review_state"] == "pending" and [row["tile_id"] for row in overlay["signed_delta"]["coverage_loss"]] == ["A1"]
+    assert [row["tile_id"] for row in overlay["signed_delta"]["support_continuity"]["carried"]] == ["M2"]
+    assert application._authority(repo.authority)["review_scan_id"] == "scan-2"

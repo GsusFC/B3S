@@ -5,6 +5,7 @@ from src.services.evidence_vault_canonical_core import build_tile_contract_regis
 from src.services.evidence_vault_sv9_authoritative_relations import validate_evidence_vault_sv9_evaluation_input
 from src.services.evidence_vault_sv9_judgment_delta import (
     JUDGMENT_DELTA_VERSION,
+    SUPPORT_CONTINUITY_JUDGMENT_DELTA_VERSION,
     validate_evidence_vault_sv9_judgment_delta,
 )
 from src.sv9 import incremental_planner as planner
@@ -145,10 +146,16 @@ def _inputs(evaluation_input: Any, judgment_delta: Any) -> tuple[dict[str, Any],
         raise EvidenceVaultSv9WorksetPartitionError("signed input is invalid") from exc
     if not all(canonical_json(raw) == canonical_json(rebuilt) for raw, rebuilt in ((evaluation_input, source), (judgment_delta, delta), (delta["plan"], plan))):
         _fail("signed input replay")
-    if delta["schema_version"] not in {JUDGMENT_DELTA_VERSION, "evidence-vault-sv9-judgment-delta-v3"} or plan["schema_version"] != planner.PLAN_VERSION:
+    if delta["schema_version"] not in {JUDGMENT_DELTA_VERSION, "evidence-vault-sv9-judgment-delta-v3", SUPPORT_CONTINUITY_JUDGMENT_DELTA_VERSION} or plan["schema_version"] != planner.PLAN_VERSION:
         _fail("signed input schema versions")
     if not _same(source["current_evidence"], delta["current_evidence"]["evidence"]) or not _same(source["authoritative_relations"], delta["authoritative_relations"]):
         _fail("input evidence or relations do not match delta")
+    continuity = delta.get("support_continuity")
+    if continuity is not None and (
+        continuity["capture_origin"] != {key: source_id[key] for key in ("capture_id", "capture_fingerprint")}
+        or continuity["operation_origin"] != {"operation_id": source_id["operation_plan_id"], "operation_fingerprint": source_id["operation_fingerprint"]}
+    ):
+        _fail("support continuity origins do not match the source identity")
     if plan["registry_tile_ids"] != list(_TILE_IDS) or plan["canonical_plan_fingerprint"] != delta["plan"]["canonical_plan_fingerprint"]:
         _fail("canonical plan registry")
     items = {row["tile_id"]: row for row in plan["items"]}
@@ -167,12 +174,16 @@ def _unmapped(delta: Mapping[str, Any], bindings: list[dict[str, Any]]) -> set[s
     return {by_pair[pair] for pair in pairs}
 def _known(delta: Mapping[str, Any]) -> set[tuple[str, str, str]]:
     # The delta counts evidence cited by accepted judgments as known, not
-    # unmapped, even when the accepted witness carries no relations.
-    return {
+    # unmapped, even when the accepted witness carries no relations.  A v4
+    # delta extends that to the current records its carried support maps to.
+    known = {
         (row["tile_id"], value["evidence_ref"], value["evidence_fingerprint"])
         for row in delta["prior_judgments"]
         for value in row["supporting_evidence"]
     }
+    for row in delta.get("support_continuity", {}).get("carried", []):
+        known |= {(row["tile_id"], value["evidence_ref"], value["evidence_fingerprint"]) for value in row["targets"]}
+    return known
 def _hints(source: Mapping[str, Any], delta: Mapping[str, Any], by_record: Mapping[str, dict[str, Any]], unmapped: set[str]):
     mapped = {
         (row["tile_id"], row["evidence_ref"], row["evidence_fingerprint"])

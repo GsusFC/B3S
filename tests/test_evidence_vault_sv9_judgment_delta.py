@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 
 from src.services import evidence_vault_sv9_judgment_delta as delta
+from src.services import evidence_vault_sv9_support_continuity as continuity
 from src.sv9 import incremental_planner as ip
-from tests.test_sv9_judgment_memory import _evidence, _judgment, _origin, _series
+from tests.test_sv9_judgment_memory import _evidence, _hash, _judgment, _origin, _series
 
 
 def _accepted_memory():
@@ -181,3 +182,178 @@ def test_signed_replay_rejects_nested_nonbuiltin_json_values():
     )
     reject(evidence)
     reject(mapping(signed))
+
+
+def _memory(support=None):
+    # Every tile cites the present pair 5 unless the caller moves a tile's support.
+    support = {} if support is None else support
+    return [
+        _judgment(tile_id=tile, component_key=component, evidence=support.get(tile, _evidence(5)))
+        for tile, component in ip._REGISTRY
+    ]
+
+
+def _sorted(*numbers):
+    return sorted(_evidence(*numbers), key=lambda row: (row["evidence_ref"], row["evidence_fingerprint"]))
+
+
+def _carried(tile, source, *targets, similarity=None):
+    entry = {
+        "tile_id": tile,
+        "source": _evidence(source)[0],
+        "tier": "canonical" if similarity is None else "owned_page_similarity",
+        "targets": _evidence(*targets),
+    }
+    if similarity is not None:
+        entry["similarity"] = {
+            "source_shingle_digest": _hash(0xA1),
+            "target_shingle_digest": _hash(0xB2),
+            **similarity,
+        }
+    return entry
+
+
+def _continuity(*carried, rule_version=continuity.SUPPORT_CONTINUITY_RULE_VERSION):
+    return {
+        "rule_version": rule_version,
+        "capture_origin": _origin("capture", 9),
+        "operation_origin": _origin("operation", 10),
+        "carried": list(carried),
+    }
+
+
+def _build_v4(*, evidence=(5, 9), prior=None, relations=(), support_continuity=None, sentinels=()):
+    return delta.build_evidence_vault_sv9_judgment_delta(
+        current_evidence=delta.build_evidence_identity_set(_evidence(*evidence)),
+        prior_judgments=_memory({"M1": _evidence(3)}) if prior is None else prior,
+        prior_component_sentinels=list(sentinels),
+        authoritative_relations=list(relations),
+        current_series_contract=_series(),
+        support_continuity=_continuity(_carried("M1", 3, 9)) if support_continuity is None else support_continuity,
+    )
+
+
+def test_frozen_v2_fixture_replays_unchanged_and_builds_without_continuity_stay_v2():
+    fixture = json.loads(Path("tests/fixtures/evidence_vault_sv9_judgment_delta_v2_sentinel_relevant.json").read_text())
+    replayed = delta.validate_evidence_vault_sv9_judgment_delta(fixture)
+    assert replayed == fixture and replayed["schema_version"] == delta.JUDGMENT_DELTA_VERSION == "evidence-vault-sv9-judgment-delta-v2"
+    assert "support_continuity" not in replayed and replayed["plan"]["expected_calls"] == 2
+    assert _build(prior=_accepted_memory())["schema_version"] == "evidence-vault-sv9-judgment-delta-v2"
+
+
+def test_v4_carries_moved_support_into_one_relevant_projection_and_validates():
+    result = _build_v4()
+
+    assert result["schema_version"] == delta.SUPPORT_CONTINUITY_JUDGMENT_DELTA_VERSION == "evidence-vault-sv9-judgment-delta-v4"
+    assert result["support_continuity"] == _continuity(_carried("M1", 3, 9))
+    assert result["coverage_loss"] == [] and result["unmapped_evidence"] == []
+    assert [row["tile_id"] for row in result["delta_projections"]] == ["M1"]
+    projection = result["delta_projections"][0]
+    assert projection["disposition"] == "relevant" and projection["evidence"] == _evidence(9)
+    assert projection["capture_origin"] == _origin("capture", 9) and projection["operation_origin"] == _origin("operation", 10)
+    item = next(row for row in result["plan"]["items"] if row["tile_id"] == "M1")
+    assert item["action"] == "evaluate_delta" and item["evidence"] == _evidence(9)
+    assert result["plan"]["tile_workset"] == ["M1", *ip._COMPONENT_TILES["coherencia"]]
+    assert delta.validate_evidence_vault_sv9_judgment_delta(json.loads(json.dumps(result))) == result
+    assert result == _build_v4()
+    assert result["canonical_delta_fingerprint"] != _build_v4(support_continuity=_continuity())["canonical_delta_fingerprint"]
+
+
+def test_v4_without_carry_keeps_coverage_loss_and_unmapped_semantics():
+    result = _build_v4(support_continuity=_continuity())
+    assert result["schema_version"] == delta.SUPPORT_CONTINUITY_JUDGMENT_DELTA_VERSION
+    assert [row["tile_id"] for row in result["coverage_loss"]] == ["M1"]
+    assert result["unmapped_evidence"] == [{**_evidence(9)[0], "reason": "unmapped_current_evidence"}]
+    assert result["delta_projections"] == [] and result["plan"]["expected_calls"] == 0
+    assert delta.validate_evidence_vault_sv9_judgment_delta(result) == result
+
+
+def test_v4_merges_present_support_carried_targets_and_relevant_relations_per_tile():
+    prior = _memory({"M1": _evidence(3, 5)})
+    relation = _relation("M1", "relevant", 11)
+    result = _build_v4(evidence=(5, 9, 11), prior=prior, relations=[relation])
+
+    assert [row["tile_id"] for row in result["delta_projections"]] == ["M1"]
+    assert result["delta_projections"][0]["evidence"] == _sorted(5, 9, 11)
+    assert result["coverage_loss"] == [] and result["unmapped_evidence"] == []
+    similarity = _build_v4(
+        evidence=(5, 9, 12),
+        prior=_memory({"M1": _evidence(3), "A1": _evidence(4)}),
+        support_continuity=_continuity(
+            _carried("M1", 3, 9, 12, similarity={"intersection": 112, "union": 121}),
+            _carried("A1", 4, 9, 12, similarity={"intersection": 112, "union": 121}),
+        ),
+    )
+    assert [(row["tile_id"], row["evidence"]) for row in similarity["delta_projections"]] == [("M1", _sorted(9, 12)), ("A1", _sorted(9, 12))]
+    assert similarity["coverage_loss"] == [] and similarity["unmapped_evidence"] == []
+    assert delta.validate_evidence_vault_sv9_judgment_delta(similarity) == similarity
+    reversed_input = _build_v4(
+        evidence=(12, 9, 5),
+        prior=list(reversed(_memory({"M1": _evidence(3), "A1": _evidence(4)}))),
+        support_continuity=_continuity(
+            _carried("A1", 4, 12, 9, similarity={"intersection": 112, "union": 121}),
+            _carried("M1", 3, 12, 9, similarity={"intersection": 112, "union": 121}),
+        ),
+    )
+    assert reversed_input == similarity
+
+
+def test_v4_carried_tile_with_contradiction_relation_stays_in_review():
+    result = _build_v4(relations=[_relation("M1", "contradiction", 9)])
+    item = next(row for row in result["plan"]["items"] if row["tile_id"] == "M1")
+    assert item["action"] == "reopen_contradiction" and "M1" in result["plan"]["review_set"]
+    assert [row["disposition"] for row in result["delta_projections"]] == ["contradiction"]
+    assert result["coverage_loss"] == []
+
+
+@pytest.mark.parametrize(
+    ("label", "support_continuity"),
+    [
+        ("source outside the tile support", _continuity(_carried("M2", 3, 9))),
+        ("source still present exactly", _continuity(_carried("M1", 5, 9))),
+        ("target is not a current record", _continuity(_carried("M1", 3, 7))),
+        ("integers below threshold", _continuity(_carried("M1", 3, 9, similarity={"intersection": 79, "union": 100}))),
+        ("union below the page minimum", _continuity(_carried("M1", 3, 9, similarity={"intersection": 19, "union": 19}))),
+        ("intersection above union", _continuity(_carried("M1", 3, 9, similarity={"intersection": 101, "union": 100}))),
+        ("boolean integers", _continuity(_carried("M1", 3, 9, similarity={"intersection": True, "union": True}))),
+        ("unknown rule version", _continuity(_carried("M1", 3, 9), rule_version="evidence-vault-sv9-support-continuity-rule-v0")),
+        ("unknown tier", _continuity({**_carried("M1", 3, 9), "tier": "exact"})),
+        ("canonical with two targets", _continuity(_carried("M1", 3, 9, 11))),
+        ("canonical carrying similarity", _continuity({**_carried("M1", 3, 9), "similarity": _carried("M1", 3, 9, similarity={"intersection": 1, "union": 1})["similarity"]})),
+        ("similarity without integers", _continuity({**_carried("M1", 3, 9, similarity={"intersection": 9, "union": 10}), "similarity": {"source_shingle_digest": _hash(1), "target_shingle_digest": _hash(2)}})),
+        ("duplicate entry", _continuity(_carried("M1", 3, 9), _carried("M1", 3, 9))),
+        ("malformed origin", {**_continuity(_carried("M1", 3, 9)), "operation_origin": {"operation_id": "operation-10"}}),
+        ("extra field", {**_continuity(_carried("M1", 3, 9)), "notes": "forged"}),
+        ("empty targets", _continuity({**_carried("M1", 3, 9), "targets": []})),
+        ("unknown tile", _continuity(_carried("Z9", 3, 9))),
+    ],
+)
+def test_forged_v4_support_continuity_is_rejected(label, support_continuity):
+    prior = _memory({"M1": _evidence(3, 5)})
+    with pytest.raises(delta.EvidenceVaultSV9JudgmentDeltaError):
+        _build_v4(evidence=(5, 9, 11), prior=prior, support_continuity=support_continuity)
+    signed = _build_v4(evidence=(5, 9, 11), prior=prior)
+    forged = deepcopy(signed)
+    forged["support_continuity"] = support_continuity
+    forged["canonical_delta_fingerprint"] = delta.jm.canonical_fingerprint(
+        delta._SUPPORT_CONTINUITY_DELTA_FINGERPRINT,
+        {key: raw for key, raw in forged.items() if key != "canonical_delta_fingerprint"},
+    )
+    with pytest.raises(delta.EvidenceVaultSV9JudgmentDeltaError):
+        delta.validate_evidence_vault_sv9_judgment_delta(forged)
+
+
+def test_v4_signed_replay_rejects_tampered_carried_targets_and_missing_field():
+    signed = _build_v4()
+    tampered = deepcopy(signed)
+    tampered["support_continuity"]["carried"][0]["targets"] = _evidence(5)
+    with pytest.raises(delta.EvidenceVaultSV9JudgmentDeltaError):
+        delta.validate_evidence_vault_sv9_judgment_delta(tampered)
+    stripped = deepcopy(signed)
+    stripped.pop("support_continuity")
+    with pytest.raises(delta.EvidenceVaultSV9JudgmentDeltaError):
+        delta.validate_evidence_vault_sv9_judgment_delta(stripped)
+    downgraded = deepcopy(signed)
+    downgraded["schema_version"] = delta.JUDGMENT_DELTA_VERSION
+    with pytest.raises(delta.EvidenceVaultSV9JudgmentDeltaError):
+        delta.validate_evidence_vault_sv9_judgment_delta(downgraded)

@@ -19,6 +19,7 @@ from src.services.evidence_vault_sv9_authority_projection import (
 )
 from src.services import evidence_vault_sv9_judgment_delta as delta
 from src.services import evidence_vault_sv9_evaluation_checkpoint as checkpoint
+from src.services import evidence_vault_sv9_support_continuity as continuity
 from src.services import evidence_vault_sv9_workset_partition as partitioning
 from src.services.evidence_vault_incremental_refresh import validate_vault_scan_plan
 from src.sv9 import incremental_evaluation as evaluation
@@ -147,7 +148,8 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
                 authority=authority_ids,
                 reasons=["invalid_evaluation_input"],
             )
-        signed = delta.build_evidence_vault_sv9_judgment_delta(current_evidence=current, prior_judgments=prior, prior_component_sentinels=sentinels, authoritative_relations=relations, current_series_contract=dict(current_series_contract))
+        carried = _support_continuity_carry(repository, authority, prior, evaluation_input["current_identity_bindings"], records, workspace_slug=workspace_slug)
+        signed = _signed_judgment_delta(current, prior, sentinels, relations, current_series_contract, context, carried)
     except EvidenceVaultSv9AuthoritySourceIdentityError as exc: return _outcome("no_new_score", reasons=["invalid_source_identity"], diagnostic_exception=exc)
     except EvidenceVaultSv9AuthorityEvaluationError as exc: return _outcome("no_new_score", reasons=["invalid_input"], diagnostic_exception=exc)
     except Exception as exc: return _outcome("no_new_score", reasons=["repository_failure"], diagnostic_exception=exc)
@@ -208,14 +210,7 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
             signed_delta=signed,
         )
     try:
-        trusted_rows = [row for row in evaluation_input["current_identity_bindings"] if (row["evidence_ref"], row["evidence_fingerprint"]) in trusted]
-        partition = partitioning.validate_evidence_vault_sv9_workset_partition(
-            partitioning.build_evidence_vault_sv9_workset_partition(
-                evaluation_input=evaluation_input,
-                judgment_delta=signed,
-                trusted_irrelevant_evidence=trusted_rows,
-            )
-        )
+        partition = _validated_partition(evaluation_input, signed, trusted)
         review = _partition_reasons(partition, review)
         unmapped = len(partition["pending_evidence"])
         complete_capture = _first_core_shared_evaluation(authority, plan)
@@ -262,6 +257,18 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
     try: result = evaluation.execute_partial_incremental_evaluation(partition, resolved, flow, lookup_evaluation=lookup, persist_evaluation=persist, **partial_options)
     except Exception as exc: return _outcome("no_new_score", plan, authority_ids, ["repository_failure"], ignored, unmapped, signed_delta=signed, partition=partition, diagnostic_exception=exc)
     if result["status"] != "partial": return _outcome("review_required" if review else "no_new_score", plan, authority_ids, review + [str(result.get("reason_code") or "evaluation_incomplete")], ignored, unmapped, result, signed_delta=signed if review else None, partition=partition)
+    dropped = _carried_witness_support_dropped(signed, relations, result)
+    if dropped:
+        # The evaluator stopped citing a pair the witness relies on, so the carried support is no longer trusted:
+        # the tile returns to coverage loss and the rebuilt delta names its accepted pair for the reopen.
+        carried = [row for row in carried if row["tile_id"] not in dropped]
+        try:
+            signed = _signed_judgment_delta(current, prior, sentinels, relations, current_series_contract, context, carried)
+            partition = _validated_partition(evaluation_input, signed, trusted)
+        except Exception as exc: return _outcome("no_new_score", plan, authority_ids, ["invalid_input"], ignored, unmapped, result, signed_delta=signed, diagnostic_exception=exc)
+        plan = signed["plan"]; review, ignored, unmapped = _review(signed, bool(authority), overlay, trusted)
+        review = _partition_reasons(partition, review); unmapped = len(partition["pending_evidence"])
+        return _outcome("review_required", plan, authority_ids, review + ["coverage_loss"], ignored, unmapped, result, signed_delta=signed, partition=partition)
     if not complete: return _outcome("review_required", plan, authority_ids, review or ["incomplete_candidate"], ignored, unmapped, result, signed_delta=signed, partition=partition)
     replay_options = {"complete_capture": True} if complete_capture else {}
     try: replay = evaluation.replay_incremental_evaluations(plan, packets, [row["evaluation"] for row in result["captured_calls"]], **replay_options)
@@ -547,6 +554,100 @@ def _accepted_support_identity_mismatches(
         # Existing authority with unverifiable historical support must never
         # become reusable merely because its ref/hash pair survived.
         return {tile_id for tile_id, _ref, _fingerprint in support}
+
+
+def _support_continuity_carry(
+    repository: EvidenceVaultSv9AuthorityEvaluationRepository,
+    authority: Mapping[str, Any] | None,
+    prior: Sequence[Mapping[str, Any]],
+    bindings: Sequence[Mapping[str, Any]],
+    records: Mapping[tuple[str, str], Mapping[str, Any]],
+    *,
+    workspace_slug: str,
+) -> list[dict[str, Any]]:
+    """Carry accepted support across the re-capture; any doubt carries nothing.
+
+    The accepted candidate's source scan is the historical capture boundary.
+    Its rows and content load once; the pure matcher decides pair by pair.
+    """
+    if authority is None or not any(row["supporting_evidence"] for row in prior):
+        return []
+    try:
+        historical_scan_id = _text(authority["accepted_candidate"]["source_scan_id"])
+        facts = repository.load_evidence_vault_sv9_authoritative_relation_facts(historical_scan_id, workspace_slug=workspace_slug)
+        rows = facts["evidence"]
+        if type(rows) is not list or not rows:
+            return []
+        resolved = repository.resolve_evidence_vault_sv9_judgment_evidence(
+            historical_scan_id, sorted({_text(row["evidence_ref"]) for row in rows}), workspace_slug=workspace_slug
+        )
+        content = {(row["evidence_ref"], row["evidence_fingerprint"]): row["content"] for row in resolved["evidence"]}
+        historical = [
+            {key: row.get(key) for key in ("evidence_ref", "evidence_fingerprint", "evidence_id", "source_identity_id", "source_class")}
+            | {"content": content[(row["evidence_ref"], row["evidence_fingerprint"])]}
+            for row in rows
+        ]
+        current = [
+            {key: row[key] for key in ("evidence_ref", "evidence_fingerprint", "evidence_id", "source_identity_id")}
+            | {"content": records[(row["evidence_ref"], row["evidence_fingerprint"])]["content"]}
+            for row in bindings
+        ]
+        return continuity.build_support_continuity_carry_map(prior_judgments=list(prior), historical=historical, current=current)
+    except (continuity.EvidenceVaultSv9SupportContinuityError, KeyError, TypeError, ValueError):
+        # Matcher doubt and malformed history carry nothing, so the pair stays coverage loss.  Anything else
+        # is an infrastructure failure that must not turn a moved pair into false coverage loss.
+        return []
+
+
+def _signed_judgment_delta(
+    current: Mapping[str, Any],
+    prior: Sequence[Mapping[str, Any]],
+    sentinels: Sequence[Mapping[str, Any]],
+    relations: Sequence[Mapping[str, Any]],
+    series: Mapping[str, Any],
+    context: Mapping[str, Any],
+    carried: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Build the judgment delta; with nothing carried it keeps the byte-identical v2 shape."""
+    support_continuity = (
+        {"rule_version": continuity.SUPPORT_CONTINUITY_RULE_VERSION, **context, "carried": list(carried)} if carried else None
+    )
+    return delta.build_evidence_vault_sv9_judgment_delta(
+        current_evidence=current,
+        prior_judgments=prior,
+        prior_component_sentinels=sentinels,
+        authoritative_relations=relations,
+        current_series_contract=dict(series),
+        support_continuity=support_continuity,
+    )
+
+
+def _validated_partition(evaluation_input: Mapping[str, Any], signed: Mapping[str, Any], trusted: set[tuple[str, str]]) -> dict[str, Any]:
+    trusted_rows = [row for row in evaluation_input["current_identity_bindings"] if (row["evidence_ref"], row["evidence_fingerprint"]) in trusted]
+    return partitioning.validate_evidence_vault_sv9_workset_partition(
+        partitioning.build_evidence_vault_sv9_workset_partition(
+            evaluation_input=evaluation_input, judgment_delta=signed, trusted_irrelevant_evidence=trusted_rows
+        )
+    )
+
+
+def _carried_witness_support_dropped(signed: Mapping[str, Any], relations: Sequence[Mapping[str, Any]], result: Mapping[str, Any]) -> list[str]:
+    """A carried tile must keep every pair its witness relation relies on."""
+    carried = {row["tile_id"] for row in signed.get("support_continuity", {}).get("carried", [])}
+    if not carried:
+        return []
+    support: dict[str, set[tuple[str, str]]] = {
+        tile: set() for row in result["evaluated_component_sentinels"] for tile in planner._COMPONENT_TILES[row["component_key"]]
+    }
+    for row in result["evaluated_tile_judgments"]:
+        support[row["tile_id"]] = {(item["evidence_ref"], item["evidence_fingerprint"]) for item in row["supporting_evidence"]}
+    dropped = {
+        row["tile_id"]
+        for row in relations
+        if row["tile_id"] in carried and row["tile_id"] in support
+        and (row["evidence_ref"], row["evidence_fingerprint"]) not in support[row["tile_id"]]
+    }
+    return sorted(dropped, key=planner._ORDER.__getitem__)
 
 
 def _trusted(value: Sequence[Mapping[str, Any]], current: Mapping[str, Any]) -> set[tuple[str, str]]:

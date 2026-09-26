@@ -295,6 +295,9 @@ def test_repository_facts_uses_only_candidate_witness_basis_and_preserves_origin
     packet_basis = packet_row["packet_payload"]["accepted_memory"]["accepted_tiles"][0]["basis"][0]
     assert basis == packet_basis
     assert basis["polarity"] == "contradicts"
+    # Support continuity needs the identity-derived source class beside the canonical ids.
+    assert [row["source_class"] for row in facts["evidence"]] == ["owned_copy", "owned_copy"]
+    assert all(row["evidence_id"] and row["source_identity_id"] for row in facts["evidence"])
 
 
 def test_repository_facts_rejects_packet_fingerprint_and_basis_tampering(monkeypatch):
