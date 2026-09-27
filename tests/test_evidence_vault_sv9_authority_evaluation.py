@@ -888,8 +888,9 @@ def test_identity_mismatch_stays_fail_closed_before_hint_routing():
     repo.load_evidence_vault_sv9_authoritative_relation_facts = mismatched_historical
     outcome = _run(repo, flow, current=(3, 9))
 
-    assert outcome["status"] == "review_required"
-    assert "coverage_loss" in outcome["reason_codes"]
+    # Neither the delta nor the partition names a reopen cause, and an unmapped hint cannot mint one.
+    assert outcome["status"] == "no_new_score"
+    assert outcome["reason_codes"] == ["unmapped_evidence", "coverage_loss"]
     assert not flow.calls and repo.get_calls == repo.append_calls == 0
 
 
@@ -951,7 +952,7 @@ def test_invalid_persisted_event_audit_metadata_stops_all_evaluation_effects(nam
 # fmt: on
 
 
-_HOME, _ABOUT, _WORK, _EXA = (_hash(0x5000 + index) for index in range(1, 5))
+_HOME, _ABOUT, _WORK, _EXA, _WWW_ABOUT = (_hash(0x5000 + index) for index in range(1, 6))
 _ABOUT_TEXT = "Primary is an independent design studio " + " ".join(f"a{index}" for index in range(30))
 _MENTION_TEXT = "Primary was named a top design studio by the trade press this spring."
 
@@ -972,13 +973,17 @@ def _pair(row):
     return {"evidence_ref": row["ref"], "evidence_fingerprint": row["evidence_fingerprint"]}
 
 
-def _primary_repository(*, truncated, repository=_Repository):
-    """Primary's re-scan shape: a moved Exa ref, a re-chunked /work page and a truncated homepage."""
+def _primary_repository(*, truncated, repository=_Repository, www=False):
+    """Primary's re-scan shape: a moved Exa ref, a re-chunked /work page and a truncated homepage.
+
+    With ``www`` the accepted capture stored the unchanged about chunk under another URL, so its
+    ref and fingerprint survive while its evidence and source identities differ.
+    """
     home = " ".join(f"h{index}" for index in range(340))
     work = [f"k{index}" for index in range(120)]
     historical = [
         _capture_row(1, "raw_inputs.0.chunk.0", home, source=_HOME),
-        _capture_row(2, "raw_inputs.1.chunk.0", _ABOUT_TEXT, source=_ABOUT),
+        _capture_row(2, "raw_inputs.1.chunk.0", _ABOUT_TEXT, source=_WWW_ABOUT if www else _ABOUT),
         _capture_row(3, "raw_inputs.3.subpage.2.chunk.0", " ".join(work[:40]), source=_WORK),
         _capture_row(4, "raw_inputs.3.subpage.2.chunk.1", " ".join(work[40:80]), source=_WORK),
         _capture_row(5, "raw_inputs.3.subpage.2.chunk.2", " ".join(work[80:]), source=_WORK),
@@ -1128,3 +1133,51 @@ def test_no_carry_delta_stays_v2_while_a_carried_delta_is_v4():
     assert plain["schema_version"] == delta.JUDGMENT_DELTA_VERSION == "evidence-vault-sv9-judgment-delta-v2" and "support_continuity" not in plain
     carried = _run(_primary_repository(truncated=True), _Flow(), scan="scan-2")["signed_delta"]
     assert carried["schema_version"] == delta.SUPPORT_CONTINUITY_JUDGMENT_DELTA_VERSION == "evidence-vault-sv9-judgment-delta-v4" and carried["support_continuity"]["carried"]
+
+
+def test_identity_mismatch_with_a_signed_cause_returns_a_persistable_review():
+    repo, flow = _primary_repository(truncated=True, www=True), _Flow()
+
+    outcome = _run(repo, flow, scan="scan-2")
+
+    signed, partition = outcome["signed_delta"], outcome["workset_partition"]
+    assert outcome["status"] == "review_required"
+    assert outcome["reason_codes"] == ["coverage_loss", "unmapped_evidence", "incomplete_review_partition"]
+    assert outcome["unmapped_evidence_count"] == len(partition["pending_evidence"])
+    assert partition["judgment_delta"] == signed and [row["tile_id"] for row in signed["coverage_loss"]] == ["M1"]
+    # The truncated homepage is the signed cause the repository accepts for the reopen.
+    assert history._sv9_authority_partition_reopen_tile_ids(partition, signed) == set()
+    assert not flow.calls and repo.get_calls == repo.append_calls == 0
+    assert repo.checkpoint_gets == [] and repo.checkpoint_appends == []
+
+
+def test_identity_mismatch_without_a_signed_cause_keeps_the_accepted_authority(monkeypatch):
+    repo, flow = _primary_repository(truncated=False, www=True), _Flow()
+    built, validated_partition = [], service._validated_partition
+
+    def spy(*args, **kwargs):
+        built.append(validated_partition(*args, **kwargs))
+        return built[-1]
+
+    monkeypatch.setattr(service, "_validated_partition", spy)
+
+    outcome = _run(repo, flow, scan="scan-2")
+
+    assert (outcome["status"], outcome["reason_codes"]) == ("no_new_score", ["coverage_loss"])
+    assert "workset_partition" not in outcome
+    assert not flow.calls and repo.get_calls == repo.append_calls == 0
+    assert repo.checkpoint_gets == [] and repo.checkpoint_appends == []
+    # The service declines exactly the reopen the repository would refuse for the same delta and partition.
+    assert len(built) == 1
+    with pytest.raises(history.EvidenceVaultSv9JudgmentCandidateError):
+        history._sv9_authority_partition_reopen_tile_ids(built[0], built[0]["judgment_delta"])
+
+
+def test_identity_mismatch_partition_failure_is_invalid_input_before_any_provider_call(monkeypatch):
+    repo, flow = _primary_repository(truncated=True, www=True), _Flow()
+    monkeypatch.setattr(service, "_validated_partition", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("partition")))
+
+    outcome = _run(repo, flow, scan="scan-2")
+
+    assert (outcome["status"], outcome["reason_codes"]) == ("no_new_score", ["invalid_input"])
+    assert not flow.calls and repo.get_calls == repo.append_calls == 0
