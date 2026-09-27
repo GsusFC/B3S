@@ -298,6 +298,10 @@ def test_repository_facts_uses_only_candidate_witness_basis_and_preserves_origin
     # Support continuity needs the identity-derived source class beside the canonical ids.
     assert [row["source_class"] for row in facts["evidence"]] == ["owned_copy", "owned_copy"]
     assert all(row["evidence_id"] and row["source_identity_id"] for row in facts["evidence"])
+    # The www-alias check recomputes both identities from the identity-derived provenance fields.
+    identities = [project_evidence_memory_row_identity(value, brand_domain="example.com") for value in history._capture_evidence_rows(evidence_rows)]
+    provenance = ("source", "evidence_type", "url")
+    assert [{key: row[key] for key in provenance} for row in facts["evidence"]] == [{key: identity[key] for key in provenance} for identity in identities]
 
 
 def test_repository_facts_rejects_packet_fingerprint_and_basis_tampering(monkeypatch):
