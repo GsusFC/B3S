@@ -4,8 +4,10 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 from src.history.report_parser import normalize_domain
+from src.services.evidence_memory_identity_v2 import project_evidence_memory_row_identity
 from src.services.evidence_vault_sv9_authoritative_relations import (
     EvidenceVaultSv9AuthoritativeRelationStaleWitnessError,
     EvidenceVaultSv9AuthoritativeRelationWitnessError,
@@ -185,14 +187,17 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
         overlay,
         trusted,
     )
-    identity_mismatch_tiles = _accepted_support_identity_mismatches(
-        repository,
-        authority,
-        prior,
-        evaluation_input["current_identity_bindings"],
-        source_scan_id=source_scan_id,
-        workspace_slug=workspace_slug,
-    )
+    try:
+        identity_mismatch_tiles = _accepted_support_identity_mismatches(
+            repository,
+            authority,
+            prior,
+            evaluation_input["current_identity_bindings"],
+            records=records,
+            source_scan_id=source_scan_id,
+            workspace_slug=workspace_slug,
+        )
+    except Exception as exc: return _outcome("no_new_score", plan, authority_ids, ["repository_failure"], ignored, unmapped, signed_delta=signed, diagnostic_exception=exc)
     if identity_mismatch_tiles:
         # The signed delta has no canonical-identity fields by design, so the
         # mismatch cannot authorize a reopen by itself.  Fail closed before any
@@ -497,6 +502,7 @@ def _accepted_support_identity_mismatches(
     prior: Sequence[Mapping[str, Any]],
     current_bindings: Sequence[Mapping[str, Any]],
     *,
+    records: Mapping[tuple[str, str], Mapping[str, Any]],
     source_scan_id: str,
     workspace_slug: str,
 ) -> set[str]:
@@ -505,7 +511,9 @@ def _accepted_support_identity_mismatches(
     Judgment support stores only the evidence ref/hash pair.  The accepted
     candidate's source scan is the existing historical capture boundary from
     which canonical evidence/source identities can be recomputed; relation IDs
-    are intentionally not involved in this continuity check.
+    are intentionally not involved in this continuity check.  Identities that
+    differ only by the brand host's leading ``www.`` are not a mismatch once
+    both recompute and the current scan's facts row confirms the binding.
     """
     if authority is None:
         return set()
@@ -524,37 +532,76 @@ def _accepted_support_identity_mismatches(
         historical_rows = facts["evidence"]
         if type(historical_rows) is not list:
             raise ValueError("historical evidence is invalid")
-        historical_by_pair: dict[tuple[str, str], list[tuple[Any, Any]]] = {}
+        historical_by_pair: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
         for row in historical_rows:
-            pair = (row["evidence_ref"], row["evidence_fingerprint"])
-            historical_by_pair.setdefault(pair, []).append(
-                (row.get("evidence_id"), row.get("source_identity_id"))
-            )
-        current_by_pair: dict[tuple[str, str], list[tuple[Any, Any]]] = {}
+            historical_by_pair.setdefault((row["evidence_ref"], row["evidence_fingerprint"]), []).append(row)
+        current_by_pair: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
         for row in current_bindings:
-            pair = (row["evidence_ref"], row["evidence_fingerprint"])
-            current_by_pair.setdefault(pair, []).append(
-                (row.get("evidence_id"), row.get("source_identity_id"))
-            )
-        mismatches = set()
+            current_by_pair.setdefault((row["evidence_ref"], row["evidence_fingerprint"]), []).append(row)
+        tiles_by_pair: dict[tuple[str, str], set[str]] = {}
         for tile_id, ref, fingerprint in support:
-            pair = ref, fingerprint
+            tiles_by_pair.setdefault((ref, fingerprint), set()).add(tile_id)
+        mismatched, aliases = set(), {}
+        for pair in tiles_by_pair:
             historical = historical_by_pair.get(pair, [])
             current = current_by_pair.get(pair, [])
             if len(historical) != 1:
-                mismatches.add(tile_id)
-                continue
-            if not current:
+                mismatched.add(pair)
+            elif not current:
                 # The accepted support disappeared from the current capture.
                 # The signed delta and partition own that coverage-loss path.
                 continue
-            if len(current) != 1 or historical[0] != current[0]:
-                mismatches.add(tile_id)
-        return mismatches
+            elif len(current) != 1:
+                mismatched.add(pair)
+            elif (historical[0].get("evidence_id"), historical[0].get("source_identity_id")) != (current[0].get("evidence_id"), current[0].get("source_identity_id")):
+                if _www_host_alias(historical[0], current[0], records): aliases[pair] = historical[0], current[0]
+                else: mismatched.add(pair)
+        if aliases:
+            try:
+                current_rows: dict[Any, list[Mapping[str, Any]]] = {}
+                for row in loader(_text(source_scan_id), workspace_slug=workspace_slug)["evidence"]: current_rows.setdefault(row["evidence_record_id"], []).append(row)
+            except (AttributeError, KeyError, TypeError, ValueError):
+                # A contract gap in the current facts confirms no alias, so only those pairs stay mismatches.
+                current_rows = {}
+            for pair, (historical, binding) in aliases.items():
+                try:
+                    joined = current_rows.get(binding["evidence_record_id"], [])
+                    # ``source`` is outside both identity digests, so only the facts row can confirm it.
+                    confirmed = len(joined) == 1 and all(joined[0][key] == binding[key] for key in ("evidence_ref", "evidence_fingerprint", "evidence_id", "source_identity_id")) and all(joined[0][key] == historical[key] for key in ("source", "canonical_domain"))
+                except (AttributeError, KeyError, TypeError, ValueError): confirmed = False
+                if not confirmed: mismatched.add(pair)
+        return {tile_id for pair in mismatched for tile_id in tiles_by_pair[pair]}
     except (AttributeError, KeyError, TypeError, ValueError):
         # Existing authority with unverifiable historical support must never
         # become reusable merely because its ref/hash pair survived.
         return {tile_id for tile_id, _ref, _fingerprint in support}
+
+
+def _www_host_alias(historical: Mapping[str, Any], binding: Mapping[str, Any], records: Mapping[tuple[str, str], Mapping[str, Any]]) -> bool:
+    """Whether owned copy on the brand host recomputes to both stored identities with only ``www.`` toggled.
+
+    The historical row's own fields must reproduce its stored ids, and the same fields with only the
+    host's leading ``www.`` toggled must reproduce the current binding's ids.  A present pair hashes
+    byte-identical content in both captures, so the current record's content serves both sides; any
+    normalization gap only keeps the pair a mismatch.
+    """
+    try:
+        domain, url = historical.get("canonical_domain"), historical.get("url")
+        if historical.get("source_class") != "owned_copy" or type(domain) is not str or not domain or type(url) is not str:
+            return False
+        parts = urlsplit(url)
+        # hostname excludes any port or userinfo, so it equals netloc only without them.
+        if parts.netloc not in {domain, f"www.{domain}"} or parts.hostname != parts.netloc:
+            return False
+        toggled = urlunsplit(parts._replace(netloc=domain if parts.netloc == f"www.{domain}" else f"www.{domain}"))
+        row = {"source": historical["source"], "evidence_type": historical["evidence_type"], "content": records[(binding["evidence_ref"], binding["evidence_fingerprint"])]["content"], "metadata": {"source_class": "owned_copy"}}
+        for candidate_url, expected in ((url, historical), (toggled, binding)):
+            identity = project_evidence_memory_row_identity(row | {"url": candidate_url}, brand_domain=domain)
+            if identity is None or (identity["evidence_id"], identity["document_id"]) != (expected["evidence_id"], expected["source_identity_id"]):
+                return False
+        return True
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
 
 
 def _support_continuity_carry(

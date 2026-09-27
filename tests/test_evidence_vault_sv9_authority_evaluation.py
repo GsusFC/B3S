@@ -7,6 +7,7 @@ from src.services import evidence_vault_sv9_authority_event as authority_event
 from src.services import evidence_vault_sv9_authority_evaluation as service
 from src.services import evidence_vault_sv9_authority_projection as authority_projection
 from src.services import evidence_vault_sv9_shared_process as shared_process
+from src.services.evidence_memory_identity_v2 import project_evidence_memory_row_identity
 from src.services.evidence_vault_canonical_core import canonical_fingerprint
 from src.services.evidence_vault_sv9_authoritative_relations import (
     EvidenceVaultSv9AuthoritativeRelationStaleWitnessError,
@@ -48,7 +49,7 @@ class _Repository:
         self.authority, self.records, self.bad_reload = authority, tuple(records), bad_reload; self.append_calls = self.get_calls = self.authority_calls = self.context_calls = self.evidence_calls = 0; self.candidates = {}; self.mutations = []; self.checkpoints = {}; self.checkpoint_gets = []; self.checkpoint_appends = []; self.shared_analysis_payloads = []; self.shared_processes = {}; self.fail_checkpoint_append = self.checkpoint_conflict = self.unmapped = self.hint_only = self.bootstrap_hint_only = self.reopen = False; self.processing_complete = ()
         self.context = {"capture_origin": {"capture_id": "00000000-0000-0000-0000-000000000009", "capture_fingerprint": _hash(9)}, "operation_origin": {"operation_id": "00000000-0000-0000-0000-000000000010", "operation_fingerprint": _hash(10)}}; self.projection_relations = None; self.projection_status = "available"; self.projection_calls = 0; self.witness_seed = 300
         # Per-scan capture rows let the historical and current captures differ; see _capture_row.
-        self.captures = {}; self.operational_basis = {}; self.records_by_scan = {}
+        self.captures = {}; self.operational_basis = {}; self.records_by_scan = {}; self.facts_loads = []
     def get_evidence_vault_sv9_judgment_authority(self, _domain, **_kwargs): self.authority_calls += 1; return deepcopy(self.authority)
     def load_evidence_vault_sv9_judgment_context(self, _scan, **_kwargs): self.context_calls += 1; return {"canonical_domain": "example.test", "capture_id": self.context["capture_origin"]["capture_id"], "capture_fingerprint": self.context["capture_origin"]["capture_fingerprint"], "operation_plan_id": self.context["operation_origin"]["operation_id"], "operation_fingerprint": self.context["operation_origin"]["operation_fingerprint"]}
     def resolve_evidence_vault_sv9_judgment_evidence(self, scan, refs, **_kwargs):
@@ -94,6 +95,7 @@ class _Repository:
         if _kwargs.get("shared_process_payload") is not None: self.shared_processes[key] = deepcopy(_kwargs["shared_process_payload"])
         return deepcopy(checkpoint), True
     def load_evidence_vault_sv9_authoritative_relation_facts(self, scan, *, workspace_slug="b3s"):
+        self.facts_loads.append(scan)
         source = {
             "workspace_id": "00000000-0000-0000-0000-000000000001",
             "brand_id": "00000000-0000-0000-0000-000000000002",
@@ -117,6 +119,9 @@ class _Repository:
                     "evidence_id": row["evidence_id"],
                     "source_identity_id": row["source_identity_id"],
                     "source_class": row["source_class"],
+                    "source": row["source"],
+                    "evidence_type": row["evidence_type"],
+                    "url": row["url"],
                 }
                 for row in self.captures[scan]
             ]
@@ -869,6 +874,7 @@ def test_accepted_support_identity_check_distinguishes_absence_from_mismatch(
         {"accepted_candidate": {"source_scan_id": "accepted-scan"}},
         [{"tile_id": "M1", "supporting_evidence": [pair]}],
         bindings,
+        records={},
         source_scan_id="current-scan",
         workspace_slug="b3s",
     )
@@ -952,20 +958,28 @@ def test_invalid_persisted_event_audit_metadata_stops_all_evaluation_effects(nam
 # fmt: on
 
 
-_HOME, _ABOUT, _WORK, _EXA, _WWW_ABOUT = (_hash(0x5000 + index) for index in range(1, 6))
+_HOME, _ABOUT, _WORK, _WWW_ABOUT = "https://example.test", "https://example.test/about", "https://example.test/work", "https://www.example.test/about"
+_EXA = "https://press.example/2026/top-design-studios"
+_EXA_ROW = {"url": _EXA, "source": "exa", "evidence_type": "external_proof.external_mentions", "source_class": "external_proof"}
+# (accepted, current) about-chunk overrides: the brand host lost its ``www.``, or the scheme drifted.
+_WWW_ALIAS, _SCHEME_DRIFT = ({"url": _WWW_ABOUT}, {}), ({"url": "http://example.test/about"}, {})
 _ABOUT_TEXT = "Primary is an independent design studio " + " ".join(f"a{index}" for index in range(30))
 _MENTION_TEXT = "Primary was named a top design studio by the trade press this spring."
 
 
-def _capture_row(record, ref, content, *, source, source_class="owned_copy"):
+def _capture_row(record, ref, content, *, url, source="web", evidence_type="raw_input", source_class="owned_copy"):
+    """One stored capture row whose canonical ids come from the production projection, never hand-built."""
+    stored = {"evidence_ref": ref, "source": source, "evidence_type": evidence_type, "url": url, "content": content, "content_raw": None, "confidence": "high", "metadata": {}, "source_class": source_class}
+    identity = project_evidence_memory_row_identity(history._capture_evidence_rows([stored])[0], brand_domain="example.test")
     return {
         "record": record,
         "ref": ref,
         "content": content,
-        "source_identity_id": source,
-        "source_class": source_class,
+        # The stored content hash, not the identity's casefolded content digest.
         "evidence_fingerprint": hashlib.sha256(content.encode("utf-8")).hexdigest(),
-        "evidence_id": hashlib.sha256(f"{source_class}|{source}|{content}".encode("utf-8")).hexdigest(),
+        "evidence_id": identity["evidence_id"],
+        "source_identity_id": identity["document_id"],
+        **{key: identity[key] for key in ("source_class", "source", "evidence_type", "url")},
     }
 
 
@@ -973,28 +987,29 @@ def _pair(row):
     return {"evidence_ref": row["ref"], "evidence_fingerprint": row["evidence_fingerprint"]}
 
 
-def _primary_repository(*, truncated, repository=_Repository, www=False):
+def _primary_repository(*, truncated, repository=_Repository, about=({}, {})):
     """Primary's re-scan shape: a moved Exa ref, a re-chunked /work page and a truncated homepage.
 
-    With ``www`` the accepted capture stored the unchanged about chunk under another URL, so its
-    ref and fingerprint survive while its evidence and source identities differ.
+    ``about`` overrides the stored fields of the unchanged about chunk on the accepted and the
+    current capture; its ref and fingerprint survive whatever identities those fields derive.
     """
     home = " ".join(f"h{index}" for index in range(340))
     work = [f"k{index}" for index in range(120)]
+    historical_about, current_about = ({"url": _ABOUT} | overrides for overrides in about)
     historical = [
-        _capture_row(1, "raw_inputs.0.chunk.0", home, source=_HOME),
-        _capture_row(2, "raw_inputs.1.chunk.0", _ABOUT_TEXT, source=_WWW_ABOUT if www else _ABOUT),
-        _capture_row(3, "raw_inputs.3.subpage.2.chunk.0", " ".join(work[:40]), source=_WORK),
-        _capture_row(4, "raw_inputs.3.subpage.2.chunk.1", " ".join(work[40:80]), source=_WORK),
-        _capture_row(5, "raw_inputs.3.subpage.2.chunk.2", " ".join(work[80:]), source=_WORK),
-        _capture_row(6, "raw_inputs.5.exa.mentions.7", _MENTION_TEXT, source=_EXA, source_class="external_proof"),
+        _capture_row(1, "raw_inputs.0.chunk.0", home, url=_HOME),
+        _capture_row(2, "raw_inputs.1.chunk.0", _ABOUT_TEXT, **historical_about),
+        _capture_row(3, "raw_inputs.3.subpage.2.chunk.0", " ".join(work[:40]), url=_WORK),
+        _capture_row(4, "raw_inputs.3.subpage.2.chunk.1", " ".join(work[40:80]), url=_WORK),
+        _capture_row(5, "raw_inputs.3.subpage.2.chunk.2", " ".join(work[80:]), url=_WORK),
+        _capture_row(6, "raw_inputs.5.exa.mentions.7", _MENTION_TEXT, **_EXA_ROW),
     ]
     current = [
-        _capture_row(11, "raw_inputs.0.chunk.0", " ".join(home.split()[:67]) if truncated else home, source=_HOME),
-        _capture_row(12, "raw_inputs.1.chunk.0", _ABOUT_TEXT, source=_ABOUT),
-        _capture_row(13, "raw_inputs.4.subpage.1.chunk.0", " ".join(work[:70]), source=_WORK),
-        _capture_row(14, "raw_inputs.4.subpage.1.chunk.1", " ".join(work[70:]) + " new closing line", source=_WORK),
-        _capture_row(16, "raw_inputs.6.exa.mentions.2", _MENTION_TEXT, source=_EXA, source_class="external_proof"),
+        _capture_row(11, "raw_inputs.0.chunk.0", " ".join(home.split()[:67]) if truncated else home, url=_HOME),
+        _capture_row(12, "raw_inputs.1.chunk.0", _ABOUT_TEXT, **current_about),
+        _capture_row(13, "raw_inputs.4.subpage.1.chunk.0", " ".join(work[:70]), url=_WORK),
+        _capture_row(14, "raw_inputs.4.subpage.1.chunk.1", " ".join(work[70:]) + " new closing line", url=_WORK),
+        _capture_row(16, "raw_inputs.6.exa.mentions.2", _MENTION_TEXT, **_EXA_ROW),
     ]
     support = {"M1": [_pair(historical[0])], "M2": [_pair(historical[5])], "A1": [_pair(historical[3])]}
     support |= {tile: [_pair(historical[1])] for tile, _component in planner._REGISTRY if tile not in support}
@@ -1033,8 +1048,9 @@ class _DroppingFlow(_Flow):
         )
 
 
-def test_next_scan_carries_moved_and_rechunked_support_and_reviews_only_the_truncated_page():
-    repo, flow = _primary_repository(truncated=True), _Flow()
+@pytest.mark.parametrize("www", [False, True])
+def test_next_scan_carries_moved_and_rechunked_support_and_reviews_only_the_truncated_page(www):
+    repo, flow = _primary_repository(truncated=True, about=_WWW_ALIAS if www else ({}, {})), _Flow()
 
     outcome = _run(repo, flow, scan="scan-2")
 
@@ -1061,12 +1077,15 @@ def test_next_scan_carries_moved_and_rechunked_support_and_reviews_only_the_trun
     assert outcome["candidate"] is None and repo.append_calls == 0
 
 
-def test_next_scan_without_truncation_produces_a_candidate_citing_only_current_records():
-    repo, flow = _primary_repository(truncated=False), _Flow()
+@pytest.mark.parametrize("www", [False, True])
+def test_next_scan_without_truncation_produces_a_candidate_citing_only_current_records(www):
+    repo, flow = _primary_repository(truncated=False, about=_WWW_ALIAS if www else ({}, {})), _Flow()
 
     outcome = _run(repo, flow, scan="scan-2")
 
     assert outcome["status"] == "candidate_available" and outcome["reason_codes"] == []
+    # Only an alias needs the current facts join, and it loads them once.
+    assert repo.facts_loads.count("scan-2") == int(www)
     candidate = next(iter(repo.candidates.values()))
     current_pairs = {(row["ref"], row["evidence_fingerprint"]) for row in repo.captures["scan-2"]}
     cited = {(item["evidence_ref"], item["evidence_fingerprint"]) for row in candidate["candidate_tile_judgments"] for item in row["supporting_evidence"]}
@@ -1136,7 +1155,7 @@ def test_no_carry_delta_stays_v2_while_a_carried_delta_is_v4():
 
 
 def test_identity_mismatch_with_a_signed_cause_returns_a_persistable_review():
-    repo, flow = _primary_repository(truncated=True, www=True), _Flow()
+    repo, flow = _primary_repository(truncated=True, about=_SCHEME_DRIFT), _Flow()
 
     outcome = _run(repo, flow, scan="scan-2")
 
@@ -1152,7 +1171,7 @@ def test_identity_mismatch_with_a_signed_cause_returns_a_persistable_review():
 
 
 def test_identity_mismatch_without_a_signed_cause_keeps_the_accepted_authority(monkeypatch):
-    repo, flow = _primary_repository(truncated=False, www=True), _Flow()
+    repo, flow = _primary_repository(truncated=False, about=_SCHEME_DRIFT), _Flow()
     built, validated_partition = [], service._validated_partition
 
     def spy(*args, **kwargs):
@@ -1174,10 +1193,133 @@ def test_identity_mismatch_without_a_signed_cause_keeps_the_accepted_authority(m
 
 
 def test_identity_mismatch_partition_failure_is_invalid_input_before_any_provider_call(monkeypatch):
-    repo, flow = _primary_repository(truncated=True, www=True), _Flow()
+    repo, flow = _primary_repository(truncated=True, about=_SCHEME_DRIFT), _Flow()
     monkeypatch.setattr(service, "_validated_partition", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("partition")))
 
     outcome = _run(repo, flow, scan="scan-2")
 
     assert (outcome["status"], outcome["reason_codes"]) == ("no_new_score", ["invalid_input"])
     assert not flow.calls and repo.get_calls == repo.append_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("about", "tampered"),
+    [
+        pytest.param(_SCHEME_DRIFT, None, id="scheme-drift"),
+        pytest.param(({"url": "https://www.example.org/about"}, {"url": "https://example.org/about"}), None, id="foreign-www-host"),
+        pytest.param(({"url": _WWW_ABOUT, "evidence_type": "owned_content"}, {}), None, id="evidence-type-change"),
+        pytest.param(({"url": _WWW_ABOUT, "source_class": "external_proof"}, {"source_class": "external_proof"}), None, id="external-proof"),
+        pytest.param(_WWW_ALIAS, "evidence_id", id="tampered-evidence-id"),
+        pytest.param(_WWW_ALIAS, "source_identity_id", id="tampered-source-identity-id"),
+    ],
+)
+def test_non_alias_identity_drift_stays_a_mismatch_without_reading_current_facts(about, tampered):
+    repo, flow = _primary_repository(truncated=False, about=about), _Flow()
+    if tampered:
+        repo.captures["scan"][1][tampered] = _hash(998)
+
+    outcome = _run(repo, flow, scan="scan-2")
+
+    assert (outcome["status"], outcome["reason_codes"]) == ("no_new_score", ["coverage_loss"])
+    assert not flow.calls and repo.append_calls == 0
+    assert "scan-2" not in repo.facts_loads
+
+
+@pytest.mark.parametrize(
+    ("about", "current_drift"),
+    [
+        pytest.param(({"url": _WWW_ABOUT, "source": "context"}, {}), {}, id="source-change"),
+        pytest.param(_WWW_ALIAS, {"evidence_id": _hash(998)}, id="current-evidence-id"),
+        pytest.param(_WWW_ALIAS, {"evidence_record_id": _uuid(998)}, id="current-record-id"),
+        pytest.param(_WWW_ALIAS, {"canonical_domain": "other.test"}, id="current-domain"),
+    ],
+)
+def test_www_alias_without_a_matching_current_facts_row_stays_a_mismatch(about, current_drift):
+    repo, flow = _primary_repository(truncated=False, about=about), _Flow()
+    load = repo.load_evidence_vault_sv9_authoritative_relation_facts
+
+    def drifted(scan, **kwargs):
+        facts = load(scan, **kwargs)
+        if scan == "scan-2":
+            next(row for row in facts["evidence"] if row["evidence_ref"] == "raw_inputs.1.chunk.0").update(current_drift)
+        return facts
+
+    repo.load_evidence_vault_sv9_authoritative_relation_facts = drifted
+    outcome = _run(repo, flow, scan="scan-2")
+
+    assert (outcome["status"], outcome["reason_codes"]) == ("no_new_score", ["coverage_loss"])
+    assert repo.facts_loads.count("scan-2") == 1
+    assert not flow.calls and repo.append_calls == 0
+
+
+def test_www_alias_current_facts_load_failure_is_a_repository_failure():
+    repo, flow = _primary_repository(truncated=False, about=_WWW_ALIAS), _Flow()
+    load = repo.load_evidence_vault_sv9_authoritative_relation_facts
+
+    def current_unavailable(scan, **kwargs):
+        if scan == "scan-2":
+            repo.facts_loads.append(scan)
+            raise RuntimeError("current facts unavailable")
+        return load(scan, **kwargs)
+
+    repo.load_evidence_vault_sv9_authoritative_relation_facts = current_unavailable
+    outcome = _run(repo, flow, scan="scan-2")
+
+    assert (outcome["status"], outcome["reason_codes"]) == ("no_new_score", ["repository_failure"])
+    assert repo.facts_loads.count("scan-2") == 1 and outcome["signed_delta"] is not None
+    assert not flow.calls and repo.append_calls == 0 and not repo.candidates
+
+
+def test_historical_identity_load_failure_is_a_repository_failure():
+    repo, flow = _primary_repository(truncated=False), _Flow()
+    load = repo.load_evidence_vault_sv9_authoritative_relation_facts
+
+    def second_history_load_fails(scan, **kwargs):
+        # The support-continuity carry reads history first; the identity gate reads it again.
+        if scan == "scan" and "scan" in repo.facts_loads:
+            raise RuntimeError("history unavailable")
+        return load(scan, **kwargs)
+
+    repo.load_evidence_vault_sv9_authoritative_relation_facts = second_history_load_fails
+    outcome = _run(repo, flow, scan="scan-2")
+
+    assert (outcome["status"], outcome["reason_codes"]) == ("no_new_score", ["repository_failure"])
+    # Unlike a carry-path failure, the signed delta already exists.
+    assert repo.facts_loads == ["scan"] and outcome["signed_delta"] is not None
+    assert not flow.calls and repo.append_calls == 0 and not repo.candidates
+
+
+@pytest.mark.parametrize("error", [KeyError("evidence"), ValueError("current facts are invalid")])
+def test_current_facts_contract_gap_keeps_only_the_alias_pair_a_mismatch(error):
+    repo = _primary_repository(truncated=False, about=_WWW_ALIAS)
+    prior = repo.authority["accepted_partition"]["candidate_tile_judgments"]
+    bindings = repo.evaluation_input("scan-2", "b3s")["current_identity_bindings"]
+    records = {(row["ref"], row["evidence_fingerprint"]): {"content": row["content"]} for row in repo.captures["scan-2"]}
+
+    def mismatches():
+        return service._accepted_support_identity_mismatches(repo, repo.authority, prior, bindings, records=records, source_scan_id="scan-2", workspace_slug="b3s")
+
+    assert mismatches() == set()
+    load = repo.load_evidence_vault_sv9_authoritative_relation_facts
+
+    def current_gap(scan, **kwargs):
+        if scan == "scan-2":
+            raise error
+        return load(scan, **kwargs)
+
+    repo.load_evidence_vault_sv9_authoritative_relation_facts = current_gap
+    # Only the tiles resting on the about chunk stay unverified; a catch-all would also flag M1, M2 and A1.
+    assert mismatches() == {tile for tile, _component in planner._REGISTRY} - {"M1", "M2", "A1"}
+
+
+def test_facts_row_provenance_keys_leave_evaluation_input_fingerprints_unchanged():
+    plain = _facts()
+    extended = deepcopy(plain)
+    for row in extended["evidence"]:
+        row.update(source="web", evidence_type="raw_input", url="https://brand.test/")
+
+    before, after = (project_evidence_vault_sv9_evaluation_input(repository=_FactsRepository(facts), source_scan_id="scan-1") for facts in (plain, extended))
+
+    assert before["status"] == "available" and before["authoritative_relations"]
+    assert (after["relation_projection_fingerprint"], after["evaluation_input_fingerprint"]) == (before["relation_projection_fingerprint"], before["evaluation_input_fingerprint"])
+    assert after == before

@@ -11,7 +11,7 @@ from src.services import evidence_vault_sv9_authority_projection as authority_pr
 from src.services import evidence_vault_sv9_judgment_delta as delta
 from src.services import evidence_vault_sv9_workset_partition as partitioning
 from src.services.evidence_vault_canonical_core import canonical_fingerprint
-from tests.test_evidence_vault_sv9_authority_evaluation import _DroppingFlow, _Flow, _Repository, _authority, _hash, _identity, _primary_repository, _relation, _series
+from tests.test_evidence_vault_sv9_authority_evaluation import _SCHEME_DRIFT, _DroppingFlow, _Flow, _Repository, _authority, _hash, _identity, _primary_repository, _relation, _series
 from tests.test_sv9_judgment_memory import _judgment
 
 def _uuid(number): return f"00000000-0000-0000-0000-{number:012d}"
@@ -1132,7 +1132,7 @@ def test_carried_tile_dropping_a_witnessed_pair_persists_a_reopen_overlay():
     assert application._authority(repo.authority)["review_scan_id"] == "scan-2"
 
 def test_identity_mismatch_with_a_signed_cause_persists_a_reopen_overlay():
-    repo, flow = _primary_repository(truncated=True, www=True, repository=_CarryReopenRepository), _Flow()
+    repo, flow = _primary_repository(truncated=True, about=_SCHEME_DRIFT, repository=_CarryReopenRepository), _Flow()
 
     result = _run(repo, flow, source="scan-2")
 
@@ -1143,7 +1143,7 @@ def test_identity_mismatch_with_a_signed_cause_persists_a_reopen_overlay():
     assert application._authority(repo.authority)["review_scan_id"] == "scan-2"
 
 def test_identity_mismatch_without_a_signed_cause_retains_the_accepted_authority():
-    repo, flow = _primary_repository(truncated=False, www=True, repository=_CarryReopenRepository), _Flow()
+    repo, flow = _primary_repository(truncated=False, about=_SCHEME_DRIFT, repository=_CarryReopenRepository), _Flow()
     before = deepcopy(repo.authority)
 
     result = _run(repo, flow, source="scan-2")
