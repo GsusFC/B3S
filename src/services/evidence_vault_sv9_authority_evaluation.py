@@ -194,21 +194,22 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
         workspace_slug=workspace_slug,
     )
     if identity_mismatch_tiles:
-        # The signed delta has no canonical-identity fields by design.  Keep
-        # the existing ref/hash coverage contract intact and fail closed before
-        # any provider call when historical accepted support cannot be matched
-        # to the exact current canonical identity.
+        # The signed delta has no canonical-identity fields by design, so the
+        # mismatch cannot authorize a reopen by itself.  Fail closed before any
+        # provider call: review only when signed data already names a cause the
+        # repository accepts, otherwise keep the accepted authority.
+        try:
+            partition = _validated_partition(evaluation_input, signed, trusted)
+            authorized = _signed_reopen_cause(partition, signed)
+            if authorized:
+                review = _partition_reasons(partition, review)
+                unmapped = len(partition["pending_evidence"])
+        except Exception as exc: return _outcome("no_new_score", plan, authority_ids, ["invalid_input"], ignored, unmapped, signed_delta=signed, diagnostic_exception=exc)
         if "coverage_loss" not in review:
             review.append("coverage_loss")
-        return _outcome(
-            "review_required",
-            plan,
-            authority_ids,
-            review,
-            ignored,
-            unmapped,
-            signed_delta=signed,
-        )
+        if not authorized:
+            return _outcome("no_new_score", plan, authority_ids, review, ignored, unmapped, signed_delta=signed)
+        return _outcome("review_required", plan, authority_ids, review, ignored, unmapped, signed_delta=signed, partition=partition)
     try:
         partition = _validated_partition(evaluation_input, signed, trusted)
         review = _partition_reasons(partition, review)
@@ -628,6 +629,17 @@ def _validated_partition(evaluation_input: Mapping[str, Any], signed: Mapping[st
         partitioning.build_evidence_vault_sv9_workset_partition(
             evaluation_input=evaluation_input, judgment_delta=signed, trusted_irrelevant_evidence=trusted_rows
         )
+    )
+
+
+def _signed_reopen_cause(partition: Mapping[str, Any], signed: Mapping[str, Any]) -> bool:
+    """Mirror the repository's reopen authorization: only these signed causes can open a review."""
+    review = partition["review_partition"]
+    return bool(
+        review["evaluation_input_reopened_tile_ids"]
+        or review["operational_authority_coverage_loss_tile_ids"]
+        or signed["plan"]["review_set"]
+        or signed["coverage_loss"]
     )
 
 

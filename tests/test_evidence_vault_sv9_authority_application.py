@@ -1130,3 +1130,23 @@ def test_carried_tile_dropping_a_witnessed_pair_persists_a_reopen_overlay():
     assert overlay["review_state"] == "pending" and [row["tile_id"] for row in overlay["signed_delta"]["coverage_loss"]] == ["A1"]
     assert [row["tile_id"] for row in overlay["signed_delta"]["support_continuity"]["carried"]] == ["M2"]
     assert application._authority(repo.authority)["review_scan_id"] == "scan-2"
+
+def test_identity_mismatch_with_a_signed_cause_persists_a_reopen_overlay():
+    repo, flow = _primary_repository(truncated=True, www=True, repository=_CarryReopenRepository), _Flow()
+
+    result = _run(repo, flow, source="scan-2")
+
+    assert result["status"] == result["evaluation_status"] == "review_required" and "coverage_loss" in result["reason_codes"]
+    assert repo.mutations == ["reopen"] and not flow.calls
+    overlay = repo.authority["reopen_review_overlay"]
+    assert overlay["review_state"] == "pending" and [row["tile_id"] for row in overlay["signed_delta"]["coverage_loss"]] == ["M1"]
+    assert application._authority(repo.authority)["review_scan_id"] == "scan-2"
+
+def test_identity_mismatch_without_a_signed_cause_retains_the_accepted_authority():
+    repo, flow = _primary_repository(truncated=False, www=True, repository=_CarryReopenRepository), _Flow()
+    before = deepcopy(repo.authority)
+
+    result = _run(repo, flow, source="scan-2")
+
+    assert (result["status"], result["evaluation_status"], result["reason_codes"]) == ("authority_retained", "no_new_score", ["coverage_loss"])
+    assert repo.mutations == [] and not flow.calls and repo.authority == before

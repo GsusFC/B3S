@@ -64,7 +64,8 @@ def test_missing_or_ambiguous_support_fails_closed_before_provider(monkeypatch):
 
     repo.load_evidence_vault_sv9_authoritative_relation_facts = ambiguous
     result = _run(repo, flow, current=(3,), scan="next-scan")
-    assert result["status"] == "review_required"
+    # Ambiguous history names no signed reopen cause, so the accepted authority stays.
+    assert result["status"] == "no_new_score"
     assert result["reason_codes"] == ["coverage_loss"]
     assert flow.calls == []
 
@@ -88,7 +89,8 @@ def test_same_ref_hash_with_changed_canonical_identity_fails_closed(monkeypatch)
 
     repo.load_evidence_vault_sv9_authoritative_relation_facts = tampered
     result = _run(repo, flow, current=(3,), scan="next-scan")
-    assert result["status"] == "review_required"
+    # The identity change is the only cause: no signed coverage loss can open a review.
+    assert result["status"] == "no_new_score"
     assert result["reason_codes"] == ["coverage_loss"]
     assert result["signed_delta"]["coverage_loss"] == []
     assert flow.calls == []
