@@ -1,8 +1,9 @@
 """Shadow ledger of whether a re-scan saw, disproved or could not check prior evidence.
 
 Every prior evidence identity gets exactly one state against the current capture.
-``not_verified`` is the fail-stable default: absence is claimed only for an owned
-page that was re-captured healthily. Rows are diagnostics and never change a score.
+``not_verified`` is the fail-stable default: absence is claimed only when an owned
+page was re-captured healthily and the prior chunk is essentially gone from it. Rows
+are diagnostics and never change a score.
 """
 
 from __future__ import annotations
@@ -32,12 +33,23 @@ from src.sv9_flow.contracts import (
 )
 
 
-EVIDENCE_LEDGER_POLICY_VERSION = "evidence-vault-evidence-ledger-v1"
+EVIDENCE_LEDGER_POLICY_VERSION = "evidence-vault-evidence-ledger-v2"
 SEEN, VERIFIED_ABSENT, NOT_VERIFIED = "seen", "verified_absent", "not_verified"
 SHOWN, SHOWN_AS_SIGNAL, NOT_SHOWN = "shown", "shown_as_signal", "not_shown"
 OWNED_PAGE_CLASS, EXTERNAL_CLASS = "owned_page", "external"
 # Provisional current/prior page-size floor; calibrate it with scripts/evidence_ledger_measure.py.
 MIN_PAGE_SIZE_RATIO = Fraction(1, 2)
+# Share of a prior chunk's 3-word shingles still on its current page. Whole-chunk matching
+# turned a changed CDN image URL, a weather widget or video-player text into absences.
+SEEN_CONTAINMENT = Fraction(9, 10)
+ABSENT_CONTAINMENT = Fraction(1, 5)
+# Anti-bot interstitials captured as page text: a page carrying one proves no absence.
+_BOT_CHALLENGE_MARKERS = (
+    "challenges.cloudflare.com/cdn-cgi/challenge-platform",
+    "cloudflare.com/products/turnstile",
+    "checking your browser",
+    "verify you are human",
+)
 _HEALTHY_GATE_STATES = frozenset({"pass", "warning"})
 # An allow-list: the acquisition gate lets an obstructed (cookie-wall) web capture pass.
 _WEB_SUCCESS_STATUSES = frozenset({"fetched", "hit", "success"})
@@ -179,8 +191,17 @@ def _verify_owned_page(
         prior_row["normalized"] in page["normalized"] or prior_row["normalized"] in page["stripped"]
     ):
         return SEEN, []
+    containment = _chunk_containment(prior_row, page)
+    if containment is not None and containment >= SEEN_CONTAINMENT:
+        return SEEN, []
     reasons = _capture_reasons(current_capture) + _page_reasons(page, prior_row["prior_page"])
-    return (NOT_VERIFIED, reasons) if reasons else (VERIFIED_ABSENT, [])
+    if reasons:
+        return NOT_VERIFIED, reasons
+    if containment is None:
+        return NOT_VERIFIED, ["chunk_too_short"]
+    if containment > ABSENT_CONTAINMENT:
+        return NOT_VERIFIED, ["chunk_text_changed"]
+    return VERIFIED_ABSENT, []
 
 
 def _verify_external(
@@ -224,8 +245,12 @@ def _page_reasons(page: Mapping[str, Any] | None, prior_page: Mapping[str, Any] 
     if page["visit_status"] != "captured" or not page["normalized"]:
         return ["page_not_captured"]
     reasons = ["page_404"] if _looks_not_found(page["text"]) else []
+    if _looks_obstructed(page["normalized"]):
+        reasons.append("page_obstructed")
     if prior_page is None or not prior_page["normalized"]:
         return [*reasons, "prior_page_unavailable"]
+    if _looks_obstructed(prior_page["normalized"]):
+        reasons.append("prior_page_obstructed")
     if min(len(prior_page["shingles"]), len(page["shingles"])) < MIN_PAGE_SHINGLES:
         reasons.append("page_too_short")
     if len(page["normalized"]) < len(prior_page["normalized"]) * MIN_PAGE_SIZE_RATIO:
@@ -250,6 +275,7 @@ def _ledger_row(
     current: Mapping[str, Any],
     shown_index: Mapping[str, Any],
 ) -> dict[str, Any]:
+    page = current["pages"].get(evidence["source_key"])
     return {
         **{key: evidence[key] for key in _ROW_IDENTITY_KEYS},
         "evidence_class": evidence["evidence_class"],
@@ -258,7 +284,8 @@ def _ledger_row(
         "health": {
             "capture_gate_state": current["gate_state"],
             "web_step_status": current["web_step_status"],
-            "page": _page_health(prior_page, current["pages"].get(evidence["source_key"])),
+            "page": _page_health(prior_page, page),
+            "chunk_containment": _containment_health(evidence, page),
         },
         "shown_to_core": shown_to_core(evidence["content"], shown_index),
         "policy_version": EVIDENCE_LEDGER_POLICY_VERSION,
@@ -275,6 +302,20 @@ def _page_health(prior_page: Mapping[str, Any] | None, current_page: Mapping[str
         "current_chars": len(current_page["normalized"]) if current_page else None,
         "change": _page_change(prior_page, current_page),
     }
+
+
+def _chunk_containment(row: Mapping[str, Any], page: Mapping[str, Any] | None) -> Fraction | None:
+    chunk = _shingles(row["content"])
+    if page is None or not chunk:
+        return None
+    return Fraction(len(chunk & page["shingles"]), len(chunk))
+
+
+def _containment_health(evidence: Mapping[str, Any], page: Mapping[str, Any] | None) -> float | None:
+    if evidence["evidence_class"] != OWNED_PAGE_CLASS:
+        return None
+    containment = _chunk_containment(evidence, page)
+    return None if containment is None else round(float(containment), 3)
 
 
 def _capture_view(snapshot: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], brand_domain: str) -> dict[str, Any]:
@@ -448,6 +489,10 @@ def _looks_not_found(text: str) -> bool:
         or first.startswith("not found the requested url was not found")
         or "the requested url was not found on this server" in first
     )
+
+
+def _looks_obstructed(normalized: str) -> bool:
+    return any(marker in normalized for marker in _BOT_CHALLENGE_MARKERS)
 
 
 def _component_entry(key: str, evaluation: Mapping[str, Any]) -> dict[str, Any]:

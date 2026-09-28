@@ -229,6 +229,67 @@ def test_removed_fragment_on_a_healthy_page_is_verified_absent():
 
     assert _verdict(row) == ("verified_absent", [])
     assert row["health"]["page"]["change"] == "unchanged"
+    assert row["health"]["chunk_containment"] == 0.0
+
+
+_CHUNK = _words(40, "k")
+_CHALLENGE = (
+    "Checking your browser… Verifying... Stuck? "
+    "[Troubleshoot](https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/f/av0/rch/9oyeu) Success!"
+)
+
+
+def _chunk_pair(current_chunk):
+    home = _words(120, "h")
+    return _snapshot(_web(home, (ABOUT, _about(_CHUNK)))), _snapshot(_web(home, (ABOUT, _about(current_chunk))))
+
+
+def _chunk_row():
+    return _row("raw_inputs.0.subpage.1.chunk.1", _CHUNK, url=ABOUT)
+
+
+def test_one_edited_word_inside_a_chunk_is_still_seen():
+    prior, current = _chunk_pair(_CHUNK.replace("k20", "x20"))
+
+    row = _only(_ledger(prior, [_chunk_row()], current))
+
+    assert _verdict(row) == ("seen", [])
+    assert row["health"]["chunk_containment"] == 0.921
+
+
+def test_partly_rewritten_chunk_is_not_verified_instead_of_absent():
+    prior, current = _chunk_pair(" ".join(f"x{index}" if 15 <= index < 25 else f"k{index}" for index in range(40)))
+
+    row = _only(_ledger(prior, [_chunk_row()], current))
+
+    assert _verdict(row) == ("not_verified", ["chunk_text_changed"])
+    assert row["health"]["chunk_containment"] == 0.684
+
+
+def test_bot_challenge_on_the_current_page_is_not_verified_instead_of_absent():
+    prior, current = _about_pair(_about(_CHALLENGE))
+
+    row = _only(_ledger(prior, [_promise_row()], current))
+
+    assert _verdict(row) == ("not_verified", ["page_obstructed"])
+
+
+def test_bot_challenge_captured_on_the_prior_page_is_never_verified_absent():
+    home = _words(120, "h")
+    prior = _snapshot(_web(home, (ABOUT, _about(_CHALLENGE))))
+    current = _snapshot(_web(home, (ABOUT, _about(_SHIPPING))))
+
+    row = _only(_ledger(prior, [_row("raw_inputs.0.subpage.1.chunk.4", _CHALLENGE, url=ABOUT)], current))
+
+    assert _verdict(row) == ("not_verified", ["prior_page_obstructed"])
+
+
+def test_chunk_too_short_to_measure_is_not_verified():
+    prior, current = _about_pair(_about(_SHIPPING))
+
+    row = _only(_ledger(prior, [_row("raw_inputs.0.subpage.1.chunk.1", "Our founders", url=ABOUT)], current))
+
+    assert _verdict(row) == ("not_verified", ["chunk_too_short"])
 
 
 def test_www_scheme_and_tracking_variants_are_the_same_owned_source():
