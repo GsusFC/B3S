@@ -70,6 +70,7 @@ def emit_evidence_vault_sv9_component_evaluation_diagnostic(
     component: Any,
     suboperation: Any,
     reason_codes: Sequence[str] = ("provider_failure",),
+    evidence_binding: Mapping[str, Any] | None = None,
     exception: BaseException | None = None,
 ) -> None:
     """Report a swallowed component failure without changing its outcome."""
@@ -77,15 +78,15 @@ def emit_evidence_vault_sv9_component_evaluation_diagnostic(
     if observer is None:
         return
     try:
-        observer(
-            {
-                "boundary": "sv9_component_evaluation",
-                "component": component if isinstance(component, str) else "unknown",
-                "suboperation": suboperation if isinstance(suboperation, str) else "unknown",
-                "reason_codes": list(reason_codes),
-            },
-            exception,
-        )
+        event = {
+            "boundary": "sv9_component_evaluation",
+            "component": component if isinstance(component, str) else "unknown",
+            "suboperation": suboperation if isinstance(suboperation, str) else "unknown",
+            "reason_codes": list(reason_codes),
+        }
+        if isinstance(evidence_binding, Mapping):
+            event["evidence_binding"] = dict(evidence_binding)
+        observer(event, exception)
     except Exception:
         pass
 

@@ -1323,3 +1323,106 @@ def test_facts_row_provenance_keys_leave_evaluation_input_fingerprints_unchanged
     assert before["status"] == "available" and before["authoritative_relations"]
     assert (after["relation_projection_fingerprint"], after["evaluation_input_fingerprint"]) == (before["relation_projection_fingerprint"], before["evaluation_input_fingerprint"])
     assert after == before
+
+
+def test_core_strict_quote_binding_failure_exposes_safe_binding_diagnostic(
+    monkeypatch,
+):
+    from src.sv9.models import ComponentResult, TileVerdict
+
+    quote = "At Primary, we believe exceptional branding is possible without the wait."
+    component = "mission"
+    target_tile = "M3"
+    evaluation_refs = [
+        "raw_inputs.1.subpage.3.chunk.4",
+        "raw_inputs.1.subpage.3.chunk.3",
+        "raw_inputs.1.subpage.3.chunk.5",
+        "raw_inputs.1.chunk.8",
+        "raw_inputs.1.subpage.15.chunk.8",
+        "raw_inputs.1.subpage.14.chunk.1",
+        "raw_inputs.2.exa.mentions.10",
+    ]
+    tiles = list(evaluation._COMPONENT_TILES[component])
+    core = ComponentResult(
+        component=component,
+        status="scored",
+        tile_profile=[
+            TileVerdict(
+                tile_id=tile,
+                estado="ok" if tile == target_tile else "sin_evidencia",
+                evidencia=quote if tile == target_tile else "",
+            )
+            for index, tile in enumerate(tiles)
+        ],
+    )
+    adapter = object.__new__(shared_process.CoreFlowSv9StrictComponentAdapter)
+    adapter._candidate = None
+    adapter._components = {}
+    adapter._component_provenance_candidates = {}
+    adapter._prior_projected_components = {}
+    adapter._tldr = {component: {"evaluation_evidence_refs": evaluation_refs}}
+    adapter._prepare = lambda: None
+    adapter._initialize_evaluation_llms = lambda: None
+    adapter._evaluate_base_component = lambda _component: core
+    adapter._merge_component = lambda _component, _requested, value: value
+    adapter._project_component_for_strict = lambda _component: core
+    adapter._actual_evaluation_evidence = lambda _component: (
+        [quote],
+        set(evaluation_refs),
+    )
+    monkeypatch.setattr(
+        shared_process,
+        "is_core_shared_series_contract",
+        lambda _value: True,
+    )
+    request = {
+        "component_key": component,
+        "current_series_contract": {},
+        "current_series_fingerprint": "a" * 64,
+        "canonical_request_fingerprint": "b" * 64,
+        "requested_tiles": [
+            {
+                "tile_id": tile,
+                "evidence": (
+                    [
+                        {
+                            "evidence_ref": "raw_inputs.1.chunk.17",
+                            "evidence_fingerprint": "c" * 64,
+                            "content": quote,
+                        },
+                        {
+                            "evidence_ref": "raw_inputs.1.subpage.1.chunk.1",
+                            "evidence_fingerprint": "d" * 64,
+                            "content": quote,
+                        },
+                    ]
+                    if tile == target_tile
+                    else []
+                ),
+            }
+            for index, tile in enumerate(tiles)
+        ],
+    }
+
+    observed = []
+    with service.observe_evidence_vault_sv9_authority_evaluation_diagnostics(
+        lambda event, exc: observed.append((event, exc))
+    ):
+        outcome = adapter.evaluate_component(request)
+
+    assert outcome.reason_code == "provider_failure"
+    assert len(observed) == 1
+    event, exception = observed[0]
+    assert type(exception).__name__ == "FlowSv9StrictComponentAdapterError"
+    assert event["reason_codes"] == ["evidence_binding_failure"]
+    assert event["evidence_binding"] == {
+        "tile_id": "M3",
+        "requested_evidence_refs": [
+            "raw_inputs.1.chunk.17",
+            "raw_inputs.1.subpage.1.chunk.1",
+        ],
+        "supplied_evidence_refs": [],
+        "evaluation_evidence_refs": evaluation_refs,
+        "quote_sha256": hashlib.sha256(quote.encode("utf-8")).hexdigest(),
+    }
+    assert quote not in str(event)
