@@ -46,6 +46,41 @@ def test_exact_resume_no_score_reason_is_attributed_to_action(monkeypatch):
     assert event["reason_codes"] == ["repository_failure"]
 
 
+def test_component_binding_diagnostic_keeps_only_safe_refs_and_quote_hash(monkeypatch):
+    status = _status()
+    persisted: list[dict] = []
+    monkeypatch.setattr(scan_runner, "_load_persisted_scan_status", lambda _scan_id: copy.deepcopy(status))
+    monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda value: persisted.append(value))
+
+    scan_runner._record_exact_resume_diagnostic(
+        "scan-1",
+        action_id="action-binding",
+        operation="vault_component_evaluation",
+        stage="vault_authority",
+        outcome="failed",
+        reason_codes=["evidence_binding_failure"],
+        evidence_binding={
+            "tile_id": "M3",
+            "requested_evidence_refs": ["raw_inputs.1.chunk.17", "SECRET CONTENT"],
+            "supplied_evidence_refs": [],
+            "evaluation_evidence_refs": ["raw_inputs.1.chunk.8"],
+            "quote_sha256": "a" * 64,
+            "quote": "SECRET CONTENT",
+        },
+    )
+
+    event = scan_runner.scan_diagnostic_dossier_from_status(persisted[-1])["events"][-1]
+    assert event["reason_codes"] == ["evidence_binding_failure"]
+    assert event["evidence_binding"] == {
+        "tile_id": "M3",
+        "requested_evidence_refs": ["raw_inputs.1.chunk.17"],
+        "supplied_evidence_refs": [],
+        "evaluation_evidence_refs": ["raw_inputs.1.chunk.8"],
+        "quote_sha256": "a" * 64,
+    }
+    assert "SECRET CONTENT" not in str(event)
+
+
 def test_exact_resume_events_accumulate_in_cached_scan_status(monkeypatch):
     status = _status()
     persisted: list[dict] = []

@@ -57,6 +57,7 @@ _DIAGNOSTIC_REASON_CODES = frozenset(
         "components_not_mapping",
         "coverage_loss",
         "evaluation_failure",
+        "evidence_binding_failure",
         "evaluation_incomplete",
         "exact_reuse",
         "incomplete_candidate",
@@ -153,6 +154,7 @@ _DIAGNOSTIC_AUTHORITY_STATES = frozenset(
 _DIAGNOSTIC_PATH = re.compile(r"(?:src|web)/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.py\Z")
 _SAFE_DB_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}\Z")
 _SAFE_ACTION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_SAFE_EVIDENCE_REF = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 
 
 def _safe_build_sha(value: Any) -> str:
@@ -357,6 +359,34 @@ def _safe_tile_ids(value: Any) -> tuple[list[str], int]:
     return kept, max(0, len(rows) - len(kept))
 
 
+def _safe_evidence_refs(value: Any) -> list[str]:
+    rows = value if isinstance(value, (list, tuple, set, frozenset)) else []
+    if isinstance(value, (set, frozenset)):
+        rows = sorted(rows)
+    return list(
+        dict.fromkeys(
+            ref for ref in rows
+            if isinstance(ref, str) and _SAFE_EVIDENCE_REF.fullmatch(ref)
+        )
+    )[:24]
+
+
+def _safe_evidence_binding(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    tile_id = value.get("tile_id")
+    quote_sha256 = _safe_fingerprint(value.get("quote_sha256"))
+    if not isinstance(tile_id, str) or tile_id not in _DIAGNOSTIC_TILE_IDS or quote_sha256 is None:
+        return None
+    return {
+        "tile_id": tile_id,
+        "requested_evidence_refs": _safe_evidence_refs(value.get("requested_evidence_refs")),
+        "supplied_evidence_refs": _safe_evidence_refs(value.get("supplied_evidence_refs")),
+        "evaluation_evidence_refs": _safe_evidence_refs(value.get("evaluation_evidence_refs")),
+        "quote_sha256": quote_sha256,
+    }
+
+
 def _safe_coverage_row(row: Any, *, delta: bool) -> dict[str, Any] | None:
     if not isinstance(row, Mapping):
         return None
@@ -507,7 +537,7 @@ def _diagnostic_operation(
     *, operation: str, stage: str, outcome: str, exc: BaseException | None = None,
     coverage: Mapping[str, Any] | None = None, started_monotonic: float | None = None,
     component: Any = None, suboperation: Any = None, reason_codes: Any = None,
-    action_id: Any = None,
+    evidence_binding: Any = None, action_id: Any = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     authority_result = _safe_authority_result(coverage)
@@ -553,6 +583,8 @@ def _diagnostic_operation(
         item["suboperation"] = _safe_diagnostic_suboperation(suboperation)
     if reason_codes is not None:
         item["reason_codes"] = _safe_reason_codes(reason_codes)
+    if (safe_binding := _safe_evidence_binding(evidence_binding)) is not None:
+        item["evidence_binding"] = safe_binding
     return item
 
 
@@ -643,6 +675,8 @@ def _safe_diagnostic_event(value: Any) -> dict[str, Any] | None:
         item["suboperation"] = _safe_diagnostic_suboperation(value.get("suboperation"))
     if "reason_codes" in value:
         item["reason_codes"] = _safe_reason_codes(value.get("reason_codes"))
+    if (safe_binding := _safe_evidence_binding(value.get("evidence_binding"))) is not None:
+        item["evidence_binding"] = safe_binding
     resource = value.get("resource")
     if isinstance(resource, Mapping):
         availability = resource.get("availability")
@@ -664,7 +698,8 @@ def _record_diagnostic_operation(
     scan_id: str, *, operation: str, stage: str, outcome: str,
     exc: BaseException | None = None, coverage: Mapping[str, Any] | None = None,
     started_monotonic: float | None = None, component: Any = None,
-    suboperation: Any = None, reason_codes: Any = None, action_id: Any = None,
+    suboperation: Any = None, reason_codes: Any = None,
+    evidence_binding: Any = None, action_id: Any = None,
 ) -> None:
     """Best-effort private diagnostic write; it must never change scan outcome."""
     try:
@@ -672,7 +707,7 @@ def _record_diagnostic_operation(
             status = _SCANS.get(scan_id)
             if status is None:
                 return
-            _append_diagnostic_operation_locked(status, _diagnostic_operation(operation=operation, stage=stage, outcome=outcome, exc=exc, coverage=coverage, started_monotonic=started_monotonic, component=component, suboperation=suboperation, reason_codes=reason_codes, action_id=action_id))
+            _append_diagnostic_operation_locked(status, _diagnostic_operation(operation=operation, stage=stage, outcome=outcome, exc=exc, coverage=coverage, started_monotonic=started_monotonic, component=component, suboperation=suboperation, reason_codes=reason_codes, evidence_binding=evidence_binding, action_id=action_id))
     except Exception:
         _LOG.warning("diagnostic operation was not recorded", extra={"scan_id": scan_id, "operation": operation})
 
@@ -690,6 +725,7 @@ def _record_exact_resume_diagnostic(
     component: Any = None,
     suboperation: Any = None,
     reason_codes: Any = None,
+    evidence_binding: Any = None,
 ) -> None:
     """Persist exact-resume diagnostics beside the original scan status only."""
     safe_action_id = _safe_action_id(action_id)
@@ -706,6 +742,7 @@ def _record_exact_resume_diagnostic(
             component=component,
             suboperation=suboperation,
             reason_codes=reason_codes,
+            evidence_binding=evidence_binding,
             action_id=safe_action_id,
         )
         with _LOCK:
@@ -2221,6 +2258,7 @@ def _run_vault_sv9_authority_scanner(
                     component=event.get("component"),
                     suboperation=event.get("suboperation"),
                     reason_codes=event.get("reason_codes"),
+                    evidence_binding=event.get("evidence_binding"),
                     started_monotonic=application_started,
                 )
                 return

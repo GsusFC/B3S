@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from typing import Any, Mapping
 
@@ -24,6 +25,9 @@ _SHARED_CHECKPOINT_PROCESS_VERSION = (
 )
 _SHARED_CHECKPOINT_SNAPSHOT_FINGERPRINT_VERSION = (
     "evidence-vault-sv9-shared-checkpoint-snapshot-v1"
+)
+_CORE_OK_QUOTE_BINDING_ERROR = (
+    "Core ok quote is not bound to requested Vault evidence"
 )
 
 
@@ -231,8 +235,14 @@ class CoreFlowSv9StrictComponentAdapter:
     def evaluate_component(self, request: Mapping[str, Any]) -> ie.ComponentEvaluationOutcome:
         component: Any = "unknown"
         suboperation = "request_validation"
+        request_for_diagnostic: Mapping[str, Any] = {}
+        projected_for_diagnostic: Any = None
+        actual_sources_for_diagnostic: list[str] = []
+        admitted_refs_for_diagnostic: set[str] = set()
+        evaluation_evidence_refs_for_diagnostic: list[str] = []
         try:
             request = ie._canon(dict(request))
+            request_for_diagnostic = request
             component = request.get("component_key", "unknown")
             if not is_core_shared_series_contract(request.get("current_series_contract")):
                 raise FlowSv9StrictComponentAdapterError("shared series is invalid")
@@ -274,6 +284,7 @@ class CoreFlowSv9StrictComponentAdapter:
             self._component_provenance_candidates[component] = self._candidate
             suboperation = "project_component"
             projected = self._project_component_for_strict(component)
+            projected_for_diagnostic = projected
             suboperation = "validate_projected_untouched_tiles"
             self._validate_projected_untouched_tiles(
                 component,
@@ -284,6 +295,21 @@ class CoreFlowSv9StrictComponentAdapter:
             actual_sources, admitted_refs = self._actual_evaluation_evidence(
                 component
             )
+            actual_sources_for_diagnostic = actual_sources
+            admitted_refs_for_diagnostic = admitted_refs
+            try:
+                from src.sv9.rubric import COMPONENTS
+
+                block_key = COMPONENTS[component].get("tldr_key")
+                block = (self._tldr or {}).get(block_key) if block_key else None
+                if isinstance(block, Mapping):
+                    evaluation_evidence_refs_for_diagnostic = [
+                        str(ref)
+                        for ref in block.get("evaluation_evidence_refs") or []
+                        if str(ref or "").strip()
+                    ]
+            except Exception:
+                pass
             by_tile = {row.tile_id: row for row in projected.tile_profile}
             suboperation = "strict_tile_results"
             strict_rows = [
@@ -310,9 +336,23 @@ class CoreFlowSv9StrictComponentAdapter:
                     emit_evidence_vault_sv9_component_evaluation_diagnostic,
                 )
 
+                evidence_binding = None
+                reason_codes = ("provider_failure",)
+                if str(exc) == _CORE_OK_QUOTE_BINDING_ERROR:
+                    evidence_binding = _strict_binding_diagnostic(
+                        request=request_for_diagnostic,
+                        projected=projected_for_diagnostic,
+                        actual_sources=actual_sources_for_diagnostic,
+                        admitted_refs=admitted_refs_for_diagnostic,
+                        evaluation_evidence_refs=evaluation_evidence_refs_for_diagnostic,
+                    )
+                    if evidence_binding is not None:
+                        reason_codes = ("evidence_binding_failure",)
                 emit_evidence_vault_sv9_component_evaluation_diagnostic(
                     component=component,
                     suboperation=suboperation,
+                    reason_codes=reason_codes,
+                    evidence_binding=evidence_binding,
                     exception=exc,
                 )
             except Exception:
@@ -970,7 +1010,7 @@ class CoreFlowSv9StrictComponentAdapter:
                 or not supporting
             ):
                 raise FlowSv9StrictComponentAdapterError(
-                    "Core ok quote is not bound to requested Vault evidence"
+                    _CORE_OK_QUOTE_BINDING_ERROR
                 )
         elif verdict.estado == "no":
             supporting = supplied
@@ -1487,6 +1527,65 @@ def _content_strings(value: Any) -> list[str]:
         return []
     text = " ".join(str(value).split())
     return [text] if text else []
+
+
+def _strict_binding_diagnostic(
+    *,
+    request: Mapping[str, Any],
+    projected: Any,
+    actual_sources: list[str],
+    admitted_refs: set[str],
+    evaluation_evidence_refs: list[str],
+) -> dict[str, Any] | None:
+    """Project only non-content identifiers for a strict quote binding failure."""
+
+    if not isinstance(request, Mapping) or projected is None:
+        return None
+    by_tile = {
+        str(row.tile_id): row
+        for row in getattr(projected, "tile_profile", [])
+        if getattr(row, "tile_id", None)
+    }
+    admitted = {str(ref) for ref in admitted_refs if str(ref or "").strip()}
+    for requested in request.get("requested_tiles") or []:
+        if not isinstance(requested, Mapping):
+            continue
+        tile_id = str(requested.get("tile_id") or "")
+        verdict = by_tile.get(tile_id)
+        if verdict is None or getattr(verdict, "estado", None) != "ok":
+            continue
+        quote = str(getattr(verdict, "evidencia", "") or "")
+        if not quote:
+            continue
+        evidence = [
+            row
+            for row in requested.get("evidence") or []
+            if isinstance(row, Mapping)
+        ]
+        requested_refs = sorted(
+            {
+                str(row.get("evidence_ref") or "")
+                for row in evidence
+                if str(row.get("evidence_ref") or "").strip()
+            }
+        )
+        supplied_refs = [ref for ref in requested_refs if ref in admitted]
+        supporting = [
+            row
+            for row in evidence
+            if str(row.get("evidence_ref") or "") in admitted
+            and _literal_in_content(quote, row.get("content"))
+        ]
+        if _literal_in_content(quote, actual_sources) and supporting:
+            continue
+        return {
+            "tile_id": tile_id,
+            "requested_evidence_refs": requested_refs,
+            "supplied_evidence_refs": supplied_refs,
+            "evaluation_evidence_refs": list(evaluation_evidence_refs),
+            "quote_sha256": hashlib.sha256(quote.encode("utf-8")).hexdigest(),
+        }
+    return None
 
 
 def _literal_in_content(quote: Any, content: Any) -> bool:
