@@ -292,6 +292,33 @@ def test_chunk_too_short_to_measure_is_not_verified():
     assert _verdict(row) == ("not_verified", ["chunk_too_short"])
 
 
+_REPEATED = _words(15, "p")
+
+
+def test_removed_chunk_whose_phrase_repeats_on_the_page_is_verified_absent():
+    home, chunk = _words(120, "h"), f"{_CHUNK} {_REPEATED}"
+    prior = _snapshot(_web(home, (ABOUT, f"{_about(chunk)} {_REPEATED}")))
+    current = _snapshot(_web(home, (ABOUT, f"{_about(_SHIPPING)} {_REPEATED}")))
+
+    row = _only(_ledger(prior, [_row("raw_inputs.0.subpage.1.chunk.1", chunk, url=ABOUT)], current))
+
+    assert _verdict(row) == ("verified_absent", [])
+    assert row["health"]["chunk_containment"] == 0.245
+    assert (row["health"]["own_shingles"], row["health"]["own_containment"]) == (40, 0.0)
+
+
+@pytest.mark.parametrize("chunk", [_REPEATED, f"{_REPEATED} unique1 unique2"])
+def test_chunk_without_enough_own_phrases_is_not_verified_instead_of_absent(chunk):
+    home = f"{_words(120, 'h')} {_REPEATED}"
+    prior = _snapshot(_web(home, (ABOUT, _about(chunk))))
+    current = _snapshot(_web(home, (ABOUT, _about(_SHIPPING))))
+
+    row = _only(_ledger(prior, [_row("raw_inputs.0.subpage.1.chunk.1", chunk, url=ABOUT)], current))
+
+    assert _verdict(row) == ("not_verified", ["chunk_not_distinctive"])
+    assert row["health"]["own_shingles"] < 5
+
+
 def test_www_scheme_and_tracking_variants_are_the_same_owned_source():
     home = _words(120, "h")
     prior_url = "https://www.acme.example/about/?utm_source=newsletter#team"

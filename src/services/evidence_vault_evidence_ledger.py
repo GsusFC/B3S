@@ -2,8 +2,8 @@
 
 Every prior evidence identity gets exactly one state against the current capture.
 ``not_verified`` is the fail-stable default: absence is claimed only when an owned
-page was re-captured healthily and the prior chunk is essentially gone from it. Rows
-are diagnostics and never change a score.
+page was re-captured healthily and the prior chunk's own phrases are gone from it.
+Rows are diagnostics and never change a score.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from src.sv9_flow.contracts import (
 )
 
 
-EVIDENCE_LEDGER_POLICY_VERSION = "evidence-vault-evidence-ledger-v2"
+EVIDENCE_LEDGER_POLICY_VERSION = "evidence-vault-evidence-ledger-v3"
 SEEN, VERIFIED_ABSENT, NOT_VERIFIED = "seen", "verified_absent", "not_verified"
 SHOWN, SHOWN_AS_SIGNAL, NOT_SHOWN = "shown", "shown_as_signal", "not_shown"
 OWNED_PAGE_CLASS, EXTERNAL_CLASS = "owned_page", "external"
@@ -42,7 +42,11 @@ MIN_PAGE_SIZE_RATIO = Fraction(1, 2)
 # Share of a prior chunk's 3-word shingles still on its current page. Whole-chunk matching
 # turned a changed CDN image URL, a weather widget or video-player text into absences.
 SEEN_CONTAINMENT = Fraction(9, 10)
+# Absence is measured on the chunk's own shingles, those found once in the whole prior owned
+# capture: phrases repeated elsewhere (nav, widgets, duplicated blocks) survive a real removal.
 ABSENT_CONTAINMENT = Fraction(1, 5)
+# One edited word touches at most 3 shingles, so 5 own shingles keep an edit from faking absence.
+MIN_OWN_SHINGLES = 5
 # Anti-bot interstitials captured as page text: a page carrying one proves no absence.
 _BOT_CHALLENGE_MARKERS = (
     "challenges.cloudflare.com/cdn-cgi/challenge-platform",
@@ -110,11 +114,13 @@ def build_evidence_ledger(
     current = _capture_view(current_snapshot, current_rows, brand_domain)
     _strip_boilerplate(current["pages"], prior["boilerplate"])
     index = build_shown_index([]) if shown_index is None else shown_index
+    capture_counts = Counter(item for page in prior["pages"].values() for item in _shingle_list(page["text"]))
     rows = []
     for evidence in prior["evidence"]:
         prior_page = prior["pages"].get(evidence["source_key"])
-        state, reasons = classify_evidence({**evidence, "prior_page": prior_page}, current, index)
-        rows.append(_ledger_row(evidence, state, reasons, prior_page, current, index))
+        own = {item for item in _shingles(evidence["content"]) if capture_counts[item] == 1}
+        state, reasons = classify_evidence({**evidence, "prior_page": prior_page, "own_shingles": own}, current, index)
+        rows.append(_ledger_row(evidence, state, reasons, prior_page, current, index, own))
     rows.sort(key=lambda row: (row["evidence_ref"], row["evidence_fingerprint"]))
     return {
         "policy_version": EVIDENCE_LEDGER_POLICY_VERSION,
@@ -199,7 +205,10 @@ def _verify_owned_page(
         return NOT_VERIFIED, reasons
     if containment is None:
         return NOT_VERIFIED, ["chunk_too_short"]
-    if containment > ABSENT_CONTAINMENT:
+    own = prior_row.get("own_shingles") or set()
+    if len(own) < MIN_OWN_SHINGLES:
+        return NOT_VERIFIED, ["chunk_not_distinctive"]
+    if _own_containment(own, page) > ABSENT_CONTAINMENT:
         return NOT_VERIFIED, ["chunk_text_changed"]
     return VERIFIED_ABSENT, []
 
@@ -274,8 +283,10 @@ def _ledger_row(
     prior_page: Mapping[str, Any] | None,
     current: Mapping[str, Any],
     shown_index: Mapping[str, Any],
+    own: set[str],
 ) -> dict[str, Any]:
     page = current["pages"].get(evidence["source_key"])
+    owned = evidence["evidence_class"] == OWNED_PAGE_CLASS
     return {
         **{key: evidence[key] for key in _ROW_IDENTITY_KEYS},
         "evidence_class": evidence["evidence_class"],
@@ -286,6 +297,8 @@ def _ledger_row(
             "web_step_status": current["web_step_status"],
             "page": _page_health(prior_page, page),
             "chunk_containment": _containment_health(evidence, page),
+            "own_shingles": len(own) if owned else None,
+            "own_containment": _rounded(_own_containment(own, page)) if owned and own and page is not None else None,
         },
         "shown_to_core": shown_to_core(evidence["content"], shown_index),
         "policy_version": EVIDENCE_LEDGER_POLICY_VERSION,
@@ -311,11 +324,18 @@ def _chunk_containment(row: Mapping[str, Any], page: Mapping[str, Any] | None) -
     return Fraction(len(chunk & page["shingles"]), len(chunk))
 
 
+def _own_containment(own: set[str], page: Mapping[str, Any]) -> Fraction:
+    return Fraction(len(own & page["shingles"]), len(own))
+
+
 def _containment_health(evidence: Mapping[str, Any], page: Mapping[str, Any] | None) -> float | None:
     if evidence["evidence_class"] != OWNED_PAGE_CLASS:
         return None
-    containment = _chunk_containment(evidence, page)
-    return None if containment is None else round(float(containment), 3)
+    return _rounded(_chunk_containment(evidence, page))
+
+
+def _rounded(value: Fraction | None) -> float | None:
+    return None if value is None else round(float(value), 3)
 
 
 def _capture_view(snapshot: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], brand_domain: str) -> dict[str, Any]:
@@ -604,5 +624,9 @@ def _line_key(line: str) -> str:
 
 
 def _shingles(text: str) -> set[str]:
+    return set(_shingle_list(text))
+
+
+def _shingle_list(text: str) -> list[str]:
     words = _WORD.findall(unicodedata.normalize("NFKC", str(text or "")).casefold())
-    return {" ".join(words[index : index + _SHINGLE_WORDS]) for index in range(len(words) - _SHINGLE_WORDS + 1)}
+    return [" ".join(words[index : index + _SHINGLE_WORDS]) for index in range(len(words) - _SHINGLE_WORDS + 1)]
