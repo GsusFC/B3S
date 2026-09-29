@@ -1578,6 +1578,12 @@ def _vault_sv9_judgment_shadow_enabled() -> bool:
     ) == "true"
 
 
+def _vault_evidence_ledger_shadow_enabled() -> bool:
+    return _vault_operational_pipeline_enabled() and os.environ.get(
+        "BRAND3_VAULT_EVIDENCE_LEDGER_SHADOW_ENABLED"
+    ) == "true"
+
+
 def _run_vault_sv9_judgment_shadow_after_publication(
     *, scan_id: str, repository: Any, payload: Mapping[str, Any], report: Mapping[str, Any]
 ) -> None:
@@ -1599,6 +1605,30 @@ def _run_vault_sv9_judgment_shadow_after_publication(
         _LOG.info("vault SV9 judgment shadow completed", extra={"scan_id": scan_id, **{key: result.get(key) for key in ("status", "reason_code", "exception_class", "calls_issued", "calls_avoided", "reused_tiles", "reopened_tiles", "evaluated_tiles", "tile_diffs", "current_score", "candidate_score", "candidate_fingerprint", "divergence_reasons")}})
     except Exception as exc:
         _LOG.warning("vault SV9 judgment shadow failed", extra={"scan_id": scan_id, "reason_code": "shadow_exception", "exception_class": type(exc).__name__})
+
+
+def _run_vault_evidence_ledger_shadow(*, scan_id: str, url: str, repository: Any) -> None:
+    """Record, best effort, whether this scan still shows the prior accepted scan's evidence.
+
+    Off unless its flag is set. It only logs: failures are never raised or written to the
+    scan's diagnostic ledger, and nothing here changes the authority result, score or publication.
+    """
+    if not _vault_evidence_ledger_shadow_enabled():
+        return
+    started = time.monotonic()
+    try:
+        from src.services.evidence_vault_evidence_ledger import NOT_VERIFIED, SEEN, VERIFIED_ABSENT, build_evidence_ledger, build_shown_index
+
+        facts = repository.load_evidence_ledger_scan_facts(url, source_scan_id=scan_id, workspace_slug="b3s")
+        if facts is None:
+            _LOG.info("vault evidence ledger shadow skipped", extra={"scan_id": scan_id, "reason_code": "no_prior_authority_scan"})
+            return
+        prior, current = facts["prior"], facts["current"]
+        rows = build_evidence_ledger(brand_domain=facts["domain"], prior_snapshot=prior["snapshot"], prior_rows=prior["evidence_rows"], current_snapshot=current["snapshot"], current_rows=current["evidence_rows"], shown_index=build_shown_index(current["evaluations"]))["rows"]
+        inserted = repository.append_evidence_ledger_rows(scan_id, prior_source_scan_id=prior["scan_id"], rows=rows, workspace_slug="b3s")
+        _LOG.info("vault evidence ledger shadow completed", extra={"scan_id": scan_id, "prior_scan_id": prior["scan_id"], "row_count": len(rows), "inserted_count": inserted, "state_counts": {state: sum(row["state"] == state for row in rows) for state in (SEEN, VERIFIED_ABSENT, NOT_VERIFIED)}, "duration_ms": max(0, round((time.monotonic() - started) * 1000, 3))})
+    except Exception as exc:
+        _LOG.warning("vault evidence ledger shadow failed", extra={"scan_id": scan_id, "exception_class": type(exc).__name__})
 
 
 def _canonical_snapshot_from_persisted_vault_capture(
@@ -2286,6 +2316,8 @@ def _run_vault_sv9_authority_scanner(
                 trusted_irrelevant_evidence=[],
             )
         record_operation(operation="vault_authority_application", stage="vault_authority", outcome="completed", coverage=operation_coverage, started_monotonic=application_started)
+        if not exact:
+            _run_vault_evidence_ledger_shadow(scan_id=scan_id, url=url, repository=repository)
         source_report = _accepted_authority_source_report(application_result, scan_id, exact_owner, domain_or_url=url)
         projection_started = time.monotonic()
         active_operation, active_stage, active_started = "vault_authority_projection", "vault_authority", projection_started

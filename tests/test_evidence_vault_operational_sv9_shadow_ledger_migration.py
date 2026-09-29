@@ -195,7 +195,7 @@ def test_postgres_sv9_shadow_hardening_revokes_public_execute_and_rejects_bad_ou
     try:
         applied = PostgresHistoryRepository(dsn).migrate()
         assert _WRITER_MIGRATION.name in applied
-        assert applied[-1] == "038_evidence_vault_sv9_judgment_review_resolutions.sql"
+        assert applied[-1] == "039_evidence_vault_evidence_ledger.sql"
         rows = [
             {
                 "component_key": component_key,

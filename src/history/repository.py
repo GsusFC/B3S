@@ -155,6 +155,12 @@ from src.services.evidence_vault_composite_group_lifecycle import (
     build_composite_group_reopen_source_resolution,
     validate_composite_group_reopen_source_resolution,
 )
+from src.services.evidence_vault_evidence_ledger import (
+    EVIDENCE_LEDGER_POLICY_VERSION,
+    NOT_VERIFIED,
+    SEEN,
+    VERIFIED_ABSENT,
+)
 from src.services.evidence_vault_exact_relation_supplement import (
     EvidenceVaultExactRelationSupplementError,
     build_exact_relation_source_candidate,
@@ -295,6 +301,10 @@ class EvidenceVaultSv9EvaluationCheckpointStaleWitnessError(EvidenceVaultSv9Eval
 
 class EvidenceVaultSv9EvaluationCheckpointConflictError(EvidenceVaultSv9EvaluationCheckpointError):
     pass
+
+
+class EvidenceVaultEvidenceLedgerError(RuntimeError):
+    """A shadow evidence ledger read or append cannot be scoped or validated."""
 
 
 def _build_vault_semantic_report_selector(
@@ -6383,6 +6393,136 @@ class PostgresHistoryRepository:
                     "SV9 evaluation checkpoint shared process conflicts with immutable content."
                 )
             return stored, inserted
+
+    def load_evidence_ledger_scan_facts(
+        self,
+        domain_or_url: str,
+        *,
+        source_scan_id: str,
+        workspace_slug: str = "b3s",
+    ) -> dict[str, Any] | None:
+        """Read one scan and its prior accepted scan for the shadow evidence ledger.
+
+        The prior scan is the source scan of the latest adopt or supersede event
+        whose candidate came from another scan; ``None`` until one exists. Both
+        scans use the measurement script's fact shape, read in one REPEATABLE
+        READ, READ ONLY transaction.
+        """
+
+        from scripts import evidence_ledger_measure as measure
+
+        self._ensure_migrated()
+        with self._connect() as conn:
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            _verify_exact_migration_head_under_shared_lock(conn)
+            brand = conn.execute(measure._BRAND_SQL, (workspace_slug, normalize_domain(domain_or_url))).fetchone()
+            if brand is None:
+                raise EvidenceVaultEvidenceLedgerError(
+                    "evidence ledger brand is not in the workspace; check the scan URL and workspace"
+                )
+            scope = (brand["workspace_id"], brand["id"])
+            prior = conn.execute(
+                f"""
+                SELECT candidates.source_scan_id
+                FROM {_SCHEMA}.evidence_vault_sv9_judgment_authority_events AS events
+                JOIN {_SCHEMA}.evidence_vault_sv9_judgment_candidates AS candidates
+                  ON candidates.id = events.candidate_id
+                 AND candidates.workspace_id = events.workspace_id
+                 AND candidates.brand_id = events.brand_id
+                WHERE events.workspace_id = %s
+                  AND events.brand_id = %s
+                  AND events.event_type IN ('adopt', 'supersede')
+                  AND candidates.source_scan_id <> %s
+                ORDER BY events.sequence DESC
+                LIMIT 1
+                """,
+                (*scope, source_scan_id),
+            ).fetchone()
+            if prior is None:
+                return None
+            scan_ids = [str(prior["source_scan_id"]), source_scan_id]
+            scans = {row["source_scan_id"]: row for row in conn.execute(measure._SCANS_SQL, (*scope, scan_ids)).fetchall()}
+            if any(scan_id not in scans for scan_id in scan_ids):
+                raise EvidenceVaultEvidenceLedgerError(
+                    "evidence ledger scan has no capture for this brand; check the source scan id"
+                )
+            evidence = measure._evidence_by_capture(
+                conn.execute(measure._EVIDENCE_SQL, ([scans[scan_id]["capture_id"] for scan_id in scan_ids],)).fetchall()
+            )
+            evaluations = measure._scan_evaluations(
+                conn.execute(measure._CHECKPOINTS_SQL, (*scope, scan_ids)).fetchall(),
+                conn.execute(measure._SNAPSHOTS_SQL, (*scope, scan_ids)).fetchall(),
+            )
+        prior_facts, current_facts = (measure._scan_facts(scans[scan_id], evidence, evaluations) for scan_id in scan_ids)
+        return {"domain": str(brand["canonical_domain"]), "prior": prior_facts, "current": current_facts}
+
+    def append_evidence_ledger_rows(
+        self,
+        source_scan_id: str,
+        *,
+        prior_source_scan_id: str,
+        rows: Iterable[Mapping[str, Any]],
+        workspace_slug: str = "b3s",
+    ) -> int:
+        """Append shadow evidence ledger rows for one scan pair; return how many were new.
+
+        Every row is validated before any database access. The scans must be two
+        captures of one brand; rows already stored for the pair stay unchanged,
+        so a replay inserts nothing.
+        """
+
+        records = [_evidence_ledger_record(row) for row in rows]
+        self._ensure_migrated()
+        with self._connect() as conn:
+            _verify_exact_migration_head_under_shared_lock(conn)
+            current = _sv9_judgment_context(conn, source_scan_id, workspace_slug, False)
+            prior = _sv9_judgment_context(conn, prior_source_scan_id, workspace_slug, False)
+            if current is None or prior is None:
+                raise EvidenceVaultEvidenceLedgerError(
+                    "evidence ledger scan has no operational capture; check both source scan ids"
+                )
+            if (
+                (current["workspace_id"], current["brand_id"]) != (prior["workspace_id"], prior["brand_id"])
+                or current["capture_id"] == prior["capture_id"]
+            ):
+                raise EvidenceVaultEvidenceLedgerError(
+                    "evidence ledger needs two different captures of one brand; check both source scan ids"
+                )
+            for record in records:
+                record["id"] = str(
+                    _stable_uuid(current["capture_id"], "evidence-ledger", prior["capture_id"], record["evidence_ref"])
+                )
+            return conn.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.evidence_vault_evidence_ledger_rows (
+                    id, workspace_id, brand_id, scan_run_id, capture_id, source_scan_id,
+                    prior_scan_run_id, prior_capture_id, prior_source_scan_id,
+                    evidence_ref, evidence_fingerprint, evidence_id, source_identity_id, source_key, evidence_class,
+                    state, reason_codes, health, shown_to_core, policy_version, runtime_effect
+                ) SELECT rows.id, %s, %s, %s, %s, %s, %s, %s, %s,
+                         rows.evidence_ref, rows.evidence_fingerprint, rows.evidence_id, rows.source_identity_id,
+                         rows.source_key, rows.evidence_class, rows.state, rows.reason_codes, rows.health,
+                         rows.shown_to_core, rows.policy_version, rows.runtime_effect
+                  FROM jsonb_to_recordset(%s::jsonb) AS rows(
+                      id uuid, evidence_ref text, evidence_fingerprint text, evidence_id text,
+                      source_identity_id text, source_key text, evidence_class text, state text,
+                      reason_codes jsonb, health jsonb, shown_to_core jsonb, policy_version text,
+                      runtime_effect boolean
+                  )
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    current["workspace_id"],
+                    current["brand_id"],
+                    current["scan_run_id"],
+                    current["capture_id"],
+                    current["source_scan_id"],
+                    prior["scan_run_id"],
+                    prior["capture_id"],
+                    prior["source_scan_id"],
+                    _jsonb(records),
+                ),
+            ).rowcount
 
     # fmt: off
     def get_evidence_vault_sv9_judgment_authority(self, domain_or_url: str, *, workspace_slug: str = "b3s") -> dict[str, Any] | None:
@@ -13400,6 +13540,39 @@ def _sv9_checkpoint_shared_process_for_request(
 def _sv9_checkpoint_insert_values(checkpoint_id: UUID, context: Mapping[str, Any], checkpoint: Mapping[str, Any]) -> tuple[Any, ...]:
     source, plan = checkpoint["evaluation_input"], checkpoint["plan_binding"]
     return (checkpoint_id, context["workspace_id"], context["brand_id"], context["scan_run_id"], context["source_scan_id"], context["capture_id"], context["operation_plan_id"], checkpoint["schema_version"], source["evaluation_input_fingerprint"], source["relation_projection_fingerprint"], checkpoint["prior_authority_snapshot"]["snapshot_fingerprint"], plan["canonical_plan_fingerprint"], plan["current_series_fingerprint"], plan["candidate_series_fingerprint"], checkpoint["checkpoint_fingerprint"], checkpoint["evaluation_state"], _jsonb(checkpoint))
+
+
+_EVIDENCE_LEDGER_STATES = frozenset({SEEN, VERIFIED_ABSENT, NOT_VERIFIED})
+_EVIDENCE_LEDGER_CLASS = re.compile(r"[a-z0-9_]{1,64}")
+
+
+def _evidence_ledger_record(row: Any) -> dict[str, Any]:
+    """One shadow ledger row, validated before any write; a bad row rejects the whole batch."""
+
+    fields = row if isinstance(row, Mapping) else {}
+    ref, state, evidence_class, reasons = (fields.get(name) for name in ("evidence_ref", "state", "evidence_class", "reason_codes"))
+    valid = {
+        "evidence_ref": isinstance(ref, str) and 1 <= len(ref) <= 1000,
+        **{
+            name: isinstance(fields.get(name), str) and _is_sha256(fields[name])
+            for name in ("evidence_fingerprint", "evidence_id", "source_identity_id")
+        },
+        # A row without a URL has an empty source key.
+        "source_key": isinstance(fields.get("source_key"), str),
+        "evidence_class": isinstance(evidence_class, str) and _EVIDENCE_LEDGER_CLASS.fullmatch(evidence_class) is not None,
+        "state": isinstance(state, str) and state in _EVIDENCE_LEDGER_STATES,
+        "reason_codes": isinstance(reasons, list) and all(isinstance(code, str) for code in reasons),
+        "health": isinstance(fields.get("health"), Mapping),
+        "shown_to_core": isinstance(fields.get("shown_to_core"), Mapping),
+        "policy_version": fields.get("policy_version") == EVIDENCE_LEDGER_POLICY_VERSION,
+        "runtime_effect": fields.get("runtime_effect") is False,
+    }
+    invalid = [name for name, ok in valid.items() if not ok]
+    if invalid:
+        raise EvidenceVaultEvidenceLedgerError(
+            f"evidence ledger row has invalid {', '.join(invalid)}; rebuild the rows with build_evidence_ledger"
+        )
+    return {name: fields[name] for name in valid}
 
 
 def _append_sv9_checkpoint_bindings(conn: Any, checkpoint_id: UUID, context: Mapping[str, Any], bindings: list[Mapping[str, Any]]) -> None:
