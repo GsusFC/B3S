@@ -651,12 +651,16 @@ class _CheckpointReplayRepository(_CoherenciaRepository):
         from pathlib import Path
 
         tree = ast.parse(Path(history.__file__).read_text())
-        guard = next(
+        advance = next(
             node
             for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_advance_sv9_judgment_authority"
+        )
+        guard = next(
+            node
+            for node in ast.walk(advance)
             if isinstance(node, ast.If)
             and len(node.body) == 1
-            and node.lineno < 6500
             and isinstance(node.body[0], ast.Raise)
             and any(
                 isinstance(child, ast.Constant) and child.value == "SV9 judgment candidate is already adopted."

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 
 import pytest
@@ -154,6 +155,173 @@ def test_authority_scanner_delegates_capture_partition_failure_to_application(mo
         scan_runner._VAULT_ACTIVATIONS.discard(scan_id)
         scan_runner._SCANS.pop(scan_id, None)
         scan_runner._SCAN_EVENTS.pop(scan_id, None)
+
+
+def _ledger_facts(scan_id: str) -> dict:
+    from tests.test_evidence_vault_evidence_ledger import BRAND, _SHIPPING, _about, _about_pair, _promise_row
+
+    prior, current = _about_pair(_about(_SHIPPING))
+    return {
+        "domain": BRAND,
+        "prior": {"scan_id": "prior-scan", "snapshot": prior, "evidence_rows": [_promise_row()], "evaluations": []},
+        "current": {"scan_id": scan_id, "snapshot": current, "evidence_rows": [], "evaluations": []},
+    }
+
+
+class _LedgerRepository:
+    """Ledger repository fake: records each call in scan order and fails where the case asks."""
+
+    def __init__(self, scan_id: str, case: str) -> None:
+        self.case, self.facts, self.calls, self.appended = case, _ledger_facts(scan_id), [], []
+
+    def load_evidence_ledger_scan_facts(self, domain_or_url, *, source_scan_id, workspace_slug="b3s"):
+        self.calls.append(("load", domain_or_url, source_scan_id, workspace_slug))
+        if self.case == "load_failure":
+            raise RuntimeError("ledger facts unavailable")
+        return None if self.case == "no_prior" else deepcopy(self.facts)
+
+    def append_evidence_ledger_rows(self, source_scan_id, *, prior_source_scan_id, rows, workspace_slug="b3s"):
+        self.calls.append(("append", source_scan_id, prior_source_scan_id, workspace_slug))
+        if self.case == "append_failure":
+            raise Exception("ledger append failed")
+        self.appended.extend(rows)
+        return len(rows)
+
+
+def _run_ledger_scan(monkeypatch, repository: _LedgerRepository, scan_id: str, *, enabled: bool) -> tuple[dict, list]:
+    """Run one authority scan with fake application and publication; return its final status and saved reports."""
+    from src.services import evidence_vault_sv9_authority_application as application
+    from src.services import evidence_vault_sv9_authority_report as publication
+
+    result = {"status": "authority_established", "reason_codes": [], "authority": {"accepted_candidate": {"source_scan_id": scan_id}}}
+    unchanged, saved = deepcopy(result), []
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
+    if enabled:
+        monkeypatch.setenv("BRAND3_VAULT_EVIDENCE_LEDGER_SHADOW_ENABLED", "true")
+    else:
+        monkeypatch.delenv("BRAND3_VAULT_EVIDENCE_LEDGER_SHADOW_ENABLED", raising=False)
+    monkeypatch.setattr(scan_runner, "_execute_vault_operational_preparation", lambda **_kwargs: "p")
+    monkeypatch.setattr(scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": True})
+    monkeypatch.setattr(scan_runner, "_vault_core_shared_flow", lambda **_kwargs: (object(), {"series": "shared"}))
+    monkeypatch.setattr(application, "run_evidence_vault_sv9_authority_application", lambda **_kwargs: repository.calls.append("application") or result)
+    monkeypatch.setattr(
+        publication,
+        "project_vault_authority_publication",
+        lambda value, *_args: repository.calls.append(("projection", value))
+        or {"action": "publish_current", "source_report_id": None, "scanner_payload": {"sv9": {"brand3_score": 7}}},
+    )
+    monkeypatch.setattr(scan_runner, "_compose_report", lambda identity, _url, _name, payload: {"id": identity, "raw": payload})
+    monkeypatch.setattr(scan_runner, "_validate_report_sv9_assessment", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scan_runner, "save_report", saved.append)
+    monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda *_args: None)
+    scan_runner._SCANS[scan_id] = _status(scan_id)
+    try:
+        assert scan_runner._run_vault_sv9_authority_scanner(
+            scan_id=scan_id,
+            url="https://acme.example",
+            brand_name="Acme",
+            repository=repository,
+            preparation={"operation_plan": {"operation_plan_fingerprint": "p", "operations": {"llm_required": False}}},
+            canonical_snapshot={"raw_inputs": [], "acquisition_gate": {"state": "pass"}},
+            canonical_source_capture=None,
+            gate={"state": "pass"},
+        ) is True
+        status = deepcopy(scan_runner._SCANS[scan_id])
+    finally:
+        scan_runner._SCANS.pop(scan_id, None)
+        scan_runner._VAULT_ACTIVATIONS.discard(scan_id)
+    # The shadow runs between application and projection and never touches the result it follows.
+    assert repository.calls[0] == "application" and repository.calls[-1] == ("projection", result)
+    assert repository.calls[-1][1] is result and result == unchanged
+    assert [report["id"] for report in saved] == [scan_id] and status["state"] == "done" and status["report_id"] == scan_id
+    return status, saved
+
+
+def _ledger_events(status: dict) -> list[dict]:
+    return [event for event in status["diagnostic_operation_ledger"]["events"] if event["operation"] == "vault_evidence_ledger_shadow"]
+
+
+def _ledger_logs(caplog) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.name == "web.scan_runner" and record.getMessage().startswith("vault evidence ledger shadow")]
+
+
+def _timeless(events: list[dict]) -> list[dict]:
+    return [{key: value for key, value in event.items() if key not in {"observed_at", "duration_ms"}} for event in events]
+
+
+def test_evidence_ledger_shadow_gate_requires_the_vault_pipeline_and_the_exact_flag(monkeypatch) -> None:
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault"); monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
+    monkeypatch.delenv("BRAND3_VAULT_EVIDENCE_LEDGER_SHADOW_ENABLED", raising=False); assert scan_runner._vault_evidence_ledger_shadow_enabled() is False
+    monkeypatch.setenv("BRAND3_VAULT_EVIDENCE_LEDGER_SHADOW_ENABLED", "true"); assert scan_runner._vault_evidence_ledger_shadow_enabled() is True
+    monkeypatch.setenv("BRAND3_VAULT_EVIDENCE_LEDGER_SHADOW_ENABLED", "True"); assert scan_runner._vault_evidence_ledger_shadow_enabled() is False
+    monkeypatch.setenv("BRAND3_VAULT_EVIDENCE_LEDGER_SHADOW_ENABLED", "true"); monkeypatch.setenv("BRAND3_ENVIRONMENT", "production"); assert scan_runner._vault_evidence_ledger_shadow_enabled() is False
+
+
+@pytest.mark.parametrize(
+    ("case", "enabled", "ledger_calls", "logs"),
+    (
+        ("disabled", False, (), []),
+        ("appended", True, ("load", "append"), [("INFO", "vault evidence ledger shadow completed")]),
+        ("no_prior", True, ("load",), [("INFO", "vault evidence ledger shadow skipped")]),
+        ("load_failure", True, ("load",), [("WARNING", "vault evidence ledger shadow failed")]),
+        ("append_failure", True, ("load", "append"), [("WARNING", "vault evidence ledger shadow failed")]),
+    ),
+)
+def test_evidence_ledger_shadow_is_off_by_default_and_only_logs(monkeypatch, caplog, case, enabled, ledger_calls, logs) -> None:
+    from src.services import evidence_vault_evidence_ledger as ledger
+
+    caplog.set_level(logging.INFO, logger="web.scan_runner")
+    scan_id = f"scan-ledger-{case}"
+    repository = _LedgerRepository(scan_id, case)
+    status, _saved = _run_ledger_scan(monkeypatch, repository, scan_id, enabled=enabled)
+
+    expected_calls = {"load": ("load", "https://acme.example", scan_id, "b3s"), "append": ("append", scan_id, "prior-scan", "b3s")}
+    assert repository.calls[1:-1] == [expected_calls[name] for name in ledger_calls]
+    records = _ledger_logs(caplog)
+    assert [(record.levelname, record.getMessage()) for record in records] == logs
+    assert all(getattr(record, "scan_id", None) == scan_id for record in records)
+    if case == "appended":
+        (record,) = records
+        assert (record.prior_scan_id, record.row_count, record.inserted_count, record.state_counts) == (
+            "prior-scan", 1, 1, {"seen": 0, "verified_absent": 1, "not_verified": 0}
+        )
+        # Logs are the only latency measurement while the shadow stays log-only.
+        duration = getattr(record, "duration_ms", None)
+        assert isinstance(duration, (int, float)) and duration >= 0
+        prior, current = repository.facts["prior"], repository.facts["current"]
+        assert repository.appended == ledger.build_evidence_ledger(
+            brand_domain=repository.facts["domain"],
+            prior_snapshot=prior["snapshot"],
+            prior_rows=prior["evidence_rows"],
+            current_snapshot=current["snapshot"],
+            current_rows=current["evidence_rows"],
+            shown_index=ledger.build_shown_index(current["evaluations"]),
+        )["rows"]
+        assert [row["state"] for row in repository.appended] == ["verified_absent"]
+    elif case == "no_prior":
+        assert getattr(records[0], "reason_code", None) == "no_prior_authority_scan"
+    elif case != "disabled":
+        assert getattr(records[0], "exception_class", None) == ("RuntimeError" if case == "load_failure" else "Exception")
+    assert _ledger_events(status) == []
+
+
+@pytest.mark.parametrize("case", ("load_failure", "append_failure"))
+def test_failing_evidence_ledger_shadow_leaves_the_scan_dossier_unchanged(monkeypatch, case) -> None:
+    scan_id = "scan-ledger-dossier"
+    flag_off, flag_on = _LedgerRepository(scan_id, case), _LedgerRepository(scan_id, case)
+    off_status, off_saved = _run_ledger_scan(monkeypatch, flag_off, scan_id, enabled=False)
+    on_status, on_saved = _run_ledger_scan(monkeypatch, flag_on, scan_id, enabled=True)
+
+    # The flag-on run really reached the failing repository call.
+    assert [call[0] for call in flag_on.calls[1:-1]] == (["load"] if case == "load_failure" else ["load", "append"])
+    baseline, dossier = (scan_runner.scan_diagnostic_dossier_from_status(status) for status in (off_status, on_status))
+    # The flag-off scan is clean: no ledger event and nothing failed.
+    assert all(event["operation"] != "vault_evidence_ledger_shadow" and event["outcome"] != "failed" for event in baseline["events"])
+    assert dossier["conditions"]["observed"] == baseline["conditions"]["observed"]
+    assert dossier["conditions"] == baseline["conditions"]
+    assert _timeless(dossier["events"]) == _timeless(baseline["events"])
+    assert on_saved == off_saved
 
 
 def test_retained_v1_result_uses_persisted_terminal_report_alias(monkeypatch) -> None:
@@ -1177,6 +1345,16 @@ def test_accepted_same_source_replay_publishes_without_changing_immutable_report
         scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": False}
     )
     monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda *_args: None)
+    monkeypatch.setenv("BRAND3_ENVIRONMENT", "vault")
+    monkeypatch.setenv("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true")
+    monkeypatch.setenv("BRAND3_VAULT_EVIDENCE_LEDGER_SHADOW_ENABLED", "true")
+    ledger_loads = []
+    monkeypatch.setattr(
+        repo,
+        "load_evidence_ledger_scan_facts",
+        lambda url, *, source_scan_id, workspace_slug: ledger_loads.append((url, source_scan_id, workspace_slug)),
+        raising=False,
+    )
     if mode == "exact":
         unavailable = _assessment_report("scan-2", binding, unavailable=True)
         unavailable["url"] = "https://example.test"
@@ -1236,6 +1414,8 @@ def test_accepted_same_source_replay_publishes_without_changing_immutable_report
         assert all((tmp_path / name).read_bytes() == value for name, value in before.items())
         assert repo.proof_reads and not flow.calls and repo.authority == accepted
         assert (len(repo.checkpoint_appends), repo.append_calls, len(repo.mutations)) == writes
+        # An exact resume republishes a finished scan; only the scan itself reads its ledger.
+        assert ledger_loads == ([] if mode == "exact" else [("https://example.test", "scan-2", "b3s")])
     finally:
         scan_runner._SCANS.pop("scan-2", None)
         scan_runner._VAULT_ACTIVATIONS.discard("scan-2")
