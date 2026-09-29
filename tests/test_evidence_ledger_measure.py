@@ -20,6 +20,7 @@ from tests.test_evidence_vault_evidence_ledger import (
     _web,
     _words,
 )
+from tests.test_evidence_vault_tile_rescan_rule import _accepted_vector, _judgment
 
 
 _ON = {"transaction_read_only": "on", "transaction_isolation": "repeatable read"}
@@ -216,6 +217,8 @@ def test_pairs_are_measured_from_fixture_dicts():
         "source_scan_in_series": True,
         "tile_count": 1,
     }
+    # A one-tile accepted vector cannot be scored, so the pair carries no tile projection.
+    assert (pair["tile_decisions"]["reason_codes"], pair["would_be_score"]) == (["accepted_vector_unavailable"], None)
     assert report["runtime_effect"] is False
 
 
@@ -268,7 +271,9 @@ def _mission_candidate(content):
 
 def _tables(prior, current, home_row):
     captures = {"s1": UUID(int=11), "s2": UUID(int=12)}
-    supporting = {"evidence_ref": _promise_row()["ref"], "evidence_fingerprint": hashlib.sha256(_PROMISE.encode()).hexdigest()}
+    judgments, sentinels = _accepted_vector({"M1"})
+    home_fingerprint = hashlib.sha256(home_row["content"].encode()).hexdigest()
+    home_pair = {"evidence_ref": home_row["ref"], "evidence_fingerprint": home_fingerprint}
 
     def evidence(scan_id, row):
         return {
@@ -295,18 +300,13 @@ def _tables(prior, current, home_row):
             {
                 "source_scan_id": "s2",
                 "component_evaluations": [{"component_key": "mission", "status": "evaluated"}],
+                "evaluated_tile_judgments": [_judgment("M1", "no", home_pair)],
                 "candidate": _mission_candidate(home_row["content"]),
             }
         ],
         "evidence_vault_sv9_judgment_authority_events": [{"event_type": "adopt", "candidate_id": _CANDIDATE_ID}],
         "candidate_tile_judgments": [
-            {
-                "id": _CANDIDATE_ID,
-                "source_scan_id": "s1",
-                "tile_judgments": [
-                    {"tile_id": "M1", "component_key": "mission", "assessment_state": "ok", "supporting_evidence": [supporting]}
-                ],
-            }
+            {"id": _CANDIDATE_ID, "source_scan_id": "s1", "tile_judgments": judgments, "component_sentinels": sentinels}
         ],
     }
 
@@ -334,9 +334,18 @@ def test_main_reads_through_the_guard_and_prints_one_json_report():
     }
     assert pair["rows"][0]["shown_to_core"]["mission"]["status"] == "shown"
     assert [(tile["tile_id"], tile["state_counts"]) for tile in pair["tiles"]] == [("M1", {"verified_absent": 1})]
+    # Core's current "no" reaches M1, whose only accepted support is now proven absent.
+    assert pair["tile_decisions"]["counts"] == {"keep_unlit": 79, "turn_off_proven": 1}
+    [m1] = [tile for tile in pair["tile_decisions"]["tiles"] if tile["tile_id"] == "M1"]
+    assert (m1["decision"], m1["reason_codes"], m1["would_be_state"]) == ("turn_off_proven", [], "no")
+    assert (pair["accepted_score"], pair["would_be_score"], pair["delta"], pair["within_tolerance"]) == (1, 0, -1, True)
     assert report["accepted_candidate"]["candidate_id"] == str(_CANDIDATE_ID)
     candidate_query = next(index for index, sql in enumerate(connection.executed) if "candidate_tile_judgments" in sql)
     assert connection.params[candidate_query] == (_WORKSPACE_ID, _BRAND_ID, _CANDIDATE_ID)
+    # The fake connection ignores column lists, so pin the JSON paths a typo would silently read as NULL.
+    checkpoint_sql = next(sql for sql in connection.executed if "evaluation_checkpoints" in sql)
+    assert "#> '{healthy_workset,evaluated_tile_judgments}'" in checkpoint_sql
+    assert "-> 'candidate_component_sentinels'" in connection.executed[candidate_query]
     assert report["read_only"]["statements_blocked"] == 0
     assert report["read_only"]["transaction_read_only"] == "on"
     assert report["read_only"]["transaction_isolation"] == "repeatable read"

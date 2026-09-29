@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure shadow evidence-ledger states across consecutive Vault scans, read-only.
+"""Measure shadow evidence-ledger states and tile re-scan decisions across consecutive Vault scans, read-only.
 
 Usage, on the Vault machine:
 
@@ -35,6 +35,7 @@ if str(ROOT) not in sys.path:
 
 from src.history.report_parser import normalize_domain  # noqa: E402
 from src.services import evidence_vault_evidence_ledger as ledger  # noqa: E402
+from src.services import evidence_vault_tile_rescan_rule as tile_rule  # noqa: E402
 
 
 MEASURE_SCHEMA_VERSION = "evidence-vault-evidence-ledger-measure-v1"
@@ -79,6 +80,7 @@ ORDER BY capture_id, evidence_ref
 _CHECKPOINTS_SQL = """
 SELECT source_scan_id,
        checkpoint_payload #> '{healthy_workset,component_evaluations}' AS component_evaluations,
+       checkpoint_payload #> '{healthy_workset,evaluated_tile_judgments}' AS evaluated_tile_judgments,
        shared_process_payload #> '{flow_context,candidate}' AS candidate
 FROM b3s_history.evidence_vault_sv9_evaluation_checkpoints
 WHERE workspace_id = %s AND brand_id = %s AND source_scan_id = ANY(%s)
@@ -101,7 +103,8 @@ WHERE workspace_id = %s AND brand_id = %s
 ORDER BY sequence
 """
 _CANDIDATE_SQL = """
-SELECT id, source_scan_id, candidate_payload -> 'candidate_tile_judgments' AS tile_judgments
+SELECT id, source_scan_id, candidate_payload -> 'candidate_tile_judgments' AS tile_judgments,
+       candidate_payload -> 'candidate_component_sentinels' AS component_sentinels
 FROM b3s_history.evidence_vault_sv9_judgment_candidates
 WHERE workspace_id = %s AND brand_id = %s AND id = %s
 """
@@ -194,13 +197,15 @@ def load_scan_facts(
     if missing:
         raise LookupError(f"scans {missing} have no capture for {domain!r}; check the scan ids")
     evidence = _evidence_by_capture(reader.fetch_all(_EVIDENCE_SQL, ([scans[scan_id]["capture_id"] for scan_id in scan_ids],)))
-    evaluations = _scan_evaluations(
-        reader.fetch_all(_CHECKPOINTS_SQL, (*scope, list(scan_ids))),
-        reader.fetch_all(_SNAPSHOTS_SQL, (*scope, list(scan_ids))),
-    )
+    checkpoints = reader.fetch_all(_CHECKPOINTS_SQL, (*scope, list(scan_ids)))
+    evaluations = _scan_evaluations(checkpoints, reader.fetch_all(_SNAPSHOTS_SQL, (*scope, list(scan_ids))))
+    judgments = _scan_judgments(checkpoints)
     return {
         "domain": str(brand["canonical_domain"]),
-        "scans": [_scan_facts(scans[scan_id], evidence, evaluations) for scan_id in scan_ids],
+        "scans": [
+            {**_scan_facts(scans[scan_id], evidence, evaluations), "judgments": judgments.get(scan_id, [])}
+            for scan_id in scan_ids
+        ],
         "accepted": _accepted_candidate(reader, scope),
     }
 
@@ -210,13 +215,14 @@ def measure_scan_series(
 ) -> dict[str, Any]:
     """Ledger every consecutive pair of an ordered scan series; no database access.
 
-    Each scan is ``{"scan_id", "snapshot", "evidence_rows", "evaluations"}``;
-    ``accepted`` is ``{"candidate_id", "source_scan_id", "tile_judgments"}`` or None.
+    Each scan is ``{"scan_id", "snapshot", "evidence_rows", "evaluations", "judgments"}``,
+    where ``judgments`` are the tile judgments Core gave in that scan;
+    ``accepted`` is ``{"candidate_id", "source_scan_id", "tile_judgments", "component_sentinels"}`` or None.
     """
 
     scan_ids = [str(scan["scan_id"]) for scan in scans]
     judgments = [row for row in (accepted or {}).get("tile_judgments") or [] if row.get("supporting_evidence")]
-    pairs = [_measure_pair(domain, prior, current, judgments) for prior, current in zip(scans, scans[1:])]
+    pairs = [_measure_pair(domain, prior, current, judgments, accepted) for prior, current in zip(scans, scans[1:])]
     accepted_summary = None
     warnings = ["no_accepted_candidate"]
     if accepted is not None:
@@ -364,6 +370,20 @@ def _put_evaluation(
     }
 
 
+def _scan_judgments(checkpoints: Iterable[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Tile judgments Core gave per scan; a later checkpoint for a tile replaces an earlier one.
+
+    Only checkpoints carry them: a candidate's tile judgments also hold reused accepted ones.
+    """
+
+    by_scan: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in checkpoints:
+        tiles = by_scan.setdefault(str(row["source_scan_id"]), {})
+        for judgment in _mappings(row["evaluated_tile_judgments"]):
+            tiles[str(judgment.get("tile_id") or "")] = dict(judgment)
+    return {scan_id: list(tiles.values()) for scan_id, tiles in by_scan.items()}
+
+
 def _scan_facts(
     row: Mapping[str, Any], evidence: Mapping[Any, list[dict[str, Any]]], evaluations: Mapping[str, list[dict[str, Any]]]
 ) -> dict[str, Any]:
@@ -392,11 +412,16 @@ def _accepted_candidate(reader: ReadOnlyReader, scope: tuple[Any, Any]) -> dict[
         "candidate_id": str(row["id"]),
         "source_scan_id": str(row["source_scan_id"]),
         "tile_judgments": _mappings(row["tile_judgments"]),
+        "component_sentinels": _mappings(row["component_sentinels"]),
     }
 
 
 def _measure_pair(
-    domain: str, prior: Mapping[str, Any], current: Mapping[str, Any], judgments: list[Mapping[str, Any]]
+    domain: str,
+    prior: Mapping[str, Any],
+    current: Mapping[str, Any],
+    judgments: list[Mapping[str, Any]],
+    accepted: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     result = ledger.build_evidence_ledger(
         brand_domain=domain,
@@ -415,6 +440,13 @@ def _measure_pair(
         if unchanged and row["state"] == ledger.VERIFIED_ABSENT
     ]
     tiles = ledger.summarize_tile_support(rows, judgments)
+    # Diagnostic only: the projection never reaches the accepted authority or its score.
+    projection = tile_rule.project_rescan(
+        (accepted or {}).get("tile_judgments") or [],
+        (accepted or {}).get("component_sentinels") or [],
+        rows,
+        current.get("judgments") or [],
+    )
     return {
         "prior_scan_id": str(prior["scan_id"]),
         "current_scan_id": str(current["scan_id"]),
@@ -424,6 +456,7 @@ def _measure_pair(
         "skipped_rows": result["skipped_rows"],
         "tiles": tiles,
         "false_verified_absent_candidates": candidates,
+        **projection,
         "summary": _pair_summary(rows, result["skipped_rows"], tiles, candidates),
     }
 
