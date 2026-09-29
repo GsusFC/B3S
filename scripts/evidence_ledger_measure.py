@@ -174,7 +174,10 @@ def open_read_only_reader(
         reader.settings = _verified_settings(reader)
         yield reader
     finally:
-        connection.close()
+        try:
+            connection.rollback()
+        finally:
+            connection.close()
 
 
 def load_scan_facts(
@@ -251,6 +254,8 @@ def main(
     dsn = (os.environ if environ is None else environ).get(_DATABASE_URL_ENV, "").strip()
     if not dsn:
         return _emit(out, {"status": "aborted", "error": f"{_DATABASE_URL_ENV} is not set; export the Vault URL and retry"})
+    from psycopg import Error as DatabaseError
+
     guard = ReadOnlyGuard()
     settings: dict[str, str] = {}
     try:
@@ -261,6 +266,8 @@ def main(
             )
     except (ReadOnlyViolation, LookupError) as exc:
         return _emit(out, {"status": "aborted", "error": str(exc), "read_only": {**settings, **guard.summary()}})
+    except (DatabaseError, UnicodeDecodeError) as exc:
+        return _emit(out, {"status": "aborted", "error": _read_error(exc), "read_only": {**settings, **guard.summary()}})
     report = measure_scan_series(domain=facts["domain"], scans=facts["scans"], accepted=facts["accepted"])
     return _emit(out, {"status": "ok", **report, "read_only": {**settings, **guard.summary()}}, code=0)
 
@@ -274,6 +281,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     if len(args.scan_ids) < 2 or len(set(args.scan_ids)) != len(args.scan_ids):
         parser.error("pass at least two distinct scan ids, oldest first")
     return args
+
+
+def _read_error(exc: Exception) -> str:
+    """Name the failure without the driver's message, which can carry the database host and user."""
+
+    if isinstance(exc, UnicodeDecodeError):
+        return "an evidence record's content_raw is not valid UTF-8, so nothing was measured; inspect that capture"
+    sqlstate = getattr(exc, "sqlstate", None) or "none"
+    return (
+        f"database read failed ({type(exc).__name__}, sqlstate {sqlstate}), so nothing was measured; "
+        f"check {_DATABASE_URL_ENV}, the network and the b3s_history schema, then retry"
+    )
 
 
 def _psycopg_connect() -> Callable[..., Any]:
