@@ -3,6 +3,7 @@ import io
 import json
 from uuid import UUID
 
+import psycopg
 import pytest
 
 from scripts import evidence_ledger_measure as measure
@@ -44,6 +45,7 @@ class _Connection:
         self.read_only = None
         self.isolation_level = None
         self.closed = False
+        self.calls = []
 
     def execute(self, sql, params=()):
         self.executed.append(sql)
@@ -57,9 +59,10 @@ class _Connection:
         return _Cursor([])
 
     def rollback(self):
-        pass
+        self.calls.append("rollback")
 
     def close(self):
+        self.calls.append("close")
         self.closed = True
 
 
@@ -140,6 +143,30 @@ def test_a_pooled_session_default_does_not_block_a_proven_read_only_transaction(
 
     with measure.open_read_only_reader("postgresql://vault.example/db", connect=lambda *args, **kwargs: connection) as reader:
         assert reader.settings == {"transaction_read_only": "on", "transaction_isolation": "repeatable read"}
+
+    assert connection.closed
+
+
+def test_reader_rolls_back_its_read_only_transaction_before_closing():
+    connection = _Connection()
+
+    with measure.open_read_only_reader("postgresql://vault.example/db", connect=lambda *args, **kwargs: connection):
+        pass
+
+    assert connection.calls == ["rollback", "close"]
+
+
+class _RollbackFails(_Connection):
+    def rollback(self):
+        raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+
+def test_reader_still_closes_when_the_rollback_fails():
+    connection = _RollbackFails()
+
+    with pytest.raises(psycopg.OperationalError):
+        with measure.open_read_only_reader("postgresql://vault.example/db", connect=lambda *args, **kwargs: connection):
+            pass
 
     assert connection.closed
 
@@ -331,3 +358,53 @@ def test_main_aborts_without_reading_facts_when_the_transaction_is_not_read_only
     report = json.loads(stdout.getvalue())
     assert code != 0 and report["status"] == "aborted"
     assert all("current_setting" in sql for sql in connection.executed)
+
+
+class _UnknownColumn(_Connection):
+    def execute(self, sql, params=()):
+        if "b3s_history.brands" in sql:
+            raise psycopg.errors.UndefinedColumn('column brands.canonical_domain does not exist at "vault.internal"')
+        return super().execute(sql, params)
+
+
+def _refused(*args, **kwargs):
+    raise psycopg.OperationalError('connection to server at "vault.internal" (10.0.0.9), port 5432 failed: timeout expired')
+
+
+@pytest.mark.parametrize(
+    ("connect", "expected"),
+    [(_refused, "OperationalError, sqlstate none"), (lambda *args, **kwargs: _UnknownColumn(), "UndefinedColumn, sqlstate 42703")],
+)
+def test_main_reports_a_database_error_as_aborted_json_without_the_raw_message(connect, expected):
+    stdout = io.StringIO()
+
+    code = measure.main(
+        ["--domain", BRAND, "s1", "s2"],
+        environ={"B3S_DATABASE_URL": "postgresql://vault.example/db"},
+        connect=connect,
+        stdout=stdout,
+    )
+
+    report = json.loads(stdout.getvalue())
+    assert code != 0 and report["status"] == "aborted"
+    assert expected in report["error"] and "vault.internal" not in report["error"]
+
+
+def test_main_reports_undecodable_evidence_bytes_as_aborted_json():
+    home = _words(160, "h")
+    home_row = _row("raw_inputs.0", home[:200])
+    prior, current = _snapshot(_web(home, (ABOUT, _about()))), _snapshot(_web(home, (ABOUT, _about(_SHIPPING))))
+    tables = _tables(prior, current, home_row)
+    tables["b3s_history.evidence_records"][0]["content_raw"] = b"\xff\xfe"
+    stdout = io.StringIO()
+
+    code = measure.main(
+        ["--domain", BRAND, "s1", "s2"],
+        environ={"B3S_DATABASE_URL": "postgresql://vault.example/db"},
+        connect=lambda *args, **kwargs: _Connection(tables=tables),
+        stdout=stdout,
+    )
+
+    report = json.loads(stdout.getvalue())
+    assert code != 0 and report["status"] == "aborted"
+    assert "not valid UTF-8" in report["error"]
