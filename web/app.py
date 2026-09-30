@@ -45,10 +45,10 @@ from web.report_store import (
     evidence_scoring_memory_preview_for_domain,
     list_report_payloads_for_index,
     list_reports_for_domain,
+    list_vault_brands_for_index,
     load_report,
     _postgres_repository,
     selected_report_for_brand,
-    vault_accepted_pointers,
     verify_postgres_runtime_ready,
     vault_sv9_shadow_diagnostics_enabled,
     vault_sv9_shadow_diagnostics_for_domain,
@@ -1171,6 +1171,8 @@ def _vault_review_error(error: ApiError) -> tuple[str, int]:
 def _report_rows_for_index() -> list[dict[str, Any]]:
     """One row per brand: the selected vault/SV9 analysis, not every scan."""
 
+    if os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault":
+        return _vault_report_rows_for_index()
     grouped: dict[str, list[dict[str, Any]]] = {}
     domain_order: list[str] = []
     for row in list_report_payloads_for_index():
@@ -1182,18 +1184,26 @@ def _report_rows_for_index() -> list[dict[str, Any]]:
             grouped[domain] = []
         grouped[domain].append(row)
     rows: list[dict[str, Any]] = []
-    is_vault = os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault"
-    accepted_pointers = vault_accepted_pointers(domain_order) if is_vault else None
     for domain in domain_order:
-        selected, classified, _state = selected_report_for_brand(
-            domain,
-            grouped[domain],
-            accepted_pointers=accepted_pointers,
-        )
-        if is_vault and selected is None:
+        selected, classified, _state = selected_report_for_brand(domain, grouped[domain])
+        source = selected or (classified[0] if classified else None)
+        if source is None:
+            continue
+        enriched = dict(source)
+        enriched["brand_domain"] = domain
+        enriched["score_publication"] = score_publication_from_report(enriched)
+        rows.append(enriched)
+    return rows
+
+
+def _vault_report_rows_for_index() -> list[dict[str, Any]]:
+    """One row per brand: its accepted Vault report, never a history report."""
+
+    rows: list[dict[str, Any]] = []
+    for domain, latest, accepted in list_vault_brands_for_index():
+        if accepted is None:
             # Keep the brand reachable, named and linked as its history names
             # it, without presenting a history report as its current one.
-            latest = classified[0] if classified else {}
             rows.append(
                 {
                     "brand_domain": domain,
@@ -1203,12 +1213,9 @@ def _report_rows_for_index() -> list[dict[str, Any]]:
                 }
             )
             continue
-        source = selected or (classified[0] if classified else None)
-        if source is None:
-            continue
-        enriched = dict(source)
+        enriched = dict(accepted)
         enriched["brand_domain"] = domain
-        enriched["score_publication"] = score_publication_from_report(enriched, comparator_retention=not is_vault)
+        enriched["score_publication"] = score_publication_from_report(enriched, comparator_retention=False)
         rows.append(enriched)
     return rows
 

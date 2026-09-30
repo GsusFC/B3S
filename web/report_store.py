@@ -16,6 +16,7 @@ from contextlib import nullcontext
 from functools import lru_cache
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from threading import Lock
 from time import monotonic
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
@@ -88,6 +89,13 @@ _POSTGRES_INDEX_PAYLOAD_LIMIT = 1000
 # very short, process-local snapshot: it avoids rereading an unchanged archive
 # on consecutive home requests without turning this cache into an authority.
 _INDEX_PAYLOAD_CACHE_TTL_SECONDS = 1.0
+
+# Vault's home reads summaries and only each brand's accepted report.
+# save_report invalidates it; the TTL bounds how long a change made by another
+# process, such as a new accepted pointer, stays unseen.  The lock lets
+# concurrent requests share one read.
+_VAULT_INDEX_CACHE_TTL_SECONDS = 60.0
+_VAULT_INDEX_LOCK = Lock()
 
 
 def reports_dir() -> Path:
@@ -274,6 +282,7 @@ def save_report(report: dict[str, Any]) -> None:
     except Exception:
         pass
     _cached_report_payloads_for_index.cache_clear()
+    _cached_vault_brands_for_index.cache_clear()
 
 
 def load_report(scan_id: str) -> dict[str, Any] | None:
@@ -315,7 +324,9 @@ def load_report(scan_id: str) -> dict[str, Any] | None:
     return postgres_report or file_report
 
 
-def _index_payload_cache_key() -> tuple[str, str, tuple[tuple[str, int, int], ...], int]:
+def _index_payload_cache_key(
+    ttl_seconds: float = _INDEX_PAYLOAD_CACHE_TTL_SECONDS,
+) -> tuple[str, str, tuple[tuple[str, int, int], ...], int]:
     directory = reports_dir()
     file_state: tuple[tuple[str, int, int], ...] = ()
     if directory.is_dir():
@@ -329,7 +340,7 @@ def _index_payload_cache_key() -> tuple[str, str, tuple[tuple[str, int, int], ..
         str(directory.resolve()),
         os.environ.get("B3S_DATABASE_URL", "").strip(),
         file_state,
-        int(monotonic() / _INDEX_PAYLOAD_CACHE_TTL_SECONDS),
+        int(monotonic() / ttl_seconds),
     )
 
 
@@ -419,6 +430,115 @@ def _read_report_payloads_for_index() -> list[dict[str, Any]]:
         reverse=True,
     )
     return reports
+
+
+def list_vault_brands_for_index() -> list[tuple[str, dict[str, Any], dict[str, Any] | None]]:
+    """Return each brand's newest summary and accepted report, newest first."""
+
+    with _VAULT_INDEX_LOCK:
+        return list(
+            _cached_vault_brands_for_index(
+                _index_payload_cache_key(_VAULT_INDEX_CACHE_TTL_SECONDS)
+            )
+        )
+
+
+@lru_cache(maxsize=1)
+def _cached_vault_brands_for_index(
+    _cache_key: tuple[str, str, tuple[tuple[str, int, int], ...], int],
+) -> tuple[tuple[str, dict[str, Any], dict[str, Any] | None], ...]:
+    return tuple(_read_vault_brands_for_index())
+
+
+def _read_vault_brands_for_index() -> list[tuple[str, dict[str, Any], dict[str, Any] | None]]:
+    """Group summaries by brand and hydrate only accepted reports."""
+
+    latest: dict[str, dict[str, Any]] = {}
+    report_ids: dict[str, list[str]] = {}
+    for row in _report_summaries_for_index():
+        domain = domain_key(str(row.get("url") or ""))
+        if not domain:
+            continue
+        latest.setdefault(domain, row)
+        report_ids.setdefault(domain, []).append(str(row.get("id") or ""))
+    pointers = vault_accepted_pointers(list(latest))
+    return [
+        (domain, row, _vault_accepted_report_for_index(domain, report_ids[domain], pointers))
+        for domain, row in latest.items()
+    ]
+
+
+def _report_summaries_for_index() -> list[dict[str, Any]]:
+    """List PostgreSQL summaries plus file-only reports, newest first."""
+
+    rows_by_id: dict[str, dict[str, Any]] = {}
+    repository = _postgres_repository()
+    if repository is not None:
+        try:
+            summaries = _all_postgres_pages(repository.list_report_summaries)
+        except (ReportConflictError, ScannerReportAssessmentError):
+            raise
+        except Exception:
+            _LOG.exception("failed to list report summaries for index from postgres")
+            summaries = []
+        for row in summaries:
+            report_id = str(row.get("id") or "")
+            if report_id:
+                rows_by_id[report_id] = row
+
+    directory = reports_dir()
+    if directory.is_dir():
+        for path in directory.glob("*.json"):
+            if path.stem in rows_by_id:
+                continue
+            report = _read_report_file(path, expected_id=path.stem)
+            rows_by_id[path.stem] = _summary_row(report, fallback_id=path.stem)
+
+    rows = list(rows_by_id.values())
+    rows.sort(
+        key=lambda row: (str(row.get("created_at") or ""), str(row.get("id") or "")),
+        reverse=True,
+    )
+    return rows
+
+
+def _vault_accepted_report_for_index(
+    domain: str,
+    report_ids: list[str],
+    pointers: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Hydrate the accepted scan's report, then its exact-resume successors."""
+
+    pointer = pointers.get(domain)
+    source_scan_id = (
+        str(pointer.get("source_scan_id") or "") if isinstance(pointer, Mapping) else ""
+    )
+    if not source_scan_id:
+        return None
+    resumed = [report_id for report_id in report_ids if _EXACT_RESUME_REPORT_ID.fullmatch(report_id)]
+    candidates: list[dict[str, Any]] = []
+    for report_id in dict.fromkeys([source_scan_id, *resumed]):
+        try:
+            report = load_report(report_id)
+        except (ReportConflictError, ScannerReportAssessmentError):
+            raise
+        except Exception:
+            _LOG.exception(
+                "failed to load accepted Vault report for index",
+                extra={"domain": domain, "report_id": report_id},
+            )
+            return None
+        if report is None:
+            continue
+        candidates.append(report)
+        selected, _classified, _state = selected_report_for_brand(
+            domain,
+            candidates,
+            accepted_pointers=pointers,
+        )
+        if selected is not None:
+            return selected
+    return None
 
 
 def list_reports() -> list[dict[str, Any]]:

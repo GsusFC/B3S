@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import stat
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -2446,12 +2448,38 @@ def _serve_vault_pointers(monkeypatch, pointers):
     return calls
 
 
-def _serve_vault_pages(monkeypatch, tmp_path, reports, pointers):
+def _serve_vault_index(monkeypatch, tmp_path, reports, pointers):
+    """Serve summaries and single payloads; reading the whole archive fails."""
+
+    from web import report_store
+
     calls = _serve_vault_pointers(monkeypatch, pointers)
+    calls["payloads"] = []
     by_id = {report["id"]: report for report in reports}
+    pointer_repository = report_store._postgres_repository
+
+    class Repository(pointer_repository):
+        def list_report_payloads(self, **_page):
+            pytest.fail("the Vault home must not read the full report archive")
+
+        def list_report_summaries(self, *, limit, offset):
+            summaries = [report_store._summary_row(report) for report in reports]
+            return summaries[offset : offset + limit]
+
+        def get_report_payload(self, report_id):
+            calls["payloads"].append(report_id)
+            return by_id.get(report_id)
+
     monkeypatch.setenv("B3S_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr("web.report_store._postgres_repository", Repository)
+    monkeypatch.setattr("web.app._postgres_repository", Repository)
+    return calls
+
+
+def _serve_vault_pages(monkeypatch, tmp_path, reports, pointers):
+    calls = _serve_vault_index(monkeypatch, tmp_path, reports, pointers)
+    by_id = {report["id"]: report for report in reports}
     monkeypatch.setattr("web.app.list_reports_for_domain", lambda _domain: list(reports))
-    monkeypatch.setattr("web.app.list_report_payloads_for_index", lambda: list(reports))
     monkeypatch.setattr("web.app.load_report", by_id.get)
     monkeypatch.setattr(
         "web.app.evidence_scoring_memory_preview_for_domain",
@@ -2660,6 +2688,7 @@ def test_core_display_keeps_temporal_selection_without_authority_reads(monkeypat
 )
 def test_vault_index_reads_every_accepted_pointer_in_one_call(
     monkeypatch,
+    tmp_path,
     pointer_read_fails,
     expected,
 ):
@@ -2667,19 +2696,24 @@ def test_vault_index_reads_every_accepted_pointer_in_one_call(
     from web.app import _report_rows_for_index
 
     history, pointer = _vault_history_with_pointer()
-    for domain, scan_id in (("alpha.test", "alpha-accepted"), ("beta.test", "beta-latest")):
+    for domain, scan_id, created_at in (
+        ("alpha.test", "alpha-accepted", "2026-09-08T11:00:00+00:00"),
+        ("beta.test", "beta-latest", "2026-09-08T10:00:00+00:00"),
+    ):
         report = _available_report(scan_id)
         report["url"] = f"https://{domain}"
+        report["created_at"] = created_at
         history.append(report)
     pointers = {
         "example.com": pointer,
         "alpha.test": pointer | {"source_scan_id": "alpha-accepted"},
     }
-    calls = _serve_vault_pointers(
+    calls = _serve_vault_index(
         monkeypatch,
+        tmp_path,
+        history,
         RuntimeError("database unavailable") if pointer_read_fails else pointers,
     )
-    monkeypatch.setattr("web.app.list_report_payloads_for_index", lambda: list(history))
     monkeypatch.setattr(
         "web.app.list_reports_for_domain",
         lambda _domain: pytest.fail("index must not load reports per domain"),
@@ -2690,11 +2724,166 @@ def test_vault_index_reads_every_accepted_pointer_in_one_call(
     assert calls == {
         "pointers": [(["example.com", "alpha.test", "beta.test"], "b3s")],
         "authority": [],
+        "payloads": [report_id for _domain, report_id in expected if report_id],
     }
     assert [(row["brand_domain"], row.get("id")) for row in rows] == expected
     assert [bool(row.get("vault_unaccepted")) for row in rows] == [
         report_id is None for _domain, report_id in expected
     ]
+
+
+def _brand_report(scan_id, url, brand_name, created_at):
+    from tests.test_vault_sv9_parity import _available_report
+
+    report = _available_report(scan_id)
+    report.update(url=url, brand_name=brand_name, created_at=created_at)
+    return report
+
+
+def test_vault_index_hydrates_accepted_reports_without_the_archive(monkeypatch, tmp_path):
+    from web.app import _report_rows_for_index
+
+    history, pointer = _vault_history_with_pointer()
+    unaccepted = _brand_report(
+        "beta-latest",
+        "https://beta.test",
+        "Beta",
+        "2026-09-08T11:00:00+00:00",
+    )
+    calls = _serve_vault_index(
+        monkeypatch,
+        tmp_path,
+        [*history, unaccepted],
+        {"example.com": pointer},
+    )
+
+    rows = _report_rows_for_index()
+
+    assert [(row["brand_domain"], row.get("id")) for row in rows] == [
+        ("example.com", "accepted"),
+        ("beta.test", None),
+    ]
+    assert calls["payloads"] == ["accepted"]
+
+
+@pytest.mark.parametrize("original", ["absent", "no-score"])
+def test_vault_index_hydrates_exact_resume_successor_after_the_original(
+    monkeypatch,
+    tmp_path,
+    original,
+):
+    from web.app import _report_rows_for_index
+
+    (latest, _accepted), pointer = _vault_history_with_pointer()
+    successor = _exact_resume_report("accepted", "1", "2026-09-08T12:45:00+00:00")
+    history = [latest, successor]
+    if original == "no-score":
+        history.append(_no_score_report("accepted", "2026-09-08T12:00:00+00:00"))
+    calls = _serve_vault_index(monkeypatch, tmp_path, history, {"example.com": pointer})
+
+    rows = _report_rows_for_index()
+
+    assert [row.get("id") for row in rows] == [successor["id"]]
+    assert calls["payloads"] == ["accepted", successor["id"]]
+
+
+@pytest.mark.parametrize(
+    "pointer_read_fails",
+    [pytest.param(False, id="pointers"), pytest.param(True, id="pointer-read-error")],
+)
+def test_vault_index_rows_match_the_full_history_selection(
+    monkeypatch,
+    tmp_path,
+    pointer_read_fails,
+):
+    from src.services.scanner_score_publication import score_publication_from_report
+    from web import report_store
+    from web.app import _report_rows_for_index
+
+    # Each accepted report is its brand's baseline: the comparator's stability
+    # projection of a later accepted report would need the brand's full history.
+    (latest, accepted), pointer = _vault_history_with_pointer()
+    unaccepted = [
+        _brand_report("beta-old", "https://beta.test/old", "Beta Old", "2026-09-08T10:00:00+00:00"),
+        _brand_report("beta-new", "https://www.beta.test", "Beta", "2026-09-08T11:00:00+00:00"),
+    ]
+    file_only = _brand_report("gamma-accepted", "https://gamma.test", "Gamma", "2026-09-08T09:00:00+00:00")
+    pointers = {
+        "example.com": pointer,
+        "gamma.test": pointer | {"source_scan_id": "gamma-accepted"},
+    }
+    _serve_vault_index(
+        monkeypatch,
+        tmp_path,
+        [latest, accepted, *unaccepted],
+        RuntimeError("database unavailable") if pointer_read_fails else pointers,
+    )
+    for report in (accepted, file_only):
+        report_store.report_path(report["id"]).write_text(json.dumps(report), encoding="utf-8")
+
+    rows = _report_rows_for_index()
+
+    served = {} if pointer_read_fails else pointers
+    expected = []
+    for domain, reports in (
+        ("example.com", [latest, accepted]),
+        ("beta.test", unaccepted),
+        ("gamma.test", [file_only]),
+    ):
+        selected, classified, _state = report_store.selected_report_for_brand(
+            domain,
+            reports,
+            accepted_pointers=served,
+        )
+        if selected is None:
+            latest = classified[0]
+            expected.append(
+                {
+                    "brand_domain": domain,
+                    "brand_name": latest["brand_name"],
+                    "url": latest["url"],
+                    "vault_unaccepted": True,
+                }
+            )
+            continue
+        row = {**selected, "brand_domain": domain}
+        expected.append(
+            {**row, "score_publication": score_publication_from_report(row, comparator_retention=False)}
+        )
+    assert rows == expected
+
+
+def test_vault_index_reads_once_for_concurrent_requests(monkeypatch, tmp_path):
+    from web import report_store
+    from web.app import _report_rows_for_index
+
+    history, pointer = _vault_history_with_pointer()
+    calls = _serve_vault_index(monkeypatch, tmp_path, history, {"example.com": pointer})
+    repository_type = report_store._postgres_repository
+    list_summaries = repository_type.list_report_summaries
+    summary_reads = []
+
+    def slow_summaries(self, *, limit, offset):
+        summary_reads.append(offset)
+        time.sleep(0.2)
+        return list_summaries(self, limit=limit, offset=offset)
+
+    monkeypatch.setattr(repository_type, "list_report_summaries", slow_summaries)
+    monkeypatch.setattr(report_store, "monotonic", lambda: 0.0)
+    requests = 4
+    barrier = threading.Barrier(requests, timeout=10)
+
+    def home_request(_index):
+        barrier.wait()
+        return _report_rows_for_index()
+
+    with ThreadPoolExecutor(max_workers=requests) as executor:
+        results = list(executor.map(home_request, range(requests)))
+
+    assert summary_reads == [0]
+    assert calls["pointers"] == [(["example.com"], "b3s")]
+    assert calls["payloads"] == ["accepted"]
+    assert [[row["id"] for row in rows] for rows in results] == [["accepted"]] * requests
 
 
 def test_vault_brand_and_report_pages_read_one_pointer_per_request(monkeypatch, tmp_path):
