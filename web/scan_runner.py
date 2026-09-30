@@ -1610,8 +1610,10 @@ def _run_vault_sv9_judgment_shadow_after_publication(
 def _run_vault_evidence_ledger_shadow(*, scan_id: str, url: str, repository: Any) -> None:
     """Record, best effort, whether this scan still shows the prior accepted scan's evidence.
 
-    Off unless its flag is set. It only logs: failures are never raised or written to the
-    scan's diagnostic ledger, and nothing here changes the authority result, score or publication.
+    Then project, also best effort, what the per-tile re-scan rule would make of the
+    prior's accepted vector. Off unless its flag is set. It only logs: failures are never
+    raised or written to the scan's diagnostic ledger, and nothing here changes the
+    authority result, score or publication.
     """
     if not _vault_evidence_ledger_shadow_enabled():
         return
@@ -1627,6 +1629,22 @@ def _run_vault_evidence_ledger_shadow(*, scan_id: str, url: str, repository: Any
         rows = build_evidence_ledger(brand_domain=facts["domain"], prior_snapshot=prior["snapshot"], prior_rows=prior["evidence_rows"], current_snapshot=current["snapshot"], current_rows=current["evidence_rows"], shown_index=build_shown_index(current["evaluations"]))["rows"]
         inserted = repository.append_evidence_ledger_rows(scan_id, prior_source_scan_id=prior["scan_id"], rows=rows, workspace_slug="b3s")
         _LOG.info("vault evidence ledger shadow completed", extra={"scan_id": scan_id, "prior_scan_id": prior["scan_id"], "row_count": len(rows), "inserted_count": inserted, "state_counts": {state: sum(row["state"] == state for row in rows) for state in (SEEN, VERIFIED_ABSENT, NOT_VERIFIED)}, "duration_ms": max(0, round((time.monotonic() - started) * 1000, 3))})
+        try:
+            from src.services.evidence_vault_tile_rescan_rule import KEEP_LIT, KEEP_UNLIT, project_rescan
+
+            accepted, projection_started = facts["accepted"], time.monotonic()
+            projection = project_rescan(accepted["tile_judgments"], accepted["component_sentinels"], rows, current["judgments"])
+            duration_ms = max(0, round((time.monotonic() - projection_started) * 1000, 3))
+            decisions, changed = projection["tile_decisions"], {}
+            for tile in decisions["tiles"]:
+                if tile["decision"] not in {KEEP_LIT, KEEP_UNLIT}:
+                    changed.setdefault(tile["decision"], []).append(tile["tile_id"])
+            summary = {"scan_id": scan_id, "prior_scan_id": prior["scan_id"], "candidate_id": accepted["candidate_id"], **{key: projection[key] for key in ("accepted_score", "would_be_score", "delta", "within_tolerance", "change_signal")}, "counts": decisions["counts"], "changed": changed, "reason_codes": decisions["reason_codes"], "duration_ms": duration_ms}
+            # WARNING with the JSON in the message: without a logging config, INFO is dropped and
+            # logging.lastResort prints only the message text, never the extra fields.
+            _LOG.warning("vault tile rescan shadow %s", json.dumps(summary, sort_keys=True, separators=(",", ":")))
+        except Exception as exc:
+            _LOG.warning("vault tile rescan shadow failed %s", type(exc).__name__)
     except Exception as exc:
         _LOG.warning("vault evidence ledger shadow failed", extra={"scan_id": scan_id, "exception_class": type(exc).__name__})
 

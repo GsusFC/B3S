@@ -6406,7 +6406,9 @@ class PostgresHistoryRepository:
         The prior scan is the source scan of the latest adopt or supersede event
         whose candidate came from another scan; ``None`` until one exists. Both
         scans use the measurement script's fact shape, read in one REPEATABLE
-        READ, READ ONLY transaction.
+        READ, READ ONLY transaction. ``accepted`` is that event's candidate
+        vector, and the current scan also carries the tile judgments Core gave
+        in its checkpoints.
         """
 
         from scripts import evidence_ledger_measure as measure
@@ -6423,7 +6425,9 @@ class PostgresHistoryRepository:
             scope = (brand["workspace_id"], brand["id"])
             prior = conn.execute(
                 f"""
-                SELECT candidates.source_scan_id
+                SELECT candidates.id, candidates.source_scan_id,
+                       candidates.candidate_payload -> 'candidate_tile_judgments' AS tile_judgments,
+                       candidates.candidate_payload -> 'candidate_component_sentinels' AS component_sentinels
                 FROM {_SCHEMA}.evidence_vault_sv9_judgment_authority_events AS events
                 JOIN {_SCHEMA}.evidence_vault_sv9_judgment_candidates AS candidates
                   ON candidates.id = events.candidate_id
@@ -6449,12 +6453,24 @@ class PostgresHistoryRepository:
             evidence = measure._evidence_by_capture(
                 conn.execute(measure._EVIDENCE_SQL, ([scans[scan_id]["capture_id"] for scan_id in scan_ids],)).fetchall()
             )
+            checkpoints = conn.execute(measure._CHECKPOINTS_SQL, (*scope, scan_ids)).fetchall()
             evaluations = measure._scan_evaluations(
-                conn.execute(measure._CHECKPOINTS_SQL, (*scope, scan_ids)).fetchall(),
-                conn.execute(measure._SNAPSHOTS_SQL, (*scope, scan_ids)).fetchall(),
+                checkpoints, conn.execute(measure._SNAPSHOTS_SQL, (*scope, scan_ids)).fetchall()
             )
         prior_facts, current_facts = (measure._scan_facts(scans[scan_id], evidence, evaluations) for scan_id in scan_ids)
-        return {"domain": str(brand["canonical_domain"]), "prior": prior_facts, "current": current_facts}
+        current_facts["judgments"] = measure._scan_judgments(checkpoints).get(source_scan_id, [])
+        accepted = {
+            "candidate_id": str(prior["id"]),
+            "source_scan_id": str(prior["source_scan_id"]),
+            "tile_judgments": measure._mappings(prior["tile_judgments"]),
+            "component_sentinels": measure._mappings(prior["component_sentinels"]),
+        }
+        return {
+            "domain": str(brand["canonical_domain"]),
+            "prior": prior_facts,
+            "current": current_facts,
+            "accepted": accepted,
+        }
 
     def append_evidence_ledger_rows(
         self,

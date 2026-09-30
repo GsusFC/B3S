@@ -11,6 +11,7 @@ from tests.test_evidence_vault_evidence_ledger import (
     _fingerprint,
     _ledger,
     _promise_row,
+    _row,
     _snapshot,
     _web,
     _words,
@@ -76,8 +77,9 @@ def test_ok_verdict_keeps_a_lit_tile_whichever_quote_it_cites(support, cited, re
     assert decision == {"decision": "keep_lit", "reason_codes": [reason]}
 
 
-def test_core_no_over_seen_proof_it_was_shown_turns_a_lit_tile_off():
-    verdict = _judgment("M1", "no", _pair(_NEW_REF))
+@pytest.mark.parametrize("state", ["no", "sin_evidencia"])
+def test_core_no_over_seen_proof_it_was_shown_turns_a_lit_tile_off(state):
+    verdict = _judgment("M1", state, _pair(_NEW_REF))
 
     decision = _decide("ok", [_support(_SEEN_REF, "seen")], verdict, {_SEEN_REF: _shown("shown")})
 
@@ -169,8 +171,10 @@ def test_light_inside_a_not_detected_component_scores_that_component_again():
 
 def test_projection_is_unavailable_instead_of_scoring_an_incomplete_accepted_vector():
     judgments, sentinels = _accepted_vector({"M1"})
+    prior, current = _about_pair(_about(_SHIPPING))
+    rows = _ledger(prior, [_promise_row()], current)["rows"]
 
-    result = rule.project_rescan(judgments[1:], sentinels, [], [])
+    result = rule.project_rescan(judgments[:-1], sentinels, rows, [])
 
     assert result == {
         "tile_decisions": {"reason_codes": ["accepted_vector_unavailable"], "counts": {}, "tiles": []},
@@ -178,4 +182,79 @@ def test_projection_is_unavailable_instead_of_scoring_an_incomplete_accepted_vec
         "accepted_score": None,
         "delta": None,
         "within_tolerance": None,
+        "change_signal": {
+            "lit_tiles": 1,
+            "all_absent": 1,
+            "any_seen": 0,
+            "unverified": 0,
+            "absent_share": 1.0,
+            "seen_share": 0.0,
+            "unverified_share": 0.0,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("lit_row", "complete"),
+    [
+        ({"component_key": "mission", "assessment_state": "ok", "supporting_evidence": []}, True),
+        ({**_judgment("M1", "ok"), "supporting_evidence": [{"evidence_ref": _SEEN_REF}]}, False),
+    ],
+    ids=["lit_row_without_a_tile_id", "lit_support_without_a_fingerprint"],
+)
+def test_malformed_accepted_vector_is_unavailable_without_a_change_signal(lit_row, complete):
+    judgments, sentinels = _accepted_vector({"M1"})
+    judgments = [lit_row, *judgments[1:]] if complete else [lit_row, *judgments[1:-1]]
+
+    result = rule.project_rescan(judgments, sentinels, [], [])
+
+    assert result["tile_decisions"] == {"reason_codes": ["accepted_vector_unavailable"], "counts": {}, "tiles": []}
+    assert _scores(result) == (None, None, None, None)
+    assert result["change_signal"] is None
+
+
+def test_change_signal_shares_count_lit_tiles_only():
+    home = _words(160, "h")
+    home_row = _row("raw_inputs.0", home[:200])
+    prior, current = _snapshot(_web(home, (ABOUT, _about()))), _snapshot(_web(home, (ABOUT, _about(_SHIPPING))))
+    rows = _ledger(prior, [home_row, _promise_row()], current)["rows"]
+    seen = {"evidence_ref": home_row["ref"], "evidence_fingerprint": _fingerprint(home_row["content"])}
+    cited = {
+        "M2": [_PROMISE_PAIR, seen],
+        "MG1": [_PROMISE_PAIR, _pair(_NEW_REF)],
+        "MG2": [],
+        # Unlit tiles: their seen and absent supports must not move the shares.
+        "M1": [seen],
+        "P4": [seen],
+        "P5": [_PROMISE_PAIR],
+    }
+    judgments, sentinels = _accepted_vector({"P1", "P2", "P3", "M2", "MG1", "MG2"})
+    for row in judgments:
+        row["supporting_evidence"] = cited.get(row["tile_id"], row["supporting_evidence"])
+
+    result = rule.project_rescan(judgments, sentinels, rows, [])
+
+    assert [row["state"] for row in rows] == ["seen", "verified_absent"]
+    assert result["change_signal"] == {
+        "lit_tiles": 6,
+        "all_absent": 3,
+        "any_seen": 1,
+        "unverified": 2,
+        "absent_share": 0.5,
+        "seen_share": 0.167,
+        "unverified_share": 0.333,
+    }
+
+
+def test_change_signal_has_no_shares_without_lit_tiles():
+    result = rule.project_rescan(*_accepted_vector(), [], [])
+
+    assert result["change_signal"] == {
+        "lit_tiles": 0,
+        "all_absent": 0,
+        "any_seen": 0,
+        "unverified": 0,
+        "absent_share": None,
+        "seen_share": None,
+        "unverified_share": None,
     }
