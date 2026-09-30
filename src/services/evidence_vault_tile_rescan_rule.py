@@ -1,8 +1,8 @@
 """Shadow per-tile re-scan rule: what each accepted tile would become after one re-scan.
 
 A lit tile follows what B3S can see against the prior accepted authority. Core's
-current ``ok`` keeps it lit. Core's ``no`` turns it off only when an accepted
-support was seen in the capture and shown to Core. A ledger that proves every
+current ``ok`` keeps it lit. Core's ``no`` or ``sin_evidencia`` turns it off only
+when an accepted support was seen in the capture and shown to Core. A ledger that proves every
 accepted support gone turns it off with or without a verdict. Any other lit case
 is a ``b3s_failure`` that keeps the tile's state. An unlit tile lights only on
 Core's ``ok``. Pure: no I/O, and the projection never changes a score.

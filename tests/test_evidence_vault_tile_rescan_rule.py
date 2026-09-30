@@ -76,8 +76,9 @@ def test_ok_verdict_keeps_a_lit_tile_whichever_quote_it_cites(support, cited, re
     assert decision == {"decision": "keep_lit", "reason_codes": [reason]}
 
 
-def test_core_no_over_seen_proof_it_was_shown_turns_a_lit_tile_off():
-    verdict = _judgment("M1", "no", _pair(_NEW_REF))
+@pytest.mark.parametrize("state", ["no", "sin_evidencia"])
+def test_core_no_over_seen_proof_it_was_shown_turns_a_lit_tile_off(state):
+    verdict = _judgment("M1", state, _pair(_NEW_REF))
 
     decision = _decide("ok", [_support(_SEEN_REF, "seen")], verdict, {_SEEN_REF: _shown("shown")})
 
