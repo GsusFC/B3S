@@ -6,10 +6,16 @@ import pytest
 from scripts import configure_b3s_runtime_role as runtime_role
 from src.history import repository as history
 from src.services import evidence_vault_evidence_ledger as ledger
+from src.services import evidence_vault_sv9_authority_event as authority_event
 from tests.test_evidence_vault_evidence_ledger import _SHIPPING, _about, _about_pair, _ledger, _promise_row
 from tests.test_evidence_vault_scan_orchestration_postgres import _reset_repository
-from tests.test_evidence_vault_sv9_evaluation_checkpoint_postgres import _CheckpointSharedFlow, _shared_series
-from tests.test_evidence_vault_sv9_judgment_candidates_postgres import _operational, _seed_accepted_sv9_authority
+from tests.test_evidence_vault_sv9_evaluation_checkpoint_postgres import _CheckpointSharedFlow, _checkpoint, _shared_series
+from tests.test_evidence_vault_sv9_judgment_candidates_postgres import (
+    _captured_candidate,
+    _operational,
+    _seed_accepted_sv9_authority,
+)
+from tests.test_sv9_judgment_memory import _series
 
 
 _MIGRATION = "039_evidence_vault_evidence_ledger.sql"
@@ -50,6 +56,34 @@ def _accepted_pair(repository):
     prior = _operational(repository, _PRIOR)
     _seed_accepted_sv9_authority(repository, _PRIOR, _shared_series(), flow=_CheckpointSharedFlow(_PRIOR))
     return prior, _operational(repository, _CURRENT, prior)
+
+
+def _adopt_captured_candidate(monkeypatch, repository, scan, predecessor=None):
+    """Append one scan's captured candidate and adopt it, superseding ``predecessor`` when given."""
+    with monkeypatch.context() as patch:
+        if predecessor is not None:
+            # Once authority exists, the captured baseline's own checkpoints would pin a stale snapshot.
+            patch.setattr(
+                repository,
+                "append_evidence_vault_sv9_evaluation_checkpoint",
+                lambda _scan, checkpoint, **_kwargs: (checkpoint, False),
+            )
+        raw, _, _ = _captured_candidate(monkeypatch, repository, scan, _series())
+    candidate = repository.append_evidence_vault_sv9_judgment_candidate(scan, raw)[0]
+    request = authority_event.build_evidence_vault_sv9_authority_request(
+        action="adopt_candidate",
+        candidate_id=candidate["id"],
+        expected_predecessor_event_fingerprint=predecessor,
+        delta_fingerprint=None,
+        source_scan_id=scan,
+    )
+    authority, _ = repository.adopt_evidence_vault_sv9_judgment_candidate(
+        scan,
+        candidate["id"],
+        expected_predecessor_event_fingerprint=predecessor,
+        idempotency_key_hash=authority_event.authority_application_idempotency_fingerprint(request),
+    )
+    return candidate, authority
 
 
 def test_ledger_migration_is_the_append_only_shadow_head():
@@ -128,6 +162,42 @@ def test_loader_reads_the_latest_accepted_scan_other_than_the_current_one():
         assert scan["snapshot"]["raw_inputs"] and scan["snapshot"]["acquisition_gate"] == {"state": "complete"}
     assert {row["status"] for row in facts["prior"]["evaluations"]} == {"evaluated"}
     assert facts["current"]["evaluations"] == []
+
+
+@_POSTGRES
+def test_loader_reads_the_prior_events_accepted_vector_and_the_current_scans_tile_verdicts(monkeypatch):
+    repository = _reset_repository()
+    prior = _operational(repository, _PRIOR)
+    accepted, authority = _adopt_captured_candidate(monkeypatch, repository, _PRIOR)
+    _operational(repository, _CURRENT, prior)
+    candidate, active, head = authority["accepted_candidate"], authority["active_authority_event"], authority["current_head"]
+    snapshot = {
+        "state": "accepted_authority",
+        "accepted_candidate_id": candidate["id"],
+        "active_event_id": active["event_id"],
+        "current_head_event_fingerprint": head["event_fingerprint"],
+        "candidate_complete_record_fingerprint": candidate["complete_record_fingerprint"],
+        "canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"],
+        "current_series_fingerprint": candidate["current_series_fingerprint"],
+    }
+    checkpoint = _checkpoint(repository, _CURRENT, snapshot, "current")
+    repository.append_evidence_vault_sv9_evaluation_checkpoint(_CURRENT, checkpoint)
+    # The hook runs right after application, which may just have adopted this scan's own candidate.
+    own, _ = _adopt_captured_candidate(monkeypatch, repository, _CURRENT, head["event_fingerprint"])
+
+    facts = repository.load_evidence_ledger_scan_facts("example.com", source_scan_id=_CURRENT)
+
+    assert facts["prior"]["scan_id"] == _PRIOR and own["id"] != accepted["id"]
+    assert facts["accepted"] == {
+        "candidate_id": accepted["id"],
+        "source_scan_id": _PRIOR,
+        "tile_judgments": accepted["candidate_tile_judgments"],
+        "component_sentinels": accepted["candidate_component_sentinels"],
+    }
+    assert len(facts["accepted"]["tile_judgments"]) == 80
+    # The prior scan's own checkpoints judged every tile; only this scan's verdicts are current.
+    assert facts["current"]["judgments"] == checkpoint["healthy_workset"]["evaluated_tile_judgments"]
+    assert [(row["tile_id"], row["assessment_state"]) for row in facts["current"]["judgments"]] == [("M1", "ok")]
 
 
 @_POSTGRES

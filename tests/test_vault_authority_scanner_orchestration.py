@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from copy import deepcopy
 
@@ -159,12 +160,21 @@ def test_authority_scanner_delegates_capture_partition_failure_to_application(mo
 
 def _ledger_facts(scan_id: str) -> dict:
     from tests.test_evidence_vault_evidence_ledger import BRAND, _SHIPPING, _about, _about_pair, _promise_row
+    from tests.test_evidence_vault_tile_rescan_rule import _PROMISE_PAIR, _accepted_vector, _judgment
 
     prior, current = _about_pair(_about(_SHIPPING))
+    judgments, sentinels = _accepted_vector({"M1", "P1"})
+    verdicts = [_judgment("V1", "ok", _PROMISE_PAIR, component="vision")]
     return {
         "domain": BRAND,
         "prior": {"scan_id": "prior-scan", "snapshot": prior, "evidence_rows": [_promise_row()], "evaluations": []},
-        "current": {"scan_id": scan_id, "snapshot": current, "evidence_rows": [], "evaluations": []},
+        "current": {"scan_id": scan_id, "snapshot": current, "evidence_rows": [], "evaluations": [], "judgments": verdicts},
+        "accepted": {
+            "candidate_id": "accepted-candidate",
+            "source_scan_id": "prior-scan",
+            "tile_judgments": judgments,
+            "component_sentinels": sentinels,
+        },
     }
 
 
@@ -246,6 +256,11 @@ def _ledger_logs(caplog) -> list[logging.LogRecord]:
     return [record for record in caplog.records if record.name == "web.scan_runner" and record.getMessage().startswith("vault evidence ledger shadow")]
 
 
+def _shadow_logs(caplog) -> list[logging.LogRecord]:
+    prefixes = ("vault evidence ledger shadow", "vault tile rescan shadow")
+    return [record for record in caplog.records if record.name == "web.scan_runner" and record.getMessage().startswith(prefixes)]
+
+
 def _timeless(events: list[dict]) -> list[dict]:
     return [{key: value for key, value in event.items() if key not in {"observed_at", "duration_ms"}} for event in events]
 
@@ -322,6 +337,74 @@ def test_failing_evidence_ledger_shadow_leaves_the_scan_dossier_unchanged(monkey
     assert dossier["conditions"] == baseline["conditions"]
     assert _timeless(dossier["events"]) == _timeless(baseline["events"])
     assert on_saved == off_saved
+
+
+@pytest.mark.parametrize("case", ("projected", "projection_failure", "accepted_vector_unavailable"))
+def test_tile_rescan_shadow_logs_one_json_warning_after_the_append_and_leaves_the_scan_unchanged(
+    monkeypatch, caplog, case
+) -> None:
+    from src.services import evidence_vault_tile_rescan_rule as rule
+
+    caplog.set_level(logging.INFO, logger="web.scan_runner")
+    scan_id, prefix = "scan-rescan", "vault tile rescan shadow "
+    flag_off, flag_on = _LedgerRepository(scan_id, "appended"), _LedgerRepository(scan_id, "appended")
+    if case == "accepted_vector_unavailable":
+        for repository in (flag_off, flag_on):
+            repository.facts["accepted"]["tile_judgments"] = repository.facts["accepted"]["tile_judgments"][:-1]
+    if case == "projection_failure":
+
+        def fail(*_args, **_kwargs):
+            raise RuntimeError("projection unavailable")
+
+        monkeypatch.setattr(rule, "project_rescan", fail)
+    off_status, off_saved = _run_ledger_scan(monkeypatch, flag_off, scan_id, enabled=False)
+    on_status, on_saved = _run_ledger_scan(monkeypatch, flag_on, scan_id, enabled=True)
+
+    assert [row["state"] for row in flag_on.appended] == ["verified_absent"]
+    records = _shadow_logs(caplog)
+    completed = ("INFO", "vault evidence ledger shadow completed")
+    if case == "projection_failure":
+        assert [(record.levelname, record.getMessage()) for record in records] == [
+            completed,
+            ("WARNING", "vault tile rescan shadow failed RuntimeError"),
+        ]
+    else:
+        # Production has no logging config: only WARNING message text reaches logging.lastResort.
+        first, record = records
+        assert (first.levelname, first.getMessage(), record.levelname) == (*completed, "WARNING")
+        message = record.getMessage()
+        payload = json.loads(message.removeprefix(prefix))
+        line = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        assert message == prefix + line and len(message) < 1024
+        assert line in logging.Formatter("%(message)s").format(record)
+        duration = payload.pop("duration_ms")
+        assert isinstance(duration, (int, float)) and duration >= 0
+        facts = flag_on.facts
+        projection = rule.project_rescan(
+            facts["accepted"]["tile_judgments"],
+            facts["accepted"]["component_sentinels"],
+            flag_on.appended,
+            facts["current"]["judgments"],
+        )
+        scores = ("accepted_score", "would_be_score", "delta", "within_tolerance")
+        assert payload == {
+            "scan_id": scan_id,
+            "prior_scan_id": "prior-scan",
+            "candidate_id": "accepted-candidate",
+            **{key: projection[key] for key in (*scores, "change_signal")},
+            "counts": projection["tile_decisions"]["counts"],
+            "changed": {"light": ["V1"], "turn_off_proven": ["M1", "P1"]} if case == "projected" else {},
+            "reason_codes": projection["tile_decisions"]["reason_codes"],
+        }
+        if case == "projected":
+            assert payload["counts"] == {"keep_unlit": 77, "light": 1, "turn_off_proven": 2}
+        else:
+            assert payload["reason_codes"] == ["accepted_vector_unavailable"]
+            assert [payload[key] for key in scores] == [None] * 4 and payload["change_signal"]["lit_tiles"] == 2
+    baseline, dossier = (scan_runner.scan_diagnostic_dossier_from_status(status) for status in (off_status, on_status))
+    assert dossier["conditions"] == baseline["conditions"]
+    assert _timeless(dossier["events"]) == _timeless(baseline["events"])
+    assert on_saved == off_saved and _ledger_events(on_status) == []
 
 
 def test_retained_v1_result_uses_persisted_terminal_report_alias(monkeypatch) -> None:

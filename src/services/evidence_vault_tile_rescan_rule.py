@@ -73,14 +73,17 @@ def project_rescan(
     ``prior_judgments`` and ``prior_sentinels`` are the accepted candidate's tile
     judgments and not-detected component sentinels; ``current_judgments`` are the
     tile judgments Core gave in the re-scan. An accepted vector the SV9 kernel
-    rejects yields no decisions and no scores.
+    rejects yields no decisions and no scores; it keeps its ``change_signal``
+    unless its rows are too malformed to count, when the signal is None.
     """
 
     sentinels = {str(row["component_key"]) for row in prior_sentinels}
+    signal = None
     try:
+        signal = _change_signal(prior_judgments, ledger_rows)
         accepted_score = _score(prior_judgments, sentinels)
     except (kernel.Sv9AssessmentError, KeyError, TypeError):
-        return _unavailable("accepted_vector_unavailable")
+        return _unavailable("accepted_vector_unavailable", signal)
     accepted = {tile_id: NOT_DETECTED for tile_id, component in _TILES if component in sentinels}
     accepted |= {row["tile_id"]: row["assessment_state"] for row in prior_judgments}
     verdicts = {str(row["tile_id"]): row for row in current_judgments}
@@ -108,7 +111,37 @@ def project_rescan(
         "accepted_score": accepted_score,
         "delta": delta,
         "within_tolerance": abs(delta) <= SCORE_TOLERANCE,
+        "change_signal": signal,
     }
+
+
+def _change_signal(
+    prior_judgments: Sequence[Mapping[str, Any]], ledger_rows: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """How many accepted lit tiles lost every support, kept one seen, or could not be checked.
+
+    A failed capture leaves supports ``not_verified``, so it counts as unverified, never as absent.
+    """
+
+    lit = [row for row in prior_judgments if row["assessment_state"] == OK]
+    summaries = ledger.summarize_tile_support(ledger_rows, lit)
+    states = [{item["state"] for item in row["supporting_evidence"]} for row in summaries]
+    absent = sum(found == {ledger.VERIFIED_ABSENT} for found in states)
+    seen = sum(ledger.SEEN in found for found in states)
+    unverified = len(states) - absent - seen
+    return {
+        "lit_tiles": len(states),
+        "all_absent": absent,
+        "any_seen": seen,
+        "unverified": unverified,
+        "absent_share": _share(absent, len(states)),
+        "seen_share": _share(seen, len(states)),
+        "unverified_share": _share(unverified, len(states)),
+    }
+
+
+def _share(count: int, total: int) -> float | None:
+    return round(count / total, 3) if total else None
 
 
 def _shown_entries(supports: Sequence[Mapping[str, Any]], component: str, by_pair: Mapping[Any, Any]) -> _Shown:
@@ -148,9 +181,9 @@ def _score(rows: Iterable[Mapping[str, Any]], sentinels: Iterable[str]) -> int:
     return kernel.build_sv9_assessment(tiles, blocks or None)["sv9_score"]
 
 
-def _unavailable(reason: str) -> dict[str, Any]:
+def _unavailable(reason: str, signal: dict[str, Any] | None) -> dict[str, Any]:
     scores = dict.fromkeys(("would_be_score", "accepted_score", "delta", "within_tolerance"))
-    return {"tile_decisions": {"reason_codes": [reason], "counts": {}, "tiles": []}, **scores}
+    return {"tile_decisions": {"reason_codes": [reason], "counts": {}, "tiles": []}, **scores, "change_signal": signal}
 
 
 def _verdict_state(verdict: Mapping[str, Any] | None) -> str | None:
