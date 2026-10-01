@@ -87,6 +87,47 @@ def _v2_candidate(base, source_scan, capture, operation):
 
 
 # fmt: off
+_V3 = "evidence-vault-sv9-judgment-candidate-v3"
+_PRIOR_ID = "00000000-0000-0000-0000-000000000009"
+
+
+def _seal(candidate):
+    candidate["complete_record_fingerprint"] = jm.canonical_fingerprint("evidence-vault-sv9-judgment-candidate-record-v3", {key: value for key, value in candidate.items() if key != "complete_record_fingerprint"})
+    return candidate
+
+
+def _v3(rows, sentinels, witness, *, prior=_PRIOR_ID, kind="apply"):
+    series = rows[0]["series_fingerprint"]
+    plan = {"schema_version": "evidence-vault-sv9-tile-rescan-plan-v1", "kind": kind, "prior_candidate_id": prior, "current_series_contract": rows[0]["series_contract"]}
+    assessment = ie._assessment({"current_series_fingerprint": series, "prior_judgments": [], "prior_component_sentinels": []}, set(), {row["tile_id"]: row for row in rows}, {row["component_key"]: row for row in sentinels})[0]
+    candidate = {"schema_version": _V3, "plan": plan, "canonical_plan_fingerprint": jm.canonical_fingerprint("evidence-vault-sv9-tile-rescan-plan-fingerprint-v1", plan), "current_series_fingerprint": series, "candidate_series_fingerprint": ip._candidate(series, [series]), "component_evaluations": [], "evidence_bindings": [], "candidate_tile_judgments": rows, "candidate_component_sentinels": sentinels, "assessment": assessment, "telemetry": dict.fromkeys(("call_count", "calls_avoided", "reused_tile_count", "evaluated_tile_count"), 0), "assessment_fingerprint": assessment["assessment_fingerprint"], "score_fingerprint": assessment["score_fingerprint"], "authoritative_relation_witness": witness}
+    candidate["evaluation_bundle_fingerprint"] = jm.canonical_fingerprint("sv9-judgment-evaluation-bundle-v1", {"canonical_plan_fingerprint": candidate["canonical_plan_fingerprint"], "evaluations": []})
+    candidate["tile_rescan"] = {"kind": kind, "rule_version": "evidence-vault-tile-rescan-rule-v1", "ledger_policy_version": "evidence-vault-evidence-ledger-v1", "prior_candidate_id": prior, "ledger_rows_fingerprint": "e" * 64, "judgments_fingerprint": jm.canonical_fingerprint("evidence-vault-sv9-tile-rescan-judgments-fingerprint-v1", {"candidate_tile_judgments": rows, "candidate_component_sentinels": sentinels}), "decisions": [{"tile_id": tile, "decision": "keep_lit", "reason_codes": ["same_quote"]} for tile, _component in ip._REGISTRY], "change_signal": {"lit_tiles": len(rows)}, "guard": {"within_tolerance": True}}
+    return _seal(candidate)
+
+
+def test_tile_rescan_candidate_envelope_is_exact_and_bound_to_its_selected_vector():
+    from tests.test_evidence_vault_sv9_authoritative_relations import _facts, _project
+    plan = ip.build_incremental_plan([], [], _series()); result = ie.execute_incremental_evaluation(plan, _packets(plan), _Flow())
+    rows, sentinels = result["candidate_tile_judgments"], result["candidate_component_sentinels"]
+    witness = authoritative_relations.build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id="scan-1", projection=_project(_facts())[0])
+    candidate = _v3(rows, sentinels, witness); rescan = candidate["tile_rescan"]; decisions = rescan["decisions"]
+    assert history._sv9_judgment_candidate_envelope(candidate) == candidate
+    held = _seal(candidate | {"tile_rescan": rescan | {"decisions": [decisions[0] | {"decision": "turn_off_proven", "reason_codes": ["held_without_core_verdict"]}, *decisions[1:]]}})
+    assert history._sv9_judgment_candidate_envelope(held) == held
+    tampered = [
+        *(candidate | {"tile_rescan": rescan | {"decisions": [decisions[0] | {"decision": decision}, *decisions[1:]]}} for decision in ("new_quote", "same_quote", "turn_off")),
+        {key: value for key, value in candidate.items() if key != "tile_rescan"}, candidate | {"schema_version": "evidence-vault-sv9-judgment-candidate-v2"}, candidate | {"extra": True}, candidate | {"plan": candidate["plan"] | {"tile_workset": []}},
+        candidate | {"tile_rescan": {key: value for key, value in rescan.items() if key != "guard"}}, candidate | {"tile_rescan": rescan | {"note": ""}}, candidate | {"tile_rescan": rescan | {"kind": "revert"}}, _v3(rows, sentinels, witness, kind="undo"), _v3(rows, sentinels, witness, prior="prior"),
+        candidate | {"tile_rescan": rescan | {"decisions": decisions[1:]}}, candidate | {"tile_rescan": rescan | {"decisions": [decisions[1], decisions[0], *decisions[2:]]}}, candidate | {"tile_rescan": rescan | {"decisions": [decisions[0] | {"note": ""}, *decisions[1:]]}},
+        candidate | {"tile_rescan": rescan | {"guard": {"url": "https://example.com"}}}, candidate | {"tile_rescan": rescan | {"change_signal": {"text": "quoted proof"}}},
+        candidate | {"tile_rescan": rescan | {"judgments_fingerprint": "0" * 64}}, candidate | {"candidate_series_fingerprint": "0" * 64}, candidate | {"telemetry": candidate["telemetry"] | {"call_count": 1}},
+        candidate | {"assessment": candidate["assessment"] | {"sv9_score": candidate["assessment"]["sv9_score"] + 1}},
+    ]
+    for value in tampered:
+        with pytest.raises(history.EvidenceVaultSv9JudgmentCandidateError): history._sv9_judgment_candidate_envelope(_seal(deepcopy(value)))
+
+
 class _AuthorityFlow:
     def __init__(self): self.calls = []
     def evaluate_component(self, request):
@@ -410,6 +451,13 @@ def test_empty_witness_migration_preserves_enforcement_and_binds_all_plan_origin
     assert "= capture_id::text" in sql and "= operation_plan_id::text" in sql
 
 
+def test_tile_rescan_migration_admits_v3_candidates_without_new_relations_or_grants():
+    sql = Path("src/history/migrations/040_evidence_vault_sv9_judgment_candidate_tile_rescan.sql").read_text()
+    assert sql.index("ADD CONSTRAINT evidence_vault_sv9_judgment_candidate_tile_rescan_check") < sql.index("VALIDATE CONSTRAINT evidence_vault_sv9_judgment_candidate_tile_rescan_check") < sql.index("DROP CONSTRAINT evidence_vault_sv9_judgment_candidate_payload_witness_check") < sql.index("RENAME CONSTRAINT")
+    assert sql.count(") NOT VALID;") == 2 and "(candidate_payload ? 'tile_rescan') = (schema_version = 'evidence-vault-sv9-judgment-candidate-v3')" in sql
+    assert all(value not in sql for value in ("review_resolution", "GRANT", "CREATE TABLE", "CREATE TRIGGER"))
+
+
 # fmt: off
 @pytest.mark.skipif(not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1", reason="requires disposable PostgreSQL")
 def test_candidate_witness_check_rejects_invalid_payloads_and_row_payload_divergence():
@@ -472,6 +520,13 @@ def test_candidate_witness_check_rejects_invalid_payloads_and_row_payload_diverg
     empty_projection["canonical_plan_fingerprint"] = "b" * 64
     empty_projection["plan"]["delta_projections"] = []
     insert(205, v2_source, v2_scan, empty_projection)
+    rescan = {"kind": "apply", "rule_version": "rule-v1", "ledger_policy_version": "evidence-vault-evidence-ledger-v1", "prior_candidate_id": str(uuid4()), "ledger_rows_fingerprint": "e" * 64, "judgments_fingerprint": "f" * 64, "decisions": [{"tile_id": tile, "decision": "keep_lit", "reason_codes": []} for tile, _component in ip._REGISTRY], "change_signal": {}, "guard": {}}
+    v3 = _seal(deepcopy(v2) | {"schema_version": _V3, "canonical_plan_fingerprint": "c" * 64, "plan": {"kind": "apply"}, "tile_rescan": rescan})
+    insert(206, v2_source, v2_scan, v3)
+    insert(207, v2_source, v2_scan, _seal(deepcopy(empty) | {"schema_version": _V3, "canonical_plan_fingerprint": "d" * 64, "plan": {}, "tile_rescan": rescan}))
+    v3_shapes = [(("kind",), "undo"), (("prior_candidate_id",), "prior"), (("judgments_fingerprint",), number), (("decisions",), rescan["decisions"][1:]), (("decisions", 0), rescan["decisions"][0] | {"note": ""}), (("decisions", 0, "reason_codes"), "same_quote"), (("guard",), []), (("note",), {})]
+    for index, payload in enumerate([v2 | {"tile_rescan": rescan}, {key: value for key, value in v3.items() if key != "tile_rescan"}, *(malformed(v3, ("tile_rescan", *path), value) for path, value in v3_shapes)], 300):
+        rejected(index, v2_source, v2_scan, payload | {"canonical_plan_fingerprint": f"{index:064x}"})
 # fmt: on
 
 
@@ -501,4 +556,75 @@ def test_repository_fences_witnessed_candidate_append_and_invalid_readback(monke
             invalid_scan,
             canonical_plan_fingerprint=invalid["canonical_plan_fingerprint"],
         )
+
+
+def _rescan_inputs(monkeypatch, repository, scan, authority):
+    from src.services.evidence_vault_sv9_evaluation_checkpoint import build_evidence_vault_sv9_evaluation_checkpoint
+    from tests.test_evidence_vault_sv9_evaluation_checkpoint import _progress, _sha
+    accepted, head = authority["accepted_candidate"], authority["current_head"]
+    snapshot = {"state": "accepted_authority", "accepted_candidate_id": accepted["id"], "active_event_id": head["event_id"], "current_head_event_fingerprint": head["event_fingerprint"], "candidate_complete_record_fingerprint": accepted["complete_record_fingerprint"], **{key: accepted[key] for key in ("canonical_plan_fingerprint", "current_series_fingerprint")}}
+    value, lit = project_evidence_vault_sv9_evaluation_input(repository=repository, source_scan_id=scan), {}; assert value["status"] == "available"
+    for tile in ("M1", "M2"):
+        progress = _progress(value, f"{scan}-{tile}", tile_id=tile); [lit[tile]] = progress["evaluated_tile_judgments"]
+        repository.append_evidence_vault_sv9_evaluation_checkpoint(scan, build_evidence_vault_sv9_evaluation_checkpoint(evaluation_input=value, prior_authority_snapshot=snapshot, current_series_fingerprint=lit[tile]["series_fingerprint"], canonical_plan_fingerprint=_sha("checkpoint-plan"), candidate_series_fingerprint=_sha("checkpoint-series"), healthy_tile_ids=[tile], **progress))
+    with monkeypatch.context() as patch:
+        patch.setattr(repository, "append_evidence_vault_sv9_evaluation_checkpoint", lambda _scan, value, **_kwargs: (value, False))
+        witness = _captured_candidate(monkeypatch, repository, scan, _series())[0]["authoritative_relation_witness"]
+    return lit, witness
+
+
+def _select(rows, selected):
+    return [selected if row["tile_id"] == selected["tile_id"] else row for row in rows]
+
+
+def _adopt(repository, scan, candidate_id, predecessor):
+    request = authority_event.build_evidence_vault_sv9_authority_request(action="adopt_candidate", candidate_id=candidate_id, expected_predecessor_event_fingerprint=predecessor, delta_fingerprint=None, source_scan_id=scan)
+    return repository.adopt_evidence_vault_sv9_judgment_candidate(scan, candidate_id, expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash=authority_event.authority_application_idempotency_fingerprint(request))[0]
+
+
+@pytest.mark.skipif(not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1", reason="requires disposable PostgreSQL")
+def test_tile_rescan_candidate_selects_prior_or_checkpoint_rows_and_serves_as_authority(monkeypatch):
+    from uuid import uuid4
+    from tests.test_evidence_vault_evidence_ledger_postgres import _CURRENT, _PRIOR, _adopt_captured_candidate
+    from tests.test_evidence_vault_sv9_review_resolution_runtime import _request
+    repository = _reset_repository(); prior = _operational(repository, _PRIOR); authority = _seed_accepted_sv9_authority(repository, _PRIOR, _series()); accepted = authority["accepted_candidate"]; current = _operational(repository, _CURRENT, prior)
+    lit, witness = _rescan_inputs(monkeypatch, repository, _CURRENT, authority); sentinels, rows = accepted["candidate_component_sentinels"], _select(accepted["candidate_tile_judgments"], lit["M2"])
+    fabricated = _select(rows, jm.build_tile_judgment(**{key: value for key, value in lit["M2"].items() if key not in {"schema_version", "series_fingerprint", "canonical_judgment_fingerprint"}} | {"assessment_state": "no"}))
+    candidate = _v3(rows, sentinels, witness, prior=accepted["id"])
+    wrong_score = _seal(deepcopy(candidate) | {"assessment": candidate["assessment"] | {"sv9_score": candidate["assessment"]["sv9_score"] - 1}})
+    [relation] = witness["authoritative_relations"]
+    assert relation["tile_id"] == "M1" and {key: relation[key] for key in ("evidence_ref", "evidence_fingerprint")} not in lit["M1"]["supporting_evidence"]
+    for invalid in (_v3(fabricated, sentinels, witness, prior=accepted["id"]), wrong_score, _v3(rows, sentinels, witness, prior=str(uuid4())), _v3(_select(rows, lit["M1"]), sentinels, witness, prior=accepted["id"])):
+        with pytest.raises(history.EvidenceVaultSv9JudgmentCandidateError): repository.append_evidence_vault_sv9_judgment_candidate(_CURRENT, invalid)
+    stored, inserted = repository.append_evidence_vault_sv9_judgment_candidate(_CURRENT, candidate)
+    assert inserted and {key: stored[key] for key in candidate} == candidate
+    assert repository.get_evidence_vault_sv9_judgment_candidate(_CURRENT, canonical_plan_fingerprint=candidate["canonical_plan_fingerprint"]) == stored
+    with pytest.raises(history.EvidenceVaultSv9JudgmentCandidateError) as refused:
+        repository.resolve_evidence_vault_sv9_judgment_review(_request(repository.load_evidence_vault_sv9_judgment_context(_CURRENT), stored, decision="reject"))
+    assert "candidate_schema_version" in str(refused.value.__cause__)
+    adopted = _adopt(repository, _CURRENT, stored["id"], authority["current_head"]["event_fingerprint"])
+    assert adopted["current_head"]["event_type"] == "supersede" and adopted["accepted_candidate"] == stored
+    assert repository.get_evidence_vault_sv9_judgment_authority("example.com")["accepted_candidate"] == stored
+    later = _operational(repository, "ledger-later", current); lit, witness = _rescan_inputs(monkeypatch, repository, "ledger-later", adopted)
+    chained = repository.append_evidence_vault_sv9_judgment_candidate("ledger-later", _v3(_select(rows, lit["M2"]), sentinels, witness, prior=stored["id"]))[0]
+    chained_authority = _adopt(repository, "ledger-later", chained["id"], adopted["current_head"]["event_fingerprint"])
+    _operational(repository, "ledger-last", later); last, final = _adopt_captured_candidate(monkeypatch, repository, "ledger-last", chained_authority["current_head"]["event_fingerprint"])
+    assert chained_authority["accepted_candidate"] == chained and final["accepted_candidate"]["id"] == last["id"] and final["current_head"]["sequence"] == 4
+    assert [row["tile_id"] for row in last["authoritative_relation_witness"]["authoritative_relations"]] == [row["tile_id"] for row in accepted["authoritative_relation_witness"]["authoritative_relations"]] != []
+
+
+@pytest.mark.skipif(not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1", reason="requires disposable PostgreSQL")
+def test_tile_rescan_migration_validates_and_reads_back_existing_v1_and_v2_candidates(monkeypatch):
+    import psycopg
+    files, scan = history._migration_files(), "candidate-before-040"
+    assert files[-1][0] == "040_evidence_vault_sv9_judgment_candidate_tile_rescan.sql"
+    with monkeypatch.context() as patch:
+        patch.setattr(history, "_migration_files", lambda: files[:-1])
+        repository = _reset_repository(); _operational(repository, scan)
+        witnessed, legacy = (_captured_candidate(monkeypatch, repository, scan, _series(prompt_version=version))[0] for version in ("v1", "v2"))
+        stored = [repository.append_evidence_vault_sv9_judgment_candidate(scan, value)[0] for value in (witnessed, _legacy(legacy))]
+    assert [row["schema_version"][-2:] for row in stored] == ["v2", "v1"] and repository.migrate() == [files[-1][0]]
+    with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"]) as conn:
+        assert conn.execute("SELECT bool_and(convalidated), count(*) FILTER (WHERE conname IN ('evidence_vault_sv9_judgment_candidates_schema_version_check', 'evidence_vault_sv9_judgment_candidate_payload_witness_check')) FROM pg_constraint WHERE conrelid = 'b3s_history.evidence_vault_sv9_judgment_candidates'::regclass AND contype = 'c'").fetchone() == (True, 2)
+    assert [repository.get_evidence_vault_sv9_judgment_candidate(scan, canonical_plan_fingerprint=row["canonical_plan_fingerprint"]) for row in stored] == stored
 # fmt: on

@@ -31,7 +31,7 @@ from scripts.pr71_vault_database_target import (  # noqa: E402
 
 SCHEMA = "b3s_history"
 MIGRATION_JOURNAL = "schema_migrations"
-EXPECTED_HEAD_VERSION = "039"
+EXPECTED_HEAD_VERSION = "040"
 APPEND_ONLY_JUDGMENT_RELATIONS = frozenset(
     {
         "evidence_vault_evidence_ledger_rows",

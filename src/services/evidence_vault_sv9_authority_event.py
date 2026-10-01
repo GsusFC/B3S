@@ -19,6 +19,12 @@ _EVENT_VERSION_V2 = "evidence-vault-sv9-judgment-authority-event-v2"
 _CANDIDATE_RECORDS = {
     "evidence-vault-sv9-judgment-candidate-v1": "evidence-vault-sv9-judgment-candidate-record-v1",
     "evidence-vault-sv9-judgment-candidate-v2": "evidence-vault-sv9-judgment-candidate-record-v2",
+    "evidence-vault-sv9-judgment-candidate-v3": "evidence-vault-sv9-judgment-candidate-record-v3",
+}
+_CANDIDATE_EXTENSIONS = {
+    "evidence-vault-sv9-judgment-candidate-v1": (),
+    "evidence-vault-sv9-judgment-candidate-v2": ("authoritative_relation_witness",),
+    "evidence-vault-sv9-judgment-candidate-v3": ("authoritative_relation_witness", "tile_rescan"),
 }
 # fmt: off
 _REQUEST_FIELDS_V1 = frozenset("schema_version action candidate_id source_scan_id expected_predecessor_event_fingerprint delta_fingerprint".split())
@@ -171,8 +177,7 @@ def _candidate(value: Mapping[str, Any]) -> dict[str, Any]:
     version = candidate.get("schema_version")
     if version not in _CANDIDATE_RECORDS:
         _fail("candidate schema_version")
-    if version.endswith("v2"):
-        expected.add("authoritative_relation_witness")
+    expected.update(_CANDIDATE_EXTENSIONS[version])
     context, allowed = (
         set(candidate) & _CANDIDATE_CONTEXT,
         expected | {"complete_record_fingerprint"} | _CANDIDATE_CONTEXT,
@@ -191,8 +196,9 @@ def _candidate(value: Mapping[str, Any]) -> dict[str, Any]:
         or any(type(item) is not int or item < 0 for item in telemetry.values())
     ):
         _fail("candidate telemetry")
-    if version.endswith("v2") and not isinstance(candidate["authoritative_relation_witness"], dict):
-        _fail("candidate witness")
+    for name, label in (("authoritative_relation_witness", "witness"), ("tile_rescan", "tile_rescan")):
+        if name in expected and not isinstance(candidate[name], dict):
+            _fail(f"candidate {label}")
     for name in "canonical_plan_fingerprint current_series_fingerprint candidate_series_fingerprint evaluation_bundle_fingerprint assessment_fingerprint score_fingerprint".split():
         _sha(candidate[name], f"candidate {name}")
     for row in candidate["evidence_bindings"]:
@@ -227,9 +233,7 @@ def _candidate(value: Mapping[str, Any]) -> dict[str, Any]:
 
 def candidate_complete_record_fingerprint(candidate: Mapping[str, Any]) -> str:
     candidate = _candidate(candidate)
-    preimage = {name: candidate[name] for name in _CANDIDATE_BASE}
-    if candidate["schema_version"].endswith("v2"):
-        preimage["authoritative_relation_witness"] = candidate["authoritative_relation_witness"]
+    preimage = {name: candidate[name] for name in (*_CANDIDATE_BASE, *_CANDIDATE_EXTENSIONS[candidate["schema_version"]])}
     result = memory.canonical_fingerprint(_CANDIDATE_RECORDS[candidate["schema_version"]], preimage)
     if candidate.get("complete_record_fingerprint") not in {None, result}:
         _fail("candidate complete_record_fingerprint")

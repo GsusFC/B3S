@@ -86,11 +86,12 @@ def _adopt_captured_candidate(monkeypatch, repository, scan, predecessor=None):
     return candidate, authority
 
 
-def test_ledger_migration_is_the_append_only_shadow_head():
+def test_ledger_migration_is_the_append_only_shadow_under_the_tile_rescan_head():
     migrations = dict(history._migration_files())
     sql = migrations[_MIGRATION]
 
-    assert list(migrations)[-1] == _MIGRATION
+    assert list(migrations)[-2:] == [_MIGRATION, "040_evidence_vault_sv9_judgment_candidate_tile_rescan.sql"]
+    assert all(_TABLE not in later for name, later in migrations.items() if name > _MIGRATION)
     assert all(
         value in sql
         for value in (
@@ -110,7 +111,7 @@ def test_ledger_migration_is_the_append_only_shadow_head():
 
 
 def test_runtime_role_grants_the_ledger_append_only_at_the_new_head():
-    assert runtime_role.EXPECTED_HEAD_VERSION == "039"
+    assert runtime_role.EXPECTED_HEAD_VERSION == "040"
     assert "evidence_vault_evidence_ledger_rows" in runtime_role.APPEND_ONLY_JUDGMENT_RELATIONS
 
 
