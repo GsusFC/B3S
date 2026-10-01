@@ -6,6 +6,7 @@ from contextvars import ContextVar
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
+from src.config import BRAND3_VAULT_SV9_CONTINUE_PAST_FAILED_COMPONENT_ENABLED
 from src.history.report_parser import normalize_domain
 from src.services.evidence_memory_identity_v2 import project_evidence_memory_row_identity
 from src.services.evidence_vault_sv9_authoritative_relations import (
@@ -261,6 +262,7 @@ def run_evidence_vault_sv9_authority_evaluation(*, repository: EvidenceVaultSv9A
         flow=flow,
     )
     partial_options = {"complete_capture": True} if complete_capture else {}
+    if BRAND3_VAULT_SV9_CONTINUE_PAST_FAILED_COMPONENT_ENABLED: partial_options["continue_past_failures"] = True
     try: result = evaluation.execute_partial_incremental_evaluation(partition, resolved, flow, lookup_evaluation=lookup, persist_evaluation=persist, **partial_options)
     except Exception as exc: return _outcome("no_new_score", plan, authority_ids, ["repository_failure"], ignored, unmapped, signed_delta=signed, partition=partition, diagnostic_exception=exc)
     if result["status"] != "partial": return _outcome("review_required" if review else "no_new_score", plan, authority_ids, review + [str(result.get("reason_code") or "evaluation_incomplete")], ignored, unmapped, result, signed_delta=signed if review else None, partition=partition)
@@ -1028,6 +1030,7 @@ def _outcome(status: str, plan: Mapping[str, Any] | None = None, authority: Mapp
     output = {"status": status, "reason_codes": list(dict.fromkeys(reasons or [])), "calls_issued": int(values.get("call_count", 0)), "calls_avoided": calls_avoided, "reused_tiles": reused_tiles, "evaluated_tiles": int(values.get("evaluated_tile_count", 0)), "review_tile_count": review_tile_count, "trusted_irrelevant_evidence_count": ignored, "unmapped_evidence_count": unmapped, "accepted_authority": dict(authority) if authority else None, "candidate": None, "signed_delta": dict(signed_delta) if signed_delta is not None else None}
     if status == "review_required" and signed_delta is not None and partition is not None:
         output["workset_partition"] = dict(partition)
+    if values.get("failed_components"): output["failed_components"] = [dict(row) for row in values["failed_components"]]
     if candidate is not None: output["candidate"] = {key: candidate[key] for key in ("id", "canonical_plan_fingerprint", "complete_record_fingerprint", "assessment_fingerprint", "score_fingerprint")} | {"source_scan_id": str(candidate.get("source_scan_id") or source_scan_id or ""), "schema_version": str(candidate["schema_version"])} | ({"authoritative_relation_witness_fingerprint": candidate["authoritative_relation_witness"]["witness_fingerprint"]} if candidate["schema_version"].endswith("v2") else {})
     _emit_outcome_diagnostic(
         status=status,

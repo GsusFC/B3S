@@ -214,6 +214,7 @@ class CoreFlowSv9StrictComponentAdapter:
         self._payload_context = _shared_json_copy(dict(payload_context or {}))
         self._payload_finalizer = payload_finalizer
         self._candidate = None
+        self._prepare_failure: Exception | None = None
         self._debug: dict[str, Any] | None = None
         self._tldr: dict[str, Any] | None = None
         self._signals: dict[str, list[dict[str, Any]]] | None = None
@@ -667,20 +668,29 @@ class CoreFlowSv9StrictComponentAdapter:
     def _prepare(self) -> None:
         if self._candidate is not None:
             return
+        if self._prepare_failure is not None:
+            raise self._prepare_failure
         from src.sv9_flow.orchestrator import build_flow_candidate
         from scripts.sv9_flow_sv9_shadow_eval import _visual_evidence_packet_from_snapshot
 
-        self._initialize_llms()
-        self._visual_evidence_packet = _visual_evidence_packet_from_snapshot(self._snapshot)
-        self._candidate, self._debug = build_flow_candidate(
-            snapshot=self._snapshot,
-            llm=self._interpretation_llm,
-            adjudicator_llm=self._adjudicator_llm,
-            labeling_llm=self._labeling_llm,
-            visual_signature_evidence=self._visual_evidence_packet,
-            gate_authority=self._gate_authority,
-        )
-        self._hydrate_analysis_inputs()
+        try:
+            self._initialize_llms()
+            self._visual_evidence_packet = _visual_evidence_packet_from_snapshot(self._snapshot)
+            self._candidate, self._debug = build_flow_candidate(
+                snapshot=self._snapshot,
+                llm=self._interpretation_llm,
+                adjudicator_llm=self._adjudicator_llm,
+                labeling_llm=self._labeling_llm,
+                visual_signature_evidence=self._visual_evidence_packet,
+                gate_authority=self._gate_authority,
+            )
+            self._hydrate_analysis_inputs()
+        except Exception as exc:
+            # A continued run must neither repeat the Flow model calls of a failed preparation
+            # nor evaluate later components on half-prepared inputs.
+            self._candidate = self._debug = None
+            self._prepare_failure = exc
+            raise
 
     def _hydrate_analysis_inputs(self) -> None:
         if self._candidate is None:

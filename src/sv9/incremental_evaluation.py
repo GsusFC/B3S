@@ -324,27 +324,37 @@ def _partial_packets(partition, values, *, complete_capture=False):
     return plan, workset, packets
 
 
-def _partial_progress(status, reason, workset, judgments, sentinels, calls, call_count):
+def _partial_progress(status, reason, workset, judgments, sentinels, calls, call_count, failed=()):
     return {
         "status": status, "reason_code": reason,
         "evaluated_tile_judgments": [judgments[tile] for tile in sorted(judgments, key=_ORDER.__getitem__)],
         "evaluated_component_sentinels": [sentinels[component] for component in _COMPONENTS if component in sentinels],
         "captured_calls": calls, "call_count": call_count,
         "evaluated_tile_count": len(judgments) + sum(len(_COMPONENT_TILES[component]) for component in sentinels),
+        **({"failed_components": list(failed)} if failed else {}),
     }
 
 
-def _run_components(plan, packets, workset, responder, call_count, coherencia_state, lookup_evaluation=None, persist_evaluation=None, *, structural_status="invalid_input", structural_reason="invalid_input", failure_status="provider_failure", failure_reason="provider_failure"):
-    workset, judgments, sentinels, calls = set(workset), {}, {}, []
+def _run_components(plan, packets, workset, responder, call_count, coherencia_state, lookup_evaluation=None, persist_evaluation=None, *, structural_status="invalid_input", structural_reason="invalid_input", failure_status="provider_failure", failure_reason="provider_failure", continue_past_failures=False):
+    workset, judgments, sentinels, calls, failed, restored = set(workset), {}, {}, [], [], {}
     packets = [packet for packet in packets if packet["component_key"] != "coherencia"] + [packet for packet in packets if packet["component_key"] == "coherencia"]
+    # A continued run restores every checkpoint before any fresh call, so fresh calls reuse the restored Flow context.
+    for index, packet in enumerate(packets if continue_past_failures and lookup_evaluation is not None else ()):
+        if packet["component_key"] == "coherencia": break
+        try: request = _request(plan, packet, [])
+        except Exception: break
+        restored[index] = lookup_evaluation(_canon(request))
     for index, packet in enumerate(packets):
         try:
             if packet["component_key"] == "coherencia" and coherencia_state == "blocked": _fail("blocked coherencia")
+            if packet["component_key"] == "coherencia" and failed:
+                failed.append({"component_key": "coherencia", "reason_code": "upstream_component_failed"})
+                continue
             upstream = _upstream(plan, workset, judgments, sentinels) if packet["component_key"] == "coherencia" else []
             request = _request(plan, packet, upstream)
         except Exception:
             return _partial_progress(structural_status, structural_reason, workset, judgments, sentinels, calls, call_count[0])
-        recovered = lookup_evaluation(_canon(request)) if lookup_evaluation is not None else None
+        recovered = restored[index] if index in restored else lookup_evaluation(_canon(request)) if lookup_evaluation is not None else None
         try:
             raw = recovered
             if raw is None:
@@ -355,17 +365,20 @@ def _run_components(plan, packets, workset, responder, call_count, coherencia_st
             _accept(plan, request, raw, workset, next_judgments, next_sentinels)
             evaluation = _evaluation(raw, True)
         except Exception:
-            return _partial_progress(failure_status, failure_reason, workset, judgments, sentinels, calls, call_count[0])
+            if not continue_past_failures: return _partial_progress(failure_status, failure_reason, workset, judgments, sentinels, calls, call_count[0])
+            failed.append({"component_key": packet["component_key"], "reason_code": "provider_failure"})
+            continue
         produced_judgments = [next_judgments[tile] for tile in sorted(set(next_judgments) - set(judgments), key=_ORDER.__getitem__)]
         produced_sentinel = next((next_sentinels[component] for component in _COMPONENTS if component not in sentinels and component in next_sentinels), None)
         if recovered is None and persist_evaluation is not None:
             persist_evaluation(_canon(request), _canon(evaluation), _canon(produced_judgments), _canon(produced_sentinel))
         judgments, sentinels = next_judgments, next_sentinels
         calls.append({"request": request, "evaluation": evaluation})
+    if failed: return _partial_progress(failure_status, failure_reason, workset, judgments, sentinels, calls, call_count[0], failed)
     return _partial_progress("partial", None, workset, judgments, sentinels, calls, call_count[0])
 
 
-def execute_partial_incremental_evaluation(workset_partition, resolved_evidence, flow, *, lookup_evaluation=None, persist_evaluation=None, complete_capture=False):
+def execute_partial_incremental_evaluation(workset_partition, resolved_evidence, flow, *, lookup_evaluation=None, persist_evaluation=None, complete_capture=False, continue_past_failures=False):
     """Evaluate the validated partition's scoreless healthy workset."""
     calls, workset = [0], []
     try:
@@ -379,10 +392,10 @@ def execute_partial_incremental_evaluation(workset_partition, resolved_evidence,
         calls[0] += 1
         try: return flow.evaluate_component(request)
         except Exception: return ComponentEvaluationOutcome.provider_failure()
-    return _run_components(plan, packets, workset, call, calls, partition["coherencia_dependency"]["state"], lookup_evaluation, persist_evaluation)
+    return _run_components(plan, packets, workset, call, calls, partition["coherencia_dependency"]["state"], lookup_evaluation, persist_evaluation, continue_past_failures=continue_past_failures)
 
 
-def replay_partial_incremental_evaluation(workset_partition, resolved_evidence, captured_calls, evaluation_state="partial", *, complete_capture=False):
+def replay_partial_incremental_evaluation(workset_partition, resolved_evidence, captured_calls, evaluation_state="partial", *, complete_capture=False, failed_components=None):
     """Replay exact strict partial calls without invoking Flow."""
     calls, workset = [0], []
     try:
@@ -403,6 +416,16 @@ def replay_partial_incremental_evaluation(workset_partition, resolved_evidence, 
             _fields(raw, frozenset({"request", "evaluation"}), "captured call")
             if raw["request"] != request: _fail("captured request does not match replay")
             return ComponentEvaluationOutcome.success(raw["evaluation"])
+        if failed_components is not None:
+            if evaluation_state != "provider_failure": _fail("invalid replay state")
+            failed, replayed = {row["component_key"] for row in failed_components}, iter(range(len(captured_calls)))
+            def skip(request, _index):
+                if request["component_key"] not in failed: return call(request, next(replayed))
+                calls[0] += 1
+                return ComponentEvaluationOutcome.provider_failure()
+            result = _run_components(plan, packets, workset, skip, calls, partition["coherencia_dependency"]["state"], structural_status="invalid_replay", structural_reason="invalid_replay", continue_past_failures=True)
+            if result.get("failed_components") != failed_components or next(replayed, None) is not None: _fail("captured calls do not match failed components")
+            return result
         result = _run_components(plan, replay_packets, workset, call, calls, partition["coherencia_dependency"]["state"], structural_status="invalid_replay", structural_reason="invalid_replay", failure_status="invalid_replay", failure_reason="invalid_replay")
         if result["status"] == "invalid_replay": return _partial_progress("invalid_replay", "invalid_replay", workset, {}, {}, [], calls[0])
         if evaluation_state == "provider_failure" and result["status"] == "partial":

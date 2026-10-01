@@ -658,6 +658,14 @@ def test_provider_failure_outcome_uses_partition_telemetry():
     assert outcome["unmapped_evidence_count"] == 0
     assert (outcome["calls_avoided"], outcome["reused_tiles"], outcome["review_tile_count"]) == (8, 69, 0)
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_continue_past_failed_component_flag_keeps_outcome_and_checkpoints_healthy_component(monkeypatch, enabled):
+    monkeypatch.setattr(service, "BRAND3_VAULT_SV9_CONTINUE_PAST_FAILED_COMPONENT_ENABLED", enabled)
+    repo, flow = _Repository(_authority(), (3, 9)), _Flow(fail=1); repo.hint_only, repo.hint_count = True, 6; outcome = _run(repo, flow, current=(3, 9))
+    assert (outcome["status"], outcome["reason_codes"]) == ("review_required", ["unmapped_evidence", "incomplete_review_partition", "provider_failure"])
+    assert [row["component_key"] for row in flow.calls] == (["mission", "vision"] if enabled else ["mission"]) and len(repo.checkpoint_appends) == int(enabled)
+    assert outcome.get("failed_components") == ([{"component_key": "mission", "reason_code": "provider_failure"}] if enabled else None)
+
 def test_resumed_partial_outcome_keeps_partition_telemetry():
     repo = _Repository(_authority(), (3, 9)); repo.hint_only = True
     first = _run(repo, _Flow(fail=2), current=(3, 9)); resumed = _run(repo, _Flow(fail=1), current=(3, 9))
@@ -1426,3 +1434,16 @@ def test_core_strict_quote_binding_failure_exposes_safe_binding_diagnostic(
         "quote_sha256": hashlib.sha256(quote.encode("utf-8")).hexdigest(),
     }
     assert quote not in str(event)
+
+
+@pytest.mark.parametrize("failing", ["flow", "hydration"])
+def test_core_shared_adapter_does_not_repeat_or_continue_failed_flow_preparation(monkeypatch, failing):
+    from src.sv9_flow import orchestrator
+    attempts, evaluated = [], []
+    monkeypatch.setattr(orchestrator, "build_flow_candidate", lambda **_kwargs: attempts.append(1) or ((_ for _ in ()).throw(RuntimeError("flow")) if failing == "flow" else (object(), {})))
+    monkeypatch.setattr(shared_process, "is_core_shared_series_contract", lambda _value: True)
+    adapter = shared_process.CoreFlowSv9StrictComponentAdapter(snapshot={}, source_run_id="run", interpretation_llm_factory=object, adjudicator_llm_factory=object, labeling_llm_factory=object, evaluator_llm_factory=object, reasoning_llm_factory=object, gate_authority="test")
+    adapter._hydrate_analysis_inputs = lambda: (_ for _ in ()).throw(RuntimeError("hydration"))
+    adapter._evaluate_base_component = evaluated.append
+    outcomes = [adapter.evaluate_component({"component_key": component, "current_series_contract": {}, "requested_tiles": []}) for component in ("mission", "vision", "values")]
+    assert [outcome.reason_code for outcome in outcomes] == ["provider_failure"] * 3 and (len(attempts), evaluated) == (1, [])

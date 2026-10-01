@@ -26,7 +26,7 @@ class _Flow:
     def evaluate_component(self, request):
         self.calls.append(request)
         if self.mode == "exception": raise RuntimeError("SECRET_REQUEST SECRET_EVIDENCE SECRET_PROVIDER_RESPONSE")
-        if self.mode == "failure" or (self.mode == "second_failure" and len(self.calls) == 2): return ie.ComponentEvaluationOutcome.provider_failure()
+        if self.mode == "failure" or (self.mode == "second_failure" and len(self.calls) == 2) or (self.mode == "mission_failure" and request["component_key"] == "mission"): return ie.ComponentEvaluationOutcome.provider_failure()
         if self.mode == "mixed": return ie.ComponentEvaluationOutcome({}, "provider_failure")
         if self.mode == "empty": return ie.ComponentEvaluationOutcome()
         rows = [{"tile_id": row["tile_id"], "assessment_state": "ok" if row["evidence"] else "sin_evidencia", "supporting_evidence": [{key: evidence[key] for key in ("evidence_ref", "evidence_fingerprint")} for evidence in row["evidence"]]} for row in request["requested_tiles"]]
@@ -143,7 +143,7 @@ def _partitioned(kind="canonical"):
     if kind == "zero_pending": extras = ("pending",)
     if kind == "sentinel": sin_evidencia = True
     source = _partition_input(extras=extras, hints=hints, sin_evidencia=sin_evidencia)
-    prior = _partition_prior(source, without=("mission",)) if kind in {"canonical", "both", "sentinel"} else None
+    prior = _partition_prior(source, without=("mission", "vision") if kind == "vision" else ("mission",)) if kind in {"canonical", "both", "sentinel", "vision"} else None
     sentinels = [_partition_sentinel(source)] if kind == "sentinel" else ()
     return _build_workset_partition(source, _partition_delta(source, prior=prior, sentinels=sentinels))
 
@@ -231,6 +231,56 @@ def test_partial_executor_detaches_persistence_material_before_coherencia():
     assert flow.calls == expected_flow.calls and result["captured_calls"] == expected["captured_calls"]
     assert result["evaluated_tile_judgments"] == expected["evaluated_tile_judgments"]
     assert result["evaluated_component_sentinels"] == expected["evaluated_component_sentinels"]
+
+
+_FAILED = [{"component_key": "mission", "reason_code": "provider_failure"}, {"component_key": "coherencia", "reason_code": "upstream_component_failed"}]
+
+
+def test_partial_executor_continues_past_failed_component_and_skips_coherencia():
+    workset, flow = _partitioned("vision"), _Flow("mission_failure")
+    stored, persist = _persisted()
+    result = ie.execute_partial_incremental_evaluation(workset, _resolved(workset), flow, persist_evaluation=persist, continue_past_failures=True)
+    assert (result["status"], result["reason_code"], result["failed_components"], result["call_count"]) == ("provider_failure", "provider_failure", _FAILED, 2)
+    assert [row["component_key"] for row in flow.calls] == ["mission", "vision"] and [row[0]["component_key"] for row in stored] == ["vision"]
+    assert [row["evaluation"] for row in result["captured_calls"]] == [stored[0][1]] and result["evaluated_tile_count"] == 5
+
+
+def test_partial_executor_resume_recalls_only_failed_component():
+    workset = _partitioned("vision")
+    stored, persist = _persisted(); ie.execute_partial_incremental_evaluation(workset, _resolved(workset), _Flow("mission_failure"), persist_evaluation=persist, continue_past_failures=True)
+    flow = _Flow("mission_failure"); result = ie.execute_partial_incremental_evaluation(workset, _resolved(workset), flow, lookup_evaluation=_lookup(stored), persist_evaluation=persist, continue_past_failures=True)
+    assert [row["component_key"] for row in flow.calls] == ["mission"] and len(stored) == 1 and (result["failed_components"], result["call_count"]) == (_FAILED, 1)
+
+
+def test_partial_executor_restores_checkpoints_before_fresh_calls():
+    workset, events = _partitioned("vision"), []
+    stored, persist = _persisted(); ie.execute_partial_incremental_evaluation(workset, _resolved(workset), _Flow("mission_failure"), persist_evaluation=persist, continue_past_failures=True)
+    flow, lookup = _Flow("mission_failure"), _lookup(stored); evaluate = flow.evaluate_component
+    flow.evaluate_component = lambda request: events.append(("call", request["component_key"])) or evaluate(request)
+    ie.execute_partial_incremental_evaluation(workset, _resolved(workset), flow, lookup_evaluation=lambda request: events.append(("lookup", request["component_key"])) or lookup(request), continue_past_failures=True)
+    assert events == [("lookup", "mission"), ("lookup", "vision"), ("call", "mission")]
+
+
+def test_partial_executor_continuing_still_stops_at_structural_failure(monkeypatch):
+    workset, flow, build = _partitioned("vision"), _Flow("mission_failure"), ie._request
+    monkeypatch.setattr(ie, "_request", lambda plan, packet, upstream: ie._fail("structural") if packet["component_key"] == "vision" else build(plan, packet, upstream))
+    result = ie.execute_partial_incremental_evaluation(workset, _resolved(workset), flow, continue_past_failures=True)
+    assert (result["status"], result["reason_code"], [row["component_key"] for row in flow.calls]) == ("invalid_input", "invalid_input", ["mission"])
+
+
+def test_partial_replay_skips_failed_components():
+    workset = _partitioned("vision"); result = ie.execute_partial_incremental_evaluation(workset, _resolved(workset), _Flow("mission_failure"), continue_past_failures=True)
+    replay = ie.replay_partial_incremental_evaluation(workset, _resolved(workset), result["captured_calls"], "provider_failure", failed_components=result["failed_components"])
+    assert replay == result
+    assert ie.replay_partial_incremental_evaluation(workset, _resolved(workset), result["captured_calls"], "provider_failure", failed_components=_FAILED[:1])["status"] == "invalid_replay"
+
+
+def test_partial_executor_stops_at_failed_component_by_default():
+    workset, flow = _partitioned("vision"), _Flow("mission_failure")
+    stored, persist = _persisted()
+    result = ie.execute_partial_incremental_evaluation(workset, _resolved(workset), flow, persist_evaluation=persist)
+    assert result == {"status": "provider_failure", "reason_code": "provider_failure", "evaluated_tile_judgments": [], "evaluated_component_sentinels": [], "captured_calls": [], "call_count": 1, "evaluated_tile_count": 0}
+    assert [row["component_key"] for row in flow.calls] == ["mission"] and not stored
 
 
 @pytest.mark.parametrize("mode", ["ok", "not_detected"])
