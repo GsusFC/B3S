@@ -7,6 +7,7 @@ import hashlib
 import json
 from typing import Any, Mapping
 
+from src.config import BRAND3_VAULT_SV9_REQUEST_SCOPED_PROMPT_ENABLED
 from src.sv9 import incremental_evaluation as ie
 from src.sv9 import judgment_memory
 from src.sv9.incremental_flow_adapter import FlowSv9StrictComponentAdapterError
@@ -255,12 +256,18 @@ class CoreFlowSv9StrictComponentAdapter:
             component = str(request["component_key"])
             requested = [str(row["tile_id"]) for row in request["requested_tiles"]]
             full_tiles = list(ie._COMPONENT_TILES[component])
+            scoped = None
             if component == "coherencia":
                 suboperation = "evaluate_coherencia"
                 core = self._evaluate_coherencia()
             else:
                 suboperation = "evaluate_base_component"
-                core = self._evaluate_base_component(component)
+                scoped = self._request_scoped_prompt(component, request)
+                core = (
+                    self._evaluate_base_component(component)
+                    if scoped is None
+                    else self._evaluate_base_component(component, block=scoped[0])
+                )
             if core.status == "not_evaluated":
                 raise FlowSv9StrictComponentAdapterError("Core component evaluation failed")
             if core.status == "not_detected":
@@ -293,16 +300,14 @@ class CoreFlowSv9StrictComponentAdapter:
                 projected,
             )
             suboperation = "actual_evaluation_evidence"
-            actual_sources, admitted_refs = self._actual_evaluation_evidence(
-                component
-            )
+            actual_sources, admitted_refs = self._actual_evaluation_evidence(component) if scoped is None else scoped[1:]
             actual_sources_for_diagnostic = actual_sources
             admitted_refs_for_diagnostic = admitted_refs
             try:
                 from src.sv9.rubric import COMPONENTS
 
                 block_key = COMPONENTS[component].get("tldr_key")
-                block = (self._tldr or {}).get(block_key) if block_key else None
+                block = scoped[0] if scoped is not None else (self._tldr or {}).get(block_key) if block_key else None
                 if isinstance(block, Mapping):
                     evaluation_evidence_refs_for_diagnostic = [
                         str(ref)
@@ -532,9 +537,8 @@ class CoreFlowSv9StrictComponentAdapter:
                 tile_results=[],
             )
         else:
-            actual_sources, admitted_refs = self._actual_evaluation_evidence(
-                component
-            )
+            scoped = self._request_scoped_prompt(component, request)
+            actual_sources, admitted_refs = self._actual_evaluation_evidence(component) if scoped is None else scoped[1:]
             by_tile = {row.tile_id: row for row in projected.tile_profile}
             strict = ie.build_component_evaluation(
                 component_key=component,
@@ -748,14 +752,49 @@ class CoreFlowSv9StrictComponentAdapter:
         self._evaluator_llm = clients["evaluator"]
         self._reasoning_llm = clients["reasoning"]
 
-    def _evaluate_base_component(self, component: str):
+    def _request_scoped_prompt(
+        self, component: str, request: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], list[str], set[str]] | None:
+        """Core's block, literal sources and admitted refs from a re-scan request's own rows.
+
+        The block keeps the Flow block's metadata. Its quotes are the Flow ingress
+        snippet of every requested row, so each row a tile may cite is one Core saw.
+        Only a re-scan has a prior shared analysis for the component; a first
+        evaluation requests the complete capture, so it keeps the Flow block.
+        """
+
+        if (
+            not BRAND3_VAULT_SV9_REQUEST_SCOPED_PROMPT_ENABLED
+            or component == "coherencia"
+            or component not in self._prior_projected_components
+        ):
+            return None
+        from src.sv9.evaluator import _component_literal_sources
+        from src.sv9.rubric import COMPONENTS
+
+        snippets = {
+            str(row["evidence_ref"]): _ingress_snippet(row["content"])
+            for tile in request["requested_tiles"]
+            for row in tile["evidence"]
+            if isinstance(row.get("content"), str) and row["content"].strip()
+        }
+        flow_block = (self._tldr or {}).get(COMPONENTS[component]["tldr_key"])
+        block = (flow_block if isinstance(flow_block, dict) else {}) | {
+            "evidence": list(dict.fromkeys(snippets.values())),
+            "evaluation_evidence_refs": list(snippets),
+        }
+        signals = (self._signals or {}).get(component) or []
+        return block, _component_literal_sources(block, signals), set(snippets)
+
+    def _evaluate_base_component(self, component: str, block: Mapping[str, Any] | None = None):
         from src.sv9.evaluator import evaluate_component
-        from src.sv9.rubric import REASONING_COMPONENTS
+        from src.sv9.rubric import COMPONENTS, REASONING_COMPONENTS
 
         llm = self._reasoning_llm if component in REASONING_COMPONENTS else self._evaluator_llm
+        tldr = self._tldr or {}
         return evaluate_component(
             component,
-            tldr=self._tldr or {},
+            tldr=tldr if block is None else tldr | {COMPONENTS[component]["tldr_key"]: block},
             signals=(self._signals or {}).get(component) or [],
             brand_name=str(self._candidate.evidence_pack.brand_name),
             url=str(self._candidate.evidence_pack.url),
@@ -934,9 +973,15 @@ class CoreFlowSv9StrictComponentAdapter:
                     None,
                 )
                 if match is None:
-                    raise FlowSv9StrictComponentAdapterError(
-                        "Coherencia evidence provenance is unavailable"
-                    )
+                    # A request-scoped prompt showed owner pack snippets in request order.
+                    ref = next((ref for snippet, ref in _ingress_snippet_pairs(owner) if snippet == source), None)
+                    if ref is None:
+                        raise FlowSv9StrictComponentAdapterError(
+                            "Coherencia evidence provenance is unavailable"
+                        )
+                    ordered.append((source, ref, owner))
+                    seen.add(source)
+                    continue
                 ordered.append((*pairs[match], owner))
                 seen.add(source)
                 cursor = match + 1
@@ -1078,8 +1123,6 @@ def _component_provenance_candidates_from_shared_analysis(
         return {}
     try:
         from src.history.report_parser import normalize_domain
-        from src.sv9.flow_ingress import detection_blocks_from_flow_candidate
-        from src.sv9.rubric import COMPONENTS
 
         rows = value["component_provenance"]
         expected_keys = _shared_provenance_component_keys()
@@ -1105,17 +1148,9 @@ def _component_provenance_candidates_from_shared_analysis(
             if component.status == "not_detected":
                 if component_evidence:
                     raise ValueError
-            else:
-                block_key = COMPONENTS[component_key].get("tldr_key")
-                blocks = detection_blocks_from_flow_candidate(owner)
-                raw_block = blocks.get(block_key) if block_key else None
-                block = raw_block if isinstance(raw_block, dict) else {}
-                pairs = _block_literal_source_pairs_for_candidate(
-                    block,
-                    candidate=owner,
-                )
-                if [source for source, _ref in pairs] != component_evidence:
-                    raise ValueError
+            # Exact membership accepts the Flow block and a request-scoped prompt alike.
+            elif not set(component_evidence) <= {source for source, _ref in _ingress_snippet_pairs(owner)}:
+                raise ValueError
             candidates[component_key] = owner
         return candidates
     except FlowSv9StrictComponentAdapterError as exc:
@@ -1143,6 +1178,21 @@ def _flow_candidate_from_shared_analysis(value: Mapping[str, Any] | None) -> Any
         raise FlowSv9StrictComponentAdapterError(
             "prior shared analysis is invalid"
         ) from exc
+
+
+def _ingress_snippet(content: str) -> str:
+    """Flow ingress's prompt text for one evidence content (``_evidence_snippet_pairs``)."""
+
+    from src.sv9.flow_ingress import _MAX_EVIDENCE_CHARS
+
+    return " ".join(content.split())[:_MAX_EVIDENCE_CHARS]
+
+
+def _ingress_snippet_pairs(candidate: Any) -> list[tuple[str, str]]:
+    """Every owner pack record's ingress snippet, stripped like the evidence it is checked against."""
+
+    records = getattr(getattr(candidate, "evidence_pack", None), "evidence", [])
+    return [(snippet, record.ref) for record in records if (snippet := _ingress_snippet(record.content).strip())]
 
 
 def _block_literal_source_pairs_for_candidate(

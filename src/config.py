@@ -291,3 +291,9 @@ BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS = os.environ.get(
     "BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS",
     "false",
 ).strip().lower() == "true"
+# On re-scans only, Vault's Core evaluator shows each base component the request's own
+# rows instead of the Flow block, so a tile can cite whatever Core quoted. A first
+# evaluation keeps the Flow block.
+BRAND3_VAULT_SV9_REQUEST_SCOPED_PROMPT_ENABLED = (
+    os.environ.get("BRAND3_VAULT_SV9_REQUEST_SCOPED_PROMPT_ENABLED", "false") == "true"
+)

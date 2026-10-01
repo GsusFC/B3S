@@ -266,6 +266,23 @@ def test_each_evaluation_carries_the_component_result_core_returned():
     assert pairs == {"s1": [("flow", "s1")], "s2": [("owner flow", "s2 snapshot")]}
 
 
+def test_a_component_core_saw_twice_in_one_scan_keeps_only_what_both_prompts_showed():
+    # A resumed scan with changed inputs re-evaluates mission on another request scope.
+    checkpoints = [
+        {
+            "source_scan_id": "s2",
+            "component_evaluations": [{"component_key": "mission", "status": "evaluated"}],
+            "candidate": "flow",
+            "component_result": {"component": "mission", "evidence": evidence},
+        }
+        for evidence in (["first scope", "both scopes"], ["both scopes", "second scope"])
+    ]
+
+    [row] = measure._scan_evaluations(checkpoints, [])["s2"]
+
+    assert row["component_result"] == {"component": "mission", "evidence": ["both scopes"]}
+
+
 _BRAND_ID, _WORKSPACE_ID, _CANDIDATE_ID = UUID(int=1), UUID(int=2), UUID(int=21)
 
 
