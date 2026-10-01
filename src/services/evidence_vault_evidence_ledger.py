@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 from src.evidence_identity import normalize_evidence_url
 from src.services.evidence_memory_identity_v2 import project_evidence_memory_row_identity
 from src.services.evidence_vault_sv9_support_continuity import MIN_PAGE_SHINGLES, meets_similarity_threshold
-from src.sv9.flow_ingress import detection_blocks_from_flow_candidate, flow_candidate_extra_signals
+from src.sv9.flow_ingress import _MAX_EVIDENCE_CHARS, detection_blocks_from_flow_candidate, flow_candidate_extra_signals
 from src.sv9.rubric import COMPONENTS, PRESENTATION_ORDER
 from src.sv9_flow.contracts import (
     SV9_FLOW_CANDIDATE_VERSION,
@@ -133,9 +133,11 @@ def build_evidence_ledger(
 def build_shown_index(evaluations: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
     """Index, per SV9 component, the evidence Core's prompt showed in one scan.
 
-    Each evaluation is ``{"component_key", "status", "candidate"}`` where the
-    candidate is a stored Flow candidate dict. Components absent from the input
-    were not evaluated in that scan.
+    Each evaluation is ``{"component_key", "status", "candidate", "component_result"}``
+    where the candidate is a stored Flow candidate dict and the component result is
+    Core's stored result, whose ``evidence`` is what its prompt showed. Without a
+    result, the candidate's detection block stands in for it. Components absent
+    from the input were not evaluated in that scan.
     """
 
     index = {key: _unindexed("component_not_evaluated") for key in PRESENTATION_ORDER}
@@ -529,10 +531,13 @@ def _component_entry(key: str, evaluation: Mapping[str, Any]) -> dict[str, Any]:
         return _unindexed("candidate_unavailable")
     contents = {record.ref: " ".join(str(record.content or "").split()) for record in candidate.evidence_pack.evidence}
     tldr_key = COMPONENTS[key]["tldr_key"]
+    block = blocks.get(tldr_key) if tldr_key else None
+    if tldr_key and evaluation.get("component_result") is not None:
+        block = _core_prompt_block(evaluation["component_result"], contents)
     return {
         # Coherencia has no detection block; the evaluator assembles its quotes privately.
         "reason_codes": [] if tldr_key else ["component_evidence_not_indexed"],
-        "snippets": _snippet_refs(blocks.get(tldr_key) if tldr_key else None, contents),
+        "snippets": _snippet_refs(block, contents),
         "signals": {
             ref: contents[ref].casefold()
             for signal in signals
@@ -540,6 +545,17 @@ def _component_entry(key: str, evaluation: Mapping[str, Any]) -> dict[str, Any]:
             if ref in contents
         },
     }
+
+
+def _core_prompt_block(result: Mapping[str, Any], contents: Mapping[str, str]) -> dict[str, Any]:
+    """Core's own prompt evidence, bound to each ref whose Flow ingress snippet it is.
+
+    A ref whose content only starts with a received snippet stays unbound: Core never saw the rest.
+    """
+
+    evidence = list(result["evidence"])
+    refs = [ref for ref, content in contents.items() if content and content[:_MAX_EVIDENCE_CHARS] in evidence]
+    return {"evidence": evidence, "evaluation_evidence_refs": refs}
 
 
 def _snippet_refs(block: Any, contents: Mapping[str, str]) -> dict[str, dict[str, Any]]:

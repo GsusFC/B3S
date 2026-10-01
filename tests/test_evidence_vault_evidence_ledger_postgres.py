@@ -162,6 +162,7 @@ def test_loader_reads_the_latest_accepted_scan_other_than_the_current_one():
         assert [(row["ref"], row["content"]) for row in scan["evidence_rows"]] == [(row["ref"], row["content"]) for row in rows]
         assert scan["snapshot"]["raw_inputs"] and scan["snapshot"]["acquisition_gate"] == {"state": "complete"}
     assert {row["status"] for row in facts["prior"]["evaluations"]} == {"evaluated"}
+    assert all(row["component_result"]["component"] == row["component_key"] for row in facts["prior"]["evaluations"])
     assert facts["current"]["evaluations"] == []
 
 
@@ -196,6 +197,8 @@ def test_loader_reads_the_prior_events_accepted_vector_and_the_current_scans_til
         "component_sentinels": accepted["candidate_component_sentinels"],
     }
     assert len(facts["accepted"]["tile_judgments"]) == 80
+    # A checkpoint stored without the shared process carries neither a Flow candidate nor Core's result.
+    assert [(row["candidate"], row["component_result"]) for row in facts["current"]["evaluations"]] == [(None, None)]
     # The prior scan's own checkpoints judged every tile; only this scan's verdicts are current.
     assert facts["current"]["judgments"] == checkpoint["healthy_workset"]["evaluated_tile_judgments"]
     assert [(row["tile_id"], row["assessment_state"]) for row in facts["current"]["judgments"]] == [("M1", "ok")]
