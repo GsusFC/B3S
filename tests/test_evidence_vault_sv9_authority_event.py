@@ -18,7 +18,8 @@ _U = lambda number: f"00000000-0000-0000-0000-{number:012d}"
 def _candidate(version="v2"):
     value = {"schema_version": f"evidence-vault-sv9-judgment-candidate-{version}", "plan": {}, "canonical_plan_fingerprint": _H(1), "current_series_fingerprint": _H(2), "candidate_series_fingerprint": _H(3), "component_evaluations": [], "evidence_bindings": [], "candidate_tile_judgments": [], "candidate_component_sentinels": [], "assessment": {}, "telemetry": {"call_count": 0, "calls_avoided": 0, "reused_tile_count": 0, "evaluated_tile_count": 0}, "assessment_fingerprint": _H(4), "score_fingerprint": _H(5)}
     value["evaluation_bundle_fingerprint"] = canonical_fingerprint("sv9-judgment-evaluation-bundle-v1", {"canonical_plan_fingerprint": value["canonical_plan_fingerprint"], "evaluations": []})
-    if version == "v2": value["authoritative_relation_witness"] = {}
+    if version != "v1": value["authoritative_relation_witness"] = {}
+    if version == "v3": value["tile_rescan"] = {}
     value["complete_record_fingerprint"] = authority.candidate_complete_record_fingerprint(value)
     return value
 
@@ -47,7 +48,7 @@ def _rehash(event):
 
 
 def test_fingerprints_match_independent_legacy_formulas_and_json_roundtrip():
-    for version in ("v1", "v2"):
+    for version in ("v1", "v2", "v3"):
         candidate = _candidate(version); namespace = f"evidence-vault-sv9-judgment-candidate-record-{version}"
         assert authority.candidate_complete_record_fingerprint(candidate) == canonical_fingerprint(namespace, {key: value for key, value in candidate.items() if key != "complete_record_fingerprint"})
         projection = candidate | {"id": _U(1), "source_scan_id": "scan", "created_at": "2026-08-30T00:00:00+00:00"}
@@ -79,8 +80,8 @@ def test_strict_schema_types_and_event_kind_shapes_fail_closed():
     request = _event()["request"]
     for bad in ({key: value for key, value in request.items() if key != "action"}, request | {"unknown": 1}, request | {"candidate_id": True}, request | {"source_scan_id": " scan"}):
         with pytest.raises(authority.EvidenceVaultSv9AuthorityEventError): authority.authority_application_idempotency_fingerprint(bad)
-    candidate = _candidate()
-    for bad in ({key: value for key, value in candidate.items() if key != "assessment"}, candidate | {"unknown": 1}, candidate | {"authoritative_relation_witness": []}, candidate | {"complete_record_fingerprint": _H(99)}):
+    candidate, rescan = _candidate(), _candidate("v3")
+    for bad in ({key: value for key, value in candidate.items() if key != "assessment"}, candidate | {"unknown": 1}, candidate | {"authoritative_relation_witness": []}, candidate | {"complete_record_fingerprint": _H(99)}, candidate | {"tile_rescan": {}}, rescan | {"tile_rescan": []}, {key: value for key, value in rescan.items() if key != "tile_rescan"}):
         with pytest.raises(authority.EvidenceVaultSv9AuthorityEventError): authority.candidate_complete_record_fingerprint(bad)
     event = _event("supersede")
     for key, value in (("event_id", "not-a-uuid"), ("current_series_fingerprint", "A" * 64), ("sequence", True), ("sequence", 0)):
