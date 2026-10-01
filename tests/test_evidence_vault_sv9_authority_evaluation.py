@@ -1333,6 +1333,160 @@ def test_facts_row_provenance_keys_leave_evaluation_input_fingerprints_unchanged
     assert after == before
 
 
+def _scoped_record(ref, content):
+    from src.sv9_flow.contracts import EvidenceRecord
+
+    return EvidenceRecord(ref=ref, source="web", evidence_type="raw_input", content=content, url="https://brand.test", metadata={"source_class": "owned_copy"})
+
+
+# A re-scan's shape: Flow shows Core 8 mission refs, while M1 is routed 9 other rows.
+_FLOW_ROWS = [_scoped_record(f"raw_inputs.0.chunk.{index}", f"Flow chunk {index} restates the mission for teams.") for index in range(1, 9)]
+_ROUTED_ROWS = [_scoped_record(f"raw_inputs.1.subpage.{index}.chunk.1", f"Routed proof {index}: we help finance team {index} close the books faster.") for index in range(1, 10)]
+
+
+def _scoped_candidate():
+    from src.sv9_flow.contracts import BrandEvidencePack, BrandInterpretation, Sv9FlowCandidate
+
+    refs = [row.ref for row in _FLOW_ROWS]
+    return Sv9FlowCandidate(
+        evidence_pack=BrandEvidencePack(brand_name="Brand", url="https://brand.test", evidence=[*_FLOW_ROWS, *_ROUTED_ROWS]),
+        interpretation=BrandInterpretation(brand_name="Brand", url="https://brand.test", blocks={"mission": {"detected": True, "content": "Help finance teams close faster.", "confidence": "high", "rationale": "The site says so."}}, evidence_refs={"mission": refs}),
+        evaluation_evidence_refs={"mission": refs},
+        evaluation_evidence_version="sv9-flow-evaluation-evidence-refs-v1",
+    )
+
+
+class _QuotingLLM:
+    """Fake evaluator: M1 is lit by the first quote its prompt shows, M2 is "no"."""
+
+    api_key, model, base_url = "fake", "fake-evaluator", ""
+
+    def _call_json(self, _system, user, **_kwargs):
+        quote = user.split("CITAS DE EVIDENCIA:\n- ", 1)[1].split("\n", 1)[0]
+        return {"message": "Lectura breve.", "baldosas": [{"id": tile, "estado": "ok", "evidencia": quote} if tile == "M1" else {"id": tile, "estado": "no" if tile == "M2" else "sin_evidencia", "motivo": "Sin prueba."} for tile in evaluation._COMPONENT_TILES["mission"]]}
+
+
+def _scoped_adapter(monkeypatch, enabled, rescan=True):
+    from src.sv9.aggregator import score_from_tile_profile
+    from src.sv9.models import ComponentResult, TileVerdict
+    from src.sv9_flow import orchestrator
+
+    monkeypatch.setattr(shared_process, "BRAND3_VAULT_SV9_REQUEST_SCOPED_PROMPT_ENABLED", enabled)
+    monkeypatch.setattr(orchestrator, "build_flow_candidate", lambda **_kwargs: (_scoped_candidate(), {}))
+    adapter = shared_process.CoreFlowSv9StrictComponentAdapter(snapshot={}, source_run_id="scan", interpretation_llm_factory=_QuotingLLM, adjudicator_llm_factory=_QuotingLLM, labeling_llm_factory=_QuotingLLM, evaluator_llm_factory=_QuotingLLM, reasoning_llm_factory=_QuotingLLM, gate_authority="veto_only")
+    if not rescan:
+        return adapter
+    # The re-scan re-evaluates M1 on top of the accepted mission result.
+    profile = [TileVerdict(tile_id=tile, estado="sin_evidencia", motivo="Sin prueba.") for tile in evaluation._COMPONENT_TILES["mission"]]
+    adapter._components = {"mission": ComponentResult(component="mission", status="scored", score=score_from_tile_profile(profile), tile_profile=profile)}
+    adapter._prior_projected_components = adapter._project_source_policy_graph(adapter._components)
+    return adapter
+
+
+def _scoped_series():
+    return shared_process.build_core_shared_series_contract(interpretation_model="interpretation-fake", labeling_model="labeling-fake", adjudicator_model="adjudicator-fake", evaluator_model="evaluator-fake", reasoning_model="reasoning-fake", editorial_model="editorial-fake", gate_authority="veto_only", editorial_enabled=False)
+
+
+def _scoped_request():
+    rows = [{"evidence_ref": row.ref, "evidence_fingerprint": hashlib.sha256(row.content.encode()).hexdigest(), "content": row.content} for row in _ROUTED_ROWS]
+    return {"plan_fingerprint": _hash(301), "candidate_series_fingerprint": _hash(302), "component_key": "mission", "current_series_contract": _scoped_series(), "current_series_fingerprint": _hash(303), "capture_origin": _origin("capture", 304), "operation_origin": _origin("operation", 305), "requested_tiles": [{"tile_id": "M1", "evidence": rows}], "canonical_request_fingerprint": _hash(306)}
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_request_scoped_prompt_binds_rows_the_flow_block_never_showed(monkeypatch, enabled):
+    adapter, request, observed = _scoped_adapter(monkeypatch, enabled), _scoped_request(), []
+    with service.observe_evidence_vault_sv9_authority_evaluation_diagnostics(lambda event, _exc: observed.append(event)):
+        outcome = adapter.evaluate_component(request)
+
+    routed = [row.ref for row in _ROUTED_ROWS]
+    if not enabled:
+        # Main's failure: Core quotes its Flow block, and no requested row is admitted.
+        binding = observed[0]["evidence_binding"]
+        assert outcome.reason_code == "provider_failure" and [event["reason_codes"] for event in observed] == [["evidence_binding_failure"]]
+        assert (binding["requested_evidence_refs"], binding["supplied_evidence_refs"], binding["evaluation_evidence_refs"]) == (routed, [], [row.ref for row in _FLOW_ROWS])
+        return
+    assert observed == [] and outcome.evaluation["tile_results"] == [{"tile_id": "M1", "assessment_state": "ok", "supporting_evidence": [{key: request["requested_tiles"][0]["evidence"][0][key] for key in ("evidence_ref", "evidence_fingerprint")}]}]
+    # Shown is admitted: Core saw all 9 requested rows (no 8-row cap) and nothing else.
+    assert adapter.get_shared_checkpoint_process(request)["component_result"]["evidence"] == [row.content for row in _ROUTED_ROWS]
+
+
+def test_request_scoped_prompt_leaves_a_first_evaluation_on_the_flow_block(monkeypatch):
+    # No prior shared analysis and the complete capture on every tile: a first Core-shared evaluation.
+    capture = sorted(({"evidence_ref": row.ref, "evidence_fingerprint": hashlib.sha256(row.content.encode()).hexdigest(), "content": row.content} for row in [*_FLOW_ROWS, *_ROUTED_ROWS]), key=lambda row: row["evidence_ref"])
+    request, runs = _scoped_request() | {"requested_tiles": [{"tile_id": tile, "evidence": capture} for tile in evaluation._COMPONENT_TILES["mission"]]}, []
+    for enabled in (False, True):
+        first, resumed = (_scoped_adapter(monkeypatch, enabled, rescan=False) for _ in range(2))
+        outcome = first.evaluate_component(request)
+        process = first.get_shared_checkpoint_process(request)
+        resumed.restore_shared_checkpoint_process(request, outcome.evaluation, process)
+        runs.append((outcome, process["component_result"], resumed.get_shared_checkpoint_process(request)["component_result"]))
+
+    assert runs[0][0].evaluation is not None and runs[1] == runs[0]
+
+
+def test_request_scoped_core_evidence_is_what_the_ledger_marks_shown(monkeypatch):
+    from src.services import evidence_vault_evidence_ledger as ledger
+
+    adapter, request = _scoped_adapter(monkeypatch, True), _scoped_request()
+    assert adapter.evaluate_component(request).evaluation is not None
+    process = adapter.get_shared_checkpoint_process(request)
+    index = ledger.build_shown_index([{"component_key": "mission", "status": "evaluated", "candidate": process["flow_context"]["candidate"], "component_result": process["component_result"]}])
+
+    assert [ledger.shown_to_core(row.content, index)["mission"] for row in _ROUTED_ROWS] == [{"status": "shown", "reason_codes": [], "evidence_refs": [row.ref]} for row in _ROUTED_ROWS]
+    assert ledger.shown_to_core(_FLOW_ROWS[0].content, index)["mission"] == {"status": "not_shown", "reason_codes": ["not_in_evaluation_evidence"], "evidence_refs": []}
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_restore_rebuilds_the_prompt_scope_its_checkpoint_was_evaluated_with(monkeypatch, enabled):
+    adapter, request = _scoped_adapter(monkeypatch, True), _scoped_request()
+    accepted = adapter.evaluate_component(request).evaluation
+    process, resumed = adapter.get_shared_checkpoint_process(request), _scoped_adapter(monkeypatch, enabled)
+    assert accepted is not None
+    if enabled:
+        resumed.restore_shared_checkpoint_process(request, accepted, process)
+        assert resumed.get_shared_checkpoint_process(request)["component_result"] == process["component_result"]
+        return
+    # Flipping the flag off mid-scan fails closed instead of re-binding another prompt's quotes.
+    with pytest.raises(shared_process.FlowSv9StrictComponentAdapterError):
+        resumed.restore_shared_checkpoint_process(request, accepted, process)
+
+
+def _shared_analysis_owners(adapter, mission_evidence):
+    from src.sv9.models import ComponentResult
+    from src.sv9.rubric import PRESENTATION_ORDER
+
+    candidate = _scoped_candidate().to_dict()
+    adapter._components = {key: ComponentResult(component=key, status="not_detected") for key in PRESENTATION_ORDER} | {"mission": ComponentResult(component="mission", status="scored", evidence=mission_evidence)}
+    value = {"analysis_payload": {"flow": {"candidate": candidate}}, "component_provenance": {key: candidate for key in PRESENTATION_ORDER if key != "coherencia"}}
+    return shared_process._component_provenance_candidates_from_shared_analysis(value, components=adapter._components)
+
+
+# Requests sort refs as text and group them by tile, so scoped evidence need not follow pack order.
+@pytest.mark.parametrize("rows", [_FLOW_ROWS, _ROUTED_ROWS[::-1]], ids=["flow_block", "request_scoped"])
+def test_shared_analysis_validators_accept_both_prompt_shapes_with_the_flag_off(monkeypatch, rows):
+    # Flow-block evidence is main's shape; request-scoped evidence must survive a rollback.
+    adapter = _scoped_adapter(monkeypatch, False)
+    adapter._component_provenance_candidates = _shared_analysis_owners(adapter, [row.content for row in rows])
+    adapter._prepare()
+
+    sources, admitted = adapter._actual_evaluation_evidence("coherencia")
+
+    assert sources[: len(rows)] == [row.content for row in rows] and {row.ref for row in rows} <= admitted
+
+
+def test_shared_analysis_validator_rejects_a_prefix_of_a_pack_snippet(monkeypatch):
+    with pytest.raises(shared_process.FlowSv9StrictComponentAdapterError):
+        _shared_analysis_owners(_scoped_adapter(monkeypatch, False), [_ROUTED_ROWS[0].content[:14]])
+
+
+def test_request_scoped_prompt_flag_keeps_the_series_fingerprint(monkeypatch):
+    fingerprints = set()
+    for enabled in (False, True):
+        monkeypatch.setattr(shared_process, "BRAND3_VAULT_SV9_REQUEST_SCOPED_PROMPT_ENABLED", enabled)
+        fingerprints.add(memory.canonical_fingerprint("sv9-judgment-series-fingerprint-v1", memory.validate_judgment_series_contract(_scoped_series())))
+    assert len(fingerprints) == 1
+
+
 def test_core_strict_quote_binding_failure_exposes_safe_binding_diagnostic(
     monkeypatch,
 ):

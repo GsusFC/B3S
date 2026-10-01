@@ -347,7 +347,12 @@ def _evidence_by_capture(rows: Iterable[Mapping[str, Any]]) -> dict[Any, list[di
 def _scan_evaluations(
     checkpoints: Iterable[Mapping[str, Any]], snapshots: Iterable[Mapping[str, Any]]
 ) -> dict[str, list[dict[str, Any]]]:
-    """Component evaluations per scan; a complete shared-analysis snapshot overrides checkpoints."""
+    """Component evaluations per scan; a complete shared-analysis snapshot overrides checkpoints.
+
+    A component Core evaluated more than once in a scan keeps only the evidence all of
+    those prompts showed: a resumed scan can re-evaluate it on another request scope,
+    and each tile keeps the verdict of whichever run judged it last.
+    """
 
     by_scan: dict[str, dict[str, dict[str, Any]]] = {}
     for row in checkpoints:
@@ -371,6 +376,13 @@ def _put_evaluation(
     component_result: Any,
 ) -> None:
     key = str(evaluation.get("component_key") or "")
+    previous = by_scan.get(str(scan_id), {}).get(key, {}).get("component_result")
+    if isinstance(previous, Mapping) and isinstance(component_result, Mapping):
+        shown = previous.get("evidence") or []
+        component_result = {
+            **component_result,
+            "evidence": [item for item in component_result.get("evidence") or [] if item in shown],
+        }
     by_scan.setdefault(str(scan_id), {})[key] = {
         "component_key": key,
         "status": str(evaluation.get("status") or ""),
