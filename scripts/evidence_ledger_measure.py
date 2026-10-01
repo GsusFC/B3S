@@ -81,7 +81,8 @@ _CHECKPOINTS_SQL = """
 SELECT source_scan_id,
        checkpoint_payload #> '{healthy_workset,component_evaluations}' AS component_evaluations,
        checkpoint_payload #> '{healthy_workset,evaluated_tile_judgments}' AS evaluated_tile_judgments,
-       shared_process_payload #> '{flow_context,candidate}' AS candidate
+       shared_process_payload #> '{flow_context,candidate}' AS candidate,
+       shared_process_payload -> 'component_result' AS component_result
 FROM b3s_history.evidence_vault_sv9_evaluation_checkpoints
 WHERE workspace_id = %s AND brand_id = %s AND source_scan_id = ANY(%s)
 ORDER BY created_at, id
@@ -90,6 +91,7 @@ _SNAPSHOTS_SQL = """
 SELECT candidates.source_scan_id,
        candidates.candidate_payload -> 'component_evaluations' AS component_evaluations,
        snapshots.payload -> 'component_provenance' AS component_provenance,
+       snapshots.payload -> 'evaluation_components' AS component_results,
        snapshots.payload #> '{analysis_payload,flow,candidate}' AS flow_candidate
 FROM b3s_history.evidence_vault_sv9_judgment_candidates AS candidates
 JOIN b3s_history.evidence_vault_sv9_shared_analysis_snapshots AS snapshots ON snapshots.candidate_id = candidates.id
@@ -350,23 +352,30 @@ def _scan_evaluations(
     by_scan: dict[str, dict[str, dict[str, Any]]] = {}
     for row in checkpoints:
         for evaluation in _mappings(row["component_evaluations"]):
-            _put_evaluation(by_scan, row["source_scan_id"], evaluation, row["candidate"])
+            _put_evaluation(by_scan, row["source_scan_id"], evaluation, row["candidate"], row["component_result"])
     for row in snapshots:
         provenance = row["component_provenance"] if isinstance(row["component_provenance"], Mapping) else {}
+        results = row["component_results"] if isinstance(row["component_results"], Mapping) else {}
         for evaluation in _mappings(row["component_evaluations"]):
-            candidate = provenance.get(str(evaluation.get("component_key") or "")) or row["flow_candidate"]
-            _put_evaluation(by_scan, row["source_scan_id"], evaluation, candidate)
+            key = str(evaluation.get("component_key") or "")
+            candidate = provenance.get(key) or row["flow_candidate"]
+            _put_evaluation(by_scan, row["source_scan_id"], evaluation, candidate, results.get(key))
     return {scan_id: list(components.values()) for scan_id, components in by_scan.items()}
 
 
 def _put_evaluation(
-    by_scan: dict[str, dict[str, dict[str, Any]]], scan_id: Any, evaluation: Mapping[str, Any], candidate: Any
+    by_scan: dict[str, dict[str, dict[str, Any]]],
+    scan_id: Any,
+    evaluation: Mapping[str, Any],
+    candidate: Any,
+    component_result: Any,
 ) -> None:
     key = str(evaluation.get("component_key") or "")
     by_scan.setdefault(str(scan_id), {})[key] = {
         "component_key": key,
         "status": str(evaluation.get("status") or ""),
         "candidate": candidate,
+        "component_result": component_result,
     }
 
 

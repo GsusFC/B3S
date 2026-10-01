@@ -1,8 +1,10 @@
+from dataclasses import replace
 import hashlib
 
 import pytest
 
 from src.services import evidence_vault_evidence_ledger as ledger
+from src.sv9.flow_ingress import detection_blocks_from_flow_candidate
 from src.sv9_flow.contracts import (
     BrandEvidencePack,
     BrandInterpretation,
@@ -427,13 +429,13 @@ _SIGNAL = EvidenceRecord(
 )
 
 
-def _mission_candidate():
+def _mission_candidate(*extra):
     refs = [_LONG.ref] + [_chunk(index).ref for index in range(1, 10)]
     return Sv9FlowCandidate(
         evidence_pack=BrandEvidencePack(
             brand_name="Acme",
             url=HOME,
-            evidence=[_LONG, _SIGNAL, *(_chunk(index) for index in range(1, 10))],
+            evidence=[_LONG, _SIGNAL, *(_chunk(index) for index in range(1, 10)), *extra],
         ),
         interpretation=BrandInterpretation(
             brand_name="Acme",
@@ -460,14 +462,30 @@ def _mission_candidate():
         ],
         evaluation_evidence_refs={"mission": refs},
         evaluation_evidence_version="sv9-flow-evaluation-evidence-refs-v1",
-    ).to_dict()
+    )
 
 
 def _mission_index():
     return ledger.build_shown_index(
         [
-            {"component_key": "mission", "status": "evaluated", "candidate": _mission_candidate()},
-            {"component_key": "values", "status": "not_detected", "candidate": _mission_candidate()},
+            {"component_key": "mission", "status": "evaluated", "candidate": _mission_candidate().to_dict()},
+            {"component_key": "values", "status": "not_detected", "candidate": _mission_candidate().to_dict()},
+        ]
+    )
+
+
+def _core_index(evidence):
+    """Mission and Coherencia indexed from stored Core results that received ``evidence``."""
+
+    return ledger.build_shown_index(
+        [
+            {
+                "component_key": key,
+                "status": "evaluated",
+                "candidate": _mission_candidate().to_dict(),
+                "component_result": {"component": key, "evidence": list(evidence)},
+            }
+            for key in ("mission", "coherencia")
         ]
     )
 
@@ -486,6 +504,41 @@ def test_shown_to_core_follows_the_core_prompt_snippets(fragment, status, reason
     shown = ledger.shown_to_core(fragment, _mission_index())
 
     assert shown["mission"] == {"status": status, "reason_codes": reasons, "evidence_refs": refs}
+
+
+@pytest.mark.parametrize(
+    ("evidence", "fragment", "status", "reasons", "refs"),
+    [
+        # Chunk 9 is outside the Flow block's eight refs; chunk 2 is inside them.
+        ([_chunk(9).content], _chunk(9).content, "shown", [], ["raw_inputs.0.chunk.9"]),
+        ([_chunk(9).content], _chunk(2).content, "not_shown", ["not_in_evaluation_evidence"], []),
+        ([], _chunk(2).content, "not_shown", ["not_in_evaluation_evidence"], []),
+    ],
+)
+def test_shown_to_core_follows_the_evidence_core_received(evidence, fragment, status, reasons, refs):
+    shown = ledger.shown_to_core(fragment, _core_index(evidence))
+
+    assert shown["mission"] == {"status": status, "reason_codes": reasons, "evidence_refs": refs}
+    assert shown["coherencia"] == {
+        "status": "not_shown",
+        "reason_codes": ["component_evidence_not_indexed"],
+        "evidence_refs": [],
+    }
+
+
+def test_core_evidence_of_todays_shape_keeps_the_flow_block_index():
+    # Today Core receives the Flow block's snippets; Coherencia and not-detected results carry none.
+    # A pack record that only starts with a received snippet must stay unindexed, as it is today.
+    longer = replace(_chunk(2), ref="raw_inputs.8", content=f"{_chunk(2).content} then copy Core never read")
+    candidate = _mission_candidate(longer)
+    evidence = {"mission": detection_blocks_from_flow_candidate(candidate)["mission"]["evidence"]}
+    flow = [
+        {"component_key": key, "status": status, "candidate": candidate.to_dict()}
+        for key, status in (("mission", "evaluated"), ("coherencia", "evaluated"), ("values", "not_detected"))
+    ]
+    core = [{**row, "component_result": {"evidence": evidence.get(row["component_key"], [])}} for row in flow]
+
+    assert ledger.build_shown_index(core) == ledger.build_shown_index(flow)
 
 
 def test_components_without_a_core_prompt_are_not_shown():

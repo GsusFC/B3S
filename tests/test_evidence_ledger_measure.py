@@ -246,6 +246,26 @@ def test_verified_absent_in_a_likely_unchanged_pair_is_a_false_absence_candidate
     assert report["summary"]["false_verified_absent_candidate_count"] == len(expected)
 
 
+def test_each_evaluation_carries_the_component_result_core_returned():
+    evaluation = {"component_key": "mission", "status": "evaluated"}
+    checkpoints = [
+        {"source_scan_id": scan, "component_evaluations": [evaluation], "candidate": "flow", "component_result": scan}
+        for scan in ("s1", "s2")
+    ]
+    snapshot = {
+        "source_scan_id": "s2",
+        "component_evaluations": [evaluation],
+        "component_provenance": {"mission": "owner flow"},
+        "component_results": {"mission": "s2 snapshot"},
+        "flow_candidate": "flow",
+    }
+
+    evaluations = measure._scan_evaluations(checkpoints, [snapshot])
+
+    pairs = {scan: [(row["candidate"], row["component_result"]) for row in rows] for scan, rows in evaluations.items()}
+    assert pairs == {"s1": [("flow", "s1")], "s2": [("owner flow", "s2 snapshot")]}
+
+
 _BRAND_ID, _WORKSPACE_ID, _CANDIDATE_ID = UUID(int=1), UUID(int=2), UUID(int=21)
 
 
@@ -302,6 +322,8 @@ def _tables(prior, current, home_row):
                 "component_evaluations": [{"component_key": "mission", "status": "evaluated"}],
                 "evaluated_tile_judgments": [_judgment("M1", "no", home_pair)],
                 "candidate": _mission_candidate(home_row["content"]),
+                # Today's shape: Core received the Flow block's snippet of the home row.
+                "component_result": {"component": "mission", "evidence": [home_row["content"]]},
             }
         ],
         "evidence_vault_sv9_judgment_authority_events": [{"event_type": "adopt", "candidate_id": _CANDIDATE_ID}],
@@ -345,6 +367,10 @@ def test_main_reads_through_the_guard_and_prints_one_json_report():
     # The fake connection ignores column lists, so pin the JSON paths a typo would silently read as NULL.
     checkpoint_sql = next(sql for sql in connection.executed if "evaluation_checkpoints" in sql)
     assert "#> '{healthy_workset,evaluated_tile_judgments}'" in checkpoint_sql
+    assert "shared_process_payload -> 'component_result'" in checkpoint_sql
+    assert "snapshots.payload -> 'evaluation_components'" in next(
+        sql for sql in connection.executed if "shared_analysis_snapshots" in sql
+    )
     assert "-> 'candidate_component_sentinels'" in connection.executed[candidate_query]
     assert report["read_only"]["statements_blocked"] == 0
     assert report["read_only"]["transaction_read_only"] == "on"
