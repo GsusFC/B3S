@@ -227,6 +227,9 @@ class CoreFlowSv9StrictComponentAdapter:
                 components=self._components,
             )
         )
+        # The accepted base of a merged payload: evaluation and restore overwrite the two above.
+        self._accepted_components = dict(self._components)
+        self._accepted_provenance_candidates = dict(self._component_provenance_candidates)
         self._prior_projected_components = self._project_source_policy_graph(
             self._components
         )
@@ -369,18 +372,8 @@ class CoreFlowSv9StrictComponentAdapter:
         """Build the same complete Core payload before candidate persistence."""
 
         self._prepare()
-        from scripts.sv9_flow_sv9_shadow_eval import (
-            SV9_FLOW_SV9_SHADOW_EVAL_VERSION,
-            _compact_interpretation_debug,
-            _detected_blocks,
-            _result_summary,
-        )
         from src.sv9.rubric import COMPONENTS
         from src.sv9.service import _aggregate_sv9_analysis
-        from src.sv9.flow_ingress import (
-            detection_blocks_from_flow_candidate,
-            flow_candidate_extra_signals,
-        )
 
         if set(self._components) != set(COMPONENTS):
             raise FlowSv9StrictComponentAdapterError(
@@ -399,6 +392,110 @@ class CoreFlowSv9StrictComponentAdapter:
             raise FlowSv9StrictComponentAdapterError(
                 "Core and Vault assessments do not match"
             )
+        return self._render_shared_analysis_payload(
+            result,
+            self._component_provenance_candidates,
+            self._components,
+        )
+
+    def build_merged_shared_analysis_payload(
+        self,
+        *,
+        assessment: Mapping[str, Any],
+        current_components: Mapping[str, Any],
+        tile_source_map: Mapping[str, str],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Build a Core payload from accepted and current tile checkpoints."""
+
+        self._prepare()
+        from src.sv9.rubric import COMPONENTS
+        from src.sv9.service import _aggregate_sv9_analysis
+
+        all_tiles = {
+            tile
+            for component in COMPONENTS
+            for tile in ie._COMPONENT_TILES[component]
+        }
+        if (
+            not isinstance(tile_source_map, Mapping)
+            or set(tile_source_map) != all_tiles
+            or any(source not in {"accepted", "current"} for source in tile_source_map.values())
+        ):
+            raise FlowSv9StrictComponentAdapterError(
+                "shared tile source map is invalid"
+            )
+        if not isinstance(current_components, Mapping) or not set(current_components) <= set(COMPONENTS):
+            raise FlowSv9StrictComponentAdapterError(
+                "current shared components are invalid"
+            )
+        current = {}
+        for component, value in current_components.items():
+            raw = value.to_dict() if callable(getattr(value, "to_dict", None)) else value
+            current[component] = _component_from_shared_analysis_row(component, raw)
+
+        merged: dict[str, Any] = {}
+        provenance = dict(self._accepted_provenance_candidates)
+        provenance_keys = _shared_provenance_component_keys()
+        for component in COMPONENTS:
+            full = list(ie._COMPONENT_TILES[component])
+            requested = [tile for tile in full if tile_source_map[tile] == "current"]
+            prior = self._accepted_components.get(component)
+            if not requested:
+                if prior is None:
+                    raise FlowSv9StrictComponentAdapterError(
+                        "accepted shared components are incomplete"
+                    )
+                merged[component] = copy.deepcopy(prior)
+                continue
+            core = current.get(component)
+            if core is None:
+                raise FlowSv9StrictComponentAdapterError(
+                    "current shared component is unavailable"
+                )
+            if core.status == "not_detected":
+                if requested != full:
+                    raise FlowSv9StrictComponentAdapterError(
+                        "not-detected shared component is incomplete"
+                    )
+                merged[component] = copy.deepcopy(core)
+            else:
+                merged[component] = self._merge_component(
+                    component, requested, core, self._accepted_components
+                )
+            if component in provenance_keys:
+                provenance[component] = self._candidate
+
+        result = _aggregate_sv9_analysis(
+            copy.deepcopy(merged),
+            brand_name=str(self._candidate.evidence_pack.brand_name),
+            url=str(self._candidate.evidence_pack.url),
+            source_run_id=self._source_run_id,
+            evaluator_llm=self._evaluator_llm,
+        )
+        computed = _assessment_output_from_scanner_envelope(result.assessment)
+        if computed != dict(assessment):
+            raise FlowSv9StrictComponentAdapterError(
+                "Core and Vault assessments do not match"
+            )
+        return self._render_shared_analysis_payload(result, provenance, merged), computed
+
+    def _render_shared_analysis_payload(
+        self,
+        result: Any,
+        provenance: Mapping[str, Any],
+        components: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        from scripts.sv9_flow_sv9_shadow_eval import (
+            SV9_FLOW_SV9_SHADOW_EVAL_VERSION,
+            _compact_interpretation_debug,
+            _detected_blocks,
+            _result_summary,
+        )
+        from src.sv9.flow_ingress import (
+            detection_blocks_from_flow_candidate,
+            flow_candidate_extra_signals,
+        )
+
         payload: dict[str, Any] = {
             "schema_version": SV9_FLOW_SV9_SHADOW_EVAL_VERSION,
             "source_run_id": self._source_run_id,
@@ -432,10 +529,10 @@ class CoreFlowSv9StrictComponentAdapter:
                 "analysis_payload": payload,
                 "evaluation_components": {
                     key: value.to_dict()
-                    for key, value in sorted(self._components.items())
+                    for key, value in sorted(components.items())
                 },
                 "component_provenance": {
-                    key: self._component_provenance_candidates[key].to_dict()
+                    key: provenance[key].to_dict()
                     for key in _shared_provenance_component_keys()
                 },
             }
@@ -819,7 +916,13 @@ class CoreFlowSv9StrictComponentAdapter:
             llm=self._reasoning_llm,
         )
 
-    def _merge_component(self, component: str, requested: list[str], core: Any):
+    def _merge_component(
+        self,
+        component: str,
+        requested: list[str],
+        core: Any,
+        base: Mapping[str, Any] | None = None,
+    ):
         from src.sv9.aggregator import score_from_tile_profile
         from src.sv9.models import ComponentResult
 
@@ -829,7 +932,7 @@ class CoreFlowSv9StrictComponentAdapter:
             raise FlowSv9StrictComponentAdapterError("Core tile profile is incomplete")
         if requested == full:
             return core
-        prior = self._components.get(component)
+        prior = (self._components if base is None else base).get(component)
         prior_rows = {
             row.tile_id: row for row in getattr(prior, "tile_profile", [])
         }
