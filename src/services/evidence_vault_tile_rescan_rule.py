@@ -21,6 +21,8 @@ from src.sv9 import assessment_kernel as kernel
 KEEP_LIT, TURN_OFF_CORE_NO, TURN_OFF_PROVEN = "keep_lit", "turn_off_core_no", "turn_off_proven"
 B3S_FAILURE, LIGHT, KEEP_UNLIT = "b3s_failure", "light", "keep_unlit"
 OK, SIN_EVIDENCIA, NOT_DETECTED = "ok", "sin_evidencia", "not_detected"
+# A re-scan candidate records the rule that decided its tiles: bump it whenever a decision changes.
+RULE_VERSION = "evidence-vault-tile-rescan-rule-v1"
 # The owner's acceptance criterion: a re-scan of an unchanged brand stays within 4 SV9 points.
 SCORE_TOLERANCE = 4
 # Reviewed and reused tiles get no verdict in a re-scan, so Core's "no" can only reach evaluated tiles.

@@ -614,6 +614,24 @@ def test_tile_rescan_candidate_selects_prior_or_checkpoint_rows_and_serves_as_au
 
 
 @pytest.mark.skipif(not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1", reason="requires disposable PostgreSQL")
+def test_tile_rescan_apply_builds_a_v3_the_repository_appends_and_adopts(monkeypatch):
+    from src.services.evidence_vault_tile_rescan_apply import build_tile_rescan_candidate
+    from tests.test_evidence_vault_evidence_ledger_postgres import _CURRENT, _PRIOR
+    from tests.test_evidence_vault_tile_rescan_apply import _ledger
+    repository = _reset_repository(); prior = _operational(repository, _PRIOR); authority = _seed_accepted_sv9_authority(repository, _PRIOR, _series()); accepted = authority["accepted_candidate"]; _operational(repository, _CURRENT, prior)
+    lit, witness = _rescan_inputs(monkeypatch, repository, _CURRENT, authority)
+    outcome = {"status": "review_required", "reason_codes": ["provider_failure"], "accepted_authority": {"accepted_candidate_id": accepted["id"]}}
+    result = build_tile_rescan_candidate(outcome=outcome, accepted_candidate=accepted, ledger_rows=_ledger(accepted), current_judgments=list(lit.values()), witness=witness)
+    rows = {row["tile_id"]: row for row in result["candidate"]["candidate_tile_judgments"]}
+    # Both tiles quote anew; M1's new quote drops its authoritative relation pair, so M1 keeps the accepted row.
+    assert rows["M1"] == next(row for row in accepted["candidate_tile_judgments"] if row["tile_id"] == "M1") and rows["M2"] == lit["M2"]
+    stored, inserted = repository.append_evidence_vault_sv9_judgment_candidate(_CURRENT, result["candidate"])
+    assert inserted and {key: stored[key] for key in result["candidate"]} == result["candidate"]
+    assert repository.get_evidence_vault_sv9_judgment_candidate(_CURRENT, canonical_plan_fingerprint=stored["canonical_plan_fingerprint"]) == stored
+    assert _adopt(repository, _CURRENT, stored["id"], authority["current_head"]["event_fingerprint"])["accepted_candidate"] == stored
+
+
+@pytest.mark.skipif(not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1", reason="requires disposable PostgreSQL")
 def test_tile_rescan_migration_validates_and_reads_back_existing_v1_and_v2_candidates(monkeypatch):
     import psycopg
     files, scan = history._migration_files(), "candidate-before-040"
