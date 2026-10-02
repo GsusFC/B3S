@@ -1,6 +1,8 @@
 # fmt: off
 from copy import deepcopy
 import json
+import logging
+import os
 import pytest
 
 from src.history import repository as history
@@ -12,6 +14,7 @@ from src.services import evidence_vault_sv9_judgment_delta as delta
 from src.services import evidence_vault_sv9_workset_partition as partitioning
 from src.services.evidence_vault_canonical_core import canonical_fingerprint
 from tests.test_evidence_vault_sv9_authority_evaluation import _SCHEME_DRIFT, _DroppingFlow, _Flow, _Repository, _authority, _hash, _identity, _primary_repository, _relation, _series
+from tests.test_evidence_vault_tile_rescan_apply import _ledger
 from tests.test_sv9_judgment_memory import _judgment
 
 def _uuid(number): return f"00000000-0000-0000-0000-{number:012d}"
@@ -1154,3 +1157,123 @@ def test_identity_mismatch_without_a_signed_cause_retains_the_accepted_authority
 
     assert (result["status"], result["evaluation_status"], result["reason_codes"]) == ("authority_retained", "no_new_score", ["coverage_loss"])
     assert repo.mutations == [] and not flow.calls and repo.authority == before
+
+class _MergingFlow(_Flow):
+    _candidate = object()  # The Flow context a re-scan leaves on its adapter once it evaluates or restores a component.
+    def build_merged_shared_analysis_payload(self, **kwargs): self.merged = kwargs; return {"schema_version": "merged"}, kwargs["assessment"]
+
+def _tile_rescan(monkeypatch, *, enabled=True, domains=("example.test",)):
+    """An accepted authority whose next scan (_rescan) asks for review because M1's accepted support is gone."""
+    monkeypatch.setattr(application, "BRAND3_VAULT_TILE_RESCAN_APPLY_ENABLED", enabled); monkeypatch.setattr(application, "BRAND3_VAULT_TILE_RESCAN_APPLY_DOMAINS", domains)
+    repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"
+    accepted, repo.ledger_loads = repo.authority["accepted_candidate"]["id"], []
+    def facts(_domain, *, source_scan_id, workspace_slug): repo.ledger_loads.append(source_scan_id); return {"domain": "example.test", "prior": {"snapshot": {}, "evidence_rows": []}, "current": {"snapshot": {}, "evidence_rows": [], "evaluations": [], "judgments": []}, "accepted": {"candidate_id": accepted}}
+    repo.load_evidence_ledger_scan_facts = facts
+    return repo
+
+def _rescan(repo, flow=None): return _run(repo, flow or _Flow(), current=(3,), relations=[_relation(repo, "M1", number=3)], source="scan-2")
+
+def _rescan_logs(caplog):
+    lines = [(record.levelno, record.getMessage()) for record in caplog.records if record.getMessage().startswith("vault tile rescan ")]
+    return [(level, message.split(" ")[3], json.loads(message.split(" ", 4)[4]), message) for level, message in lines]
+
+@pytest.mark.parametrize(("enabled", "domains"), [(False, ("example.test",)), (True, ("other.test",))], ids=("flag_off", "domain_not_listed"))
+def test_tile_rescan_apply_off_or_unlisted_reopens_exactly_as_main(monkeypatch, caplog, enabled, domains):
+    baseline = _ApplicationRepository(records=(9,)); _run(baseline, _Flow()); expected = _rescan(baseline)
+    repo = _tile_rescan(monkeypatch, enabled=enabled, domains=domains); result = _rescan(repo)
+    assert result == expected and (result["status"], repo.mutations) == ("review_required", ["adopt", "reopen"]) and repo.authority == baseline.authority
+    assert repo.authority_calls == baseline.authority_calls and not repo.ledger_loads and not _rescan_logs(caplog)
+
+def test_tile_rescan_guard_keeps_the_review_and_logs_its_shares(monkeypatch, caplog):
+    repo = _tile_rescan(monkeypatch)
+    # No ledger row covers M1's accepted support, so the whole lit share is unverified and D1 holds the review.
+    result = _rescan(repo)
+    assert (result["status"], repo.mutations, repo.ledger_loads) == ("review_required", ["adopt", "reopen"], ["scan-2"])
+    [(level, kind, summary, message)] = _rescan_logs(caplog)
+    assert (level, kind, summary["scan_id"], summary["status"], summary["reason_codes"], summary["change_signal"]["unverified_share"]) == (logging.WARNING, "guard", "scan-2", "guarded", ["change_signal_guard"], 1.0)
+    assert message == "vault tile rescan guard " + json.dumps(summary, sort_keys=True, separators=(",", ":"))
+
+@pytest.mark.parametrize(("fault", "status", "reasons"), [
+    ("unavailable", "unavailable", ["authoritative_relation_dropped"]),
+    ("witness_mismatch", "failed", ["witness_mismatch"]),
+    ("conflict", "failed", ["EvidenceVaultSv9JudgmentCandidateConflictError"]),
+    ("builder_exception", "failed", ["RuntimeError"]),
+    ("no_flow_context", "failed", ["no_flow_context"]),
+])
+def test_tile_rescan_failures_keep_the_review_and_log_why(monkeypatch, caplog, fault, status, reasons):
+    repo, flow = _tile_rescan(monkeypatch), _MergingFlow(); accepted = deepcopy(repo.authority["accepted_candidate"])
+    def fail(*_args, **_kwargs): raise (history.EvidenceVaultSv9JudgmentCandidateConflictError("one v3 per scan, prior and series") if fault == "conflict" else RuntimeError("builder failed"))
+    if fault == "unavailable":
+        # Every accepted support is seen, but the re-scan's relation pair for M1 is not in M1's accepted row.
+        monkeypatch.setattr(application, "build_evidence_ledger", lambda **_kwargs: {"rows": _ledger(accepted)})
+    if fault == "witness_mismatch": repo.witness_seed += 1
+    if fault in {"conflict", "no_flow_context"}:
+        candidate = accepted | {"tile_rescan": {"decisions": [{"tile_id": "M1", "decision": "keep_lit", "reason_codes": ["same_quote"]}]}}
+        monkeypatch.setattr(application, "build_tile_rescan_candidate", lambda **_kwargs: {"status": "candidate", "reason_codes": [], "change_signal": None, "candidate": candidate, "ambiguous_tile_ids": []})
+        monkeypatch.setattr(repo, "append_evidence_vault_sv9_judgment_candidate", fail)
+        # A review held before any component ran leaves no Flow context: merging would prepare a new one, with model calls.
+        if fault == "no_flow_context": flow._candidate = None
+    if fault == "builder_exception": monkeypatch.setattr(application, "build_tile_rescan_candidate", fail)
+    result = _rescan(repo, flow)
+    assert (result["status"], result["evaluation_status"], repo.mutations) == ("review_required", "review_required", ["adopt", "reopen"])
+    [(level, kind, summary, _message)] = _rescan_logs(caplog)
+    assert (level, kind, summary["status"], summary["reason_codes"]) == (logging.WARNING, "apply", status, reasons)
+    assert (hasattr(flow, "merged"), summary["candidate_id"]) == (fault == "conflict", None)
+
+@pytest.mark.skipif(not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1", reason="requires disposable PostgreSQL")
+def test_tile_rescan_apply_publishes_a_primary_shaped_rescan_on_the_core_series(monkeypatch, caplog):
+    from src.services.evidence_vault_sv9_authority_report import project_vault_authority_publication
+    from src.sv9 import incremental_evaluation as ie
+    from src.sv9.aggregator import score_from_tile_profile
+    from src.sv9.models import ComponentResult, TileVerdict
+    from tests import test_evidence_vault_sv9_evaluation_checkpoint as checkpoint_tests
+    from tests.test_evidence_vault_evidence_ledger import _snapshot, _web
+    from tests.test_evidence_vault_evidence_ledger_postgres import _CURRENT, _accepted_pair
+    from tests.test_evidence_vault_scan_orchestration_postgres import _reset_repository
+    from tests.test_evidence_vault_sv9_evaluation_checkpoint_postgres import _CheckpointSharedFlow, _shared_series
+    from tests.test_evidence_vault_sv9_judgment_candidates_postgres import _rescan_inputs
+    from tests.test_evidence_vault_sv9_shared_process import _candidate, _core_adapter
+    repository = _reset_repository(); _accepted_pair(repository)
+    authority = repository.get_evidence_vault_sv9_judgment_authority("example.com"); accepted = authority["accepted_candidate"]
+    prior = repository.get_evidence_vault_sv9_shared_analysis(accepted["id"])
+    # Core re-evaluated mission only: every tile ok in its own words, so only the rows tell the sources apart.
+    profile = [TileVerdict(tile_id=tile, estado="ok", evidencia=f"current {tile} evidence", motivo="") for tile in ie._COMPONENT_TILES["mission"]]
+    core = _CheckpointSharedFlow(_CURRENT); core.shared_components = {"mission": ComponentResult(component="mission", status="scored", score=score_from_tile_profile(profile), tile_profile=profile, evaluation_model="test").to_dict()}
+    append = repository.append_evidence_vault_sv9_evaluation_checkpoint
+    def with_shared_process(scan, value, **kwargs):
+        [component], source, plan = value["healthy_workset"]["component_evaluations"], value["evaluation_input"]["source_identity"], value["plan_binding"]
+        request = {"plan_fingerprint": plan["canonical_plan_fingerprint"], "canonical_request_fingerprint": component["request_fingerprint"], "current_series_fingerprint": plan["current_series_fingerprint"], "candidate_series_fingerprint": plan["candidate_series_fingerprint"], "component_key": component["component_key"], "capture_origin": {key: source[key] for key in ("capture_id", "capture_fingerprint")}, "operation_origin": {"operation_id": source["operation_plan_id"], "operation_fingerprint": source["operation_fingerprint"]}}
+        return append(scan, value, shared_process_payload=core.get_shared_checkpoint_process(request), **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(checkpoint_tests, "_series", _shared_series); patch.setattr(repository, "append_evidence_vault_sv9_evaluation_checkpoint", with_shared_process)
+        lit, _witness = _rescan_inputs(monkeypatch, repository, _CURRENT, authority)
+    # Primary's 50a5c7151c8d: the other components failed, so mission's M1 and M2 are the only fresh quotes.
+    head = authority["current_head"]
+    outcome = {"status": "review_required", "reason_codes": ["coverage_loss", "incomplete_review_partition", "provider_failure", "unmapped_evidence"], "accepted_authority": {"accepted_candidate_id": accepted["id"], "active_event_id": authority["active_authority_event"]["event_id"], "current_head_event_fingerprint": head["event_fingerprint"]}, "candidate": None, "signed_delta": None, "failed_components": [{"component_key": "vision", "reason_code": "provider_failure"}, {"component_key": "coherencia", "reason_code": "upstream_component_failed"}]}
+    monkeypatch.setattr(evaluation_service, "run_evidence_vault_sv9_authority_evaluation", lambda **_kwargs: deepcopy(outcome))
+    load = repository.load_evidence_ledger_scan_facts
+    def visited(*args, **kwargs):
+        # The fixture captures record no visited page: give each the homepage its copy came from, so the ledger can see it.
+        facts = load(*args, **kwargs)
+        for side in ("prior", "current"): facts[side]["snapshot"] = _snapshot(_web(" ".join(row["content"] for row in facts[side]["evidence_rows"]), url="https://example.com"))
+        return facts
+    monkeypatch.setattr(repository, "load_evidence_ledger_scan_facts", visited)
+    monkeypatch.setattr(application, "BRAND3_VAULT_TILE_RESCAN_APPLY_ENABLED", True); monkeypatch.setattr(application, "BRAND3_VAULT_TILE_RESCAN_APPLY_DOMAINS", ("example.com",))
+    # The re-scan's own adapter, with the editorial finalizer Core runs on every payload.
+    flow = _core_adapter(_CURRENT, prior, _candidate("current")); flow._payload_finalizer = lambda payload: payload | {"sv9": payload["sv9"] | {"editorial": {"source": "merged"}}}
+
+    result = application.run_evidence_vault_sv9_authority_application(repository=repository, flow=flow, domain_or_url="https://example.com", source_scan_id=_CURRENT, current_series_contract=_shared_series())
+
+    advanced = repository.get_evidence_vault_sv9_judgment_authority("example.com"); stored = advanced["accepted_candidate"]
+    assert (result["status"], result["evaluation_status"], result["candidate"]["id"]) == ("authority_advanced", "candidate_available", stored["id"])
+    assert (advanced["current_head"]["event_type"], advanced["reopen_review_overlay"], stored["schema_version"], stored["tile_rescan"]["prior_candidate_id"]) == ("supersede", None, "evidence-vault-sv9-judgment-candidate-v3", accepted["id"])
+    rows, accepted_rows = ({row["tile_id"]: row for row in value["candidate_tile_judgments"]} for value in (stored, accepted))
+    # M2's fresh quote replaces the accepted row; M1's new quote drops its relation pair, so M1 keeps the accepted row.
+    assert rows["M2"] == lit["M2"] != accepted_rows["M2"] and rows["M1"] == accepted_rows["M1"] and all(rows[tile] == row for tile, row in accepted_rows.items() if tile != "M2")
+    snapshot = repository.get_evidence_vault_sv9_shared_analysis(stored["id"])
+    mission, accepted_mission = (value["evaluation_components"]["mission"]["tile_profile"] for value in (snapshot, prior))
+    assert mission == [profile[1].to_dict() if row["id"] == "M2" else row for row in accepted_mission] and snapshot["analysis_payload"]["sv9"]["editorial"] == {"source": "merged"}
+    assert project_vault_authority_publication(result, _CURRENT)["action"] == "publish_current"
+    [(level, kind, summary, _message)] = _rescan_logs(caplog)
+    assert (level, kind, summary["status"], summary["candidate_id"], summary["counts"]) == (logging.WARNING, "apply", "applied", stored["id"], {"keep_lit": 80})
+    assert (summary["accepted_score"], summary["score"]) == (accepted["assessment"]["sv9_score"], stored["assessment"]["sv9_score"])
