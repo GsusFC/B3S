@@ -2,21 +2,33 @@
 
 from __future__ import annotations
 
+from collections import Counter
+import json
+import logging
 from typing import Any, Mapping, Protocol, Sequence
 from uuid import UUID
 
+from src.config import BRAND3_VAULT_TILE_RESCAN_APPLY_DOMAINS, BRAND3_VAULT_TILE_RESCAN_APPLY_ENABLED
+from src.history.report_parser import normalize_domain
 from src.services import evidence_vault_sv9_authority_event as authority_event
 from src.services import evidence_vault_sv9_authority_evaluation as evaluation_service
 from src.services import evidence_vault_sv9_judgment_delta as delta
 from src.services import evidence_vault_sv9_workset_partition as partitioning
+from src.services.evidence_vault_evidence_ledger import build_evidence_ledger, build_shown_index
 from src.services.evidence_vault_sv9_authoritative_relations import (
     EvidenceVaultSv9AuthoritativeRelationStaleWitnessError,
     EvidenceVaultSv9AuthoritativeRelationWitnessError,
+    build_evidence_vault_sv9_authoritative_relation_witness,
+    project_evidence_vault_sv9_evaluation_input,
+    validate_evidence_vault_sv9_evaluation_input,
 )
 from src.services.evidence_vault_sv9_authority_projection import (
     validate_persisted_evidence_vault_sv9_authority_projection,
 )
+from src.services.evidence_vault_tile_rescan_apply import build_tile_rescan_candidate
 from src.sv9 import incremental_evaluation as evaluation
+
+_LOG = logging.getLogger(__name__)
 
 
 # fmt: off
@@ -44,7 +56,7 @@ def run_evidence_vault_sv9_authority_application(*, repository: EvidenceVaultSv9
     if status == "candidate_available":
         return _apply_candidate(repository, domain_or_url, source_scan_id, workspace_slug, outcome)
     if status == "review_required":
-        return _apply_review(repository, domain_or_url, source_scan_id, workspace_slug, outcome)
+        return _apply_tile_rescan(repository, flow, domain_or_url, source_scan_id, workspace_slug, outcome) or _apply_review(repository, domain_or_url, source_scan_id, workspace_slug, outcome)
     if status == "no_new_score":
         return _result("authority_conflict", outcome) if any(reason in outcome.get("reason_codes", []) for reason in ("invalid_source_identity", "invalid_input")) else _retain(repository, domain_or_url, source_scan_id, workspace_slug, outcome)
     return _result("authority_conflict", outcome)
@@ -123,6 +135,67 @@ def _apply_review(repository, domain: str, source: str, workspace: str, outcome:
     ):
         return _result("review_required", outcome, authority, signed_delta=signed)
     return _result("authority_conflict", outcome)
+
+def _apply_tile_rescan(repository, flow, domain: str, source: str, workspace: str, outcome: Mapping[str, Any]) -> dict[str, Any] | None:
+    """S4a: an eligible re-scan of a listed brand publishes its v3 candidate; None keeps today's review."""
+    if not BRAND3_VAULT_TILE_RESCAN_APPLY_ENABLED or normalize_domain(domain) not in BRAND3_VAULT_TILE_RESCAN_APPLY_DOMAINS:
+        return None
+    summary: dict[str, Any] = {"scan_id": source, "status": "failed", "reason_codes": [], **dict.fromkeys(("change_signal", "counts", "accepted_score", "score", "candidate_id"))}
+    try:
+        result = _tile_rescan(repository, flow, domain, source, workspace, outcome, summary)
+    except Exception as exc:
+        result = None; summary.update(status="failed", reason_codes=[type(exc).__name__])
+    # WARNING with the JSON in the message: without a logging config, INFO and extra fields never reach the log.
+    _LOG.warning("vault tile rescan %s %s", "guard" if summary["status"] == "guarded" else "apply", json.dumps(summary, sort_keys=True, separators=(",", ":"), default=str))
+    return result
+
+def _tile_rescan(repository, flow, domain: str, source: str, workspace: str, outcome: Mapping[str, Any], summary: dict[str, Any]) -> dict[str, Any] | None:
+    bound = outcome.get("accepted_authority")
+    if not isinstance(bound, Mapping):
+        summary.update(status="ineligible", reason_codes=["no_accepted_authority"]); return None
+    state, authority, details = _read(repository, domain, workspace)
+    held = state == "authority" and (details["candidate"]["id"], details["head"]) == (bound.get("accepted_candidate_id"), bound.get("current_head_event_fingerprint"))
+    facts = repository.load_evidence_ledger_scan_facts(domain, source_scan_id=source, workspace_slug=workspace) if held else None
+    if facts is None or facts["accepted"]["candidate_id"] != details["candidate"]["id"]:
+        summary["reason_codes"] = ["accepted_authority_mismatch"]; return None
+    accepted, witness = authority["accepted_candidate"], _rescan_witness(repository, source, workspace)
+    summary["accepted_score"], prior = accepted["assessment"]["sv9_score"], accepted["authoritative_relation_witness"]
+    # The outcome carries no witness: today's must descend from the accepted one before the builder protects its relations.
+    if witness["operational_witness"] != prior["operational_witness"] or [row["tile_id"] for row in witness["authoritative_relations"]] != [row["tile_id"] for row in prior["authoritative_relations"]]:
+        summary["reason_codes"] = ["witness_mismatch"]; return None
+    current = facts["current"]
+    rows = build_evidence_ledger(brand_domain=facts["domain"], prior_snapshot=facts["prior"]["snapshot"], prior_rows=facts["prior"]["evidence_rows"], current_snapshot=current["snapshot"], current_rows=current["evidence_rows"], shown_index=build_shown_index(current["evaluations"]))["rows"]
+    built = build_tile_rescan_candidate(outcome=outcome, accepted_candidate=accepted, ledger_rows=rows, current_judgments=current["judgments"], witness=witness)
+    candidate = built["candidate"]
+    summary.update(status=built["status"], reason_codes=built["reason_codes"], change_signal=built["change_signal"])
+    if candidate is None:
+        return None
+    summary.update(counts=dict(Counter(row["decision"] for row in candidate["tile_rescan"]["decisions"])), score=candidate["assessment"]["sv9_score"])
+    kept, chosen = ({row["tile_id"]: row for row in value["candidate_tile_judgments"]} for value in (accepted, candidate))
+    # The builder returns decisions, not sources: a tile is current when its row is not the accepted one.
+    sources = {tile: "current" if tile in chosen and chosen[tile] != kept.get(tile) else "accepted" for tile in evaluation._ORDER}
+    fresh = {evaluation._BY_TILE[tile][1] for tile, origin in sources.items() if origin == "current"}
+    components = {row["component_key"]: row["component_result"] for row in current["evaluations"] if row["component_key"] in fresh}
+    # Without the re-scan's Flow context (no component evaluated or restored), merging would prepare a new one with model calls.
+    if getattr(flow, "_candidate", None) is None:
+        summary.update(status="failed", reason_codes=["no_flow_context"]); return None
+    # The adapter that holds this re-scan's Flow context; its payload finalizer runs on the merged payload.
+    snapshot, _assessment = flow.build_merged_shared_analysis_payload(assessment=candidate["assessment"], current_components=components, tile_source_map=sources)
+    stored, inserted = repository.append_evidence_vault_sv9_judgment_candidate(source, candidate, workspace_slug=workspace, shared_analysis_payload=snapshot)
+    summary["candidate_id"] = stored["id"]
+    compact = {key: stored[key] for key in ("id", "source_scan_id", "canonical_plan_fingerprint", "complete_record_fingerprint", "assessment_fingerprint", "score_fingerprint")}
+    result = _apply_candidate(repository, domain, source, workspace, dict(outcome) | {"status": "candidate_available", "reason_codes": [] if inserted else ["candidate_already_present"], "candidate": compact})
+    advanced = result["status"] == "authority_advanced"
+    summary.update(status="applied" if advanced else "failed", reason_codes=[result["status"], *result["reason_codes"]])
+    return result if advanced else None
+
+def _rescan_witness(repository, source: str, workspace: str) -> dict[str, Any]:
+    """The re-scan's authoritative relation witness, built as the evaluation builds a candidate's."""
+    value = validate_evidence_vault_sv9_evaluation_input(project_evidence_vault_sv9_evaluation_input(repository=repository, source_scan_id=source, workspace_slug=workspace), source_scan_id=source, workspace_slug=workspace)
+    origin = value["source_identity"]
+    projection = {"status": "available", "reason_codes": [], "authoritative_relations": value["authoritative_relations"], "operational_witness": value["operational_witness"], "projection_fingerprint": value["relation_projection_fingerprint"], **{key: value[key] for key in ("current_identity_bindings", "authority_continuity", "authority_coverage_loss", "reopen_tile_ids")}}
+    # Operational coverage loss or a reopened tile has no witness: the builder raises, so the review stays.
+    return build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id=source, projection=projection, capture_origin={key: origin[key] for key in ("capture_id", "capture_fingerprint")}, operation_origin={"operation_id": origin["operation_plan_id"], "operation_fingerprint": origin["operation_fingerprint"]})
 
 def _retain(repository, domain: str, source: str, workspace: str, outcome: Mapping[str, Any]) -> dict[str, Any]:
     state, authority, _details = _read(repository, domain, workspace)
