@@ -2,10 +2,13 @@
 
 A lit tile follows what B3S can see against the prior accepted authority. Core's
 current ``ok`` keeps it lit. Core's ``no`` or ``sin_evidencia`` turns it off only
-when an accepted support was seen in the capture and shown to Core. A ledger that proves every
-accepted support gone turns it off with or without a verdict. Any other lit case
+when the ledger proves every accepted support gone, which takes a healthy capture.
+Over an accepted support seen in the capture and shown to Core, that verdict keeps
+the tile lit as a ``doubt`` for a person. Proof gone with no current verdict is a
+``b3s_failure``: Core was not called to look for another quote. Any other lit case
 is a ``b3s_failure`` that keeps the tile's state. An unlit tile lights only on
-Core's ``ok``. Pure: no I/O, and the projection never changes a score.
+Core's ``ok``. ``rescan_signals`` adds log-only call-plan and redesign signals.
+Pure: no I/O, and the projection never changes a score.
 """
 
 from __future__ import annotations
@@ -18,15 +21,20 @@ from src.services import evidence_vault_evidence_ledger as ledger
 from src.sv9 import assessment_kernel as kernel
 
 
+# Rule v1 turned a lit tile off on Core's "no" over shown proof: v2 never emits it, but stored v1 decisions do.
 KEEP_LIT, TURN_OFF_CORE_NO, TURN_OFF_PROVEN = "keep_lit", "turn_off_core_no", "turn_off_proven"
 B3S_FAILURE, LIGHT, KEEP_UNLIT = "b3s_failure", "light", "keep_unlit"
 OK, SIN_EVIDENCIA, NOT_DETECTED = "ok", "sin_evidencia", "not_detected"
 # A re-scan candidate records the rule that decided its tiles: bump it whenever a decision changes.
-RULE_VERSION = "evidence-vault-tile-rescan-rule-v1"
+RULE_VERSION = "evidence-vault-tile-rescan-rule-v2"
 # The owner's acceptance criterion: a re-scan of an unchanged brand stays within 4 SV9 points.
 SCORE_TOLERANCE = 4
 # Reviewed and reused tiles get no verdict in a re-scan, so Core's "no" can only reach evaluated tiles.
 NO_VERDICT = "component_not_evaluated"
+# A Core "no" over proof still there makes a doubt for a person; gone proof without a Core call is B3S's failure.
+DOUBT, CORE_NOT_CALLED = "doubt", "core_not_called"
+# Provisional (rule 12), not calibrated: changing this share of the owned pages in both captures suggests a redesign.
+REDESIGN_CHANGED_SHARE = 0.5
 _VERDICT_STATES = frozenset({OK, "no", SIN_EVIDENCIA})
 _COMPONENTS = kernel.build_sv9_tile_contract_registry()["components"]
 _TILES = tuple((tile["tile_id"], row["component_key"]) for row in _COMPONENTS for tile in row["tiles"])
@@ -54,9 +62,9 @@ def decide_tile(
         return _decision(KEEP_LIT, ["same_quote" if same else "new_quote"])
     seen = [item for item in supports if item["state"] == ledger.SEEN]
     if state is not None and any(_shown(item, shown)["status"] == ledger.SHOWN for item in seen):
-        return _decision(TURN_OFF_CORE_NO, [])
+        return _decision(KEEP_LIT, [DOUBT, "core_no_with_proof_seen"])
     if supports and all(item["state"] == ledger.VERIFIED_ABSENT for item in supports):
-        return _decision(TURN_OFF_PROVEN, missing)
+        return _decision(B3S_FAILURE, [NO_VERDICT, CORE_NOT_CALLED]) if state is None else _decision(TURN_OFF_PROVEN, [])
     if seen and state is None:
         return _decision(KEEP_LIT, [NO_VERDICT, "proof_seen_not_reevaluated"])
     if seen:
@@ -114,6 +122,60 @@ def project_rescan(
         "delta": delta,
         "within_tolerance": abs(delta) <= SCORE_TOLERANCE,
         "change_signal": signal,
+        "doubts": [tile["tile_id"] for tile in tiles if DOUBT in tile["reason_codes"]],
+    }
+
+
+def rescan_signals(
+    *,
+    brand_domain: str,
+    prior_snapshot: Mapping[str, Any],
+    prior_rows: Sequence[Mapping[str, Any]],
+    current_snapshot: Mapping[str, Any],
+    current_rows: Sequence[Mapping[str, Any]],
+    current_evaluations: Iterable[Mapping[str, Any]],
+    prior_judgments: Sequence[Mapping[str, Any]],
+    ledger_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Log-only signals: which components Core would be called on (rule 9) and a suspected redesign (rule 12).
+
+    Snapshots and rows are the two captures as ``build_evidence_ledger`` takes them,
+    ``current_evaluations`` the components Core evaluated in the re-scan and
+    ``prior_judgments`` the accepted tile judgments. Nothing here changes a call or a score.
+    """
+
+    lit = [row for row in prior_judgments if row["assessment_state"] == OK]
+    summaries = ledger.summarize_tile_support(ledger_rows, lit)
+    gone = _registry_order(
+        row["component_key"]
+        for row, summary in zip(lit, summaries)
+        if {item["state"] for item in summary["supporting_evidence"]} == {ledger.VERIFIED_ABSENT}
+    )
+    pages = ledger.compare_owned_pages(prior_snapshot, current_snapshot)
+    changed_or_new = sum(page["change"] == "changed" or (page["in_current"] and not page["in_prior"]) for page in pages)
+    # The ledger's own capture views: its source keys, and the capture health its absence proof requires.
+    prior = ledger._capture_view(prior_snapshot, prior_rows, brand_domain)
+    current = ledger._capture_view(current_snapshot, current_rows, brand_domain)
+    new_external = len(_external_keys(current) - _external_keys(prior))
+    compared = [page for page in pages if page["in_prior"] and page["in_current"]]
+    changed = sum(page["change"] == "changed" for page in compared)
+    healthy = not ledger._capture_reasons(current)
+    return {
+        "core_plan": {
+            "proof_gone_components": gone,
+            "changed_owned_pages": changed_or_new,
+            "new_external_urls": new_external,
+            "content_trigger": changed_or_new > 0 or new_external > 0,
+            # New content is not routed to components yet, so only a gone proof names a call.
+            "would_call": list(gone),
+            "actual_calls": _registry_order(row["component_key"] for row in current_evaluations),
+        },
+        "redesign": {
+            "pages_compared": len(compared),
+            "changed": changed,
+            "changed_share": _share(changed, len(compared)),
+            "suspected": healthy and bool(compared) and changed >= REDESIGN_CHANGED_SHARE * len(compared),
+        },
     }
 
 
@@ -154,7 +216,7 @@ def _shown_entries(supports: Sequence[Mapping[str, Any]], component: str, by_pai
 def _would_be_state(accepted_state: str, decision: str, verdict_state: str | None) -> str:
     if decision in {KEEP_LIT, LIGHT}:
         return OK
-    if decision in {TURN_OFF_CORE_NO, TURN_OFF_PROVEN}:
+    if decision == TURN_OFF_PROVEN:
         return verdict_state or SIN_EVIDENCIA
     return accepted_state
 
@@ -185,7 +247,18 @@ def _score(rows: Iterable[Mapping[str, Any]], sentinels: Iterable[str]) -> int:
 
 def _unavailable(reason: str, signal: dict[str, Any] | None) -> dict[str, Any]:
     scores = dict.fromkeys(("would_be_score", "accepted_score", "delta", "within_tolerance"))
-    return {"tile_decisions": {"reason_codes": [reason], "counts": {}, "tiles": []}, **scores, "change_signal": signal}
+    tile_decisions = {"reason_codes": [reason], "counts": {}, "tiles": []}
+    return {"tile_decisions": tile_decisions, **scores, "change_signal": signal, "doubts": []}
+
+
+def _external_keys(capture: Mapping[str, Any]) -> set[str]:
+    rows = capture["evidence"]
+    return {row["source_key"] for row in rows if row["evidence_class"] == ledger.EXTERNAL_CLASS and row["source_key"]}
+
+
+def _registry_order(components: Iterable[str]) -> list[str]:
+    found = set(components)
+    return [row["component_key"] for row in _COMPONENTS if row["component_key"] in found]
 
 
 def _verdict_state(verdict: Mapping[str, Any] | None) -> str | None:

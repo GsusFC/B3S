@@ -1611,9 +1611,9 @@ def _run_vault_evidence_ledger_shadow(*, scan_id: str, url: str, repository: Any
     """Record, best effort, whether this scan still shows the prior accepted scan's evidence.
 
     Then project, also best effort, what the per-tile re-scan rule would make of the
-    prior's accepted vector. Off unless its flag is set. It only logs: failures are never
-    raised or written to the scan's diagnostic ledger, and nothing here changes the
-    authority result, score or publication.
+    prior's accepted vector, with its call-plan and redesign signals. Off unless its
+    flag is set. It only logs: failures are never raised or written to the scan's
+    diagnostic ledger, and nothing here changes the authority result, score or publication.
     """
     if not _vault_evidence_ledger_shadow_enabled():
         return
@@ -1630,16 +1630,17 @@ def _run_vault_evidence_ledger_shadow(*, scan_id: str, url: str, repository: Any
         inserted = repository.append_evidence_ledger_rows(scan_id, prior_source_scan_id=prior["scan_id"], rows=rows, workspace_slug="b3s")
         _LOG.info("vault evidence ledger shadow completed", extra={"scan_id": scan_id, "prior_scan_id": prior["scan_id"], "row_count": len(rows), "inserted_count": inserted, "state_counts": {state: sum(row["state"] == state for row in rows) for state in (SEEN, VERIFIED_ABSENT, NOT_VERIFIED)}, "duration_ms": max(0, round((time.monotonic() - started) * 1000, 3))})
         try:
-            from src.services.evidence_vault_tile_rescan_rule import KEEP_LIT, KEEP_UNLIT, project_rescan
+            from src.services.evidence_vault_tile_rescan_rule import KEEP_LIT, KEEP_UNLIT, project_rescan, rescan_signals
 
             accepted, projection_started = facts["accepted"], time.monotonic()
             projection = project_rescan(accepted["tile_judgments"], accepted["component_sentinels"], rows, current["judgments"])
+            signals = rescan_signals(brand_domain=facts["domain"], prior_snapshot=prior["snapshot"], prior_rows=prior["evidence_rows"], current_snapshot=current["snapshot"], current_rows=current["evidence_rows"], current_evaluations=current["evaluations"], prior_judgments=accepted["tile_judgments"], ledger_rows=rows)
             duration_ms = max(0, round((time.monotonic() - projection_started) * 1000, 3))
             decisions, changed = projection["tile_decisions"], {}
             for tile in decisions["tiles"]:
                 if tile["decision"] not in {KEEP_LIT, KEEP_UNLIT}:
                     changed.setdefault(tile["decision"], []).append(tile["tile_id"])
-            summary = {"scan_id": scan_id, "prior_scan_id": prior["scan_id"], "candidate_id": accepted["candidate_id"], **{key: projection[key] for key in ("accepted_score", "would_be_score", "delta", "within_tolerance", "change_signal")}, "counts": decisions["counts"], "changed": changed, "reason_codes": decisions["reason_codes"], "duration_ms": duration_ms}
+            summary = {"scan_id": scan_id, "prior_scan_id": prior["scan_id"], "candidate_id": accepted["candidate_id"], **{key: projection[key] for key in ("accepted_score", "would_be_score", "delta", "within_tolerance", "change_signal", "doubts")}, **signals, "counts": decisions["counts"], "changed": changed, "reason_codes": decisions["reason_codes"], "duration_ms": duration_ms}
             # WARNING with the JSON in the message: without a logging config, INFO is dropped and
             # logging.lastResort prints only the message text, never the extra fields.
             _LOG.warning("vault tile rescan shadow %s", json.dumps(summary, sort_keys=True, separators=(",", ":")))

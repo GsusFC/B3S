@@ -27,7 +27,7 @@ ELIGIBLE_REVIEW_REASONS = frozenset(
 MAX_ABSENT_SHARE, MAX_UNVERIFIED_SHARE = 0.30, 0.50
 HELD_WITHOUT_CORE_VERDICT = "held_without_core_verdict"
 HELD_FOR_AUTHORITATIVE_RELATION = "held_for_authoritative_relation"
-_FROM_CHECKPOINT = frozenset({rule.LIGHT, rule.TURN_OFF_CORE_NO, rule.TURN_OFF_PROVEN})
+_FROM_CHECKPOINT = frozenset({rule.LIGHT, rule.TURN_OFF_PROVEN})
 _CANDIDATE_VERSION, _PLAN_VERSION = "evidence-vault-sv9-judgment-candidate-v3", "evidence-vault-sv9-tile-rescan-plan-v1"
 _LEDGER_ROWS_FINGERPRINT = "evidence-vault-sv9-tile-rescan-ledger-rows-fingerprint-v1"
 _TELEMETRY = ("call_count", "calls_avoided", "reused_tile_count", "evaluated_tile_count")
@@ -70,10 +70,10 @@ def build_tile_rescan_candidate(
     rows, decisions, held = {}, [], []
     for tile in tiles:
         tile_id, codes = tile["tile_id"], list(tile["reason_codes"])
+        # A doubt is keep_lit without a new quote: it keeps the accepted row, never Core's "no".
         fresh = tile["decision"] in _FROM_CHECKPOINT or (tile["decision"] == rule.KEEP_LIT and "new_quote" in codes)
-        if tile["decision"] == rule.TURN_OFF_PROVEN and rule.NO_VERDICT in codes:
-            # D2: proven absence with no Core verdict is ambiguous, so the accepted row holds.
-            fresh = False
+        if tile["decision"] == rule.B3S_FAILURE and rule.CORE_NOT_CALLED in codes:
+            # D2: proven absence with no Core verdict is ambiguous; as a b3s_failure it holds the accepted row.
             codes.append(HELD_WITHOUT_CORE_VERDICT)
             held.append(tile_id)
         elif tile["decision"] == rule.KEEP_LIT and fresh and _drops_relation(verdicts[tile_id], relations.get(tile_id)):

@@ -387,17 +387,29 @@ def test_tile_rescan_shadow_logs_one_json_warning_after_the_append_and_leaves_th
             facts["current"]["judgments"],
         )
         scores = ("accepted_score", "would_be_score", "delta", "within_tolerance")
+        # M1 and P1 lost their only proof and Core was not called on them: rule 9 would call their components.
+        gone = ["mission", "value_proposition"]
         assert payload == {
             "scan_id": scan_id,
             "prior_scan_id": "prior-scan",
             "candidate_id": "accepted-candidate",
-            **{key: projection[key] for key in (*scores, "change_signal")},
+            **{key: projection[key] for key in (*scores, "change_signal", "doubts")},
+            "core_plan": {
+                "proof_gone_components": gone,
+                "changed_owned_pages": 0,
+                "new_external_urls": 0,
+                "content_trigger": False,
+                "would_call": gone,
+                "actual_calls": [],
+            },
+            "redesign": {"pages_compared": 2, "changed": 0, "changed_share": 0.0, "suspected": False},
             "counts": projection["tile_decisions"]["counts"],
-            "changed": {"light": ["V1"], "turn_off_proven": ["M1", "P1"]} if case == "projected" else {},
+            "changed": {"b3s_failure": ["M1", "P1"], "light": ["V1"]} if case == "projected" else {},
             "reason_codes": projection["tile_decisions"]["reason_codes"],
         }
+        assert payload["doubts"] == []
         if case == "projected":
-            assert payload["counts"] == {"keep_unlit": 77, "light": 1, "turn_off_proven": 2}
+            assert payload["counts"] == {"b3s_failure": 2, "keep_unlit": 77, "light": 1}
         else:
             assert payload["reason_codes"] == ["accepted_vector_unavailable"]
             assert [payload[key] for key in scores] == [None] * 4 and payload["change_signal"]["lit_tiles"] == 2
