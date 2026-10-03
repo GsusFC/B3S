@@ -160,9 +160,9 @@ _NEW = _pair("new")
         pytest.param("sin_evidencia", "seen", (), ("sin_evidencia",), "keep_unlit", "accepted", id="keep_unlit"),
         pytest.param("ok", "not_verified", (), None, "b3s_failure", "accepted", id="b3s_failure"),
         pytest.param("sin_evidencia", "seen", (), ("ok", _NEW), "light", "checkpoint", id="light"),
-        pytest.param("ok", "seen", ("V1",), ("no", _NEW), "turn_off_core_no", "checkpoint", id="turn_off_core_no"),
+        pytest.param("ok", "seen", ("V1",), ("no", _NEW), "keep_lit", "accepted", id="keep_lit_doubt"),
         pytest.param("ok", "verified_absent", (), ("no", _NEW), "turn_off_proven", "checkpoint", id="turn_off_proven_core_verdict"),
-        pytest.param("ok", "verified_absent", (), None, "turn_off_proven", "held", id="turn_off_proven_no_verdict"),
+        pytest.param("ok", "verified_absent", (), None, "b3s_failure", "held", id="b3s_failure_core_not_called"),
     ],
 )
 def test_each_decision_copies_the_row_its_table_names(accepted_state, ledger_state, shown, verdict, decision, source):
@@ -196,7 +196,7 @@ def test_a_new_quote_keeps_the_accepted_row_only_when_it_drops_the_authoritative
 def test_a_turn_off_that_drops_the_authoritative_relation_is_unavailable():
     accepted = _accepted()
 
-    result = _build(accepted, [_judgment("M1", "no", _NEW, capture=2)], ledger=_ledger(accepted, shown={"M1"}))
+    result = _build(accepted, [_judgment("M1", "no", _NEW, capture=2)], ledger=_ledger(accepted, {"M1": "verified_absent"}))
 
     assert (result["status"], result["reason_codes"], result["candidate"]) == ("unavailable", ["authoritative_relation_dropped"], None)
 

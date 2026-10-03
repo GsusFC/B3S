@@ -4,12 +4,16 @@ from src.services import evidence_vault_tile_rescan_rule as rule
 from src.sv9.rubric import COMPONENTS, PRESENTATION_ORDER
 from tests.test_evidence_vault_evidence_ledger import (
     ABOUT,
+    BRAND,
+    HOME,
+    TEAM,
     _PROMISE,
     _SHIPPING,
     _about,
     _about_pair,
     _fingerprint,
     _ledger,
+    _news,
     _promise_row,
     _row,
     _snapshot,
@@ -78,12 +82,12 @@ def test_ok_verdict_keeps_a_lit_tile_whichever_quote_it_cites(support, cited, re
 
 
 @pytest.mark.parametrize("state", ["no", "sin_evidencia"])
-def test_core_no_over_seen_proof_it_was_shown_turns_a_lit_tile_off(state):
+def test_core_no_over_seen_proof_it_was_shown_keeps_a_lit_tile_as_a_doubt(state):
     verdict = _judgment("M1", state, _pair(_NEW_REF))
 
     decision = _decide("ok", [_support(_SEEN_REF, "seen")], verdict, {_SEEN_REF: _shown("shown")})
 
-    assert decision == {"decision": "turn_off_core_no", "reason_codes": []}
+    assert decision == {"decision": "keep_lit", "reason_codes": ["doubt", "core_no_with_proof_seen"]}
 
 
 @pytest.mark.parametrize(
@@ -99,10 +103,19 @@ def test_core_no_over_seen_proof_it_was_not_shown_is_a_b3s_failure(shown, reason
     assert decision == {"decision": "b3s_failure", "reason_codes": [reason]}
 
 
-def test_lit_tile_whose_supports_are_all_verified_absent_turns_off_without_a_verdict():
+@pytest.mark.parametrize(
+    ("verdict", "decision"),
+    [
+        (None, {"decision": "b3s_failure", "reason_codes": ["component_not_evaluated", "core_not_called"]}),
+        (_judgment("M1", "no", _pair(_NEW_REF)), {"decision": "turn_off_proven", "reason_codes": []}),
+        (_judgment("M1", "sin_evidencia"), {"decision": "turn_off_proven", "reason_codes": []}),
+    ],
+    ids=["no_verdict", "core_no", "core_sin_evidencia"],
+)
+def test_lit_tile_whose_supports_are_all_verified_absent_turns_off_only_on_a_core_verdict(verdict, decision):
     supports = [_support(_SEEN_REF, "verified_absent"), _support(_NEW_REF, "verified_absent")]
 
-    assert _decide("ok", supports) == {"decision": "turn_off_proven", "reason_codes": ["component_not_evaluated"]}
+    assert _decide("ok", supports, verdict) == decision
 
 
 def test_lit_tile_mixing_absent_and_unverified_supports_is_a_b3s_failure():
@@ -149,14 +162,43 @@ def test_projection_that_keeps_every_tile_reproduces_the_accepted_score():
 
 
 @pytest.mark.parametrize(("lit", "delta", "within"), [(4, -4, True), (5, -5, False)])
-def test_proven_absences_move_the_score_against_a_four_point_tolerance(lit, delta, within):
+def test_proven_absences_core_confirms_move_the_score_against_a_four_point_tolerance(lit, delta, within):
     prior, current = _about_pair(_about(_SHIPPING))
     rows = _ledger(prior, [_promise_row()], current)["rows"]
+    tiles = {f"P{index}" for index in range(1, lit + 1)}
+    verdicts = [_judgment(tile, "no", _pair(_NEW_REF), component="value_proposition") for tile in tiles]
 
-    result = rule.project_rescan(*_accepted_vector({f"P{index}" for index in range(1, lit + 1)}), rows, [])
+    result = rule.project_rescan(*_accepted_vector(tiles), rows, verdicts)
 
     assert result["tile_decisions"]["counts"]["turn_off_proven"] == lit
     assert _scores(result) == (lit, 0, delta, within)
+
+
+def test_proven_absences_core_was_not_called_on_keep_their_score_as_b3s_failures():
+    prior, current = _about_pair(_about(_SHIPPING))
+    rows = _ledger(prior, [_promise_row()], current)["rows"]
+
+    result = rule.project_rescan(*_accepted_vector({"P1", "P2"}), rows, [])
+
+    assert result["tile_decisions"]["counts"] == {"b3s_failure": 2, "keep_unlit": 78}
+    assert [_tiles(result)[tile]["would_be_state"] for tile in ("P1", "P2")] == ["ok", "ok"]
+    assert _scores(result) == (2, 2, 0, True)
+
+
+def test_projection_keeps_a_doubt_lit_lists_it_and_keeps_the_score():
+    snapshot = _snapshot(_web(_words(120, "h"), (ABOUT, _about())))
+    rows = _ledger(snapshot, [_promise_row()], snapshot, [_promise_row()])["rows"]
+    rows[0]["shown_to_core"]["mission"] = _shown("shown")
+
+    result = rule.project_rescan(*_accepted_vector({"M1", "MG1"}), rows, [_judgment("M1", "no", _pair(_NEW_REF))])
+
+    m1 = _tiles(result)["M1"]
+    assert (m1["decision"], m1["reason_codes"], m1["would_be_state"]) == (
+        "keep_lit",
+        ["doubt", "core_no_with_proof_seen"],
+        "ok",
+    )
+    assert result["doubts"] == ["M1"] and _scores(result) == (3, 3, 0, True)
 
 
 def test_light_inside_a_not_detected_component_scores_that_component_again():
@@ -191,6 +233,7 @@ def test_projection_is_unavailable_instead_of_scoring_an_incomplete_accepted_vec
             "seen_share": 0.0,
             "unverified_share": 0.0,
         },
+        "doubts": [],
     }
 
 
@@ -258,3 +301,65 @@ def test_change_signal_has_no_shares_without_lit_tiles():
         "seen_share": None,
         "unverified_share": None,
     }
+
+
+def _signals(prior, prior_rows, current, current_rows=(), *, lit=(), evaluated=()):
+    return rule.rescan_signals(
+        brand_domain=BRAND,
+        prior_snapshot=prior,
+        prior_rows=list(prior_rows),
+        current_snapshot=current,
+        current_rows=list(current_rows),
+        current_evaluations=[{"component_key": key, "status": "evaluated"} for key in evaluated],
+        prior_judgments=_accepted_vector(lit)[0],
+        ledger_rows=_ledger(prior, prior_rows, current, current_rows)["rows"],
+    )
+
+
+def test_signals_plan_core_calls_only_where_a_lit_tiles_proof_is_gone():
+    prior, current = _about_pair(_about(_SHIPPING))
+
+    result = _signals(prior, [_promise_row()], current, lit={"M1", "P1"}, evaluated=("magnetism", "mission"))
+
+    assert result == {
+        "core_plan": {
+            "proof_gone_components": ["mission", "value_proposition"],
+            "changed_owned_pages": 0,
+            "new_external_urls": 0,
+            "content_trigger": False,
+            "would_call": ["mission", "value_proposition"],
+            "actual_calls": ["mission", "magnetism"],
+        },
+        "redesign": {"pages_compared": 2, "changed": 0, "changed_share": 0.0, "suspected": False},
+    }
+
+
+def test_signals_count_new_owned_pages_and_new_external_urls_as_content_to_look_at():
+    home, news = _words(120, "h"), _news("raw_inputs.1")
+    prior = _snapshot(_web(home, (ABOUT, _about())))
+    current = _snapshot(_web(home, (ABOUT, _about()), (TEAM, _words(90, "t"))))
+    press = {**_news("raw_inputs.2"), "url": "https://press.example/acme"}
+
+    result = _signals(prior, [_promise_row(), news], current, [_promise_row(), news, press], lit={"M1"})
+
+    plan = result["core_plan"]
+    assert (plan["changed_owned_pages"], plan["new_external_urls"], plan["content_trigger"]) == (1, 1, True)
+    # New content is not routed to components yet, and no lit tile lost its proof.
+    assert (plan["proof_gone_components"], plan["would_call"]) == ([], [])
+
+
+@pytest.mark.parametrize(
+    ("kept", "gate", "redesign"),
+    [
+        (1, "pass", {"pages_compared": 2, "changed": 1, "changed_share": 0.5, "suspected": True}),
+        (2, "pass", {"pages_compared": 3, "changed": 1, "changed_share": 0.333, "suspected": False}),
+        (1, "blocked", {"pages_compared": 2, "changed": 1, "changed_share": 0.5, "suspected": False}),
+    ],
+    ids=["half_changed", "a_third_changed", "unhealthy_capture"],
+)
+def test_signals_suspect_a_redesign_when_half_the_owned_pages_changed_in_a_healthy_capture(kept, gate, redesign):
+    subpages = [(f"{HOME}/page-{index}", _words(90, f"p{index}x")) for index in range(kept)]
+    prior = _snapshot(_web(_words(120, "h"), *subpages))
+    current = _snapshot(_web(_words(120, "x"), *subpages), gate=gate)
+
+    assert _signals(prior, [], current)["redesign"] == redesign
