@@ -1220,6 +1220,23 @@ def test_tile_rescan_failures_keep_the_review_and_log_why(monkeypatch, caplog, f
     assert (level, kind, summary["status"], summary["reason_codes"]) == (logging.WARNING, "apply", status, reasons)
     assert (hasattr(flow, "merged"), summary["candidate_id"]) == (fault == "conflict", None)
 
+def test_tile_rescan_failure_logs_the_step_and_the_error_chain(monkeypatch, caplog):
+    repo, flow = _tile_rescan(monkeypatch), _MergingFlow(); accepted = deepcopy(repo.authority["accepted_candidate"])
+    candidate = accepted | {"tile_rescan": {"decisions": [{"tile_id": "M1", "decision": "keep_lit", "reason_codes": ["same_quote"]}]}}
+    monkeypatch.setattr(application, "build_tile_rescan_candidate", lambda **_kwargs: {"status": "candidate", "reason_codes": [], "change_signal": None, "candidate": candidate, "ambiguous_tile_ids": []})
+    def refuse(*_args, **_kwargs):
+        # Production refused the real append with only this class name in the log; the cause names the failing check.
+        try:
+            raise ValueError("snapshot provenance")
+        except ValueError as exc:
+            raise history.EvidenceVaultSv9JudgmentCandidateError("SV9 judgment candidate is invalid") from exc
+    monkeypatch.setattr(repo, "append_evidence_vault_sv9_judgment_candidate", refuse)
+    result = _rescan(repo, flow)
+    assert (result["status"], repo.mutations) == ("review_required", ["adopt", "reopen"])
+    [(_level, _kind, summary, _message)] = _rescan_logs(caplog)
+    assert (summary["status"], summary["step"], summary["reason_codes"]) == ("failed", "append", ["EvidenceVaultSv9JudgmentCandidateError"])
+    assert summary["error"] == "EvidenceVaultSv9JudgmentCandidateError: SV9 judgment candidate is invalid <- ValueError: snapshot provenance"
+
 @pytest.mark.skipif(not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1", reason="requires disposable PostgreSQL")
 def test_tile_rescan_apply_publishes_a_primary_shaped_rescan_on_the_core_series(monkeypatch, caplog):
     from src.services.evidence_vault_sv9_authority_report import project_vault_authority_publication

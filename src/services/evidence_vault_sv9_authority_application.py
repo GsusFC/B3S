@@ -140,11 +140,11 @@ def _apply_tile_rescan(repository, flow, domain: str, source: str, workspace: st
     """S4a: an eligible re-scan of a listed brand publishes its v3 candidate; None keeps today's review."""
     if not BRAND3_VAULT_TILE_RESCAN_APPLY_ENABLED or normalize_domain(domain) not in BRAND3_VAULT_TILE_RESCAN_APPLY_DOMAINS:
         return None
-    summary: dict[str, Any] = {"scan_id": source, "status": "failed", "reason_codes": [], **dict.fromkeys(("change_signal", "counts", "accepted_score", "score", "candidate_id"))}
+    summary: dict[str, Any] = {"scan_id": source, "status": "failed", "reason_codes": [], **dict.fromkeys(("change_signal", "counts", "accepted_score", "score", "candidate_id", "step", "error"))}
     try:
         result = _tile_rescan(repository, flow, domain, source, workspace, outcome, summary)
     except Exception as exc:
-        result = None; summary.update(status="failed", reason_codes=[type(exc).__name__])
+        result = None; summary.update(status="failed", reason_codes=[type(exc).__name__], error=_error_chain(exc))
     # WARNING with the JSON in the message: without a logging config, INFO and extra fields never reach the log.
     _LOG.warning("vault tile rescan %s %s", "guard" if summary["status"] == "guarded" else "apply", json.dumps(summary, sort_keys=True, separators=(",", ":"), default=str))
     return result
@@ -153,18 +153,21 @@ def _tile_rescan(repository, flow, domain: str, source: str, workspace: str, out
     bound = outcome.get("accepted_authority")
     if not isinstance(bound, Mapping):
         summary.update(status="ineligible", reason_codes=["no_accepted_authority"]); return None
+    summary["step"] = "authority"
     state, authority, details = _read(repository, domain, workspace)
     held = state == "authority" and (details["candidate"]["id"], details["head"]) == (bound.get("accepted_candidate_id"), bound.get("current_head_event_fingerprint"))
     facts = repository.load_evidence_ledger_scan_facts(domain, source_scan_id=source, workspace_slug=workspace) if held else None
     if facts is None or facts["accepted"]["candidate_id"] != details["candidate"]["id"]:
         summary["reason_codes"] = ["accepted_authority_mismatch"]; return None
+    summary["step"] = "witness"
     accepted, witness = authority["accepted_candidate"], _rescan_witness(repository, source, workspace)
     summary["accepted_score"], prior = accepted["assessment"]["sv9_score"], accepted["authoritative_relation_witness"]
     # The outcome carries no witness: today's must descend from the accepted one before the builder protects its relations.
     if witness["operational_witness"] != prior["operational_witness"] or [row["tile_id"] for row in witness["authoritative_relations"]] != [row["tile_id"] for row in prior["authoritative_relations"]]:
         summary["reason_codes"] = ["witness_mismatch"]; return None
-    current = facts["current"]
+    current, summary["step"] = facts["current"], "ledger"
     rows = build_evidence_ledger(brand_domain=facts["domain"], prior_snapshot=facts["prior"]["snapshot"], prior_rows=facts["prior"]["evidence_rows"], current_snapshot=current["snapshot"], current_rows=current["evidence_rows"], shown_index=build_shown_index(current["evaluations"]))["rows"]
+    summary["step"] = "build"
     built = build_tile_rescan_candidate(outcome=outcome, accepted_candidate=accepted, ledger_rows=rows, current_judgments=current["judgments"], witness=witness)
     candidate = built["candidate"]
     summary.update(status=built["status"], reason_codes=built["reason_codes"], change_signal=built["change_signal"])
@@ -180,14 +183,25 @@ def _tile_rescan(repository, flow, domain: str, source: str, workspace: str, out
     if getattr(flow, "_candidate", None) is None:
         summary.update(status="failed", reason_codes=["no_flow_context"]); return None
     # The adapter that holds this re-scan's Flow context; its payload finalizer runs on the merged payload.
+    summary["step"] = "snapshot"
     snapshot, _assessment = flow.build_merged_shared_analysis_payload(assessment=candidate["assessment"], current_components=components, tile_source_map=sources)
+    summary["step"] = "append"
     stored, inserted = repository.append_evidence_vault_sv9_judgment_candidate(source, candidate, workspace_slug=workspace, shared_analysis_payload=snapshot)
     summary["candidate_id"] = stored["id"]
     compact = {key: stored[key] for key in ("id", "source_scan_id", "canonical_plan_fingerprint", "complete_record_fingerprint", "assessment_fingerprint", "score_fingerprint")}
+    summary["step"] = "adopt"
     result = _apply_candidate(repository, domain, source, workspace, dict(outcome) | {"status": "candidate_available", "reason_codes": [] if inserted else ["candidate_already_present"], "candidate": compact})
     advanced = result["status"] == "authority_advanced"
     summary.update(status="applied" if advanced else "failed", reason_codes=[result["status"], *result["reason_codes"]])
     return result if advanced else None
+
+def _error_chain(exc: BaseException) -> str:
+    """The exception and its causes, bounded: a repository refusal names its failing check in the cause."""
+    parts: list[str] = []
+    while exc is not None and len(parts) < 3:
+        parts.append(f"{type(exc).__name__}: {exc}")
+        exc = exc.__cause__ if exc.__cause__ is not None else (None if exc.__suppress_context__ else exc.__context__)
+    return " <- ".join(parts)[:400]
 
 def _rescan_witness(repository, source: str, workspace: str) -> dict[str, Any]:
     """The re-scan's authoritative relation witness, built as the evaluation builds a candidate's."""
