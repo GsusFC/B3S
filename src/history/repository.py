@@ -12817,7 +12817,6 @@ def _sv9_judgment_accepted_result_authority(
             }
         packet_basis_by_identity: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
         blind_accepted_tiles: dict[str, Mapping[str, Any]] = {}
-        rescanned = candidate["schema_version"] == _SV9_TILE_RESCAN_CANDIDATE
         for tile in accepted_tiles:
             if not isinstance(tile, Mapping):
                 raise ValueError("accepted SV9 tile basis is invalid")
@@ -12836,12 +12835,12 @@ def _sv9_judgment_accepted_result_authority(
                 if not (_is_sha256(relation_id) and _is_sha256(evidence_id) and _is_sha256(source_id) and polarity in {"supports", "contradicts", "demonstrates_absence"}):
                     raise ValueError("accepted SV9 relation basis is invalid")
                 matches = by_identity.get((evidence_id, source_id), [])
-                if not matches and rescanned:
-                    # A tile re-scan's capture need not hold the packet's other basis evidence (M5);
-                    # each of its witness relations must still resolve below.
+                if not matches:
+                    # The operational packet carries basis from earlier captures that the accepted scan's
+                    # capture need not hold (M5, v2 and v3 alike); each witness relation must still resolve below.
                     continue
                 if len(matches) != 1:
-                    raise ValueError("accepted SV9 relation basis is missing or ambiguous")
+                    raise ValueError("accepted SV9 relation basis is ambiguous")
                 packet_basis_by_identity.setdefault((tile_id, evidence_id, source_id), []).append(dict(original))
         selected_basis: dict[str, list[dict[str, Any]]] = {}
         for relation in relation_rows:
