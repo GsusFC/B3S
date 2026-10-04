@@ -405,6 +405,30 @@ class EvaluateComponentTests(unittest.TestCase):
             all(verdict.estado == "no" for verdict in result.tile_profile)
         )
 
+    def test_tile_grouped_evidence_retries_a_quote_from_another_tile(self):
+        class SiblingQuoteLLM(FakeLLM):
+            def _call_json(self, system, user, max_tokens=8000, **kwargs):
+                self.calls.append({"user": user})
+                ids = self._tiles_for(kwargs.get("schema_name"))
+                m1_quote = "quote M2" if len(self.calls) == 1 else "quote M1"
+                return {
+                    "baldosas": [
+                        {"id": tile_id, "estado": "ok", "evidencia": m1_quote if tile_id == "M1" else f"quote {tile_id}"}
+                        for tile_id in ids
+                    ]
+                }
+
+        tldr = full_tldr()
+        tldr["mission"]["tile_evidence"] = {"M1": ["quote M1"], "M2": ["quote M2"]}
+        llm = SiblingQuoteLLM()
+        result = evaluate_component("mission", tldr=tldr, signals=[], brand_name="Acme", url="u", llm=llm)
+
+        # "quote M2" is in the component's quotes, but M1 may only quote its own.
+        self.assertIn("M1 (cita solo de estas):\n- quote M1\nM2 (cita solo de estas):\n- quote M2", llm.calls[0]["user"])
+        self.assertEqual(len(llm.calls), 2)
+        self.assertIn("cita evidencia de otra baldosa en: M1;", llm.calls[1]["user"])
+        self.assertEqual(result.tile_profile[0].evidencia, "quote M1")
+
     def test_embedded_literal_quote_is_canonicalized_without_retry(self):
         class EmbeddedQuoteLLM(FakeLLM):
             def _call_json(self, system, user, max_tokens=8000, **kwargs):

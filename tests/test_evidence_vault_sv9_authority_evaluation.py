@@ -1362,7 +1362,7 @@ class _QuotingLLM:
     api_key, model, base_url = "fake", "fake-evaluator", ""
 
     def _call_json(self, _system, user, **_kwargs):
-        quote = user.split("CITAS DE EVIDENCIA:\n- ", 1)[1].split("\n", 1)[0]
+        quote = next(line[2:] for line in user.split("CITAS DE EVIDENCIA:\n", 1)[1].splitlines() if line.startswith("- "))
         return {"message": "Lectura breve.", "baldosas": [{"id": tile, "estado": "ok", "evidencia": quote} if tile == "M1" else {"id": tile, "estado": "no" if tile == "M2" else "sin_evidencia", "motivo": "Sin prueba."} for tile in evaluation._COMPONENT_TILES["mission"]]}
 
 
@@ -1408,6 +1408,32 @@ def test_request_scoped_prompt_binds_rows_the_flow_block_never_showed(monkeypatc
     assert observed == [] and outcome.evaluation["tile_results"] == [{"tile_id": "M1", "assessment_state": "ok", "supporting_evidence": [{key: request["requested_tiles"][0]["evidence"][0][key] for key in ("evidence_ref", "evidence_fingerprint")}]}]
     # Shown is admitted: Core saw all 9 requested rows (no 8-row cap) and nothing else.
     assert adapter.get_shared_checkpoint_process(request)["component_result"]["evidence"] == [row.content for row in _ROUTED_ROWS]
+
+
+@pytest.mark.parametrize("corrected", [True, False], ids=["retry_corrects", "keeps_sibling_quote"])
+def test_request_scoped_prompt_binds_each_tile_to_its_own_rows(monkeypatch, corrected):
+    # Primary's A1/P2 failure: one component prompt shows every requested tile's rows, and Core lit M1 with M2's row.
+    class SiblingQuotingLLM(_QuotingLLM):
+        calls = []
+
+        def _call_json(self, _system, user, **_kwargs):
+            self.calls.append(user)
+            quote = _ROUTED_ROWS[0 if corrected and len(self.calls) > 1 else 5].content
+            return {"message": "Lectura breve.", "baldosas": [{"id": tile, "estado": "ok", "evidencia": quote} if tile == "M1" else {"id": tile, "estado": "no" if tile == "M2" else "sin_evidencia", "motivo": "Sin prueba."} for tile in evaluation._COMPONENT_TILES["mission"]]}
+
+    adapter, request, observed = _scoped_adapter(monkeypatch, True), _scoped_request(), []
+    adapter._llm_factories = dict.fromkeys(adapter._llm_factories, SiblingQuotingLLM)
+    m1, m2 = request["requested_tiles"][0]["evidence"][:5], request["requested_tiles"][0]["evidence"][5:]
+    request["requested_tiles"] = [{"tile_id": "M1", "evidence": m1}, {"tile_id": "M2", "evidence": m2}]
+    with service.observe_evidence_vault_sv9_authority_evaluation_diagnostics(lambda event, _exc: observed.append(event)):
+        outcome = adapter.evaluate_component(request)
+
+    assert len(SiblingQuotingLLM.calls) == 2 and "otra baldosa en: M1" in SiblingQuotingLLM.calls[1]
+    if not corrected:
+        # The last attempt only checks the component's quotes: Vault's per-tile binding still fails closed.
+        assert outcome.reason_code == "provider_failure" and [event["reason_codes"] for event in observed] == [["evidence_binding_failure"]]
+        return
+    assert observed == [] and outcome.evaluation["tile_results"][0] == {"tile_id": "M1", "assessment_state": "ok", "supporting_evidence": [{key: m1[0][key] for key in ("evidence_ref", "evidence_fingerprint")}]}
 
 
 def test_request_scoped_prompt_leaves_a_first_evaluation_on_the_flow_block(monkeypatch):
