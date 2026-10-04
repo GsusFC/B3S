@@ -1482,3 +1482,31 @@ def test_tile_rescan_path_publishes_when_accepted_basis_evidence_changed(monkeyp
     previous, result, advanced = rescan("ledger-next")
     assert (previous["id"], result["status"], advanced["accepted_candidate"]["tile_rescan"]["prior_candidate_id"]) == (stored["id"], "authority_advanced", stored["id"])
     assert [summary["status"] for _level, _kind, summary, _message in _rescan_logs(caplog)] == ["applied", "applied"]
+
+@_POSTGRES
+def test_v2_authority_rebuilds_when_its_packet_basis_holds_earlier_capture_evidence():
+    """M5 for a v2 authority: the accepted packet carries basis evidence that the accepted scan's own capture no longer holds."""
+    from src.services.evidence_memory_identity_v2 import project_evidence_memory_row_identity
+    from src.services.evidence_vault_sv9_authoritative_relations import project_evidence_vault_sv9_evaluation_input
+    from tests.test_evidence_vault_evidence_ledger_postgres import _CURRENT, _PRIOR
+    from tests.test_evidence_vault_operation_execution_postgres import _row
+    from tests.test_evidence_vault_scan_orchestration_postgres import _reset_repository
+    from tests.test_evidence_vault_sv9_evaluation_checkpoint_postgres import _CheckpointSharedFlow, _shared_series
+    from tests.test_evidence_vault_sv9_judgment_candidates_postgres import _operational, _seed_accepted_sv9_authority
+    web = _row()
+    page = _row() | {"ref": "raw_inputs.1.chunk.0", "url": "https://example.com/about", "content": "About us: we help teams ship better products every week."}
+    exa = _row() | {"ref": "raw_inputs.2.chunk.0", "source": "exa", "evidence_type": "external_proof.news", "url": "https://news.example/example-launch", "content": "News: Example will help teams ship better products.", "metadata": {"source_class": "external_proof", "identity_match": "domain"}}
+    changed = page | {"content": "About us: we now help teams ship better products every day."}
+    repository = _reset_repository(); prior_rows = _operational(repository, _PRIOR, rows=[web, page, exa])
+    # The operational memory keeps the earlier capture's basis, while the accepted scan changes the about chunk and drops the Exa row.
+    _operational(repository, _CURRENT, prior_rows, rows=[web, changed])
+    # The reviewed relation rests on the new about chunk, which only the accepted scan's adoption holds.
+    witnessed = project_evidence_memory_row_identity(changed, brand_domain="example.com")["evidence_id"]
+    _seed_accepted_sv9_authority(repository, _CURRENT, _shared_series(), flow=_CheckpointSharedFlow(_CURRENT), witnessed_evidence_id=witnessed)
+    accepted = repository.get_evidence_vault_sv9_judgment_authority("example.com")["accepted_candidate"]
+    assert (accepted["schema_version"], accepted["source_scan_id"]) == ("evidence-vault-sv9-judgment-candidate-v2", _CURRENT)
+
+    # The rebuild skips the basis that only earlier captures hold, and the reviewed relation still resolves.
+    evaluation_input = project_evidence_vault_sv9_evaluation_input(repository=repository, source_scan_id=_CURRENT)
+    assert (evaluation_input["status"], evaluation_input["reason_codes"]) == ("available", [])
+    assert [row["evidence_ref"] for row in evaluation_input["authoritative_relations"]] == [changed["ref"]]
