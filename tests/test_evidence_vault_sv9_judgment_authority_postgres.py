@@ -963,3 +963,50 @@ def test_repository_persists_and_replays_a_support_continuity_reopen(monkeypatch
             conn.execute("DROP SCHEMA IF EXISTS b3s_history CASCADE")
             if not existed:
                 conn.execute("DROP ROLE b3s_history_vault_provenance_owner")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("B3S_TEST_DATABASE_URL")
+    or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1",
+    reason="requires disposable PostgreSQL",
+)
+def test_authority_replay_reuses_validated_events_without_changing_results(monkeypatch) -> None:
+    import psycopg
+    from src.history import repository as history
+    from src.services import evidence_vault_sv9_authority_event as authority_event
+    from tests.test_evidence_vault_evidence_ledger_postgres import _CURRENT, _PRIOR, _adopt_captured_candidate
+    from tests.test_evidence_vault_scan_orchestration_postgres import _reset_repository
+    from tests.test_evidence_vault_sv9_judgment_candidates_postgres import _operational
+
+    repository = _reset_repository()
+    prior = _operational(repository, _PRIOR)
+    first, adopted = _adopt_captured_candidate(monkeypatch, repository, _PRIOR)
+    _operational(repository, _CURRENT, prior)
+    predecessor = adopted["current_head"]["event_fingerprint"]
+    candidate, superseded = _adopt_captured_candidate(monkeypatch, repository, _CURRENT, predecessor)
+    validated, validate = [], history._sv9_authority_validated_event
+    monkeypatch.setattr(history, "_sv9_authority_validated_event", lambda *args: validated.append(args[4]["sequence"]) or validate(*args))
+    history._SV9_AUTHORITY_REPLAY_MEMO.clear()
+
+    cold = repository.get_evidence_vault_sv9_judgment_authority("example.com")
+    warm = repository.get_evidence_vault_sv9_judgment_authority("example.com")
+
+    # The second replay re-validates nothing and returns the same authority.
+    assert validated == [1, 2] and warm == cold and cold["current_head"] == superseded["current_head"]
+    # Idempotency is unchanged: a retry finds its own event, and another request under that key still conflicts.
+    request = authority_event.build_evidence_vault_sv9_authority_request(action="adopt_candidate", candidate_id=candidate["id"], expected_predecessor_event_fingerprint=predecessor, delta_fingerprint=None, source_scan_id=_CURRENT)
+    key = authority_event.authority_application_idempotency_fingerprint(request)
+    again, replayed = repository.adopt_evidence_vault_sv9_judgment_candidate(_CURRENT, candidate["id"], expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash=key)
+    assert replayed and again["event"] == superseded["event"] and validated == [1, 2]
+    with pytest.raises(history.EvidenceVaultSv9JudgmentCandidateConflictError):
+        repository.adopt_evidence_vault_sv9_judgment_candidate(_CURRENT, first["id"], expected_predecessor_event_fingerprint=predecessor, idempotency_key_hash=key)
+    # A row that no longer matches what was validated is a miss: it is validated again and refused as before.
+    with psycopg.connect(os.environ["B3S_TEST_DATABASE_URL"], autocommit=True) as conn:
+        conn.execute("ALTER TABLE b3s_history.evidence_vault_sv9_judgment_authority_events DISABLE TRIGGER ALL")
+        try:
+            conn.execute("UPDATE b3s_history.evidence_vault_sv9_judgment_authority_events SET score_fingerprint = %s WHERE sequence = 2", (_hash("2"),))
+        finally:
+            conn.execute("ALTER TABLE b3s_history.evidence_vault_sv9_judgment_authority_events ENABLE TRIGGER ALL")
+    with pytest.raises(history.EvidenceVaultSv9JudgmentCandidateError, match="replay is invalid"):
+        repository.get_evidence_vault_sv9_judgment_authority("example.com")
+    assert validated == [1, 2, 2]

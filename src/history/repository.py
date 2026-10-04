@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -14026,6 +14027,61 @@ def _append_sv9_judgment_authority_event(conn: Any, event: Mapping[str, Any]) ->
         raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment authority event could not be appended.")
 
 
+# Validated replays of append-only authority events (032), reused for the process lifetime. A reuse needs
+# the same event row and the same chain state it was validated on, so anything else replays as before.
+_SV9_AUTHORITY_REPLAY_MEMO: dict[tuple[str, str], tuple[Any, dict[str, Any]]] = {}
+_SV9_AUTHORITY_REPLAY_MEMO_LIMIT = 1024
+
+
+def _sv9_authority_replayed_event(conn: Any, workspace_slug: str, context: Mapping[str, Any], state: Mapping[str, Any] | None, row: Mapping[str, Any]) -> dict[str, Any]:
+    key = (str(row["id"]), str(row["event_fingerprint"]))
+    basis = (workspace_slug, None if state is None else tuple(str(state[name][field]) for name in ("head", "active") for field in ("id", "event_fingerprint")))
+    cached = _SV9_AUTHORITY_REPLAY_MEMO.get(key)
+    if cached is not None and cached[0] == basis and _sv9_authority_row_matches(row, cached[1]):
+        return deepcopy(cached[1])
+    event = _sv9_authority_validated_event(conn, workspace_slug, context, state, row)
+    if len(_SV9_AUTHORITY_REPLAY_MEMO) >= _SV9_AUTHORITY_REPLAY_MEMO_LIMIT:
+        _SV9_AUTHORITY_REPLAY_MEMO.clear()
+    _SV9_AUTHORITY_REPLAY_MEMO[key] = (basis, deepcopy(event))
+    return event
+
+
+def _sv9_authority_row_matches(row: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
+    created_at = row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"])
+    return event["created_at"] == created_at and not any((row[key] is None) != (event[key] is None) or (row[key] is not None and (row[key] != event[key] if key == "event_payload" else str(row[key]) != str(event[key]))) for key in _SV9_AUTHORITY_COLUMNS)
+
+
+def _sv9_authority_validated_event(conn: Any, workspace_slug: str, context: Mapping[str, Any], state: Mapping[str, Any] | None, row: Mapping[str, Any]) -> dict[str, Any]:
+    kind, payload, workspace_id, brand_id = str(row["event_type"]), row["event_payload"], context["workspace_id"], context["brand_id"]
+    candidate = candidate_row = delta = partition = None
+    predecessor = state["head"]["event_fingerprint"] if state else None
+    if kind in {"adopt", "supersede"}:
+        candidate, candidate_row = _sv9_authority_candidate(conn, _sv9_authority_uuid(row["candidate_id"], "candidate_id"), workspace_slug, workspace_id, brand_id)
+        request = _sv9_authority_request("adopt_candidate", candidate["id"], predecessor, None, candidate_row["source_scan_id"])
+        review_link = payload.get("sv9_review_resolution")
+    else:
+        review_link = None
+        partition = _sv9_authority_partition(
+            payload.get("workset_partition"), payload.get("signed_delta")
+        )
+        delta = _sv9_authority_delta(payload.get("signed_delta"), partition)
+        source = payload["request"].get("source_scan_id") if type(payload.get("request")) is dict else None
+        request = _sv9_authority_request("reopen_authority", None, predecessor, delta["canonical_delta_fingerprint"], source, partition["partition_fingerprint"] if partition else None)
+        if partition is not None:
+            if source != partition["evaluation_input"]["source_identity"]["source_scan_id"]:
+                raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment reopen source context is invalid.")
+            _sv9_authority_reopen_partition_binding(state, delta, partition)
+        else:
+            source_context = _sv9_judgment_context(conn, source, workspace_slug, False)
+            if source_context is None or source_context["workspace_id"] != workspace_id or source_context["brand_id"] != brand_id: raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment reopen source context is unavailable.")
+            _sv9_authority_reopen_binding(conn, state, source_context, delta)
+    created_at = row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"])
+    event = _sv9_authority_event(context, state, request, _sv9_authority_fingerprint(row["idempotency_key_hash"], "idempotency_key_hash"), candidate, candidate_row, delta, partition, created_at, review_link)
+    if not _sv9_authority_row_matches(row, event):
+        raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment authority replay is invalid.")
+    return event
+
+
 def _replay_sv9_judgment_authority(conn: Any, workspace_slug: str, workspace_id: Any, brand_id: Any) -> dict[str, Any] | None:
     rows = conn.execute(f"SELECT * FROM {_SCHEMA}.evidence_vault_sv9_judgment_authority_events WHERE workspace_id = %s AND brand_id = %s ORDER BY sequence", (workspace_id, brand_id)).fetchall()
     if not rows:
@@ -14038,32 +14094,8 @@ def _replay_sv9_judgment_authority(conn: Any, workspace_slug: str, workspace_id:
         kind, payload = str(row["event_type"]), row["event_payload"]
         if kind not in {"adopt", "reopen", "supersede"} or type(payload) is not dict or int(row["sequence"]) != sequence:
             raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment authority chain is invalid.")
-        candidate = candidate_row = delta = partition = None
-        predecessor = state["head"]["event_fingerprint"] if state else None
-        if kind in {"adopt", "supersede"}:
-            candidate, candidate_row = _sv9_authority_candidate(conn, _sv9_authority_uuid(row["candidate_id"], "candidate_id"), workspace_slug, workspace_id, brand_id)
-            request = _sv9_authority_request("adopt_candidate", candidate["id"], predecessor, None, candidate_row["source_scan_id"])
-            review_link = payload.get("sv9_review_resolution")
-        else:
-            review_link = None
-            partition = _sv9_authority_partition(
-                payload.get("workset_partition"), payload.get("signed_delta")
-            )
-            delta = _sv9_authority_delta(payload.get("signed_delta"), partition)
-            source = payload["request"].get("source_scan_id") if type(payload.get("request")) is dict else None
-            request = _sv9_authority_request("reopen_authority", None, predecessor, delta["canonical_delta_fingerprint"], source, partition["partition_fingerprint"] if partition else None)
-            if partition is not None:
-                if source != partition["evaluation_input"]["source_identity"]["source_scan_id"]:
-                    raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment reopen source context is invalid.")
-                _sv9_authority_reopen_partition_binding(state, delta, partition)
-            else:
-                source_context = _sv9_judgment_context(conn, source, workspace_slug, False)
-                if source_context is None or source_context["workspace_id"] != workspace_id or source_context["brand_id"] != brand_id: raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment reopen source context is unavailable.")
-                _sv9_authority_reopen_binding(conn, state, source_context, delta)
-        created_at = row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"])
-        event = _sv9_authority_event(context, state, request, _sv9_authority_fingerprint(row["idempotency_key_hash"], "idempotency_key_hash"), candidate, candidate_row, delta, partition, created_at, review_link)
-        if any((row[key] is None) != (event[key] is None) or (row[key] is not None and (row[key] != event[key] if key == "event_payload" else str(row[key]) != str(event[key]))) for key in _SV9_AUTHORITY_COLUMNS):
-            raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment authority replay is invalid.")
+        event = _sv9_authority_replayed_event(conn, workspace_slug, context, state, row)
+        candidate, delta, partition = event["candidate"], event["delta"], event["partition"]
         events[event["id"]] = event
         if candidate:
             state, overlay = {"head": event, "active": event, "candidate": candidate, "events": events, "overlay": None}, None
