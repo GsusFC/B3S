@@ -230,6 +230,8 @@ class CoreFlowSv9StrictComponentAdapter:
         # The accepted base of a merged payload: evaluation and restore overwrite the two above.
         self._accepted_components = dict(self._components)
         self._accepted_provenance_candidates = dict(self._component_provenance_candidates)
+        # Its Flow context and editorial, which a re-scan that changed no tile publishes again.
+        self._accepted_analysis = _shared_json_copy(prior_shared_analysis.get("analysis_payload")) if prior_shared_analysis is not None else None
         self._prior_projected_components = self._project_source_policy_graph(
             self._components
         )
@@ -479,11 +481,48 @@ class CoreFlowSv9StrictComponentAdapter:
             )
         return self._render_shared_analysis_payload(result, provenance, merged), computed
 
+    def build_unchanged_shared_analysis_payload(self, *, assessment: Mapping[str, Any]) -> dict[str, Any]:
+        """Publish the accepted analysis again for a re-scan that changed no tile, with no model call.
+
+        The accepted Flow context stands in for this scan's, as a restored checkpoint's
+        does, the accepted components aggregate again under this scan's id, and the
+        accepted editorial is copied instead of written anew.
+        """
+
+        from src.sv9.service import _aggregate_sv9_analysis
+
+        accepted = self._accepted_analysis
+        flow = accepted.get("flow") if isinstance(accepted, Mapping) else None
+        if not isinstance(flow, Mapping) or not self._accepted_components:
+            raise FlowSv9StrictComponentAdapterError("accepted shared analysis is unavailable")
+        self._candidate = _flow_candidate_from_shared_checkpoint(flow.get("candidate"))
+        self._debug = _shared_json_copy(dict(flow.get("interpretation_debug") or {}))
+        # The payload keeps only the visual packet's presence and schema version, which is all rendering reads.
+        self._visual_evidence_packet = {"schema_version": flow.get("visual_acquisition_schema_version")} if flow.get("visual_acquisition_present") else None
+        result = _aggregate_sv9_analysis(
+            copy.deepcopy(self._accepted_components),
+            brand_name=str(self._candidate.evidence_pack.brand_name),
+            url=str(self._candidate.evidence_pack.url),
+            source_run_id=self._source_run_id,
+            evaluator_llm=None,
+        )
+        if _assessment_output_from_scanner_envelope(result.assessment) != dict(assessment):
+            raise FlowSv9StrictComponentAdapterError(
+                "Core and Vault assessments do not match"
+            )
+        return self._render_shared_analysis_payload(
+            result,
+            self._accepted_provenance_candidates,
+            self._accepted_components,
+            finalizer=lambda payload: _with_accepted_editorial(payload, accepted.get("sv9")),
+        )
+
     def _render_shared_analysis_payload(
         self,
         result: Any,
         provenance: Mapping[str, Any],
         components: Mapping[str, Any],
+        finalizer: Any = None,
     ) -> dict[str, Any]:
         from scripts.sv9_flow_sv9_shadow_eval import (
             SV9_FLOW_SV9_SHADOW_EVAL_VERSION,
@@ -521,8 +560,9 @@ class CoreFlowSv9StrictComponentAdapter:
             "llm_usage": self._cumulative_llm_usage(),
         }
         payload.update(copy.deepcopy(self._payload_context))
-        if callable(self._payload_finalizer):
-            payload = self._payload_finalizer(payload)
+        finalize = self._payload_finalizer if finalizer is None else finalizer
+        if callable(finalize):
+            payload = finalize(payload)
         return _shared_json_copy(
             {
                 "schema_version": "evidence-vault-sv9-shared-analysis-payload-v1",
@@ -1188,6 +1228,26 @@ class CoreFlowSv9StrictComponentAdapter:
                 for row in supporting
             ],
         }
+
+
+def _with_accepted_editorial(payload: dict[str, Any], accepted: Any) -> dict[str, Any]:
+    """Copy what the editorial finalizer attached to the accepted analysis onto an unchanged one."""
+
+    if not isinstance(accepted, Mapping):
+        return payload
+    sv9, accepted_result = payload["sv9"], accepted.get("result")
+    if "editorial" in accepted:
+        sv9["editorial"] = accepted["editorial"]
+    if isinstance(accepted_result, Mapping):
+        for key in ("editorial_v3_1", "executive_reading"):
+            if key in accepted_result:
+                sv9["result"][key] = accepted_result[key]
+        messages = accepted_result.get("components")
+        for key, detail in sv9["result"]["components"].items():
+            message = (messages.get(key) or {}).get("message") if isinstance(messages, Mapping) else None
+            if isinstance(message, str):
+                detail["message"] = message
+    return payload
 
 
 def _components_from_shared_analysis(value: Mapping[str, Any] | None) -> dict[str, Any]:

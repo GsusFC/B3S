@@ -134,8 +134,8 @@ class _AuthorityFlow:
         self.calls.append(request); rows = [{"tile_id": row["tile_id"], "assessment_state": "ok" if row["evidence"] else "sin_evidencia", "supporting_evidence": [{key: evidence[key] for key in ("evidence_ref", "evidence_fingerprint")} for evidence in row["evidence"]]} for row in request["requested_tiles"]]
         return ie.ComponentEvaluationOutcome.success(ie.build_component_evaluation(component_key=request["component_key"], series_fingerprint=request["current_series_fingerprint"], request_fingerprint=request["canonical_request_fingerprint"], status="evaluated", tile_results=rows))
 
-def _operational(repository, scan, previous=()):
-    row = _row() | {"ref": f"raw_inputs.{len(previous)}.chunk.0", "content": _row()["content"] if not previous else f"Safer {scan}. {_row()['content']}"}; current = [*previous, row]; memory = repository.get_evidence_vault_operational_memory("example.com"); plan = build_vault_scan_plan(brand_identity="example.com", subject_url="https://example.com", mode="incremental_refresh" if memory else "baseline", current_evidence_records=current, previous_capture_evidence_records=list(previous) or current, known_evidence_records=current, canonical_memory_version=memory["canonical_memory_version"] if memory else None); _persist_baseline(repository, scan, current, plan)
+def _operational(repository, scan, previous=(), rows=None):
+    row = _row() | {"ref": f"raw_inputs.{len(previous)}.chunk.0", "content": _row()["content"] if not previous else f"Safer {scan}. {_row()['content']}"}; current = [*previous, row] if rows is None else list(rows); memory = repository.get_evidence_vault_operational_memory("example.com"); plan = build_vault_scan_plan(brand_identity="example.com", subject_url="https://example.com", mode="incremental_refresh" if memory else "baseline", current_evidence_records=current, previous_capture_evidence_records=list(previous) or current, known_evidence_records=current, canonical_memory_version=memory["canonical_memory_version"] if memory else None); _persist_baseline(repository, scan, current, plan)
     execute_vault_operation_plan(repository=repository, source_scan_id=scan, worker_id="candidate-worker", llm=ExecutorLLM()); operation = repository.get_capture_operation_plan(scan)["result_payload"]
     repository.review_and_adopt_evidence_vault_operational_source("example.com", source_candidate_packet_fingerprint=operation["source_candidate_packet_fingerprint"], decisions=[{"relation_id": relation["relation_id"], "decision": "accept", "rationale": "Direct literal support."} for relation in operation["basis_relations"]], reviewer_id="candidate-reviewer", reviewed_at="2026-08-07T13:00:00+02:00", created_at="2026-08-07T11:00:00Z")
     return current
@@ -171,8 +171,11 @@ def _captured_candidate(monkeypatch, repository, scan, series):
     return captured["candidate"], projection, evidence
 
 
-def _seed_accepted_sv9_authority(repository, scan, series, flow=None):
-    """Seed a replay-valid historical accepted SV9 authority for continuity tests."""
+def _seed_accepted_sv9_authority(repository, scan, series, flow=None, witnessed_evidence_id=None):
+    """Seed a replay-valid historical accepted SV9 authority for continuity tests.
+
+    Its witness holds one basis relation: the first, or the one on ``witnessed_evidence_id``.
+    """
     if repository.get_evidence_vault_sv9_judgment_authority("example.com") is not None:
         raise AssertionError("historical authority fixture must start absent")
     evaluation_input = project_evidence_vault_sv9_evaluation_input(
@@ -218,7 +221,7 @@ def _seed_accepted_sv9_authority(repository, scan, series, flow=None):
     candidate = captured["candidate"]
     facts = repository.load_evidence_vault_sv9_authoritative_relation_facts(scan)
     operation = repository.get_capture_operation_plan(scan)["result_payload"]
-    basis = operation["basis_relations"][0]
+    basis = next(row for row in operation["basis_relations"] if witnessed_evidence_id in {None, row["evidence_id"]})
     projection = authoritative_relations._project(
         facts["source"],
         facts["evidence"],
@@ -620,8 +623,7 @@ def test_tile_rescan_apply_builds_a_v3_the_repository_appends_and_adopts(monkeyp
     from tests.test_evidence_vault_tile_rescan_apply import _ledger
     repository = _reset_repository(); prior = _operational(repository, _PRIOR); authority = _seed_accepted_sv9_authority(repository, _PRIOR, _series()); accepted = authority["accepted_candidate"]; _operational(repository, _CURRENT, prior)
     lit, witness = _rescan_inputs(monkeypatch, repository, _CURRENT, authority)
-    outcome = {"status": "review_required", "reason_codes": ["provider_failure"], "accepted_authority": {"accepted_candidate_id": accepted["id"]}}
-    result = build_tile_rescan_candidate(outcome=outcome, accepted_candidate=accepted, ledger_rows=_ledger(accepted), current_judgments=list(lit.values()), witness=witness)
+    result = build_tile_rescan_candidate(accepted_candidate=accepted, ledger_rows=_ledger(accepted), current_judgments=list(lit.values()), witness=witness, guard={"failed_components": []})
     rows = {row["tile_id"]: row for row in result["candidate"]["candidate_tile_judgments"]}
     # Both tiles quote anew; M1's new quote drops its authoritative relation pair, so M1 keeps the accepted row.
     assert rows["M1"] == next(row for row in accepted["candidate_tile_judgments"] if row["tile_id"] == "M1") and rows["M2"] == lit["M2"]

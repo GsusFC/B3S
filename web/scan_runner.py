@@ -94,6 +94,9 @@ _DIAGNOSTIC_REASON_CODES = frozenset(
         "vault_persisted_capture_readback_failed",
         "vault_persisted_capture_unavailable",
         "vault_persistence_repository_unavailable",
+        "vault_rescan_capture_broken",
+        "vault_rescan_capture_partial",
+        "vault_rescan_publish_failed",
         "vault_sidecar_failed",
     }
 )
@@ -1572,6 +1575,19 @@ def _vault_sv9_authority_scanner_enabled() -> bool:
     ) == "true"
 
 
+def _vault_tile_rescan_with_authority(url: str) -> bool:
+    """Whether this scan re-scans an allow-listed brand that already has accepted SV9 authority."""
+
+    from src.services.evidence_vault_tile_rescan_path import tile_rescan_listed
+
+    if not (_vault_sv9_authority_scanner_enabled() and tile_rescan_listed(url)):
+        return False
+    from web.report_store import _postgres_repository
+
+    repository = _postgres_repository()
+    return repository is not None and bool(repository.get_evidence_vault_sv9_accepted_pointers([url], workspace_slug="b3s"))
+
+
 def _vault_sv9_judgment_shadow_enabled() -> bool:
     return _vault_operational_pipeline_enabled() and os.environ.get(
         "BRAND3_VAULT_SV9_JUDGMENT_SHADOW_ENABLED"
@@ -2434,6 +2450,14 @@ def _run_vault_sv9_authority_scanner(
         # The outer runner marks the error terminal and releases this guard
         # under the same lock; releasing here opens a cancellation window.
         release_guard = not authority_boundary_entered
+        from src.services.evidence_vault_tile_rescan_path import (
+            EvidenceVaultTileRescanCaptureError,
+            EvidenceVaultTileRescanError,
+        )
+
+        if isinstance(exc, (EvidenceVaultTileRescanCaptureError, EvidenceVaultTileRescanError)):
+            # A failed tile re-scan published nothing; its own reason keeps the failure visible.
+            raise RuntimeError(exc.reason_code) from None
         raise RuntimeError("vault_authority_preparation_failed") from None
     finally:
         if not exact and release_guard:
@@ -2474,6 +2498,9 @@ def _run(scan_id: str, url: str, brand_name: str, allow_degraded_fallback: bool,
                 BRAND3_VAULT_VERIFIED_RAW_ALLOW_OWNED_ONLY_ANALYSIS
             ),
         )
+        if gate["state"] == "blocked" and _vault_tile_rescan_with_authority(url):
+            # Rule 11: a broken re-scan of a tile re-scan brand publishes nothing and waits for no decision.
+            raise RuntimeError("vault_rescan_capture_broken")
         if gate["state"] == "blocked" and allow_degraded_fallback and gate.get("can_continue"):
             gate = _approve_acquisition_gate(gate, decision_source="preapproved")
         snapshot["acquisition_gate"] = gate
