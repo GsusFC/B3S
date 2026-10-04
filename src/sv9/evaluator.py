@@ -253,6 +253,7 @@ def evaluate_component(
         evidence_source_summary=_int_dict(block.get("evidence_source_summary")),
         evidence=[str(e) for e in (block.get("evidence") or [])],
         literal_sources=_component_literal_sources(block, signals),
+        tile_sources=_tile_literal_sources(block),
     )
 
 
@@ -304,6 +305,7 @@ def _run_tile_call(
     evidence_source_summary: dict[str, int] | None = None,
     evidence: list[str] | None = None,
     literal_sources: list[str] | None = None,
+    tile_sources: dict[str, list[str]] | None = None,
 ) -> ComponentResult:
     ids = tile_ids(key)
     requires_veredicto = key == "coherencia"
@@ -336,6 +338,7 @@ def _run_tile_call(
                 if literal_sources is None
                 else literal_sources
             ),
+            tile_sources=tile_sources,
         )
         veredicto = str((raw or {}).get("veredicto") or "").strip() if isinstance(raw, dict) else ""
         message = spanish_generated_text((raw or {}).get("message")) if isinstance(raw, dict) else ""
@@ -471,6 +474,17 @@ def _component_literal_sources(
             if value and value not in sources:
                 sources.append(value)
     return sources
+
+
+def _tile_literal_sources(block: dict[str, Any]) -> dict[str, list[str]] | None:
+    """The evidence snippets a block shows under each tile id, when it groups them by tile."""
+    grouped = block.get("tile_evidence")
+    if not isinstance(grouped, dict) or not grouped:
+        return None
+    return {
+        str(tile): [str(item) for item in items or [] if str(item or "").strip()]
+        for tile, items in grouped.items()
+    }
 
 
 def _coherencia_literal_sources(
@@ -643,6 +657,7 @@ def _normalize_tiles(
     *,
     lenient: bool,
     literal_sources: list[str],
+    tile_sources: dict[str, list[str]] | None = None,
 ) -> tuple[list[TileVerdict] | None, str]:
     """Validate the LLM payload into one verdict per tile.
 
@@ -651,6 +666,8 @@ def _normalize_tiles(
     in place rather than retried: `ok` without evidence is demoted to `no`,
     missing motivos are auto-filled. `ok` evidence must be a normalized
     substring of one of the exact evidence snippets supplied to the evaluator.
+    A tile listed in `tile_sources` must quote its own snippets; the lenient
+    pass checks only the union and leaves per-tile binding to the caller.
     """
     if not isinstance(raw, dict):
         return None, "la respuesta no es un objeto JSON"
@@ -718,12 +735,32 @@ def _normalize_tiles(
                 )
             )
         ]
+        other_tile_quote = [
+            tid
+            for tid, verdict in by_id.items()
+            if (
+                verdict.estado == ESTADO_OK
+                and verdict.evidencia
+                and tid not in non_literal_quote
+                and tid in (tile_sources or {})
+                and not _literal_quote_in_sources(verdict.evidencia, tile_sources[tid])
+            )
+        ]
         invalid_quote = no_quote + non_literal_quote
+        errors = []
         if invalid_quote:
-            return None, (
+            errors.append(
                 "'ok' sin evidencia literal verificable en: "
                 f"{', '.join(invalid_quote)}"
             )
+        if other_tile_quote:
+            errors.append(
+                "'ok' cita evidencia de otra baldosa en: "
+                f"{', '.join(other_tile_quote)}; cada baldosa solo puede citar "
+                "las citas listadas bajo su propio id"
+            )
+        if errors:
+            return None, "; ".join(errors)
 
     # Lenient pass (last attempt): fill the gaps instead of failing.
     if missing and not lenient:
@@ -927,6 +964,14 @@ def _build_component_prompt(
     evidence_section = (
         "\n".join(f"- {quote}" for quote in evidence_quotes) if evidence_quotes else "(none)"
     )
+    tile_quotes = _tile_literal_sources(block)
+    if tile_quotes is not None:
+        # A tile may only quote the snippets listed under its own id.
+        evidence_section = "\n".join(
+            f"{tile} (cita solo de estas):\n"
+            + ("\n".join(f"- {quote}" for quote in quotes) if quotes else "(none)")
+            for tile, quotes in tile_quotes.items()
+        )
     limitations = block.get("limitations") or []
     limitations_section = (
         "\n".join(f"- {limitation}" for limitation in limitations) if limitations else "(none)"

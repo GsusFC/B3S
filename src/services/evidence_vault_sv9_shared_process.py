@@ -895,7 +895,9 @@ class CoreFlowSv9StrictComponentAdapter:
         """Core's block, literal sources and admitted refs from a re-scan request's own rows.
 
         The block keeps the Flow block's metadata. Its quotes are the Flow ingress
-        snippet of every requested row, so each row a tile may cite is one Core saw.
+        snippet of every requested row, so each row a tile may cite is one Core saw;
+        ``tile_evidence`` lists them under each requested tile, the only rows that
+        tile's quote binds to.
         Only a re-scan has a prior shared analysis for the component; a first
         evaluation requests the complete capture, so it keeps the Flow block.
         """
@@ -915,10 +917,15 @@ class CoreFlowSv9StrictComponentAdapter:
             for row in tile["evidence"]
             if isinstance(row.get("content"), str) and row["content"].strip()
         }
+        tile_evidence = {
+            str(tile["tile_id"]): list(dict.fromkeys(snippets[str(row["evidence_ref"])] for row in tile["evidence"] if str(row["evidence_ref"]) in snippets))
+            for tile in request["requested_tiles"]
+        }
         flow_block = (self._tldr or {}).get(COMPONENTS[component]["tldr_key"])
         block = (flow_block if isinstance(flow_block, dict) else {}) | {
             "evidence": list(dict.fromkeys(snippets.values())),
             "evaluation_evidence_refs": list(snippets),
+            "tile_evidence": tile_evidence,
         }
         signals = (self._signals or {}).get(component) or []
         return block, _component_literal_sources(block, signals), set(snippets)
