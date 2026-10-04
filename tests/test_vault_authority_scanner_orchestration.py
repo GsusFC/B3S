@@ -398,6 +398,8 @@ def test_tile_rescan_shadow_logs_one_json_warning_after_the_append_and_leaves_th
                 "proof_gone_components": gone,
                 "changed_owned_pages": 0,
                 "new_external_urls": 0,
+                "new_owned_rows": 0,
+                "new_content_components": [],
                 "content_trigger": False,
                 "would_call": gone,
                 "actual_calls": [],
@@ -417,6 +419,64 @@ def test_tile_rescan_shadow_logs_one_json_warning_after_the_append_and_leaves_th
     assert dossier["conditions"] == baseline["conditions"]
     assert _timeless(dossier["events"]) == _timeless(baseline["events"])
     assert on_saved == off_saved and _ledger_events(on_status) == []
+
+
+@pytest.mark.parametrize(("listed", "pointers", "broken"), ((True, {"example.test": {}}, True), (True, {}, False), (False, {"example.test": {}}, False)), ids=("listed_rescan", "listed_first_scan", "not_listed"))
+def test_blocked_gate_fails_a_listed_rescan_without_waiting_or_publishing(monkeypatch, listed, pointers, broken) -> None:
+    from src.services import evidence_vault_tile_rescan_path as tile_rescan_path
+    from web import report_store
+
+    scan_id, waits, persisted = f"rescan-gate-{listed}-{bool(pointers)}", [], []
+    scan_runner._SCANS[scan_id] = _status(scan_id); scan_runner._SCAN_EVENTS[scan_id] = scan_runner.threading.Event()
+    for name, value in (("BRAND3_ENVIRONMENT", "vault"), ("BRAND3_VAULT_OPERATIONAL_PIPELINE_ENABLED", "true"), ("BRAND3_VAULT_SV9_AUTHORITY_SCANNER_ENABLED", "true")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(tile_rescan_path, "BRAND3_VAULT_TILE_RESCAN_APPLY_ENABLED", True); monkeypatch.setattr(tile_rescan_path, "BRAND3_VAULT_TILE_RESCAN_APPLY_DOMAINS", ("example.test",) if listed else ())
+
+    class Repository:
+        def get_evidence_vault_sv9_accepted_pointers(self, domains, *, workspace_slug):
+            assert (domains, workspace_slug) == (["https://example.test"], "b3s")
+            return pointers
+
+    monkeypatch.setattr(report_store, "_postgres_repository", Repository)
+    monkeypatch.setattr(scan_runner, "_capture_snapshot", lambda *_args: {"acquisition_steps": {}, "raw_inputs": []})
+    # A pre-approved degraded fallback must not let a broken re-scan of a listed brand through.
+    monkeypatch.setattr(scan_runner, "_build_acquisition_gate", lambda *_args, **_kwargs: {"state": "blocked", "can_continue": True, "issues": [], "warnings": [], "fallbacks": []})
+    monkeypatch.setattr(scan_runner, "_approve_acquisition_gate", lambda gate, **_kwargs: gate)
+    monkeypatch.setattr(scan_runner, "_wait_for_acquisition_decision", lambda identity: waits.append(identity) or False)
+    monkeypatch.setattr(scan_runner, "_persist_scan_status", persisted.append); monkeypatch.setattr(scan_runner, "save_report", lambda *_args: pytest.fail("published"))
+    monkeypatch.setattr(scan_runner.traceback, "print_exc", lambda: None)
+    try:
+        scan_runner._run(scan_id, "https://example.test", "Example", True)
+        status = scan_runner._SCANS[scan_id]
+        if broken:
+            assert (status["state"], status["error"], waits) == ("error", "RuntimeError: vault_rescan_capture_broken", [])
+            assert status["diagnostic"]["reason_codes"] == ["vault_rescan_capture_broken"] and status["acquisition_gate"] == {}
+        else:
+            # Everyone else keeps today's gate: it is shown as blocked and waits for a person's decision.
+            assert waits == [scan_id] and status["state"] == "blocked" and status["acquisition_gate"]["state"] == "blocked"
+    finally:
+        scan_runner._SCANS.pop(scan_id, None); scan_runner._SCAN_EVENTS.pop(scan_id, None)
+
+
+@pytest.mark.parametrize(("error", "reason"), (("publish", "vault_rescan_publish_failed"), ("capture", "vault_rescan_capture_partial")))
+def test_failed_tile_rescan_surfaces_its_own_reason_and_publishes_nothing(monkeypatch, error, reason) -> None:
+    from src.services import evidence_vault_sv9_authority_application as application
+    from src.services import evidence_vault_tile_rescan_path as tile_rescan_path
+
+    scan_id, saved = f"rescan-failure-{error}", []
+    failure = tile_rescan_path.EvidenceVaultTileRescanError("append", "EvidenceVaultSv9JudgmentCandidateError") if error == "publish" else tile_rescan_path.EvidenceVaultTileRescanCaptureError("vault_rescan_capture_partial")
+    scan_runner._SCANS[scan_id] = _status(scan_id)
+    monkeypatch.setattr(scan_runner, "_execute_vault_operational_preparation", lambda **_kwargs: "p")
+    monkeypatch.setattr(scan_runner, "_activate_vault_result_unless_cancelled", lambda *_args, **_kwargs: {"created": True})
+    monkeypatch.setattr(scan_runner, "_vault_core_shared_flow", lambda **_kwargs: (object(), {"series": "shared"}))
+    monkeypatch.setattr(application, "run_evidence_vault_sv9_authority_application", lambda **_kwargs: (_ for _ in ()).throw(failure))
+    monkeypatch.setattr(scan_runner, "save_report", saved.append); monkeypatch.setattr(scan_runner, "_persist_scan_status", lambda *_args: None)
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            scan_runner._run_vault_sv9_authority_scanner(scan_id=scan_id, url="https://example.test", brand_name="Example", repository=object(), preparation={"operation_plan": {"operation_plan_fingerprint": "p", "operations": {"llm_required": False}}}, canonical_snapshot={"raw_inputs": [], "acquisition_gate": {"state": "pass"}}, canonical_source_capture=None, gate={"state": "pass"})
+        assert str(raised.value) == reason and reason in scan_runner._DIAGNOSTIC_REASON_CODES and saved == []
+    finally:
+        scan_runner._SCANS.pop(scan_id, None); scan_runner._VAULT_ACTIVATIONS.discard(scan_id)
 
 
 def test_retained_v1_result_uses_persisted_terminal_report_alias(monkeypatch) -> None:

@@ -6031,10 +6031,13 @@ class PostgresHistoryRepository:
                 "SELECT pg_advisory_xact_lock(%s)",
                 (_advisory_lock_key(context["brand_id"], "evidence-vault-sv9-judgment-candidate"),),
             )
-            if candidate["schema_version"] == _SV9_TILE_RESCAN_CANDIDATE: _sv9_tile_rescan_prior(_replay_sv9_judgment_authority(conn, workspace_slug, context["workspace_id"], context["brand_id"]), candidate)
-            candidate = _sv9_tile_rescan_replay(conn, candidate, context) if candidate["schema_version"] == _SV9_TILE_RESCAN_CANDIDATE else _sv9_judgment_candidate_replay(candidate, _sv9_judgment_packets(conn, candidate, context))
-            _sv9_judgment_current_authoritative_relation_witness(conn, candidate, context, workspace_slug)
-            if candidate["schema_version"] == _SV9_TILE_RESCAN_CANDIDATE: _sv9_judgment_accepted_result_authority(conn, {"candidate": candidate | {"source_scan_id": context["source_scan_id"]}}, context, workspace_slug)
+            rescan = candidate["schema_version"] == _SV9_TILE_RESCAN_CANDIDATE
+            state = _replay_sv9_judgment_authority(conn, workspace_slug, context["workspace_id"], context["brand_id"]) if rescan else _SV9_REPLAY_IN_FACTS
+            if rescan: _sv9_tile_rescan_prior(state, candidate)
+            candidate = _sv9_tile_rescan_replay(conn, candidate, context) if rescan else _sv9_judgment_candidate_replay(candidate, _sv9_judgment_packets(conn, candidate, context))
+            # The accepted side is reconstructed from the replayed state's own capture; the re-scan side is checked per tile.
+            _sv9_judgment_current_authoritative_relation_witness(conn, candidate, context, workspace_slug, state=state)
+            if rescan: _sv9_tile_rescan_continuity(state, candidate)
             shared_analysis = _prepare_sv9_shared_analysis_snapshot(
                 shared_analysis_payload,
                 candidate=candidate,
@@ -6649,7 +6652,7 @@ class PostgresHistoryRepository:
                 if str(candidate_row["source_scan_id"]) != context["source_scan_id"] or any(candidate_row[field] != context[field] for field in ("scan_run_id", "capture_id", "operation_plan_id")): raise EvidenceVaultSv9JudgmentCandidateError("SV9 judgment candidate does not match the source scan context.")
                 if candidate["schema_version"].endswith("v1"): raise EvidenceVaultSv9JudgmentCandidateLegacyAuthorityError("SV9 judgment candidate v1 cannot establish new authority.")
                 if candidate["schema_version"] == _SV9_TILE_RESCAN_CANDIDATE: _sv9_tile_rescan_prior(state, candidate)
-                _sv9_judgment_current_authoritative_relation_witness(conn, candidate, context, workspace_slug)
+                _sv9_judgment_current_authoritative_relation_witness(conn, candidate, context, workspace_slug, state=state)
                 if conn.execute(f"SELECT 1 FROM {_SCHEMA}.evidence_vault_sv9_judgment_authority_events WHERE workspace_id = %s AND brand_id = %s AND candidate_id = %s", (context["workspace_id"], context["brand_id"], candidate_id)).fetchone(): raise EvidenceVaultSv9JudgmentCandidateConflictError("SV9 judgment candidate is already adopted.")
                 if conn.execute(f"SELECT 1 FROM {_SCHEMA}.evidence_vault_sv9_judgment_review_resolutions WHERE workspace_id = %s AND brand_id = %s AND candidate_id = %s AND decision = 'reject'", (context["workspace_id"], context["brand_id"], candidate_id)).fetchone(): raise EvidenceVaultSv9JudgmentCandidateConflictError("SV9 judgment candidate has a terminal rejected review.")
             elif state is None: raise EvidenceVaultSv9JudgmentCandidateConflictError("SV9 judgment authority is unavailable for reopen.")
@@ -12609,6 +12612,8 @@ _SV9_TILE_RESCAN_CANDIDATE = "evidence-vault-sv9-judgment-candidate-v3"
 _SV9_TILE_RESCAN_FIELDS = frozenset("kind rule_version ledger_policy_version prior_candidate_id ledger_rows_fingerprint judgments_fingerprint decisions change_signal guard".split())
 _SV9_TILE_RESCAN_PLAN_FIELDS = frozenset("schema_version kind prior_candidate_id current_series_contract".split())
 _SV9_TILE_RESCAN_DECISIONS = frozenset({KEEP_LIT, KEEP_UNLIT, LIGHT, TURN_OFF_CORE_NO, TURN_OFF_PROVEN, B3S_FAILURE})
+# A caller that holds no replayed authority state lets the relation facts replay it.
+_SV9_REPLAY_IN_FACTS = object()
 
 def _sv9_judgment_candidate_envelope(value: Any) -> dict[str, Any]:
     try:
@@ -12688,6 +12693,18 @@ def _sv9_tile_rescan_replay(conn: Any, candidate: dict[str, Any], context: Mappi
 
 def _sv9_tile_rescan_prior(state: Mapping[str, Any] | None, candidate: Mapping[str, Any]) -> None:
     if state is None or state["candidate"]["id"] != candidate["tile_rescan"]["prior_candidate_id"]: raise EvidenceVaultSv9JudgmentCandidateConflictError("SV9 tile re-scan prior is not the accepted candidate.")
+
+def _sv9_tile_rescan_continuity(state: Mapping[str, Any], candidate: Mapping[str, Any]) -> None:
+    # Rule 8: the v3 keeps every reviewed relation of the candidate it supersedes, tile for tile, and its
+    # rows cite each pair its witness names, as any accepted candidate's must for the next reconstruction.
+    try:
+        relations = candidate["authoritative_relation_witness"]["authoritative_relations"]
+        reviewed = sorted(row["tile_id"] for row in state["candidate"]["authoritative_relation_witness"]["authoritative_relations"])
+        cited = {row["tile_id"]: {(item["evidence_ref"], item["evidence_fingerprint"]) for item in row["supporting_evidence"]} for row in candidate["candidate_tile_judgments"]}
+        kept = sorted(row["tile_id"] for row in relations) == reviewed and all((row["evidence_ref"], row["evidence_fingerprint"]) in cited.get(row["tile_id"], ()) for row in relations)
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise EvidenceVaultSv9JudgmentCandidateError("SV9 tile re-scan continuity is invalid.") from exc
+    if not kept: raise EvidenceVaultSv9JudgmentCandidateError("SV9 tile re-scan drops a reviewed relation.")
 
 def _sv9_judgment_candidate_witness(candidate: Mapping[str, Any], context: Mapping[str, Any]) -> None:
     try:
@@ -12799,6 +12816,7 @@ def _sv9_judgment_accepted_result_authority(
             }
         packet_basis_by_identity: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
         blind_accepted_tiles: dict[str, Mapping[str, Any]] = {}
+        rescanned = candidate["schema_version"] == _SV9_TILE_RESCAN_CANDIDATE
         for tile in accepted_tiles:
             if not isinstance(tile, Mapping):
                 raise ValueError("accepted SV9 tile basis is invalid")
@@ -12817,6 +12835,10 @@ def _sv9_judgment_accepted_result_authority(
                 if not (_is_sha256(relation_id) and _is_sha256(evidence_id) and _is_sha256(source_id) and polarity in {"supports", "contradicts", "demonstrates_absence"}):
                     raise ValueError("accepted SV9 relation basis is invalid")
                 matches = by_identity.get((evidence_id, source_id), [])
+                if not matches and rescanned:
+                    # A tile re-scan's capture need not hold the packet's other basis evidence (M5);
+                    # each of its witness relations must still resolve below.
+                    continue
                 if len(matches) != 1:
                     raise ValueError("accepted SV9 relation basis is missing or ambiguous")
                 packet_basis_by_identity.setdefault((tile_id, evidence_id, source_id), []).append(dict(original))
@@ -12881,6 +12903,7 @@ def _sv9_judgment_authoritative_relation_facts(
     workspace_slug: str,
     *,
     for_evaluation_input: bool = False,
+    state: Any = _SV9_REPLAY_IN_FACTS,
 ) -> dict[str, Any] | None:
     operation_row = _vault_operation_row(conn, workspace_slug=workspace_slug, source_scan_id=str(context["source_scan_id"]), for_update=False)
     operation = _vault_operation_plan_record(operation_row)
@@ -12894,9 +12917,10 @@ def _sv9_judgment_authoritative_relation_facts(
     evidence = []
     for row, value in zip(rows, _capture_evidence_rows(rows), strict=True):
         identity = project_evidence_memory_row_identity(value, brand_domain=str(context["canonical_domain"])); evidence.append({"workspace_id": str(context["workspace_id"]), "brand_id": str(context["brand_id"]), "source_scan_id": str(context["source_scan_id"]), "canonical_domain": str(context["canonical_domain"]), "capture_id": str(context["capture_id"]), "evidence_record_id": str(row["id"]), "evidence_ref": value["ref"], "evidence_fingerprint": str(row["content_hash"]), "evidence_id": identity and identity["evidence_id"], "source_identity_id": identity and identity["document_id"], "source_class": identity and identity["source_class"], "source": identity and identity["source"], "evidence_type": identity and identity["evidence_type"], "url": identity and identity["url"]})
-    state = _replay_sv9_judgment_authority(
-        conn, workspace_slug, context["workspace_id"], context["brand_id"]
-    )
+    if state is _SV9_REPLAY_IN_FACTS:
+        state = _replay_sv9_judgment_authority(
+            conn, workspace_slug, context["workspace_id"], context["brand_id"]
+        )
     authority = (
         _sv9_judgment_accepted_result_authority(conn, state, context, workspace_slug)
         if state is not None
@@ -12929,7 +12953,7 @@ def _sv9_judgment_authoritative_relation_facts(
     return facts
 
 
-def _sv9_judgment_current_authoritative_relation_witness(conn: Any, candidate: Mapping[str, Any], context: Mapping[str, Any], workspace_slug: str) -> None:
+def _sv9_judgment_current_authoritative_relation_witness(conn: Any, candidate: Mapping[str, Any], context: Mapping[str, Any], workspace_slug: str, *, state: Any = _SV9_REPLAY_IN_FACTS) -> None:
     if candidate["schema_version"].endswith("v1"): return
     _sv9_judgment_candidate_witness(candidate, context)
     try:
@@ -12938,6 +12962,7 @@ def _sv9_judgment_current_authoritative_relation_witness(conn: Any, candidate: M
             context,
             workspace_slug,
             for_evaluation_input=True,
+            state=state,
         )
         projection = _project_sv9_authoritative_relations(facts["source"], facts["evidence"], facts["authority"])
         expected = build_evidence_vault_sv9_authoritative_relation_witness(source_scan_id=str(context["source_scan_id"]), projection=projection, capture_origin={"capture_id": str(context["capture_id"]), "capture_fingerprint": str(context["capture_fingerprint"])}, operation_origin={"operation_id": str(context["operation_plan_id"]), "operation_fingerprint": str(context["operation_fingerprint"])})

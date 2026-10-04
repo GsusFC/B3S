@@ -87,6 +87,47 @@ def test_merged_payload_rejects_assessment_that_breaks_kernel_parity():
         adapter.build_merged_shared_analysis_payload(assessment=invalid, current_components={}, tile_source_map=_source_map())
 
 
+def test_unchanged_payload_republishes_the_accepted_analysis_without_a_model_call():
+    from src.history.repository import _prepare_sv9_shared_analysis_snapshot
+
+    prior = _prior()
+    accepted = prior["analysis_payload"]["sv9"]
+    # What the editorial finalizer attached to the accepted analysis.
+    accepted["editorial"] = {"status": "attached", "mode": "v3_1_structured"}
+    accepted["result"] |= {"executive_reading": "Accepted reading.", "editorial_v3_1": {"schema_version": "v3.1", "components": {}}}
+    accepted["result"]["components"]["mission"]["message"] = "Accepted editorial message."
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("an unchanged re-scan makes no model call")
+
+    adapter = shared_process.CoreFlowSv9StrictComponentAdapter(
+        snapshot={}, source_run_id="rescan", interpretation_llm_factory=refuse, adjudicator_llm_factory=refuse,
+        labeling_llm_factory=refuse, evaluator_llm_factory=refuse, reasoning_llm_factory=refuse,
+        gate_authority="veto_only", prior_shared_analysis=prior, payload_finalizer=refuse,
+    )
+    assessment = _assessment(adapter._components)
+
+    payload = adapter.build_unchanged_shared_analysis_payload(assessment=assessment)
+
+    series = shared_process.build_core_shared_series_contract(
+        interpretation_model="i", labeling_model="l", adjudicator_model="a", evaluator_model="e",
+        reasoning_model="r", editorial_model="ed", gate_authority="veto_only", editorial_enabled=True,
+    )
+    candidate = {"plan": {"current_series_contract": series}, "assessment": assessment} | {key: assessment[key] for key in ("assessment_fingerprint", "score_fingerprint")}
+    assert _prepare_sv9_shared_analysis_snapshot(payload, candidate=candidate, context={"source_scan_id": "rescan", "canonical_domain": "example.com"})["payload"] == payload
+    analysis, sv9 = payload["analysis_payload"], payload["analysis_payload"]["sv9"]
+    assert (analysis["source_run_id"], sv9["result"]["source_run_id"]) == ("rescan", "rescan")
+    # Only the scan id changes: the accepted components, provenance, Flow context and editorial carry over.
+    assert sv9 == accepted | {"result": accepted["result"] | {"source_run_id": "rescan"}}
+    assert {key: payload[key] for key in ("evaluation_components", "component_provenance")} == {key: prior[key] for key in ("evaluation_components", "component_provenance")}
+    assert analysis["flow"]["candidate"] == prior["analysis_payload"]["flow"]["candidate"] and analysis["llm_usage"]["totals"]["provider_calls"] == 0
+
+
+def test_unchanged_payload_needs_an_accepted_analysis():
+    with pytest.raises(shared_process.FlowSv9StrictComponentAdapterError, match="accepted shared analysis is unavailable"):
+        _core_adapter("rescan", None, _candidate("current")).build_unchanged_shared_analysis_payload(assessment={})
+
+
 @pytest.mark.skipif(
     not os.environ.get("B3S_TEST_DATABASE_URL")
     or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1",

@@ -19,13 +19,6 @@ from src.sv9 import incremental_planner as planner
 from src.sv9 import judgment_memory as memory
 
 
-ELIGIBLE_REVIEW_REASONS = frozenset(
-    "coverage_loss unmapped_evidence incomplete_review_partition review_set provider_failure "
-    "incomplete_candidate evaluation_incomplete".split()
-)
-# Guard D1: a re-scan that proved this much accepted proof gone, or could not check it, keeps its review.
-MAX_ABSENT_SHARE, MAX_UNVERIFIED_SHARE = 0.30, 0.50
-HELD_WITHOUT_CORE_VERDICT = "held_without_core_verdict"
 HELD_FOR_AUTHORITATIVE_RELATION = "held_for_authoritative_relation"
 _FROM_CHECKPOINT = frozenset({rule.LIGHT, rule.TURN_OFF_PROVEN})
 _CANDIDATE_VERSION, _PLAN_VERSION = "evidence-vault-sv9-judgment-candidate-v3", "evidence-vault-sv9-tile-rescan-plan-v1"
@@ -35,96 +28,71 @@ _TELEMETRY = ("call_count", "calls_avoided", "reused_tile_count", "evaluated_til
 
 def build_tile_rescan_candidate(
     *,
-    outcome: Mapping[str, Any],
-    accepted_candidate: Mapping[str, Any] | None,
+    accepted_candidate: Mapping[str, Any],
     ledger_rows: Sequence[Mapping[str, Any]],
     current_judgments: Sequence[Mapping[str, Any]],
     witness: Mapping[str, Any],
+    guard: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Build the v3 candidate for one eligible re-scan, or say why there is none.
+    """Build the v3 candidate for one re-scan, or say why there is none.
 
-    ``outcome`` is the SV9 authority evaluation outcome and ``accepted_candidate`` the
-    accepted authority's raw candidate payload with its ``id``. ``current_judgments``
-    are the tile judgments in the re-scan's checkpoints and ``witness`` its current
-    authoritative relation witness. The status is ``ineligible``, ``guarded`` (D1, with
-    the shares in ``change_signal``), ``unavailable`` or ``candidate``.
+    ``accepted_candidate`` is the accepted authority's raw candidate payload with its
+    ``id``. ``current_judgments`` are the tile judgments in the re-scan's checkpoints
+    and ``witness`` its current authoritative relation witness. ``guard`` is recorded
+    as is in ``tile_rescan.guard``. The status is ``unavailable`` or ``candidate``.
     """
 
-    reason = _ineligible(outcome, accepted_candidate)
-    if reason:
-        return _result("ineligible", [reason])
     witness = validate_evidence_vault_sv9_authoritative_relation_witness(witness)
     prior_rows, prior_sentinels = (accepted_candidate[key] for key in ("candidate_tile_judgments", "candidate_component_sentinels"))
     projection = rule.project_rescan(prior_rows, prior_sentinels, ledger_rows, current_judgments)
     signal, tiles = projection["change_signal"], projection["tile_decisions"]["tiles"]
     if not tiles:
         return _result("unavailable", projection["tile_decisions"]["reason_codes"], signal)
-    if not _within_guard(signal):
-        return _result("guarded", ["change_signal_guard"], signal)
     accepted = {row["tile_id"]: row for row in prior_rows}
     # Keyed as the rule keys them, so a tile gets the very row its decision saw.
     verdicts = {str(row["tile_id"]): row for row in current_judgments}
     relations: dict[str, set[tuple[str, str]]] = {}
     for relation in witness["authoritative_relations"]:
         relations.setdefault(relation["tile_id"], set()).add((relation["evidence_ref"], relation["evidence_fingerprint"]))
-    rows, decisions, held = {}, [], []
+    rows, decisions = {}, []
     for tile in tiles:
-        tile_id, codes = tile["tile_id"], list(tile["reason_codes"])
+        tile_id, decision, codes = tile["tile_id"], tile["decision"], list(tile["reason_codes"])
         # A doubt is keep_lit without a new quote: it keeps the accepted row, never Core's "no".
-        fresh = tile["decision"] in _FROM_CHECKPOINT or (tile["decision"] == rule.KEEP_LIT and "new_quote" in codes)
-        if tile["decision"] == rule.B3S_FAILURE and rule.CORE_NOT_CALLED in codes:
-            # D2: proven absence with no Core verdict is ambiguous; as a b3s_failure it holds the accepted row.
-            codes.append(HELD_WITHOUT_CORE_VERDICT)
-            held.append(tile_id)
-        elif tile["decision"] == rule.KEEP_LIT and fresh and _drops_relation(verdicts[tile_id], relations.get(tile_id)):
-            # Owner decision A: the tile stays lit either way, so it keeps the row that cites its relation.
+        fresh = decision in _FROM_CHECKPOINT or (decision == rule.KEEP_LIT and "new_quote" in codes)
+        if fresh and decision in {rule.KEEP_LIT, rule.TURN_OFF_PROVEN} and _drops_relation(verdicts[tile_id], relations.get(tile_id)):
+            # Rule 8: the tile keeps the accepted row that cites its reviewed relation, so it stays lit.
+            # A proven turn-off becomes a doubt for a person instead of failing the re-scan (Q4 = A).
             fresh = False
-            codes.append(HELD_FOR_AUTHORITATIVE_RELATION)
+            codes = [*codes, HELD_FOR_AUTHORITATIVE_RELATION] if decision == rule.KEEP_LIT else [rule.DOUBT, rule.TURN_OFF_PROVEN, HELD_FOR_AUTHORITATIVE_RELATION]
+            decision = rule.KEEP_LIT
         row = verdicts[tile_id] if fresh else accepted.get(tile_id)
         if row is not None:
             rows[tile_id] = row
-        decisions.append({"tile_id": tile_id, "decision": tile["decision"], "reason_codes": codes})
+        decisions.append({"tile_id": tile_id, "decision": decision, "reason_codes": codes})
     if any(_drops_relation(rows.get(tile_id), pairs) for tile_id, pairs in relations.items()):
         return _result("unavailable", ["authoritative_relation_dropped"], signal)
     # A tile of a not-detected component has no accepted row; its sentinel stands for it until one lights.
     components = {row["component_key"] for row in rows.values()}
     sentinels = {row["component_key"]: row for row in prior_sentinels if row["component_key"] not in components}
     try:
-        candidate = _candidate(str(accepted_candidate["id"]), rows, sentinels, witness, ledger_rows, decisions, signal)
+        candidate = _candidate(str(accepted_candidate["id"]), rows, sentinels, witness, ledger_rows, decisions, signal, guard)
     except evaluation.IncrementalEvaluationError:
         return _result("unavailable", ["candidate_partition_invalid"], signal)
-    return _result("candidate", [], signal, candidate, held)
-
-
-def _ineligible(outcome: Mapping[str, Any], accepted: Mapping[str, Any] | None) -> str | None:
-    authority, reasons = outcome.get("accepted_authority"), outcome.get("reason_codes")
-    accepted_id = authority.get("accepted_candidate_id") if isinstance(authority, Mapping) else None
-    if accepted_id is None or not isinstance(accepted, Mapping) or accepted_id != accepted.get("id"):
-        return "no_accepted_authority"
-    if type(reasons) is not list or not reasons or not set(reasons) <= ELIGIBLE_REVIEW_REASONS:
-        return "outcome_not_eligible"
-    status = outcome.get("status")
-    eligible = status == "review_required" or (status == "no_new_score" and "provider_failure" in reasons)
-    return None if eligible else "outcome_not_eligible"
+    return _result("candidate", [], signal, candidate)
 
 
 def _drops_relation(row: Mapping[str, Any] | None, pairs: set[tuple[str, str]] | None) -> bool:
-    """The append guard's test (repository ``_sv9_judgment_accepted_result_authority``): a tile's
+    """The append guard's test (repository ``_sv9_tile_rescan_continuity``): a tile's
     authoritative relation pairs must all stay in its row's supporting evidence."""
 
     supports = {(item["evidence_ref"], item["evidence_fingerprint"]) for item in (row or {}).get("supporting_evidence", [])}
     return bool(pairs) and not pairs <= supports
 
 
-def _within_guard(signal: Mapping[str, Any]) -> bool:
-    absent, unverified = signal["absent_share"], signal["unverified_share"]
-    # Without an accepted lit tile there is no share to measure, so the guard cannot clear the re-scan.
-    return absent is not None and absent <= MAX_ABSENT_SHARE and unverified <= MAX_UNVERIFIED_SHARE
-
-
 def _candidate(
     prior_id: str, rows: Mapping[str, Any], sentinels: Mapping[str, Any], witness: Mapping[str, Any],
     ledger_rows: Sequence[Mapping[str, Any]], decisions: list[dict[str, Any]], signal: Mapping[str, Any],
+    guard: Mapping[str, Any],
 ) -> dict[str, Any]:
     """The v3 payload exactly as the repository's tile re-scan envelope rebuilds it from its rows."""
 
@@ -161,7 +129,7 @@ def _candidate(
             "judgments_fingerprint": memory.canonical_fingerprint("evidence-vault-sv9-tile-rescan-judgments-fingerprint-v1", judgments),
             "decisions": decisions,
             "change_signal": dict(signal),
-            "guard": {"max_absent_share": MAX_ABSENT_SHARE, "max_unverified_share": MAX_UNVERIFIED_SHARE},
+            "guard": dict(guard),
         },
     }
     candidate["complete_record_fingerprint"] = authority_event.candidate_complete_record_fingerprint(candidate)
@@ -169,8 +137,6 @@ def _candidate(
 
 
 def _result(
-    status: str, reasons: list[str], signal: Mapping[str, Any] | None = None, candidate: dict[str, Any] | None = None,
-    held: Sequence[str] = (),
+    status: str, reasons: list[str], signal: Mapping[str, Any] | None = None, candidate: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    result = {"status": status, "reason_codes": reasons, "change_signal": signal, "candidate": candidate}
-    return result | {"ambiguous_tile_ids": list(held)}
+    return {"status": status, "reason_codes": reasons, "change_signal": signal, "candidate": candidate}

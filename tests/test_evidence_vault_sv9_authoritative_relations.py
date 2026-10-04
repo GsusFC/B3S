@@ -131,7 +131,7 @@ def test_candidate_freshness_reuses_first_run_operational_witness_and_rejects_st
     current_facts = first_run_facts
     calls = []
 
-    def load_facts(_conn, _context, _workspace, *, for_evaluation_input=False):
+    def load_facts(_conn, _context, _workspace, *, for_evaluation_input=False, **_kwargs):
         calls.append(for_evaluation_input)
         assert for_evaluation_input is True
         return deepcopy(current_facts)

@@ -303,7 +303,7 @@ def test_change_signal_has_no_shares_without_lit_tiles():
     }
 
 
-def _signals(prior, prior_rows, current, current_rows=(), *, lit=(), evaluated=()):
+def _signals(prior, prior_rows, current, current_rows=(), *, lit=(), evaluated=(), hints=()):
     return rule.rescan_signals(
         brand_domain=BRAND,
         prior_snapshot=prior,
@@ -313,6 +313,7 @@ def _signals(prior, prior_rows, current, current_rows=(), *, lit=(), evaluated=(
         current_evaluations=[{"component_key": key, "status": "evaluated"} for key in evaluated],
         prior_judgments=_accepted_vector(lit)[0],
         ledger_rows=_ledger(prior, prior_rows, current, current_rows)["rows"],
+        hinted_rows=list(hints),
     )
 
 
@@ -326,6 +327,8 @@ def test_signals_plan_core_calls_only_where_a_lit_tiles_proof_is_gone():
             "proof_gone_components": ["mission", "value_proposition"],
             "changed_owned_pages": 0,
             "new_external_urls": 0,
+            "new_owned_rows": 0,
+            "new_content_components": [],
             "content_trigger": False,
             "would_call": ["mission", "value_proposition"],
             "actual_calls": ["mission", "magnetism"],
@@ -344,8 +347,24 @@ def test_signals_count_new_owned_pages_and_new_external_urls_as_content_to_look_
 
     plan = result["core_plan"]
     assert (plan["changed_owned_pages"], plan["new_external_urls"], plan["content_trigger"]) == (1, 1, True)
-    # New content is not routed to components yet, and no lit tile lost its proof.
-    assert (plan["proof_gone_components"], plan["would_call"]) == ([], [])
+    # No hint routes the new content to a component, and no lit tile lost its proof.
+    assert (plan["new_owned_rows"], plan["proof_gone_components"], plan["would_call"]) == (0, [], [])
+
+
+def test_signals_name_a_call_only_for_hinted_owned_rows_the_prior_page_does_not_hold():
+    home, launch = _words(120, "h"), "A brand new line about the launch event we hosted today."
+    prior = _snapshot(_web(home, (ABOUT, _about())))
+    current = _snapshot(_web(f"{home} {launch}", (ABOUT, f"{_words(100, 'c')} {_SHIPPING} {_PROMISE} {_words(100, 'd')}")))
+    new, moved = _row("raw_inputs.0.subpage.1.chunk.0", _SHIPPING, url=ABOUT), _row("raw_inputs.0.subpage.1.chunk.1", _PROMISE, url=ABOUT)
+    # The homepage gained a line but still counts as unchanged, and the press row is external: neither names a call.
+    unchanged, press = _row("raw_inputs.0", launch), {**_news("raw_inputs.1"), "url": "https://press.example/acme"}
+    routes = ((new, "personality"), (moved, "mission"), (unchanged, "vision"), (press, "attributes"))
+    hints = [{"evidence_ref": row["ref"], "evidence_fingerprint": _fingerprint(row["content"]), "component_key": key} for row, key in routes]
+
+    plan = _signals(prior, [_promise_row()], current, [new, moved, unchanged, press], hints=hints)["core_plan"]
+
+    # The promise was only re-chunked onto the changed page: the prior page holds it, so it names no call.
+    assert (plan["new_owned_rows"], plan["new_content_components"], plan["would_call"]) == (1, ["personality"], ["personality"])
 
 
 @pytest.mark.parametrize(

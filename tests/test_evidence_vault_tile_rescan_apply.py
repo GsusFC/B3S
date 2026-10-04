@@ -66,17 +66,15 @@ def _ledger(accepted, states=None, shown=()):
     return list(rows.values())
 
 
-def _outcome(status="review_required", *reasons, authority=_ID):
-    accepted = None if authority is None else {"accepted_candidate_id": authority}
-    return {"status": status, "reason_codes": list(reasons or ["provider_failure"]), "accepted_authority": accepted}
+_GUARD = {"core_plan": {"proof_gone_components": [], "would_call": [], "actual_calls": []}, "failed_components": []}
 
 
-def _build(accepted, verdicts=(), *, ledger=None, outcome=None):
+def _build(accepted, verdicts=(), *, ledger=None):
     """Build, and hold every candidate to PR1's v3 envelope and to rows copied from durable facts."""
 
     result = apply.build_tile_rescan_candidate(
-        outcome=outcome or _outcome(), accepted_candidate=accepted, ledger_rows=_ledger(accepted) if ledger is None else ledger,
-        current_judgments=list(verdicts), witness=_WITNESS,
+        accepted_candidate=accepted, ledger_rows=_ledger(accepted) if ledger is None else ledger,
+        current_judgments=list(verdicts), witness=_WITNESS, guard=_GUARD,
     )
     if result["status"] == "candidate":
         candidate = result["candidate"]
@@ -96,56 +94,16 @@ def _score(rows):
     return ie._assessment(plan, set(), {row["tile_id"]: row for row in rows}, {})[0]["sv9_score"]
 
 
-@pytest.mark.parametrize(
-    "outcome",
-    [
-        _outcome("review_required", "coverage_loss", "unmapped_evidence", "incomplete_review_partition", "review_set",
-                 "provider_failure", "incomplete_candidate", "evaluation_incomplete"),
-        _outcome("review_required", "unmapped_evidence"),
-        _outcome("no_new_score", "provider_failure"),
-    ],
-)
-def test_eligible_outcomes_with_accepted_authority_build_a_candidate(outcome):
-    assert _build(_accepted(), outcome=outcome)["status"] == "candidate"
+def test_unverified_or_absent_proof_never_blocks_and_keeps_the_accepted_rows():
+    accepted = _accepted()
+    # No ledger row: every lit tile's proof is unverified. All verified absent: proof gone without a Core call.
+    absent = _ledger(accepted, dict.fromkeys((row["tile_id"] for row in accepted["candidate_tile_judgments"]), "verified_absent"))
 
-
-@pytest.mark.parametrize(
-    ("outcome", "reason"),
-    [
-        (_outcome("review_required", "provider_failure", "series_rollover"), "outcome_not_eligible"),
-        (_outcome("no_new_score", "evaluation_incomplete"), "outcome_not_eligible"),
-        (_outcome("review_required", "provider_failure", authority=None), "no_accepted_authority"),
-        (_outcome("review_required", "provider_failure", authority="00000000-0000-0000-0000-000000000001"), "no_accepted_authority"),
-    ],
-)
-def test_other_outcomes_and_first_scans_are_never_eligible(outcome, reason):
-    result = _build(_accepted(), outcome=outcome)
-
-    assert (result["status"], result["reason_codes"], result["candidate"]) == ("ineligible", [reason], None)
-
-
-@pytest.mark.parametrize(
-    ("absent", "unverified", "status"),
-    [(0.3, 0.5, "candidate"), (0.301, 0.5, "guarded"), (0.3, 0.501, "guarded"), (None, None, "guarded")],
-)
-def test_change_signal_guard_applies_up_to_its_exact_boundaries(monkeypatch, absent, unverified, status):
-    project = rule.project_rescan
-
-    def shares(*args):
-        result = project(*args)
-        return result | {"change_signal": result["change_signal"] | {"absent_share": absent, "unverified_share": unverified}}
-
-    monkeypatch.setattr(rule, "project_rescan", shares)
-    result = _build(_accepted())
-
-    assert result["status"] == status and (result["candidate"] is None) == (status == "guarded")
-    assert (result["change_signal"]["absent_share"], result["change_signal"]["unverified_share"]) == (absent, unverified)
-
-
-def test_guard_reads_the_rules_change_signal():
-    result = _build(_accepted(), ledger=[])
-
-    assert (result["status"], result["reason_codes"], result["change_signal"]["unverified_share"]) == ("guarded", ["change_signal_guard"], 1.0)
+    for result, share in ((_build(accepted, ledger=[]), "unverified_share"), (_build(accepted, ledger=absent), "absent_share")):
+        assert (result["status"], result["change_signal"][share]) == ("candidate", 1.0)
+        assert result["candidate"]["candidate_tile_judgments"] == accepted["candidate_tile_judgments"]
+        assert {row["decision"] for row in result["candidate"]["tile_rescan"]["decisions"]} == {"b3s_failure"}
+        assert result["candidate"]["tile_rescan"]["guard"] == _GUARD
 
 
 _NEW = _pair("new")
@@ -162,7 +120,7 @@ _NEW = _pair("new")
         pytest.param("sin_evidencia", "seen", (), ("ok", _NEW), "light", "checkpoint", id="light"),
         pytest.param("ok", "seen", ("V1",), ("no", _NEW), "keep_lit", "accepted", id="keep_lit_doubt"),
         pytest.param("ok", "verified_absent", (), ("no", _NEW), "turn_off_proven", "checkpoint", id="turn_off_proven_core_verdict"),
-        pytest.param("ok", "verified_absent", (), None, "b3s_failure", "held", id="b3s_failure_core_not_called"),
+        pytest.param("ok", "verified_absent", (), None, "b3s_failure", "accepted", id="b3s_failure_core_not_called"),
     ],
 )
 def test_each_decision_copies_the_row_its_table_names(accepted_state, ledger_state, shown, verdict, decision, source):
@@ -174,8 +132,6 @@ def test_each_decision_copies_the_row_its_table_names(accepted_state, ledger_sta
     made = _tile(result["candidate"]["tile_rescan"]["decisions"], "V1")
     expected = checkpoint[0] if source == "checkpoint" else _tile(accepted["candidate_tile_judgments"], "V1")
     assert made["decision"] == decision and _tile(result["candidate"]["candidate_tile_judgments"], "V1") == expected
-    assert result["ambiguous_tile_ids"] == (["V1"] if source == "held" else [])
-    assert ("held_without_core_verdict" in made["reason_codes"]) == (source == "held")
 
 
 @pytest.mark.parametrize(("pairs", "source"), [((_NEW,), "accepted"), ((_RELATION, _NEW), "checkpoint")], ids=["drops_relation", "keeps_relation"])
@@ -193,12 +149,25 @@ def test_a_new_quote_keeps_the_accepted_row_only_when_it_drops_the_authoritative
     assert result["candidate"]["assessment"]["sv9_score"] == _score(accepted["candidate_tile_judgments"])
 
 
-def test_a_turn_off_that_drops_the_authoritative_relation_is_unavailable():
+def test_a_turn_off_that_drops_the_authoritative_relation_stays_lit_as_a_doubt():
     accepted = _accepted()
 
     result = _build(accepted, [_judgment("M1", "no", _NEW, capture=2)], ledger=_ledger(accepted, {"M1": "verified_absent"}))
 
-    assert (result["status"], result["reason_codes"], result["candidate"]) == ("unavailable", ["authoritative_relation_dropped"], None)
+    made = _tile(result["candidate"]["tile_rescan"]["decisions"], "M1")
+    assert (made["decision"], made["reason_codes"]) == ("keep_lit", ["doubt", "turn_off_proven", "held_for_authoritative_relation"])
+    assert _tile(result["candidate"]["candidate_tile_judgments"], "M1") == _tile(accepted["candidate_tile_judgments"], "M1")
+    assert result["candidate"]["assessment"]["sv9_score"] == _score(accepted["candidate_tile_judgments"])
+
+
+def test_a_turn_off_of_a_tile_without_a_reviewed_relation_takes_cores_row():
+    accepted = _accepted()
+    verdict = _judgment("V1", "no", _NEW, capture=2)
+
+    result = _build(accepted, [verdict], ledger=_ledger(accepted, {"V1": "verified_absent"}))
+
+    assert _tile(result["candidate"]["tile_rescan"]["decisions"], "V1")["decision"] == "turn_off_proven"
+    assert _tile(result["candidate"]["candidate_tile_judgments"], "V1") == verdict
 
 
 def test_a_not_detected_component_keeps_its_sentinel_unless_one_of_its_tiles_lights():

@@ -136,12 +136,17 @@ def rescan_signals(
     current_evaluations: Iterable[Mapping[str, Any]],
     prior_judgments: Sequence[Mapping[str, Any]],
     ledger_rows: Sequence[Mapping[str, Any]],
+    hinted_rows: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Log-only signals: which components Core would be called on (rule 9) and a suspected redesign (rule 12).
 
     Snapshots and rows are the two captures as ``build_evidence_ledger`` takes them,
     ``current_evaluations`` the components Core evaluated in the re-scan and
-    ``prior_judgments`` the accepted tile judgments. Nothing here changes a call or a score.
+    ``prior_judgments`` the accepted tile judgments. ``hinted_rows`` are the current rows
+    the operational hints route to a component (``evidence_ref``, ``evidence_fingerprint``,
+    ``component_key``); one is new content only when it is owned copy on a changed or new
+    page and the prior capture's page does not already hold it, so re-chunked unchanged
+    text names no call. New external URLs are only counted. Nothing here changes a call or a score.
     """
 
     lit = [row for row in prior_judgments if row["assessment_state"] == OK]
@@ -152,22 +157,25 @@ def rescan_signals(
         if {item["state"] for item in summary["supporting_evidence"]} == {ledger.VERIFIED_ABSENT}
     )
     pages = ledger.compare_owned_pages(prior_snapshot, current_snapshot)
-    changed_or_new = sum(page["change"] == "changed" or (page["in_current"] and not page["in_prior"]) for page in pages)
+    changed_or_new = {page["source_key"] for page in pages if page["change"] == "changed" or (page["in_current"] and not page["in_prior"])}
     # The ledger's own capture views: its source keys, and the capture health its absence proof requires.
     prior = ledger._capture_view(prior_snapshot, prior_rows, brand_domain)
     current = ledger._capture_view(current_snapshot, current_rows, brand_domain)
     new_external = len(_external_keys(current) - _external_keys(prior))
+    new_rows = _new_owned_rows(prior["pages"], current["evidence"], changed_or_new, hinted_rows)
+    new_components = _registry_order(row["component_key"] for row in new_rows)
     compared = [page for page in pages if page["in_prior"] and page["in_current"]]
     changed = sum(page["change"] == "changed" for page in compared)
     healthy = not ledger._capture_reasons(current)
     return {
         "core_plan": {
             "proof_gone_components": gone,
-            "changed_owned_pages": changed_or_new,
+            "changed_owned_pages": len(changed_or_new),
             "new_external_urls": new_external,
-            "content_trigger": changed_or_new > 0 or new_external > 0,
-            # New content is not routed to components yet, so only a gone proof names a call.
-            "would_call": list(gone),
+            "new_owned_rows": len({(row["evidence_ref"], row["evidence_fingerprint"]) for row in new_rows}),
+            "new_content_components": new_components,
+            "content_trigger": bool(changed_or_new) or new_external > 0,
+            "would_call": _registry_order([*gone, *new_components]),
             "actual_calls": _registry_order(row["component_key"] for row in current_evaluations),
         },
         "redesign": {
@@ -249,6 +257,33 @@ def _unavailable(reason: str, signal: dict[str, Any] | None) -> dict[str, Any]:
     scores = dict.fromkeys(("would_be_score", "accepted_score", "delta", "within_tolerance"))
     tile_decisions = {"reason_codes": [reason], "counts": {}, "tiles": []}
     return {"tile_decisions": tile_decisions, **scores, "change_signal": signal, "doubts": []}
+
+
+def _new_owned_rows(
+    prior_pages: Mapping[str, Mapping[str, Any]],
+    current_rows: Sequence[Mapping[str, Any]],
+    changed_pages: set[str],
+    hinted_rows: Iterable[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Hinted owned rows on a changed or new page that the prior capture's page does not hold."""
+
+    owned = {(row["evidence_ref"], row["evidence_fingerprint"]): row for row in current_rows if row["evidence_class"] == ledger.OWNED_PAGE_CLASS}
+    found = []
+    for hint in hinted_rows:
+        row = owned.get((hint["evidence_ref"], hint["evidence_fingerprint"]))
+        if row is not None and row["source_key"] in changed_pages and not _held_by(row, prior_pages.get(row["source_key"])):
+            found.append(hint)
+    return found
+
+
+def _held_by(row: Mapping[str, Any], page: Mapping[str, Any] | None) -> bool:
+    # The ledger's seen test, run against the prior page: the row's own text, or SEEN_CONTAINMENT of its shingles.
+    if page is None or not page["normalized"]:
+        return False
+    if row["normalized"] and row["normalized"] in page["normalized"]:
+        return True
+    containment = ledger._chunk_containment(row, page)
+    return containment is not None and containment >= ledger.SEEN_CONTAINMENT
 
 
 def _external_keys(capture: Mapping[str, Any]) -> set[str]:
