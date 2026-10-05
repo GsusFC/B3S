@@ -2,10 +2,11 @@
 
 It starts from the accepted result: each tile keeps its accepted row unless a durable
 fact changes it (``evidence_vault_tile_rescan_apply``), and a healthy re-scan supersedes
-the accepted candidate with that v3 candidate instead of reopening review. This path
-calls no Core component yet, so a gone proof or new owned content only shows in the
-logged ``would_call``. Past its preconditions every failure raises: nothing is
-published and the accepted result stands.
+the accepted candidate with that v3 candidate instead of reopening review. Core is called
+only on the components a gone proof or new owned content names (``would_call``), plus the
+Coherencia the planner reopens with them; a component Core fails keeps its accepted rows.
+Past its preconditions every other failure raises: nothing is published and the accepted
+result stands.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from src.config import BRAND3_VAULT_TILE_RESCAN_APPLY_DOMAINS, BRAND3_VAULT_TILE
 from src.history.report_parser import normalize_domain
 from src.services import evidence_vault_evidence_ledger as ledger
 from src.services import evidence_vault_sv9_authority_application as application
+from src.services import evidence_vault_sv9_authority_evaluation as evaluation_service
 from src.services import evidence_vault_tile_rescan_rule as rule
 from src.services.evidence_vault_sv9_authoritative_relations import (
     _project_evidence_vault_sv9_evaluation_input_from_facts,
@@ -31,6 +33,8 @@ from src.services.evidence_vault_sv9_authoritative_relations import (
 from src.services.evidence_vault_sv9_shared_process import is_core_shared_series_contract
 from src.services.evidence_vault_tile_rescan_apply import build_tile_rescan_candidate
 from src.sv9 import incremental_evaluation as evaluation
+from src.sv9 import incremental_planner as planner
+from src.sv9 import judgment_memory as memory
 
 _LOG = logging.getLogger(__name__)
 # Rule 11 with Q2 = B: a failed or bot-walled page is a broken capture; a 404 or truncated page is only not checked.
@@ -116,28 +120,37 @@ def _rescan(summary: dict[str, Any], repository: Any, flow: Any, domain: str, so
     accepted = authority["accepted_candidate"]
     if facts["accepted"]["candidate_id"] != accepted["id"]:
         raise EvidenceVaultTileRescanError("facts", "accepted_authority_mismatch")
-    prior, current = facts["prior"], facts["current"]
+    prior = facts["prior"]
     summary.update(prior_scan_id=prior["scan_id"], accepted_score=accepted["assessment"]["sv9_score"])
-    with _step(summary, "ledger"):
+    with _step(summary, "health"):
         rows = _healthy_capture_ledger(facts, accepted)
-        repository.append_evidence_ledger_rows(source, prior_source_scan_id=prior["scan_id"], rows=rows, workspace_slug=workspace)
     with _step(summary, "witness"):
         evaluation_input, witness = _rescan_witness(repository, source, workspace)
         reviewed = accepted["authoritative_relation_witness"]
         # The re-scan's witness must descend from the accepted one before the builder protects its relations.
         if witness["operational_witness"] != reviewed["operational_witness"] or [row["tile_id"] for row in witness["authoritative_relations"]] != [row["tile_id"] for row in reviewed["authoritative_relations"]]:
             raise EvidenceVaultTileRescanError("witness", "witness_mismatch")
+    would_call, called = _signals(facts, accepted, rows, evaluation_input)["core_plan"]["would_call"], []
+    if would_call:
+        with _step(summary, "core"):
+            called = _core_calls(repository, flow, domain, source, workspace, series, authority, evaluation_input, would_call)
+            # Core's verdicts reach the builder and the ledger's shown-to-Core index through this scan's checkpoints.
+            facts = repository.load_evidence_ledger_scan_facts(domain, source_scan_id=source, workspace_slug=workspace)
+            if facts is None or facts["accepted"]["candidate_id"] != accepted["id"]:
+                raise EvidenceVaultTileRescanError("core", "accepted_authority_mismatch")
+    current = facts["current"]
+    with _step(summary, "ledger"):
+        rows = _healthy_capture_ledger(facts, accepted)
+        repository.append_evidence_ledger_rows(source, prior_source_scan_id=prior["scan_id"], rows=rows, workspace_slug=workspace)
     with _step(summary, "build"):
-        signals = rule.rescan_signals(
-            brand_domain=facts["domain"], prior_snapshot=prior["snapshot"], prior_rows=prior["evidence_rows"],
-            current_snapshot=current["snapshot"], current_rows=current["evidence_rows"], current_evaluations=current["evaluations"],
-            prior_judgments=accepted["candidate_tile_judgments"], ledger_rows=rows, hinted_rows=_hinted_rows(evaluation_input),
-        )
-        # No Core call yet: a gone proof or new content only names one here, and rules 2 and 10 keep those tiles.
+        signals = _signals(facts, accepted, rows, evaluation_input)
         summary["core_plan"] = signals["core_plan"]
+        # A component Core was asked for and left without a checkpoint keeps its accepted rows (rules 2 and 10).
+        failed = rule._registry_order(set(would_call) | set(called))
+        failed = [component for component in failed if component not in signals["core_plan"]["actual_calls"]]
         built = build_tile_rescan_candidate(
             accepted_candidate=accepted, ledger_rows=rows, current_judgments=current["judgments"], witness=witness,
-            guard={"core_plan": signals["core_plan"], "failed_components": []},
+            guard={"core_plan": signals["core_plan"], "failed_components": failed},
         )
         summary["change_signal"] = built["change_signal"]
         candidate = built["candidate"]
@@ -161,6 +174,53 @@ def _rescan(summary: dict[str, Any], repository: Any, flow: Any, domain: str, so
     if result["status"] != "authority_advanced":
         raise EvidenceVaultTileRescanError("adopt", result["status"])
     return result
+
+
+def _signals(facts: Mapping[str, Any], accepted: Mapping[str, Any], rows: list[dict[str, Any]], evaluation_input: Mapping[str, Any]) -> dict[str, Any]:
+    prior, current = facts["prior"], facts["current"]
+    return rule.rescan_signals(
+        brand_domain=facts["domain"], prior_snapshot=prior["snapshot"], prior_rows=prior["evidence_rows"],
+        current_snapshot=current["snapshot"], current_rows=current["evidence_rows"], current_evaluations=current["evaluations"],
+        prior_judgments=accepted["candidate_tile_judgments"], ledger_rows=rows, hinted_rows=_hinted_rows(evaluation_input),
+    )
+
+
+def _core_calls(repository: Any, flow: Any, domain: str, source: str, workspace: str, series: Mapping[str, Any], authority: Mapping[str, Any], evaluation_input: Mapping[str, Any], would_call: list[str]) -> list[str]:
+    """Call Core on ``would_call`` through the incremental planner and checkpoints; return the components planned.
+
+    Every tile of a named component sees the same rows: the current rows the hints route
+    to it and the current rows of its accepted supports. A tile whose rows equal its own
+    supports is left out, since the planner would send it to review. Coherencia gets its
+    own rows, or the planner reopens it on its prior supports. A provider failure only
+    leaves components without a checkpoint; any other failure raises.
+    """
+
+    prior, sentinels, _ids, _overlay, snapshot = evaluation_service._authority(authority, source)
+    context, records = evaluation_service._source(repository, source, evaluation_input, workspace, normalize_domain(domain))
+    hinted, by_tile, deltas = _hinted_rows(evaluation_input), {row["tile_id"]: row for row in prior}, []
+    for component, tiles in planner._COMPONENT_TILES.items():
+        if component not in would_call and not (component == "coherencia" and deltas):
+            continue
+        pairs = {(row["evidence_ref"], row["evidence_fingerprint"]) for row in hinted if row["component_key"] == component}
+        pairs |= {(item["evidence_ref"], item["evidence_fingerprint"]) for row in prior if row["component_key"] == component for item in row["supporting_evidence"]}
+        evidence = [{"evidence_ref": ref, "evidence_fingerprint": fingerprint} for ref, fingerprint in sorted(pairs & set(records))]
+        if not evidence:
+            continue
+        for tile in tiles:
+            delta = memory.build_tile_evidence_delta_projection(tile_id=tile, component_key=component, disposition="relevant", evidence=evidence, **context)
+            if tile not in by_tile or delta["evidence"] != by_tile[tile]["supporting_evidence"]:
+                deltas.append(delta)
+    if not deltas:
+        return []
+    plan = planner.build_incremental_plan(prior, deltas, dict(series), prior_component_sentinels=sentinels)
+    if plan["review_set"]:
+        raise EvidenceVaultTileRescanError("core", "plan_review")
+    packets, _bindings = evaluation_service._packets(plan, records, context)
+    lookup, persist = evaluation_service._checkpoint_callbacks(repository, source, workspace, evaluation_input, snapshot, plan, flow=flow)
+    result = evaluation.execute_incremental_evaluation(plan, packets, flow, lookup_evaluation=lookup, persist_evaluation=persist)
+    if result["status"] != "available" and result["reason_code"] != "provider_failure":
+        raise EvidenceVaultTileRescanError("core", str(result["reason_code"]))
+    return list(plan["component_workset"])
 
 
 def _skip(state: str, authority: Mapping[str, Any] | None, details: Mapping[str, Any] | None, source: str, series: Mapping[str, Any]) -> str | None:

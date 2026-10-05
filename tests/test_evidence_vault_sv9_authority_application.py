@@ -13,8 +13,10 @@ from src.services import evidence_vault_sv9_authority_projection as authority_pr
 from src.services import evidence_vault_sv9_judgment_delta as delta
 from src.services import evidence_vault_sv9_workset_partition as partitioning
 from src.services import evidence_vault_tile_rescan_path as tile_rescan_path
+from src.services import evidence_vault_tile_rescan_rule as rule
 from src.services.evidence_vault_canonical_core import canonical_fingerprint
 from src.services.evidence_vault_sv9_authority_report import project_vault_authority_publication
+from src.sv9 import incremental_planner as planner
 from tests.test_evidence_vault_sv9_authority_evaluation import _SCHEME_DRIFT, _DroppingFlow, _Flow, _Repository, _authority, _hash, _identity, _primary_repository, _relation, _series
 from tests.test_evidence_vault_tile_rescan_apply import _judgment as _tile_judgment, _ledger
 from tests.test_sv9_judgment_memory import _judgment
@@ -1203,7 +1205,7 @@ def test_tile_rescan_path_runs_before_the_evaluation_and_supersedes_without_core
     assert project_vault_authority_publication(result, "scan-2")["action"] == "publish_current"
     [(level, kind, summary, message)] = _rescan_logs(caplog)
     assert (level, kind, summary["status"], summary["reason_codes"], summary["step"], summary["candidate_id"]) == (logging.WARNING, "apply", "applied", ["authority_advanced"], "adopt", stored["id"])
-    assert set(summary["timings_ms"]) == {"read", "facts", "ledger", "witness", "build", "snapshot", "append", "adopt"}
+    assert set(summary["timings_ms"]) == {"read", "facts", "health", "witness", "ledger", "build", "snapshot", "append", "adopt"}
     assert summary["core_plan"]["would_call"] == summary["core_plan"]["actual_calls"] == [] and stored["tile_rescan"]["guard"] == {"core_plan": summary["core_plan"], "failed_components": []}
     assert (summary["accepted_score"], summary["score"], summary["doubts"]) == (accepted["assessment"]["sv9_score"], stored["assessment"]["sv9_score"], [])
     assert message == "vault tile rescan apply " + json.dumps(summary, sort_keys=True, separators=(",", ":"))
@@ -1297,7 +1299,7 @@ def test_tile_rescan_path_fails_a_broken_capture_and_keeps_a_404(monkeypatch, ca
         _rescan(repo)
     assert raised.value.reason_code == reason and repo.mutations == ["adopt"] and not repo.ledger_appends
     [(_level, _kind, summary, _message)] = _rescan_logs(caplog)
-    assert (summary["status"], summary["step"], summary["reason_codes"]) == ("failed", "ledger", [reason])
+    assert (summary["status"], summary["step"], summary["reason_codes"]) == ("failed", "health", [reason])
 
 def test_tile_rescan_path_failure_logs_the_step_and_the_error_chain(monkeypatch, caplog):
     repo = _tile_rescan(monkeypatch)
@@ -1313,6 +1315,63 @@ def test_tile_rescan_path_failure_logs_the_step_and_the_error_chain(monkeypatch,
     [(_level, _kind, summary, _message)] = _rescan_logs(caplog)
     assert (summary["status"], summary["step"], summary["reason_codes"]) == ("failed", "append", ["EvidenceVaultSv9JudgmentCandidateError"])
     assert summary["error"] == "EvidenceVaultSv9JudgmentCandidateError: SV9 judgment candidate is invalid <- ValueError: snapshot provenance"
+
+def _core_rescan(monkeypatch, repo):
+    """New owned content routed to mission: the re-scan's evidence 3 is hinted to it, and rescan_signals names the call."""
+    events, signals, start = [], rule.rescan_signals, len(repo.checkpoint_appends)
+    load, append_rows, append_checkpoint = repo.load_evidence_ledger_scan_facts, repo.append_evidence_ledger_rows, repo.append_evidence_vault_sv9_evaluation_checkpoint
+    def facts(*args, **kwargs):
+        # The scan facts' current side is what this scan's checkpoints hold, as the repository loads it.
+        value = load(*args, **kwargs); events.append("facts")
+        value["current"]["judgments"] = [row for checkpoint in repo.checkpoint_appends[start:] for row in checkpoint["healthy_workset"]["evaluated_tile_judgments"]]
+        value["current"]["evaluations"] = [{"component_key": row["component_key"], "status": "evaluated", "candidate": None, "component_result": None} for checkpoint in repo.checkpoint_appends[start:] for row in checkpoint["healthy_workset"]["component_evaluations"]]
+        return value
+    repo.load_evidence_ledger_scan_facts = facts
+    relation_facts = repo.load_evidence_vault_sv9_authoritative_relation_facts
+    def accepted_basis_unchanged(scan, **kwargs):
+        # Evidence 3 is new to the capture: the reviewed relation still rests on evidence 9 alone.
+        value = relation_facts(scan, **kwargs); [accepted_row] = value["authority"]["accepted"]
+        accepted_row["basis"] = accepted_row["basis"][-1:]
+        return value
+    repo.load_evidence_vault_sv9_authoritative_relation_facts = accepted_basis_unchanged
+    repo.append_evidence_ledger_rows = lambda *args, **kwargs: events.append("ledger") or append_rows(*args, **kwargs)
+    repo.append_evidence_vault_sv9_evaluation_checkpoint = lambda *args, **kwargs: events.append("checkpoint") or append_checkpoint(*args, **kwargs)
+    monkeypatch.setattr(tile_rescan_path, "_hinted_rows", lambda _input: [_identity(3) | {"component_key": "mission"}])
+    monkeypatch.setattr(rule, "rescan_signals", lambda **kwargs: (result := signals(**kwargs)) | {"core_plan": result["core_plan"] | {"would_call": ["mission"]}})
+    return events, start
+
+def _core_run(repo, flow): return _run(repo, flow, current=(3, 9), relations=[_relation(repo, "M1", number=9)], source="scan-2")
+
+@pytest.mark.parametrize(("fail", "failed"), [(None, []), (1, ["mission", "coherencia"]), (2, ["coherencia"])], ids=("calls_succeed", "mission_fails", "coherencia_fails"))
+def test_tile_rescan_path_calls_core_on_would_call_and_keeps_failed_components(monkeypatch, caplog, fail, failed):
+    repo, flow = _tile_rescan(monkeypatch), _Flow(fail=fail); (events, start) = _core_rescan(monkeypatch, repo); accepted = deepcopy(repo.authority["accepted_candidate"])
+
+    result = _core_run(repo, flow)
+
+    stored = repo.authority["accepted_candidate"]; rows, accepted_rows = ({row["tile_id"]: row for row in value["candidate_tile_judgments"]} for value in (stored, accepted))
+    # The planner reopens Coherencia with mission; Core stops at the first failure, and nothing reopens review.
+    assert result["status"] == "authority_advanced" and "reopen" not in repo.mutations
+    assert [request["component_key"] for request in flow.calls] == ["mission", "coherencia"][: fail or 2]
+    # Every mission tile saw the same rows: its hinted new row and the component's accepted supports.
+    assert all([row["evidence_ref"] for row in tile["evidence"]] == ["evidence:3", "evidence:9"] for tile in flow.calls[0]["requested_tiles"])
+    checkpointed = {row["tile_id"]: row for checkpoint in repo.checkpoint_appends[start:] for row in checkpoint["healthy_workset"]["evaluated_tile_judgments"]}
+    # A component Core answered takes its checkpoint rows; a failed one keeps its accepted rows.
+    assert all(rows[tile] == (checkpointed[tile] if tile in checkpointed else accepted_rows[tile]) for tile in accepted_rows)
+    assert {dict(planner._REGISTRY)[tile] for tile in checkpointed} == {"mission", "coherencia"} - set(failed)
+    # The ledger is built after Core, so its shown-to-Core index sees this scan's calls.
+    assert events == ["facts", *["checkpoint"] * len(repo.checkpoint_appends[start:]), "facts", "ledger"]
+    [(_level, _kind, summary, _message)] = _rescan_logs(caplog)
+    assert summary["core_plan"]["actual_calls"] == [key for key in ("mission", "coherencia") if key not in failed] and stored["tile_rescan"]["guard"]["failed_components"] == failed
+    assert "core" in summary["timings_ms"] and summary["status"] == "applied"
+
+def test_tile_rescan_path_fails_closed_when_a_core_checkpoint_cannot_persist(monkeypatch, caplog):
+    repo = _tile_rescan(monkeypatch); _core_rescan(monkeypatch, repo); repo.fail_checkpoint_append = True; accepted = deepcopy(repo.authority["accepted_candidate"])
+    with pytest.raises(tile_rescan_path.EvidenceVaultTileRescanError) as raised:
+        _core_run(repo, _Flow())
+    assert (raised.value.step, raised.value.reason) == ("core", "invalid_input")
+    assert repo.authority["accepted_candidate"] == accepted and repo.mutations == ["adopt"] and not repo.ledger_appends
+    [(_level, _kind, summary, _message)] = _rescan_logs(caplog)
+    assert (summary["status"], summary["step"], summary["reason_codes"]) == ("failed", "core", ["invalid_input"])
 
 _POSTGRES = pytest.mark.skipif(not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1", reason="requires disposable PostgreSQL")
 

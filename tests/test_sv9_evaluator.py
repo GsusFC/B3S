@@ -429,6 +429,17 @@ class EvaluateComponentTests(unittest.TestCase):
         self.assertIn("cita evidencia de otra baldosa en: M1;", llm.calls[1]["user"])
         self.assertEqual(result.tile_profile[0].evidencia, "quote M1")
 
+    def test_identical_tile_groups_render_one_flat_quote_list(self):
+        llm = FakeLLM()
+        tldr = full_tldr()
+        tldr["mission"]["tile_evidence"] = {tile_id: ["quote M1", "quote M2"] for tile_id in tile_ids("mission")}
+        evaluate_component("mission", tldr=tldr, signals=[], brand_name="Acme", url="u", llm=llm)
+
+        flat = FakeLLM()
+        evaluate_component("mission", tldr=full_tldr(), signals=[], brand_name="Acme", url="u", llm=flat)
+        # Every tile may quote every row, so the prompt lists them once, as a block without groups does.
+        self.assertEqual(llm.calls[0]["user"], flat.calls[0]["user"])
+
     def test_embedded_literal_quote_is_canonicalized_without_retry(self):
         class EmbeddedQuoteLLM(FakeLLM):
             def _call_json(self, system, user, max_tokens=8000, **kwargs):

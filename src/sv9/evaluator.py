@@ -965,8 +965,8 @@ def _build_component_prompt(
         "\n".join(f"- {quote}" for quote in evidence_quotes) if evidence_quotes else "(none)"
     )
     tile_quotes = _tile_literal_sources(block)
-    if tile_quotes is not None:
-        # A tile may only quote the snippets listed under its own id.
+    if tile_quotes is not None and len({tuple(quotes) for quotes in tile_quotes.values()}) > 1:
+        # A tile may only quote the snippets listed under its own id; identical groups stay one flat list.
         evidence_section = "\n".join(
             f"{tile} (cita solo de estas):\n"
             + ("\n".join(f"- {quote}" for quote in quotes) if quotes else "(none)")
