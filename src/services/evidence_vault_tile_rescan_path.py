@@ -86,7 +86,7 @@ def run_tile_rescan_path(
         return None
     started = time.monotonic()
     summary: dict[str, Any] = {"scan_id": source_scan_id, "timings_ms": {}} | dict.fromkeys(
-        ("status", "step", "reason_codes", "error", "prior_scan_id", "accepted_score", "score", "candidate_id", "counts", "doubts", "change_signal", "core_plan", "total_ms")
+        ("status", "step", "reason_codes", "error", "prior_scan_id", "accepted_score", "score", "candidate_id", "counts", "doubts", "change_signal", "core_plan", "carried_calls", "total_ms")
     )
     try:
         result = _rescan(summary, repository, flow, domain_or_url, source_scan_id, current_series_contract, workspace_slug)
@@ -130,7 +130,10 @@ def _rescan(summary: dict[str, Any], repository: Any, flow: Any, domain: str, so
         # The re-scan's witness must descend from the accepted one before the builder protects its relations.
         if witness["operational_witness"] != reviewed["operational_witness"] or [row["tile_id"] for row in witness["authoritative_relations"]] != [row["tile_id"] for row in reviewed["authoritative_relations"]]:
             raise EvidenceVaultTileRescanError("witness", "witness_mismatch")
-    would_call, called = _signals(facts, accepted, rows, evaluation_input)["core_plan"]["would_call"], []
+    # A component the accepted re-scan named but Core never answered is called now: its content is already in the prior capture.
+    summary["carried_calls"] = _pending_calls(accepted)
+    would_call = rule._registry_order({*_signals(facts, accepted, rows, evaluation_input)["core_plan"]["would_call"], *summary["carried_calls"]})
+    called: list[str] = []
     if would_call:
         with _step(summary, "core"):
             called = _core_calls(repository, flow, domain, source, workspace, series, authority, evaluation_input, would_call)
@@ -183,6 +186,28 @@ def _signals(facts: Mapping[str, Any], accepted: Mapping[str, Any], rows: list[d
         current_snapshot=current["snapshot"], current_rows=current["evidence_rows"], current_evaluations=current["evaluations"],
         prior_judgments=accepted["candidate_tile_judgments"], ledger_rows=rows, hinted_rows=_hinted_rows(evaluation_input),
     )
+
+
+def _pending_calls(accepted: Mapping[str, Any]) -> list[str]:
+    """The components the accepted re-scan left unevaluated, from its ``tile_rescan.guard``.
+
+    The guard is a contract here: the next re-scan reads ``core_plan.would_call``,
+    ``core_plan.actual_calls`` and ``failed_components`` to call what Core never answered
+    (``would_call`` minus ``actual_calls``, plus ``failed_components``). An accepted
+    candidate without a tile re-scan, or with a guard of any other shape, carries nothing.
+    """
+
+    tile_rescan = accepted.get("tile_rescan")
+    guard = tile_rescan.get("guard") if isinstance(tile_rescan, Mapping) else None
+    plan = guard.get("core_plan") if isinstance(guard, Mapping) else None
+    if not isinstance(plan, Mapping):
+        return []
+    named = [plan.get("would_call"), plan.get("actual_calls"), guard.get("failed_components")]
+    known = {row["component_key"] for row in rule._COMPONENTS}
+    if any(type(value) is not list or not set(value) <= known for value in named):
+        return []
+    would_call, actual_calls, failed = (set(value) for value in named)
+    return rule._registry_order((would_call - actual_calls) | failed)
 
 
 def _core_calls(repository: Any, flow: Any, domain: str, source: str, workspace: str, series: Mapping[str, Any], authority: Mapping[str, Any], evaluation_input: Mapping[str, Any], would_call: list[str]) -> list[str]:
