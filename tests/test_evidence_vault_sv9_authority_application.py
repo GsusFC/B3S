@@ -1316,15 +1316,17 @@ def test_tile_rescan_path_failure_logs_the_step_and_the_error_chain(monkeypatch,
     assert (summary["status"], summary["step"], summary["reason_codes"]) == ("failed", "append", ["EvidenceVaultSv9JudgmentCandidateError"])
     assert summary["error"] == "EvidenceVaultSv9JudgmentCandidateError: SV9 judgment candidate is invalid <- ValueError: snapshot provenance"
 
-def _core_rescan(monkeypatch, repo):
-    """New owned content routed to mission: the re-scan's evidence 3 is hinted to it, and rescan_signals names the call."""
-    events, signals, start = [], rule.rescan_signals, len(repo.checkpoint_appends)
+def _core_rescan(monkeypatch, repo, named=None):
+    """New owned content routed to mission: the re-scan's evidence 3 is hinted to it, and rescan_signals names ``named``."""
+    named = ["mission"] if named is None else named
+    events, signals, start, starts = [], rule.rescan_signals, len(repo.checkpoint_appends), {}
     load, append_rows, append_checkpoint = repo.load_evidence_ledger_scan_facts, repo.append_evidence_ledger_rows, repo.append_evidence_vault_sv9_evaluation_checkpoint
-    def facts(*args, **kwargs):
-        # The scan facts' current side is what this scan's checkpoints hold, as the repository loads it.
-        value = load(*args, **kwargs); events.append("facts")
-        value["current"]["judgments"] = [row for checkpoint in repo.checkpoint_appends[start:] for row in checkpoint["healthy_workset"]["evaluated_tile_judgments"]]
-        value["current"]["evaluations"] = [{"component_key": row["component_key"], "status": "evaluated", "candidate": None, "component_result": None} for checkpoint in repo.checkpoint_appends[start:] for row in checkpoint["healthy_workset"]["component_evaluations"]]
+    def facts(*args, source_scan_id, **kwargs):
+        # The scan facts' current side is what this scan's checkpoints hold, against the authority accepted now.
+        value = load(*args, source_scan_id=source_scan_id, **kwargs); events.append("facts"); own = repo.checkpoint_appends[starts.setdefault(source_scan_id, len(repo.checkpoint_appends)):]
+        value["accepted"]["candidate_id"] = repo.authority["accepted_candidate"]["id"]
+        value["current"]["judgments"] = [row for checkpoint in own for row in checkpoint["healthy_workset"]["evaluated_tile_judgments"]]
+        value["current"]["evaluations"] = [{"component_key": row["component_key"], "status": "evaluated", "candidate": None, "component_result": None} for checkpoint in own for row in checkpoint["healthy_workset"]["component_evaluations"]]
         return value
     repo.load_evidence_ledger_scan_facts = facts
     relation_facts = repo.load_evidence_vault_sv9_authoritative_relation_facts
@@ -1337,10 +1339,10 @@ def _core_rescan(monkeypatch, repo):
     repo.append_evidence_ledger_rows = lambda *args, **kwargs: events.append("ledger") or append_rows(*args, **kwargs)
     repo.append_evidence_vault_sv9_evaluation_checkpoint = lambda *args, **kwargs: events.append("checkpoint") or append_checkpoint(*args, **kwargs)
     monkeypatch.setattr(tile_rescan_path, "_hinted_rows", lambda _input: [_identity(3) | {"component_key": "mission"}])
-    monkeypatch.setattr(rule, "rescan_signals", lambda **kwargs: (result := signals(**kwargs)) | {"core_plan": result["core_plan"] | {"would_call": ["mission"]}})
+    monkeypatch.setattr(rule, "rescan_signals", lambda **kwargs: (result := signals(**kwargs)) | {"core_plan": result["core_plan"] | {"would_call": list(named)}})
     return events, start
 
-def _core_run(repo, flow): return _run(repo, flow, current=(3, 9), relations=[_relation(repo, "M1", number=9)], source="scan-2")
+def _core_run(repo, flow, source="scan-2"): return _run(repo, flow, current=(3, 9), relations=[_relation(repo, "M1", number=9)], source=source)
 
 @pytest.mark.parametrize(("fail", "failed"), [(None, []), (1, ["mission", "coherencia"]), (2, ["coherencia"])], ids=("calls_succeed", "mission_fails", "coherencia_fails"))
 def test_tile_rescan_path_calls_core_on_would_call_and_keeps_failed_components(monkeypatch, caplog, fail, failed):
@@ -1372,6 +1374,37 @@ def test_tile_rescan_path_fails_closed_when_a_core_checkpoint_cannot_persist(mon
     assert repo.authority["accepted_candidate"] == accepted and repo.mutations == ["adopt"] and not repo.ledger_appends
     [(_level, _kind, summary, _message)] = _rescan_logs(caplog)
     assert (summary["status"], summary["step"], summary["reason_codes"]) == ("failed", "core", ["invalid_input"])
+
+@pytest.mark.parametrize(("fail", "carried", "calls"), [(1, ["mission", "coherencia"], ["mission", "coherencia"]), (2, ["coherencia"], [])], ids=("carried_and_answered", "carried_without_new_rows"))
+def test_tile_rescan_path_calls_what_the_accepted_rescan_left_unevaluated(monkeypatch, caplog, fail, carried, calls):
+    # Primary's gap: scan-2 named mission but Core never answered, and scan-3's capture holds the same content.
+    named = ["mission"]; repo = _tile_rescan(monkeypatch); _core_rescan(monkeypatch, repo, named)
+    assert _core_run(repo, _Flow(fail=fail))["status"] == "authority_advanced"
+    assert repo.authority["accepted_candidate"]["tile_rescan"]["guard"]["failed_components"] == carried
+    named.clear(); flow = _Flow()
+
+    assert _core_run(repo, flow, source="scan-3")["status"] == "authority_advanced"
+
+    # Nothing new names a call, yet the accepted guard carries the unanswered components.
+    # Coherencia alone has no rows beyond its accepted supports, so the planner cannot reopen it: it is not carried again.
+    assert [request["component_key"] for request in flow.calls] == calls
+    summary = _rescan_logs(caplog)[-1][2]
+    assert (summary["carried_calls"], summary["core_plan"]["actual_calls"], repo.authority["accepted_candidate"]["tile_rescan"]["guard"]["failed_components"]) == (carried, calls, [])
+
+@pytest.mark.parametrize(("guard", "carried"), [
+    ({"core_plan": {"would_call": ["attributes"], "actual_calls": []}, "failed_components": []}, ["attributes"]),
+    ({"core_plan": {"would_call": ["attributes", "mission"], "actual_calls": ["mission"]}, "failed_components": ["coherencia"]}, ["attributes", "coherencia"]),
+    ({"core_plan": {"would_call": ["attributes"], "actual_calls": ["attributes"]}, "failed_components": []}, []),
+    ({"core_plan": {"would_call": ["attributes"]}, "failed_components": []}, []),
+    ({"core_plan": {"would_call": "attributes", "actual_calls": []}, "failed_components": []}, []),
+    ({"core_plan": {"would_call": ["unknown"], "actual_calls": []}, "failed_components": []}, []),
+    ({"core_plan": {"would_call": [{}], "actual_calls": []}, "failed_components": []}, []),
+    ({"core_plan": None, "failed_components": []}, []),
+    (None, []),
+], ids=("named_never_called", "called_one_failed_another", "all_answered", "missing_field", "not_a_list", "unknown_component", "unhashable_entry", "no_plan", "no_guard"))
+def test_tile_rescan_pending_calls_read_the_accepted_guard_and_carry_nothing_when_malformed(guard, carried):
+    accepted = {} if guard is None else {"tile_rescan": {"guard": guard}}
+    assert tile_rescan_path._pending_calls(accepted) == carried
 
 _POSTGRES = pytest.mark.skipif(not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1", reason="requires disposable PostgreSQL")
 
