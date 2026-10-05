@@ -131,8 +131,9 @@ def _rescan(summary: dict[str, Any], repository: Any, flow: Any, domain: str, so
         if witness["operational_witness"] != reviewed["operational_witness"] or [row["tile_id"] for row in witness["authoritative_relations"]] != [row["tile_id"] for row in reviewed["authoritative_relations"]]:
             raise EvidenceVaultTileRescanError("witness", "witness_mismatch")
     # A component the accepted re-scan named but Core never answered is called now: its content is already in the prior capture.
+    named = _signals(facts, accepted, rows, evaluation_input)["core_plan"]["would_call"]
     summary["carried_calls"] = _pending_calls(accepted)
-    would_call = rule._registry_order({*_signals(facts, accepted, rows, evaluation_input)["core_plan"]["would_call"], *summary["carried_calls"]})
+    would_call = rule._registry_order({*named, *summary["carried_calls"]})
     called: list[str] = []
     if would_call:
         with _step(summary, "core"):
@@ -149,7 +150,8 @@ def _rescan(summary: dict[str, Any], repository: Any, flow: Any, domain: str, so
         signals = _signals(facts, accepted, rows, evaluation_input)
         summary["core_plan"] = signals["core_plan"]
         # A component Core was asked for and left without a checkpoint keeps its accepted rows (rules 2 and 10).
-        failed = rule._registry_order(set(would_call) | set(called))
+        # A carried one the planner could not reopen (no rows beyond its accepted supports) is not carried again.
+        failed = rule._registry_order(set(named) | set(called))
         failed = [component for component in failed if component not in signals["core_plan"]["actual_calls"]]
         built = build_tile_rescan_candidate(
             accepted_candidate=accepted, ledger_rows=rows, current_judgments=current["judgments"], witness=witness,
@@ -204,7 +206,7 @@ def _pending_calls(accepted: Mapping[str, Any]) -> list[str]:
         return []
     named = [plan.get("would_call"), plan.get("actual_calls"), guard.get("failed_components")]
     known = {row["component_key"] for row in rule._COMPONENTS}
-    if any(type(value) is not list or not set(value) <= known for value in named):
+    if any(type(value) is not list or any(type(item) is not str or item not in known for item in value) for value in named):
         return []
     would_call, actual_calls, failed = (set(value) for value in named)
     return rule._registry_order((would_call - actual_calls) | failed)

@@ -1375,19 +1375,21 @@ def test_tile_rescan_path_fails_closed_when_a_core_checkpoint_cannot_persist(mon
     [(_level, _kind, summary, _message)] = _rescan_logs(caplog)
     assert (summary["status"], summary["step"], summary["reason_codes"]) == ("failed", "core", ["invalid_input"])
 
-def test_tile_rescan_path_calls_what_the_accepted_rescan_left_unevaluated(monkeypatch, caplog):
+@pytest.mark.parametrize(("fail", "carried", "calls"), [(1, ["mission", "coherencia"], ["mission", "coherencia"]), (2, ["coherencia"], [])], ids=("carried_and_answered", "carried_without_new_rows"))
+def test_tile_rescan_path_calls_what_the_accepted_rescan_left_unevaluated(monkeypatch, caplog, fail, carried, calls):
     # Primary's gap: scan-2 named mission but Core never answered, and scan-3's capture holds the same content.
     named = ["mission"]; repo = _tile_rescan(monkeypatch); _core_rescan(monkeypatch, repo, named)
-    assert _core_run(repo, _Flow(fail=1))["status"] == "authority_advanced"
-    assert repo.authority["accepted_candidate"]["tile_rescan"]["guard"]["failed_components"] == ["mission", "coherencia"]
+    assert _core_run(repo, _Flow(fail=fail))["status"] == "authority_advanced"
+    assert repo.authority["accepted_candidate"]["tile_rescan"]["guard"]["failed_components"] == carried
     named.clear(); flow = _Flow()
 
     assert _core_run(repo, flow, source="scan-3")["status"] == "authority_advanced"
 
-    # Nothing new names a call, yet the accepted guard carries mission (and the planner reopens Coherencia with it).
-    assert [request["component_key"] for request in flow.calls] == ["mission", "coherencia"]
+    # Nothing new names a call, yet the accepted guard carries the unanswered components.
+    # Coherencia alone has no rows beyond its accepted supports, so the planner cannot reopen it: it is not carried again.
+    assert [request["component_key"] for request in flow.calls] == calls
     summary = _rescan_logs(caplog)[-1][2]
-    assert (summary["carried_calls"], summary["core_plan"]["actual_calls"], repo.authority["accepted_candidate"]["tile_rescan"]["guard"]["failed_components"]) == (["mission", "coherencia"], ["mission", "coherencia"], [])
+    assert (summary["carried_calls"], summary["core_plan"]["actual_calls"], repo.authority["accepted_candidate"]["tile_rescan"]["guard"]["failed_components"]) == (carried, calls, [])
 
 @pytest.mark.parametrize(("guard", "carried"), [
     ({"core_plan": {"would_call": ["attributes"], "actual_calls": []}, "failed_components": []}, ["attributes"]),
@@ -1396,9 +1398,10 @@ def test_tile_rescan_path_calls_what_the_accepted_rescan_left_unevaluated(monkey
     ({"core_plan": {"would_call": ["attributes"]}, "failed_components": []}, []),
     ({"core_plan": {"would_call": "attributes", "actual_calls": []}, "failed_components": []}, []),
     ({"core_plan": {"would_call": ["unknown"], "actual_calls": []}, "failed_components": []}, []),
+    ({"core_plan": {"would_call": [{}], "actual_calls": []}, "failed_components": []}, []),
     ({"core_plan": None, "failed_components": []}, []),
     (None, []),
-], ids=("named_never_called", "called_one_failed_another", "all_answered", "missing_field", "not_a_list", "unknown_component", "no_plan", "no_guard"))
+], ids=("named_never_called", "called_one_failed_another", "all_answered", "missing_field", "not_a_list", "unknown_component", "unhashable_entry", "no_plan", "no_guard"))
 def test_tile_rescan_pending_calls_read_the_accepted_guard_and_carry_nothing_when_malformed(guard, carried):
     accepted = {} if guard is None else {"tile_rescan": {"guard": guard}}
     assert tile_rescan_path._pending_calls(accepted) == carried
