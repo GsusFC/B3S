@@ -12737,6 +12737,7 @@ def _ledger_origin_context(conn: Any, source_scan_id: Any, workspace_slug: Any) 
     try:
         return _sv9_judgment_context(conn, source_scan_id, workspace_slug, False) is not None
     except (KeyError, TypeError, ValueError):
+        _LOG.warning("evidence ledger origin capture is unreadable", extra={"source_scan_id": str(source_scan_id)})
         return False
 
 def _sv9_judgment_context(conn: Any, source_scan_id: Any, workspace_slug: Any, for_update: bool) -> dict[str, Any] | None:
