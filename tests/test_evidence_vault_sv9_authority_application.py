@@ -1577,3 +1577,52 @@ def test_v2_authority_rebuilds_when_its_packet_basis_holds_earlier_capture_evide
     evaluation_input = project_evidence_vault_sv9_evaluation_input(repository=repository, source_scan_id=_CURRENT)
     assert (evaluation_input["status"], evaluation_input["reason_codes"]) == ("available", [])
     assert [row["evidence_ref"] for row in evaluation_input["authoritative_relations"]] == [changed["ref"]]
+
+@_POSTGRES
+@pytest.mark.parametrize(("state", "cited", "relations", "doubts"), [
+    ("ok", "web", 1, []),
+    ("no", "web", 0, ["M1"]),
+    ("no", "page", 1, []),
+], ids=["uncited_on_a_lit_tile", "uncited_on_an_unlit_tile", "cited_on_an_unlit_tile"])
+def test_tile_rescan_path_publishes_an_authority_whose_rows_never_cited_its_reviewed_relation(monkeypatch, caplog, state, cited, relations, doubts):
+    """The authorities adopted before the 2026-09-11 citation check hold reviewed relations their rows never cited."""
+    from src.services.evidence_memory_identity_v2 import project_evidence_memory_row_identity
+    from src.sv9 import incremental_evaluation as ie
+    from tests.test_evidence_vault_evidence_ledger_postgres import _CURRENT, _PRIOR
+    from tests.test_evidence_vault_operation_execution_postgres import _row
+    from tests.test_evidence_vault_scan_orchestration_postgres import _reset_repository
+    from tests.test_evidence_vault_sv9_judgment_candidates_postgres import _AuthorityFlow, _operational, _seed_accepted_sv9_authority
+    web = _row()
+    page = _row() | {"ref": "raw_inputs.1.chunk.0", "url": "https://example.com/about", "content": "About us: we help teams ship better products every week."}
+    exa = _row() | {"ref": "raw_inputs.2.chunk.0", "source": "exa", "evidence_type": "external_proof.news", "url": "https://news.example/example-launch", "content": "News: Example will help teams ship better products.", "metadata": {"source_class": "external_proof", "identity_match": "domain"}}
+    class _M1Flow(_AuthorityFlow):
+        # Core judged M1 ``state`` on its ``cited`` row alone, while the reviewed relation rests on the about chunk.
+        def evaluate_component(self, request):
+            if request["component_key"] != "mission": return super().evaluate_component(request)
+            ref = {"web": web, "page": page}[cited]["ref"]
+            rows = [{"tile_id": row["tile_id"], "assessment_state": state if row["tile_id"] == "M1" else "ok", "supporting_evidence": [{key: item[key] for key in ("evidence_ref", "evidence_fingerprint")} for item in row["evidence"] if row["tile_id"] != "M1" or item["evidence_ref"] == ref]} for row in request["requested_tiles"]]
+            return ie.ComponentEvaluationOutcome.success(ie.build_component_evaluation(component_key="mission", series_fingerprint=request["current_series_fingerprint"], request_fingerprint=request["canonical_request_fingerprint"], status="evaluated", tile_results=rows))
+    repository = _reset_repository(); rows = _operational(repository, _PRIOR, rows=[web, page, exa])
+    witnessed = project_evidence_memory_row_identity(page, brand_domain="example.com")["evidence_id"]
+    _seed_accepted_sv9_authority(repository, _PRIOR, _series(), flow=_M1Flow(), witnessed_evidence_id=witnessed)
+    _operational(repository, _CURRENT, rows, rows=rows)
+    _healthy_facts(monkeypatch, repository)
+
+    def rescan(scan):
+        accepted = repository.get_evidence_vault_sv9_judgment_authority("example.com")["accepted_candidate"]
+        result = application.run_evidence_vault_sv9_authority_application(repository=repository, flow=_AuthorityFlow(), domain_or_url="https://example.com", source_scan_id=scan, current_series_contract=_series())
+        return accepted, result, repository.get_evidence_vault_sv9_judgment_authority("example.com")
+
+    accepted, result, advanced = rescan(_CURRENT)
+
+    stored = advanced["accepted_candidate"]
+    assert (result["status"], advanced["current_head"]["event_type"], stored["tile_rescan"]["prior_candidate_id"]) == ("authority_advanced", "supersede", accepted["id"])
+    # No tile changed: every row is the accepted one, and a doubt leaves the witness.
+    assert stored["candidate_tile_judgments"] == accepted["candidate_tile_judgments"]
+    assert [row["evidence_ref"] for row in stored["authoritative_relation_witness"]["authoritative_relations"]] == [page["ref"]] * relations
+    [(_level, _kind, summary, _message)] = _rescan_logs(caplog)
+    assert (summary["status"], summary["doubts"], summary["core_plan"]["actual_calls"]) == ("applied", doubts, [])
+    # The next re-scan rebuilds that v3 as its accepted authority.
+    _operational(repository, "ledger-next", rows, rows=rows)
+    previous, result, advanced = rescan("ledger-next")
+    assert (previous["id"], result["status"], advanced["accepted_candidate"]["tile_rescan"]["prior_candidate_id"]) == (stored["id"], "authority_advanced", stored["id"])

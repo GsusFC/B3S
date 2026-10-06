@@ -10,7 +10,7 @@ from src.sv9 import incremental_evaluation as ie
 from src.sv9 import incremental_planner as ip
 from src.sv9 import judgment_memory as jm
 from src.sv9.rubric import PRESENTATION_ORDER
-from tests.test_evidence_vault_sv9_authoritative_relations import _facts, _project
+from tests.test_evidence_vault_sv9_authoritative_relations import _facts, _id, _project, _sha
 from tests.test_sv9_judgment_memory import _origin, _series
 
 
@@ -18,6 +18,12 @@ _ID = "00000000-0000-0000-0000-000000000009"
 # PR1's fixture witness: one authoritative relation, on M1.
 _WITNESS = relations.build_evidence_vault_sv9_authoritative_relation_witness(
     source_scan_id="scan-1", projection=_project(_facts())[0]
+)
+# A re-scan's witness once the accepted rebuild leaves M1's relation out as a doubt.
+_NO_RELATIONS = relations.build_evidence_vault_sv9_authoritative_relation_witness(
+    source_scan_id="scan-1", projection=_project(_facts(count=0))[0],
+    capture_origin={"capture_id": _id("capture"), "capture_fingerprint": _sha("capture")},
+    operation_origin={"operation_id": _id("operation"), "operation_fingerprint": _sha("operation")},
 )
 _RELATION = {key: _WITNESS["authoritative_relations"][0][key] for key in ("evidence_ref", "evidence_fingerprint")}
 _NOT_SHOWN = {"status": "not_shown", "reason_codes": ["component_not_evaluated"], "evidence_refs": []}
@@ -49,7 +55,16 @@ def _accepted(unlit=(), not_detected=()):
         )
         for component in not_detected
     ]
-    return {"id": _ID, "candidate_tile_judgments": rows, "candidate_component_sentinels": sentinels}
+    return {"id": _ID, "candidate_tile_judgments": rows, "candidate_component_sentinels": sentinels, "authoritative_relation_witness": _WITNESS}
+
+
+def _uncited(state="ok", *pairs):
+    """An accepted candidate whose M1 row leaves its reviewed relation uncited, as the authorities adopted before the 2026-09-11 citation check do."""
+
+    accepted = _accepted()
+    m1 = _judgment("M1", state, *(pairs or ((_pair("M1"),) if state != "sin_evidencia" else ())))
+    accepted["candidate_tile_judgments"] = [m1 if row["tile_id"] == "M1" else row for row in accepted["candidate_tile_judgments"]]
+    return accepted
 
 
 def _ledger(accepted, states=None, shown=()):
@@ -69,16 +84,17 @@ def _ledger(accepted, states=None, shown=()):
 _GUARD = {"core_plan": {"proof_gone_components": [], "would_call": [], "actual_calls": []}, "failed_components": []}
 
 
-def _build(accepted, verdicts=(), *, ledger=None):
-    """Build, and hold every candidate to PR1's v3 envelope and to rows copied from durable facts."""
+def _build(accepted, verdicts=(), *, ledger=None, witness=_WITNESS):
+    """Build, and hold every candidate to PR1's v3 envelope, the append guard and rows copied from durable facts."""
 
     result = apply.build_tile_rescan_candidate(
         accepted_candidate=accepted, ledger_rows=_ledger(accepted) if ledger is None else ledger,
-        current_judgments=list(verdicts), witness=_WITNESS, guard=_GUARD,
+        current_judgments=list(verdicts), witness=witness, guard=_GUARD,
     )
     if result["status"] == "candidate":
         candidate = result["candidate"]
         assert history._sv9_judgment_candidate_envelope(candidate) == candidate
+        history._sv9_tile_rescan_continuity({"candidate": accepted}, candidate)
         sources = {jm.canonical_json(row) for row in [*accepted["candidate_tile_judgments"], *accepted["candidate_component_sentinels"], *verdicts]}
         assert all(jm.canonical_json(row) in sources for row in [*candidate["candidate_tile_judgments"], *candidate["candidate_component_sentinels"]])
     return result
@@ -168,6 +184,52 @@ def test_a_turn_off_of_a_tile_without_a_reviewed_relation_takes_cores_row():
 
     assert _tile(result["candidate"]["tile_rescan"]["decisions"], "V1")["decision"] == "turn_off_proven"
     assert _tile(result["candidate"]["candidate_tile_judgments"], "V1") == verdict
+
+
+@pytest.mark.parametrize(
+    ("verdict", "ledger_state", "codes", "source"),
+    [
+        pytest.param(None, "seen", ["component_not_evaluated", "proof_seen_not_reevaluated"], "accepted", id="not_reevaluated"),
+        pytest.param(("ok", _NEW), "seen", ["new_quote"], "checkpoint", id="new_quote"),
+        pytest.param(("no", _NEW), "verified_absent", ["doubt", "turn_off_proven", "held_for_authoritative_relation"], "accepted", id="turn_off"),
+    ],
+)
+def test_a_reviewed_relation_its_accepted_row_never_cited_binds_while_the_tile_stays_lit(verdict, ledger_state, codes, source):
+    accepted = _uncited()
+    checkpoint = [] if verdict is None else [_judgment("M1", *verdict, capture=2)]
+
+    result = _build(accepted, checkpoint, ledger=_ledger(accepted, {"M1": ledger_state}))
+
+    made = _tile(result["candidate"]["tile_rescan"]["decisions"], "M1")
+    expected = checkpoint[0] if source == "checkpoint" else _tile(accepted["candidate_tile_judgments"], "M1")
+    assert (made["decision"], made["reason_codes"]) == ("keep_lit", codes)
+    assert _tile(result["candidate"]["candidate_tile_judgments"], "M1") == expected
+
+
+@pytest.mark.parametrize("state", ["no", "sin_evidencia"])
+def test_a_reviewed_relation_its_accepted_row_never_cited_on_an_unlit_tile_is_a_doubt(state):
+    accepted = _uncited(state)
+
+    # The accepted rebuild leaves the doubt out, so the re-scan's witness holds no relation.
+    result = _build(accepted, witness=_NO_RELATIONS)
+
+    assert apply.split_reviewed_relations(accepted) == ([], _WITNESS["authoritative_relations"])
+    made = _tile(result["candidate"]["tile_rescan"]["decisions"], "M1")
+    assert (made["decision"], made["reason_codes"]) == ("keep_unlit", ["component_not_evaluated", "doubt", "held_for_authoritative_relation"])
+    assert _tile(result["candidate"]["candidate_tile_judgments"], "M1") == _tile(accepted["candidate_tile_judgments"], "M1")
+
+
+@pytest.mark.parametrize(("accepted", "kept"), [(_accepted(), False), (_uncited(), True)], ids=["cited_pair", "uncited_pair"])
+def test_the_append_guard_never_lets_a_cited_reviewed_pair_go(accepted, kept):
+    # Core's new quote for M1 leaves the reviewed pair out, and the v3 takes Core's row anyway.
+    rows = [_judgment("M1", "ok", _NEW, capture=2) if row["tile_id"] == "M1" else row for row in accepted["candidate_tile_judgments"]]
+    candidate = {"authoritative_relation_witness": _WITNESS, "candidate_tile_judgments": rows}
+
+    if kept:
+        history._sv9_tile_rescan_continuity({"candidate": accepted}, candidate)
+        return
+    with pytest.raises(history.EvidenceVaultSv9JudgmentCandidateError, match="drops a reviewed relation"):
+        history._sv9_tile_rescan_continuity({"candidate": accepted}, candidate)
 
 
 def test_a_not_detected_component_keeps_its_sentinel_unless_one_of_its_tiles_lights():

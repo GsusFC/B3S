@@ -163,6 +163,7 @@ from src.services.evidence_vault_evidence_ledger import (
     VERIFIED_ABSENT,
 )
 from src.services.evidence_vault_tile_rescan_rule import B3S_FAILURE, KEEP_LIT, KEEP_UNLIT, LIGHT, TURN_OFF_CORE_NO, TURN_OFF_PROVEN
+from src.services.evidence_vault_tile_rescan_apply import keeps_reviewed_relations, split_reviewed_relations
 from src.services.evidence_vault_exact_relation_supplement import (
     EvidenceVaultExactRelationSupplementError,
     build_exact_relation_source_candidate,
@@ -12710,13 +12711,13 @@ def _sv9_tile_rescan_prior(state: Mapping[str, Any] | None, candidate: Mapping[s
     if state is None or state["candidate"]["id"] != candidate["tile_rescan"]["prior_candidate_id"]: raise EvidenceVaultSv9JudgmentCandidateConflictError("SV9 tile re-scan prior is not the accepted candidate.")
 
 def _sv9_tile_rescan_continuity(state: Mapping[str, Any], candidate: Mapping[str, Any]) -> None:
-    # Rule 8: the v3 keeps every reviewed relation of the candidate it supersedes, tile for tile, and its
-    # rows cite each pair its witness names, as any accepted candidate's must for the next reconstruction.
+    # Rule 8: the v3 keeps every reviewed relation of the candidate it supersedes but its doubts, tile for
+    # tile, and its rows keep each pair its witness names as the next reconstruction will read them.
     try:
         relations = candidate["authoritative_relation_witness"]["authoritative_relations"]
-        reviewed = sorted(row["tile_id"] for row in state["candidate"]["authoritative_relation_witness"]["authoritative_relations"])
-        cited = {row["tile_id"]: {(item["evidence_ref"], item["evidence_fingerprint"]) for item in row["supporting_evidence"]} for row in candidate["candidate_tile_judgments"]}
-        kept = sorted(row["tile_id"] for row in relations) == reviewed and all((row["evidence_ref"], row["evidence_fingerprint"]) in cited.get(row["tile_id"], ()) for row in relations)
+        reviewed = sorted(row["tile_id"] for row in split_reviewed_relations(state["candidate"])[0])
+        rows = {row["tile_id"]: row for row in candidate["candidate_tile_judgments"]}
+        kept = sorted(row["tile_id"] for row in relations) == reviewed and keeps_reviewed_relations(state["candidate"], rows, relations)
     except (AttributeError, KeyError, TypeError) as exc:
         raise EvidenceVaultSv9JudgmentCandidateError("SV9 tile re-scan continuity is invalid.") from exc
     if not kept: raise EvidenceVaultSv9JudgmentCandidateError("SV9 tile re-scan drops a reviewed relation.")
@@ -12865,13 +12866,17 @@ def _sv9_judgment_accepted_result_authority(
                     raise ValueError("accepted SV9 relation basis is ambiguous")
                 packet_basis_by_identity.setdefault((tile_id, evidence_id, source_id), []).append(dict(original))
         selected_basis: dict[str, list[dict[str, Any]]] = {}
+        doubts = split_reviewed_relations(candidate)[1]
         for relation in relation_rows:
             tile_id = str(relation["tile_id"])
             if tile_id not in candidate_tiles:
                 raise ValueError("accepted SV9 witness references unknown candidate tile")
+            if relation in doubts:
+                # Reviewed before the 2026-09-11 citation check, on a tile its row judged unlit: a doubt, no continuity.
+                continue
             pair = (relation["evidence_ref"], relation["evidence_fingerprint"])
             keys = by_pair.get(pair, [])
-            if len(keys) != 1 or pair not in candidate_supports[tile_id]:
+            if len(keys) != 1:
                 raise ValueError("accepted SV9 witness basis is missing or ambiguous")
             matching = packet_basis_by_identity.get((tile_id, keys[0][0], keys[0][1]), [])
             if len(matching) != 1:

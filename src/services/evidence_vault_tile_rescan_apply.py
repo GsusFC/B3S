@@ -7,7 +7,7 @@ kernel scores the selected vector. Pure: no I/O and no LLM.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from src.services import evidence_vault_sv9_authority_event as authority_event
@@ -49,27 +49,31 @@ def build_tile_rescan_candidate(
     if not tiles:
         return _result("unavailable", projection["tile_decisions"]["reason_codes"], signal)
     accepted = {row["tile_id"]: row for row in prior_rows}
+    doubted = {row["tile_id"] for row in split_reviewed_relations(accepted_candidate)[1]}
     # Keyed as the rule keys them, so a tile gets the very row its decision saw.
     verdicts = {str(row["tile_id"]): row for row in current_judgments}
-    relations: dict[str, set[tuple[str, str]]] = {}
+    relations: dict[str, list[dict[str, Any]]] = {}
     for relation in witness["authoritative_relations"]:
-        relations.setdefault(relation["tile_id"], set()).add((relation["evidence_ref"], relation["evidence_fingerprint"]))
+        relations.setdefault(relation["tile_id"], []).append(relation)
     rows, decisions = {}, []
     for tile in tiles:
         tile_id, decision, codes = tile["tile_id"], tile["decision"], list(tile["reason_codes"])
         # A doubt is keep_lit without a new quote: it keeps the accepted row, never Core's "no".
         fresh = decision in _FROM_CHECKPOINT or (decision == rule.KEEP_LIT and "new_quote" in codes)
-        if fresh and decision in {rule.KEEP_LIT, rule.TURN_OFF_PROVEN} and _drops_relation(verdicts[tile_id], relations.get(tile_id)):
+        if fresh and decision in {rule.KEEP_LIT, rule.TURN_OFF_PROVEN} and not keeps_reviewed_relations(accepted_candidate, verdicts, relations.get(tile_id, [])):
             # Rule 8: the tile keeps the accepted row that cites its reviewed relation, so it stays lit.
             # A proven turn-off becomes a doubt for a person instead of failing the re-scan (Q4 = A).
             fresh = False
             codes = [*codes, HELD_FOR_AUTHORITATIVE_RELATION] if decision == rule.KEEP_LIT else [rule.DOUBT, rule.TURN_OFF_PROVEN, HELD_FOR_AUTHORITATIVE_RELATION]
             decision = rule.KEEP_LIT
+        if tile_id in doubted:
+            # The accepted row judged this tile unlit over reviewed evidence it never cited: a person decides.
+            codes = [*codes, rule.DOUBT, HELD_FOR_AUTHORITATIVE_RELATION]
         row = verdicts[tile_id] if fresh else accepted.get(tile_id)
         if row is not None:
             rows[tile_id] = row
         decisions.append({"tile_id": tile_id, "decision": decision, "reason_codes": codes})
-    if any(_drops_relation(rows.get(tile_id), pairs) for tile_id, pairs in relations.items()):
+    if not keeps_reviewed_relations(accepted_candidate, rows, witness["authoritative_relations"]):
         return _result("unavailable", ["authoritative_relation_dropped"], signal)
     # A tile of a not-detected component has no accepted row; its sentinel stands for it until one lights.
     components = {row["component_key"] for row in rows.values()}
@@ -81,12 +85,61 @@ def build_tile_rescan_candidate(
     return _result("candidate", [], signal, candidate)
 
 
-def _drops_relation(row: Mapping[str, Any] | None, pairs: set[tuple[str, str]] | None) -> bool:
-    """The append guard's test (repository ``_sv9_tile_rescan_continuity``): a tile's
-    authoritative relation pairs must all stay in its row's supporting evidence."""
+def split_reviewed_relations(candidate: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split a candidate's reviewed relations by its own rows into those that bind and its doubts, in witness order.
 
-    supports = {(item["evidence_ref"], item["evidence_fingerprint"]) for item in (row or {}).get("supporting_evidence", [])}
-    return bool(pairs) and not pairs <= supports
+    A relation binds when its row cites it, or when its row leaves it uncited on a lit tile, as
+    the authorities adopted before the 2026-09-11 citation check hold them. One left uncited on
+    an unlit tile is a doubt: the candidate's rebuild leaves it out and its next tile re-scan reports it.
+    """
+
+    rows = {row["tile_id"]: row for row in candidate["candidate_tile_judgments"]}
+    relations = candidate["authoritative_relation_witness"]["authoritative_relations"]
+    reviewed = _relation_pairs(relations)
+    binding: list[dict[str, Any]] = []
+    doubts: list[dict[str, Any]] = []
+    for relation in relations:
+        row = rows.get(relation["tile_id"])
+        (binding if _keeps(row, reviewed[relation["tile_id"]], row, _pair(relation)) else doubts).append(relation)
+    return binding, doubts
+
+
+def keeps_reviewed_relations(accepted_candidate: Mapping[str, Any], rows: Mapping[str, Mapping[str, Any]], relations: Iterable[Mapping[str, Any]]) -> bool:
+    """Rule 8, the append guard's test too (repository ``_sv9_tile_rescan_continuity``): whether
+    ``rows``, by tile id, keep every reviewed relation in ``relations`` over the accepted candidate.
+
+    A row keeps a pair it cites. Where the accepted row leaves one of its tile's reviewed relations
+    uncited (reviewed before the 2026-09-11 citation check), a pair it does not cite either binds
+    only while the tile stays lit.
+    """
+
+    accepted = {row["tile_id"]: row for row in accepted_candidate["candidate_tile_judgments"]}
+    reviewed = _relation_pairs(accepted_candidate["authoritative_relation_witness"]["authoritative_relations"])
+    return all(_keeps(accepted.get(row["tile_id"]), reviewed.get(row["tile_id"], set()), rows.get(row["tile_id"]), _pair(row)) for row in relations)
+
+
+def _keeps(accepted_row: Mapping[str, Any] | None, reviewed: set[tuple[str, str]], row: Mapping[str, Any] | None, pair: tuple[str, str]) -> bool:
+    cited = _supports(accepted_row)
+    return pair in _supports(row) or (pair not in cited and not reviewed <= cited and _lit(accepted_row) and _lit(row))
+
+
+def _relation_pairs(relations: Iterable[Mapping[str, Any]]) -> dict[str, set[tuple[str, str]]]:
+    pairs: dict[str, set[tuple[str, str]]] = {}
+    for relation in relations:
+        pairs.setdefault(relation["tile_id"], set()).add(_pair(relation))
+    return pairs
+
+
+def _pair(item: Mapping[str, Any]) -> tuple[str, str]:
+    return item["evidence_ref"], item["evidence_fingerprint"]
+
+
+def _supports(row: Mapping[str, Any] | None) -> set[tuple[str, str]]:
+    return {_pair(item) for item in (row or {}).get("supporting_evidence", [])}
+
+
+def _lit(row: Mapping[str, Any] | None) -> bool:
+    return row is not None and row.get("assessment_state") == rule.OK
 
 
 def _candidate(

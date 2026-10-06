@@ -31,7 +31,7 @@ from src.services.evidence_vault_sv9_authoritative_relations import (
     validate_evidence_vault_sv9_evaluation_input,
 )
 from src.services.evidence_vault_sv9_shared_process import is_core_shared_series_contract
-from src.services.evidence_vault_tile_rescan_apply import build_tile_rescan_candidate
+from src.services.evidence_vault_tile_rescan_apply import build_tile_rescan_candidate, split_reviewed_relations
 from src.sv9 import incremental_evaluation as evaluation
 from src.sv9 import incremental_planner as planner
 from src.sv9 import judgment_memory as memory
@@ -126,9 +126,9 @@ def _rescan(summary: dict[str, Any], repository: Any, flow: Any, domain: str, so
         rows = _healthy_capture_ledger(facts, accepted)
     with _step(summary, "witness"):
         evaluation_input, witness = _rescan_witness(repository, source, workspace)
-        reviewed = accepted["authoritative_relation_witness"]
-        # The re-scan's witness must descend from the accepted one before the builder protects its relations.
-        if witness["operational_witness"] != reviewed["operational_witness"] or [row["tile_id"] for row in witness["authoritative_relations"]] != [row["tile_id"] for row in reviewed["authoritative_relations"]]:
+        reviewed, _doubts = split_reviewed_relations(accepted)
+        # The re-scan's witness must descend from the accepted one, but its doubts, before the builder protects its relations.
+        if witness["operational_witness"] != accepted["authoritative_relation_witness"]["operational_witness"] or [row["tile_id"] for row in witness["authoritative_relations"]] != [row["tile_id"] for row in reviewed]:
             raise EvidenceVaultTileRescanError("witness", "witness_mismatch")
     # A component the accepted re-scan named but Core never answered is called now: its content is already in the prior capture.
     named = _signals(facts, accepted, rows, evaluation_input)["core_plan"]["would_call"]
