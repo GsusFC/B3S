@@ -195,6 +195,8 @@ def test_loader_reads_the_prior_events_accepted_vector_and_the_current_scans_til
         "source_scan_id": _PRIOR,
         "tile_judgments": accepted["candidate_tile_judgments"],
         "component_sentinels": accepted["candidate_component_sentinels"],
+        # Every accepted tile was judged on the prior capture itself, so no older capture is loaded.
+        "origins": [],
     }
     assert len(facts["accepted"]["tile_judgments"]) == 80
     # A checkpoint stored without the shared process carries neither a Flow candidate nor Core's result.

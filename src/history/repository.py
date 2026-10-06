@@ -6415,7 +6415,9 @@ class PostgresHistoryRepository:
         scans use the measurement script's fact shape, read in one REPEATABLE
         READ, READ ONLY transaction. ``accepted`` is that event's candidate
         vector, and the current scan also carries the tile judgments Core gave
-        in its checkpoints.
+        in its checkpoints. ``accepted["origins"]`` holds, in the same fact shape
+        without evaluations, the brand's other captures its tile judgments were
+        first judged on.
         """
 
         from scripts import evidence_ledger_measure as measure
@@ -6457,8 +6459,19 @@ class PostgresHistoryRepository:
                 raise EvidenceVaultEvidenceLedgerError(
                     "evidence ledger scan has no capture for this brand; check the source scan id"
                 )
+            # The captures an accepted tile's supports came from, when neither scan holds them:
+            # rows copied through re-scans keep the capture they were first judged on.
+            known = {str(scans[scan_id]["capture_id"]) for scan_id in scan_ids}
+            origin_ids = sorted({
+                str(row["capture_origin"]["capture_id"])
+                for row in measure._mappings(prior["tile_judgments"])
+                if isinstance(row.get("capture_origin"), Mapping) and row["capture_origin"].get("capture_id")
+            } - known)
+            origins = conn.execute(measure._ORIGIN_SCANS_SQL, (*scope, origin_ids)).fetchall() if origin_ids else []
+            # Only captures with an operational context can hold ledger rows; any other origin is left out.
+            origins = [row for row in origins if _ledger_origin_context(conn, row["source_scan_id"], workspace_slug)]
             evidence = measure._evidence_by_capture(
-                conn.execute(measure._EVIDENCE_SQL, ([scans[scan_id]["capture_id"] for scan_id in scan_ids],)).fetchall()
+                conn.execute(measure._EVIDENCE_SQL, ([scans[scan_id]["capture_id"] for scan_id in scan_ids] + [row["capture_id"] for row in origins],)).fetchall()
             )
             checkpoints = conn.execute(measure._CHECKPOINTS_SQL, (*scope, scan_ids)).fetchall()
             evaluations = measure._scan_evaluations(
@@ -6471,6 +6484,7 @@ class PostgresHistoryRepository:
             "source_scan_id": str(prior["source_scan_id"]),
             "tile_judgments": measure._mappings(prior["tile_judgments"]),
             "component_sentinels": measure._mappings(prior["component_sentinels"]),
+            "origins": [measure._scan_facts(row, evidence, {}) for row in sorted(origins, key=lambda row: str(row["source_scan_id"]))],
         }
         return {
             "domain": str(brand["canonical_domain"]),
@@ -12717,6 +12731,14 @@ def _sv9_judgment_candidate_witness(candidate: Mapping[str, Any], context: Mappi
         raise
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise EvidenceVaultSv9AuthoritativeRelationWitnessError("SV9 judgment candidate witness does not match source provenance.") from exc
+
+def _ledger_origin_context(conn: Any, source_scan_id: Any, workspace_slug: Any) -> bool:
+    """Whether an earlier capture can hold evidence ledger rows; an unreadable one cannot."""
+    try:
+        return _sv9_judgment_context(conn, source_scan_id, workspace_slug, False) is not None
+    except (KeyError, TypeError, ValueError):
+        _LOG.warning("evidence ledger origin capture is unreadable", extra={"source_scan_id": str(source_scan_id)})
+        return False
 
 def _sv9_judgment_context(conn: Any, source_scan_id: Any, workspace_slug: Any, for_update: bool) -> dict[str, Any] | None:
     scan, workspace = str(source_scan_id or "").strip(), str(workspace_slug or "").strip()

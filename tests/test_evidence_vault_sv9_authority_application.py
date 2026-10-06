@@ -1406,6 +1406,40 @@ def test_tile_rescan_pending_calls_read_the_accepted_guard_and_carry_nothing_whe
     accepted = {} if guard is None else {"tile_rescan": {"guard": guard}}
     assert tile_rescan_path._pending_calls(accepted) == carried
 
+def test_origin_ledgers_verify_an_accepted_support_against_the_capture_it_was_judged_on():
+    import hashlib
+    from tests.test_evidence_vault_evidence_ledger import ABOUT, _about, _row, _snapshot, _web, _words
+    page = _snapshot(_web(_words(120, "h"), (ABOUT, _about())))
+    # Exa's positional ref holds another page in every later capture; only the origin capture has the accepted pair.
+    exa = _row("raw_inputs.2.exa.mentions.7", f"{_words(30, 'a')} ... See more sprints", url=ABOUT, source="exa", evidence_type="external_proof.owned_confirmation")
+    held = _row("raw_inputs.0.chunk.0", _words(40, "h"))
+    pair = lambda row: {"evidence_ref": row["ref"], "evidence_fingerprint": hashlib.sha256(row["content"].encode()).hexdigest()}
+    accepted = {"candidate_tile_judgments": [{"supporting_evidence": [pair(exa), pair(held)]}]}
+    facts = {
+        "domain": "acme.example", "current": {"snapshot": page, "evidence_rows": [], "evaluations": []},
+        "accepted": {"origins": [{"scan_id": "scan-empty", "snapshot": page, "evidence_rows": []}, {"scan_id": "scan-0", "snapshot": page, "evidence_rows": [exa, held]}]},
+    }
+
+    [(origin, rows)] = tile_rescan_path._origin_ledgers(facts, accepted, [])
+
+    # Only the Exa support comes from its origin, seen on its owned page; an owned chunk could prove absence there, so it is left out.
+    assert (origin, [(row["evidence_ref"], row["state"]) for row in rows]) == ("scan-0", [(exa["ref"], "seen")])
+
+def test_tile_rescan_path_keeps_lit_a_tile_whose_support_its_origin_capture_proves(monkeypatch, caplog):
+    repo = _tile_rescan(monkeypatch); accepted = deepcopy(repo.authority["accepted_candidate"])
+    baseline = tile_rescan_path._origin_ledgers
+    monkeypatch.setattr(tile_rescan_path, "_origin_ledgers", lambda facts, value, rows: baseline(facts, value, rows) or [("scan-0", _ledger(accepted))])
+
+    assert _rescan(repo)["status"] == "authority_advanced"
+
+    # The accepted supports are not in the prior pair's rows (a B3S failure today); their origin capture proves them.
+    decisions = repo.authority["accepted_candidate"]["tile_rescan"]["decisions"]
+    lit = {row["tile_id"] for row in accepted["candidate_tile_judgments"] if row["assessment_state"] == "ok"}
+    assert lit and all((row["decision"], "proof_seen_not_reevaluated" in row["reason_codes"]) == ("keep_lit", True) for row in decisions if row["tile_id"] in lit)
+    assert "b3s_failure" not in _rescan_logs(caplog)[-1][2]["counts"]
+    assert repo.ledger_appends == [("scan-2", "scan", 0), ("scan-2", "scan-0", len(_ledger(accepted)))]
+    assert repo.authority["accepted_candidate"]["candidate_tile_judgments"] == accepted["candidate_tile_judgments"]
+
 _POSTGRES = pytest.mark.skipif(not os.environ.get("B3S_TEST_DATABASE_URL") or os.environ.get("B3S_TEST_ALLOW_SCHEMA_DROP") != "1", reason="requires disposable PostgreSQL")
 
 def _healthy_facts(monkeypatch, repository):
