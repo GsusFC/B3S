@@ -18,7 +18,7 @@ from src.history import repository as repository_module
 
 
 _TARGET = b3s_vault_migration_target()
-_TARGET_DSN = f"postgresql://neondb_owner:do-not-print@{_TARGET.host}/neondb?sslmode=require&channel_binding=require"
+_TARGET_DSN = f"postgresql://neondb_owner:do-not-print@{_TARGET.host}/{_TARGET.database}?sslmode=require&channel_binding=require"
 
 
 class _Connection:

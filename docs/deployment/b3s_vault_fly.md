@@ -31,7 +31,10 @@ production remains at 60 seconds. Both use the same bounded capture path and
 `BRAND3_VISUAL_SCREENSHOT_TIMEOUT_SECONDS`.
 
 The current database branch is `b3s-vault`, derived once from the Neon
-`production` branch. Provider credentials for LLM, Exa, and Firecrawl may be
+`production` branch. Since 2026-10-06 the Vault runs on the database
+`b3s_vault_v2` of that branch, created empty so every brand starts afresh;
+the earlier Vault stays untouched in `neondb` on the same branch, and the
+app is never pointed back at it. Provider credentials for LLM, Exa, and Firecrawl may be
 shared so field scans remain comparable. `B3S_DATABASE_URL`, the Fly volume,
 `B3S_SCANNER_API_TOKEN`, and `B3S_EVIDENCE_ADJUDICATION_TOKEN` must remain
 Vault-specific. Set `B3S_EVIDENCE_REVIEWER_ID` to the stable identity written

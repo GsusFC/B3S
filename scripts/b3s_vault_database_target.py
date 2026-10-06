@@ -9,7 +9,8 @@ from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 B3S_VAULT_HOST = "ep-fancy-recipe-as612c8j-pooler.c-4.eu-central-1.aws.neon.tech"
-B3S_VAULT_DATABASE = "neondb"
+# Since 2026-10-06 the Vault starts afresh here; "neondb" on the same branch keeps the earlier Vault untouched.
+B3S_VAULT_DATABASE = "b3s_vault_v2"
 B3S_VAULT_PROJECT_ID = "jolly-river-32467750"
 B3S_VAULT_BRANCH_ID = "br-misty-sky-asfp14gb"
 B3S_VAULT_MIGRATION_ROLE = "neondb_owner"
