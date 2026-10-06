@@ -71,6 +71,13 @@ FROM b3s_history.scan_runs AS scans
 JOIN b3s_history.captures AS captures ON captures.scan_run_id = scans.id
 WHERE scans.workspace_id = %s AND scans.brand_id = %s AND scans.source_scan_id = ANY(%s)
 """
+_ORIGIN_SCANS_SQL = """
+SELECT scans.source_scan_id, scans.acquisition_state, captures.id AS capture_id,
+       COALESCE(NULLIF(captures.raw_payload, '{}'::jsonb), scans.request_payload -> 'capture_payload') AS snapshot
+FROM b3s_history.scan_runs AS scans
+JOIN b3s_history.captures AS captures ON captures.scan_run_id = scans.id
+WHERE scans.workspace_id = %s AND scans.brand_id = %s AND captures.id::text = ANY(%s)
+"""
 _EVIDENCE_SQL = """
 SELECT capture_id, evidence_ref, source, source_class, evidence_type, url, content, content_raw, confidence, metadata
 FROM b3s_history.evidence_records

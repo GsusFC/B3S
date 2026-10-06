@@ -33,7 +33,7 @@ from src.sv9_flow.contracts import (
 )
 
 
-EVIDENCE_LEDGER_POLICY_VERSION = "evidence-vault-evidence-ledger-v3"
+EVIDENCE_LEDGER_POLICY_VERSION = "evidence-vault-evidence-ledger-v4"
 SEEN, VERIFIED_ABSENT, NOT_VERIFIED = "seen", "verified_absent", "not_verified"
 SHOWN, SHOWN_AS_SIGNAL, NOT_SHOWN = "shown", "shown_as_signal", "not_shown"
 OWNED_PAGE_CLASS, EXTERNAL_CLASS = "owned_page", "external"
@@ -47,6 +47,9 @@ SEEN_CONTAINMENT = Fraction(9, 10)
 ABSENT_CONTAINMENT = Fraction(1, 5)
 # One edited word touches at most 3 shingles, so 5 own shingles keep an edit from faking absence.
 MIN_OWN_SHINGLES = 5
+# A search result can only be seen on the brand's own page when that many of its own shingles
+# match: a short snippet is too easy to find on a page it never came from.
+MIN_EXTERNAL_OWN_SHINGLES = 20
 # Anti-bot interstitials captured as page text: a page carrying one proves no absence.
 _BOT_CHALLENGE_MARKERS = (
     "challenges.cloudflare.com/cdn-cgi/challenge-platform",
@@ -220,6 +223,12 @@ def _verify_external(
 ) -> tuple[str, list[str]]:
     if any(_same_external_item(prior_row, row) for row in current_capture["evidence"]):
         return SEEN, []
+    # A search result whose URL is one of the brand's own pages is seen when that page still holds
+    # its own shingles; a search result never proves absence, so anything else stays not verified.
+    page = current_capture["pages"].get(prior_row["source_key"])
+    own = prior_row.get("own_shingles") or set()
+    if page is not None and page["normalized"] and len(own) >= MIN_EXTERNAL_OWN_SHINGLES and _own_containment(own, page) >= SEEN_CONTAINMENT:
+        return SEEN, []
     return NOT_VERIFIED, ["external_exact_fetch_unavailable"]
 
 
@@ -288,7 +297,8 @@ def _ledger_row(
     own: set[str],
 ) -> dict[str, Any]:
     page = current["pages"].get(evidence["source_key"])
-    owned = evidence["evidence_class"] == OWNED_PAGE_CLASS
+    # An external row on one of the brand's own pages reports the same own-shingle health as owned copy.
+    owned = evidence["evidence_class"] == OWNED_PAGE_CLASS or (evidence["evidence_class"] == EXTERNAL_CLASS and page is not None)
     return {
         **{key: evidence[key] for key in _ROW_IDENTITY_KEYS},
         "evidence_class": evidence["evidence_class"],

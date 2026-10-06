@@ -146,6 +146,9 @@ def _rescan(summary: dict[str, Any], repository: Any, flow: Any, domain: str, so
     with _step(summary, "ledger"):
         rows = _healthy_capture_ledger(facts, accepted)
         repository.append_evidence_ledger_rows(source, prior_source_scan_id=prior["scan_id"], rows=rows, workspace_slug=workspace)
+        for origin, origin_rows in _origin_ledgers(facts, accepted, rows):
+            repository.append_evidence_ledger_rows(source, prior_source_scan_id=origin, rows=origin_rows, workspace_slug=workspace)
+            rows = [*rows, *origin_rows]
     with _step(summary, "build"):
         signals = _signals(facts, accepted, rows, evaluation_input)
         summary["core_plan"] = signals["core_plan"]
@@ -282,6 +285,34 @@ def _healthy_capture_ledger(facts: Mapping[str, Any], accepted: Mapping[str, Any
     ):
         raise EvidenceVaultTileRescanCaptureError("vault_rescan_capture_partial")
     return rows
+
+
+def _origin_ledgers(facts: Mapping[str, Any], accepted: Mapping[str, Any], rows: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Ledger rows for accepted search-result supports the prior capture does not hold, against their own capture.
+
+    A row copied through re-scans keeps its first capture's (ref, fingerprint): an Exa result
+    there has another fingerprint in every later capture, so only its own capture can prove it.
+    Only external rows are taken: they can be seen but never verified absent.
+    """
+
+    current = facts["current"]
+    missing = {(item["evidence_ref"], item["evidence_fingerprint"]) for row in accepted["candidate_tile_judgments"] for item in row["supporting_evidence"]}
+    missing -= {(row["evidence_ref"], row["evidence_fingerprint"]) for row in rows}
+    found = []
+    for origin in facts["accepted"].get("origins") or []:
+        if not missing:
+            break
+        origin_rows = [
+            row for row in ledger.build_evidence_ledger(
+                brand_domain=facts["domain"], prior_snapshot=origin["snapshot"], prior_rows=origin["evidence_rows"],
+                current_snapshot=current["snapshot"], current_rows=current["evidence_rows"], shown_index=ledger.build_shown_index(current["evaluations"]),
+            )["rows"]
+            if row["evidence_class"] == ledger.EXTERNAL_CLASS and (row["evidence_ref"], row["evidence_fingerprint"]) in missing
+        ]
+        if origin_rows:
+            found.append((origin["scan_id"], origin_rows))
+            missing -= {(row["evidence_ref"], row["evidence_fingerprint"]) for row in origin_rows}
+    return found
 
 
 def _rescan_witness(repository: Any, source: str, workspace: str) -> tuple[dict[str, Any], dict[str, Any]]:

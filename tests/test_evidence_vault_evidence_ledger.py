@@ -399,6 +399,31 @@ def test_search_confirmation_of_an_owned_page_uses_the_external_verifier():
     assert _verdict(row) == ("not_verified", ["external_exact_fetch_unavailable"])
 
 
+def _confirmation(content, url=ABOUT):
+    return _row("raw_inputs.2.exa.mentions.7", content, url=url, source="exa", source_class="owned_copy", evidence_type="external_proof.owned_confirmation")
+
+
+@pytest.mark.parametrize(
+    ("content", "url", "verdict"),
+    [
+        # Exa joins page sections and navigation into one snippet: its own shingles still all sit on the page.
+        (f"{_words(30, 'a')} ... See more sprints → Craft → Loti", ABOUT, ("seen", [])),
+        (f"{_words(30, 'a')} ... See more sprints → Craft → Loti", "https://news.example/acme-about", ("not_verified", ["external_exact_fetch_unavailable"])),
+        (f"{_words(12, 'a')} ... See more sprints", ABOUT, ("not_verified", ["external_exact_fetch_unavailable"])),
+    ],
+    ids=("owned_page_still_holds_it", "third_party_host", "too_few_own_shingles"),
+)
+def test_search_result_on_an_owned_page_is_seen_by_its_own_shingles(content, url, verdict):
+    prior, current = _about_pair(_about())
+
+    row = _only(_ledger(prior, [_confirmation(content, url)], current))
+
+    assert row["evidence_class"] == "external" and _verdict(row) == verdict
+    if verdict[0] == "seen":
+        # Its health reports the same own-shingle measure as owned copy: the 28 shingles of its 30 page words.
+        assert (row["health"]["own_shingles"], row["health"]["own_containment"]) == (28, 1.0)
+
+
 def _chunk(index):
     return EvidenceRecord(
         ref=f"raw_inputs.0.chunk.{index}",
