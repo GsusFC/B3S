@@ -298,7 +298,7 @@ BRAND3_VAULT_SV9_REQUEST_SCOPED_PROMPT_ENABLED = (
     os.environ.get("BRAND3_VAULT_SV9_REQUEST_SCOPED_PROMPT_ENABLED", "false") == "true"
 )
 # An eligible re-scan of a listed brand publishes its tile re-scan candidate (v3)
-# instead of reopening review. Off by default; an empty domain list lists none.
+# instead of reopening review. Off by default; an empty domain list lists none and "*" lists every brand.
 BRAND3_VAULT_TILE_RESCAN_APPLY_ENABLED = (
     os.environ.get("BRAND3_VAULT_TILE_RESCAN_APPLY_ENABLED", "false") == "true"
 )

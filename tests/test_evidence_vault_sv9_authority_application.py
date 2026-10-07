@@ -1172,6 +1172,11 @@ _HEALTHY = {"acquisition_gate": {"state": "pass"}, "acquisition_steps": {"web": 
 def _listed(monkeypatch, enabled=True, domains=("example.test",)):
     monkeypatch.setattr(tile_rescan_path, "BRAND3_VAULT_TILE_RESCAN_APPLY_ENABLED", enabled); monkeypatch.setattr(tile_rescan_path, "BRAND3_VAULT_TILE_RESCAN_APPLY_DOMAINS", domains)
 
+@pytest.mark.parametrize(("enabled", "domains", "listed"), [(True, ("*",), True), (True, ("primary.studio",), False), (False, ("*",), False)], ids=("wildcard", "other_brand", "flag_off"))
+def test_tile_rescan_listing_lists_every_brand_with_a_wildcard(monkeypatch, enabled, domains, listed):
+    _listed(monkeypatch, enabled, domains)
+    assert tile_rescan_path.tile_rescan_listed("https://www.example.test/") is listed
+
 def _tile_rescan(monkeypatch, *, enabled=True, domains=("example.test",), snapshot=_HEALTHY, judgments=()):
     """An accepted authority whose next scan (_rescan) re-captures it; only Core's ``judgments`` change a tile."""
     repo = _ApplicationRepository(records=(9,)); assert _run(repo, _Flow())["status"] == "authority_established"
