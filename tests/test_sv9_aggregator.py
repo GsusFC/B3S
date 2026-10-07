@@ -242,7 +242,7 @@ class AggregateTests(unittest.TestCase):
         result = aggregate(
             full_components(
                 attributes=scored("attributes", 2, blind=1),
-                value_proposition=scored("value_proposition", 6, blind=2),
+                value_proposition=scored("value_proposition", 7, blind=2),
             ),
             brand_name="Acme",
             url="https://acme.test",
@@ -262,6 +262,39 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(result.reliability_status, "usable")
         self.assertFalse(result.is_reliable)
         self.assertIn("blind_spots_present", result.reliability_reason_codes)
+
+    def test_structural_blind_spots_do_not_lower_reliability(self):
+        # A4, MG9, MG10 and C8 are blind spots by rubric design.
+        result = aggregate(
+            full_components(
+                attributes=scored("attributes", 3, blind=1),
+                magnetism=scored("magnetism", 8, blind=2),
+                coherencia=scored("coherencia", 7, blind=1),
+            ),
+            brand_name="Acme",
+            url="https://acme.test",
+        )
+        self.assertEqual(result.total_blind_spots, 4)
+        self.assertEqual(result.components["magnetism"].confidence, "media")
+        self.assertEqual(result.reliability_status, "reliable")
+        self.assertEqual(result.reliability_reason_codes, [])
+        self.assertTrue(result.is_canonical)
+
+    def test_only_non_structural_blind_spots_set_the_reliability_band(self):
+        # PE6 and C7 still count; MG9 and MG10 do not.
+        result = aggregate(
+            full_components(
+                personality=scored("personality", 5, blind=1),
+                magnetism=scored("magnetism", 8, blind=2),
+                coherencia=scored("coherencia", 6, blind=1),
+            ),
+            brand_name="Acme",
+            url="https://acme.test",
+        )
+        self.assertEqual(result.total_blind_spots, 4)
+        self.assertEqual(result.reliability_status, "usable")
+        self.assertIn("blind_spots_present", result.reliability_reason_codes)
+        self.assertEqual(result.canonical_status, "non_canonical")
 
     def test_aggregate_requires_every_component(self):
         components = full_components()

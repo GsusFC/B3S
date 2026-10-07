@@ -28,6 +28,7 @@ from src.sv9.rubric import (
     TILE_ESTADOS,
     component_points,
     confidence_from_blind_spots,
+    reliability_blind_spot_count,
 )
 
 
@@ -210,6 +211,13 @@ class Sv9ScanResult:
         return sum(c.blind_spot_count for c in self.components.values())
 
     @property
+    def reliability_blind_spots(self) -> int:
+        """Blind spots that lower the reliability label: structural ones are left out."""
+        return reliability_blind_spot_count(
+            tile_id for component in self.components.values() for tile_id in component.blind_spot_tiles
+        )
+
+    @property
     def reliability_status(self) -> str:
         """Product-facing reliability gate for the scan as a whole."""
         if not self.is_complete:
@@ -218,9 +226,9 @@ class Sv9ScanResult:
             return "shadow"
         if self.not_detected:
             return "shadow"
-        if self.total_blind_spots == 0:
+        if self.reliability_blind_spots == 0:
             return "reliable"
-        if self.total_blind_spots <= 2:
+        if self.reliability_blind_spots <= 2:
             return "usable"
         return "shadow"
 
@@ -233,9 +241,9 @@ class Sv9ScanResult:
             reasons.append("coherencia_needs_review")
         if self.not_detected:
             reasons.append("components_not_detected")
-        if self.total_blind_spots > 2:
+        if self.reliability_blind_spots > 2:
             reasons.append("blind_spots_above_usable_threshold")
-        elif self.total_blind_spots > 0:
+        elif self.reliability_blind_spots > 0:
             reasons.append("blind_spots_present")
         return reasons
 
