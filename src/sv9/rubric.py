@@ -30,6 +30,8 @@ Rules encoded here:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 RUBRIC_VERSION = "baldosas-v3-1"
 
 # The model label persisted on every scan and shown in the ranking during the
@@ -943,6 +945,20 @@ def confidence_from_blind_spots(blind_spot_count: int) -> str:
     if blind_spot_count >= CONFIDENCE_MEDIA_BLIND_SPOTS:
         return CONFIDENCE_MEDIA
     return CONFIDENCE_ALTA
+
+
+# Tiles flagged `blind_spot` need a cohort, community, external traction or real
+# product use that no snapshot can hold. Their `sin_evidencia` is a limit of the
+# method, not of the scan, so it does not lower the reliability label. It still
+# counts for confidence and in every blind-spot total.
+STRUCTURAL_BLIND_SPOT_TILE_IDS = frozenset(
+    tile["id"] for spec in COMPONENTS.values() for tile in spec["tiles"] if tile.get("blind_spot")
+)
+
+
+def reliability_blind_spot_count(blind_spot_tile_ids: Iterable[str]) -> int:
+    """How many `sin_evidencia` tiles lower the scan's reliability label."""
+    return sum(1 for tile_id in blind_spot_tile_ids if tile_id not in STRUCTURAL_BLIND_SPOT_TILE_IDS)
 
 
 # --- Integrity checks (same spirit as legacy dimensions.py) ---

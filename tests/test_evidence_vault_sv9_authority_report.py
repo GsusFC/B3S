@@ -11,6 +11,7 @@ from src.services import evidence_vault_sv9_authority_report as publication
 from src.sv9.aggregator import aggregate
 from src.sv9.models import ComponentResult, STATUS_NOT_DETECTED
 from tests.test_evidence_vault_sv9_authority_application import _ApplicationRepository, _Flow, _relation, _run
+from tests.test_sv9_aggregator import full_components, scored
 from tests.test_vault_sv9_parity import _components, _vision_sentinel_result
 from web import scan_runner
 
@@ -180,4 +181,14 @@ def test_malformed_current_ids_and_unknown_dispatcher_rows_are_safe_no_score():
     _repo, outcome = _adopt()
     for current in ("", " scan ", None, True): _no(outcome, current)
     _no(_app("review_required", "candidate_available"), "scan"); _no(_app("authority_conflict", "unknown_dispatcher"), "current")
+
+
+@pytest.mark.parametrize("overrides, expected", (
+    ({"magnetism": scored("magnetism", 8, blind=2), "coherencia": scored("coherencia", 7, blind=1)}, "reliable"),
+    ({"personality": scored("personality", 5, blind=1), "magnetism": scored("magnetism", 8, blind=2), "coherencia": scored("coherencia", 6, blind=1)}, "usable"),
+))
+def test_vault_reliability_matches_scanner_and_ignores_structural_blind_spots(overrides, expected):
+    scanner = aggregate(full_components(**overrides), brand_name="Example", url="https://example.test").to_dict(); kernel = {key: value for key, value in scanner["assessment"].items() if key not in {"assessment_schema_version", "expected_tile_count", "availability", "reason_codes"}}; kernel["schema_version"] = scanner["assessment"]["assessment_schema_version"]
+    assessment, projection = publication._scanner(kernel); sv9 = publication._payload("scan", assessment, projection)["sv9"]
+    assert sv9["reliability_status"] == scanner["reliability_status"] == expected and sv9["result"]["total_blind_spots"] == scanner["total_blind_spots"]
 # fmt: on

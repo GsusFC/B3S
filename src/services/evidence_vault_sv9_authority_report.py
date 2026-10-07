@@ -23,7 +23,7 @@ from src.sv9.assessment_kernel import (
     build_scanner_sv9_assessment,
     validate_sv9_assessment_output,
 )
-from src.sv9.rubric import COHERENCIA_REVIEW_THRESHOLD, PRESENTATION_ORDER, STATUS_NOT_DETECTED, STATUS_SCORED
+from src.sv9.rubric import COHERENCIA_REVIEW_THRESHOLD, PRESENTATION_ORDER, STATUS_NOT_DETECTED, STATUS_SCORED, reliability_blind_spot_count
 
 # fmt: off
 _APPLICATION_FIELDS = frozenset("status reason_codes evaluation_status candidate signed_delta authority".split())
@@ -155,13 +155,13 @@ def _payload(source: str | None, assessment: Mapping[str, Any] | None = None, pr
         assessment = build_scanner_sv9_assessment({}); aliases = {"brand3_score": None, "base_average": None, "magnetism_capped": None, "reliability_status": "broken", "not_detected": [], "not_evaluated": list(PRESENTATION_ORDER), "components": {}, "assessment": assessment, "assessment_fingerprint": None, "score_fingerprint": None}; extras = {"needs_review": False, "total_blind_spots": 0}
     else:
         if projection is None: raise ValueError
-        rows, components, missing, blind = projection["component_projections"], {}, [], 0
+        rows, components, missing, blind, gating = projection["component_projections"], {}, [], 0, 0
         for key in PRESENTATION_ORDER:
             row, profile = rows[key], _clone(rows[key]["tile_profile"])
             if row["status"] not in {STATUS_SCORED, STATUS_NOT_DETECTED}: raise ValueError
             states = {state: [tile["id"] for tile in profile if tile["estado"] == state] for state in ("ok", "no", "sin_evidencia")}
-            components[key] = {"component": key, "status": row["status"], "score": row["score"], "points": row["points"], "scale": row["scale"], "tile_profile": profile, "blind_spot_count": row["blind"], "lit_tiles": states["ok"], "off_tiles": states["no"], "blind_spot_tiles": states["sin_evidencia"]}; missing += [key] if row["status"] == STATUS_NOT_DETECTED else []; blind += row["blind"]
-        review = components["coherencia"]["status"] == STATUS_SCORED and components["coherencia"]["score"] <= COHERENCIA_REVIEW_THRESHOLD; reliability = "shadow" if review or missing or blind > 2 else "reliable" if not blind else "usable"
+            components[key] = {"component": key, "status": row["status"], "score": row["score"], "points": row["points"], "scale": row["scale"], "tile_profile": profile, "blind_spot_count": row["blind"], "lit_tiles": states["ok"], "off_tiles": states["no"], "blind_spot_tiles": states["sin_evidencia"]}; missing += [key] if row["status"] == STATUS_NOT_DETECTED else []; blind += row["blind"]; gating += reliability_blind_spot_count(states["sin_evidencia"])
+        review = components["coherencia"]["status"] == STATUS_SCORED and components["coherencia"]["score"] <= COHERENCIA_REVIEW_THRESHOLD; reliability = "shadow" if review or missing or gating > 2 else "reliable" if not gating else "usable"
         aliases = {"brand3_score": projection["sv9_score"], "base_average": projection["base_average"], "magnetism_capped": projection["magnetism_capped"], "reliability_status": reliability, "not_detected": missing, "not_evaluated": [], "components": components, "assessment": assessment, "assessment_fingerprint": projection["assessment_fingerprint"], "score_fingerprint": projection["score_fingerprint"]}; extras = {"needs_review": review, "total_blind_spots": blind}
     result = _clone(aliases) | extras
     return {"schema_version": "sv9-flow-sv9-shadow-eval-v1", "source_run_id": source, "sv9": _clone(aliases) | {"result": result}}
