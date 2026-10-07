@@ -61,9 +61,10 @@ class EvidenceVaultTileRescanCaptureError(RuntimeError):
 
 
 def tile_rescan_listed(domain_or_url: str) -> bool:
-    """Whether this brand's re-scans take the tile-by-tile path."""
+    """Whether this brand's re-scans take the tile-by-tile path; ``*`` in the allowlist lists every brand."""
 
-    return BRAND3_VAULT_TILE_RESCAN_APPLY_ENABLED and normalize_domain(domain_or_url) in BRAND3_VAULT_TILE_RESCAN_APPLY_DOMAINS
+    domains = BRAND3_VAULT_TILE_RESCAN_APPLY_DOMAINS
+    return BRAND3_VAULT_TILE_RESCAN_APPLY_ENABLED and ("*" in domains or normalize_domain(domain_or_url) in domains)
 
 
 def run_tile_rescan_path(
