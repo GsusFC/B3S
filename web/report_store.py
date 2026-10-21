@@ -16,6 +16,7 @@ from contextlib import nullcontext
 from functools import lru_cache
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from threading import Lock
 from time import monotonic
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
@@ -84,10 +85,12 @@ _LOG = logging.getLogger(__name__)
 _POSTGRES_PAGE_SIZE = 200
 _POSTGRES_INDEX_PAYLOAD_LIMIT = 1000
 
-# Home needs complete payloads to make the canonical selection. Keep only a
-# very short, process-local snapshot: it avoids rereading an unchanged archive
-# on consecutive home requests without turning this cache into an authority.
-_INDEX_PAYLOAD_CACHE_TTL_SECONDS = 1.0
+# Home needs complete payloads to make the canonical selection, and reading
+# them all is slow. As in Vault, save_report invalidates the snapshot, the TTL
+# bounds how long a change made by another process stays unseen, and the lock
+# lets concurrent requests share one read instead of each running it.
+_INDEX_PAYLOAD_CACHE_TTL_SECONDS = 60.0
+_INDEX_PAYLOAD_LOCK = Lock()
 
 
 def reports_dir() -> Path:
@@ -333,7 +336,7 @@ def _index_payload_cache_key() -> tuple[str, str, tuple[tuple[str, int, int], ..
     )
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=1)
 def _cached_report_payloads_for_index(
     _cache_key: tuple[str, str, tuple[tuple[str, int, int], ...], int],
 ) -> tuple[dict[str, Any], ...]:
@@ -343,7 +346,8 @@ def _cached_report_payloads_for_index(
 def list_report_payloads_for_index() -> list[dict[str, Any]]:
     """Return every validated report payload for one home-page request."""
 
-    return list(_cached_report_payloads_for_index(_index_payload_cache_key()))
+    with _INDEX_PAYLOAD_LOCK:
+        return list(_cached_report_payloads_for_index(_index_payload_cache_key()))
 
 
 def _read_report_payloads_for_index() -> list[dict[str, Any]]:

@@ -1,6 +1,7 @@
 import os
 import struct
 import tempfile
+import time
 import unittest
 import zlib
 from unittest.mock import patch
@@ -1931,6 +1932,27 @@ Tabular foundation models for real-world data.
         self.assertIn("Our values. Your strengths.", content)
         self.assertIn("values into practice", content)
         self.assertNotIn("__NEXT_DATA__", content)
+
+    def test_html_to_markdown_fallback_is_linear_on_unclosed_tags(self):
+        # <link> reads as an unclosed <li> and <path> as an unclosed <p>; the
+        # old regexes rescanned the page from each one and took minutes here.
+        collector = WebCollector()
+        html = (
+            "<html><head><title>Big Page</title>"
+            + '<link rel="preload" href="/a.css">' * 40000
+            + "</head><body><svg>"
+            + '<path d="M0 0L1 1"/>' * 40000
+            + "<p>A paragraph long enough to keep in the snapshot.</p>"
+            + "<script>var a = 1;" * 20000
+            + "</body></html>"
+        )
+
+        started = time.perf_counter()
+        content = collector._html_to_markdown_fallback(html)
+
+        self.assertLess(time.perf_counter() - started, 5)
+        self.assertIn("# Big Page", content)
+        self.assertIn("A paragraph long enough to keep in the snapshot.", content)
 
     def test_extract_canonical_metadata_captures_alternate_domains(self):
         collector = WebCollector()

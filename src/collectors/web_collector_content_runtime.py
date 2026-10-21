@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from html import unescape
 from urllib.parse import urlparse
 
@@ -10,6 +11,41 @@ _MIN_USABLE_MARKDOWN_CHARS = 200
 _FALLBACK_MAX_LINES = 96
 _FALLBACK_RICH_TEXT_MIN_CHARS = 2000
 _FALLBACK_MAX_CHARS = 12000
+_SKIPPED_ELEMENT_NAMES = r"script|style|noscript|svg|iframe"
+_TEXT_BLOCK_NAMES = r"h[1-6]|p|li|blockquote"
+
+
+def _paired_elements(html: str, names: str) -> list[tuple[int, int, int, int]]:
+    """Return what ``<(names)[^>]*>(.*?)</\\1>`` finds, in linear time.
+
+    Each item is (start, content start, content end, end). With that regex an
+    opening tag without a later closing tag, such as ``<link`` read as ``<li``,
+    rescans the rest of the page, so a large page held the GIL for hours.
+    """
+    gt_positions = [match.start() for match in re.finditer(">", html)]
+    closings: dict[str, list[tuple[int, int]]] = {}
+    for match in re.finditer(rf"</({names})>", html, flags=re.IGNORECASE):
+        closings.setdefault(match.group(1).lower(), []).append((match.start(), match.end()))
+    closing_starts = {name: [start for start, _ in spans] for name, spans in closings.items()}
+
+    elements: list[tuple[int, int, int, int]] = []
+    cursor = 0
+    for opening in re.finditer(rf"<({names})", html, flags=re.IGNORECASE):
+        if opening.start() < cursor:
+            continue
+        gt_index = bisect_left(gt_positions, opening.end())
+        if gt_index == len(gt_positions):
+            break
+        content_start = gt_positions[gt_index] + 1
+        name = opening.group(1).lower()
+        starts = closing_starts.get(name, [])
+        closing_index = bisect_left(starts, content_start)
+        if closing_index == len(starts):
+            continue
+        content_end, end = closings[name][closing_index]
+        elements.append((opening.start(), content_start, content_end, end))
+        cursor = end
+    return elements
 
 
 class WebCollectorContentSupport:
@@ -205,18 +241,18 @@ class WebCollectorContentSupport:
         title = self._extract_html_title(html)
         meta_description = self._extract_meta_description(html)
 
-        body = re.sub(
-            r"<(script|style|noscript|svg|iframe)[^>]*>.*?</\1>",
-            " ",
-            html,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
+        body_parts: list[str] = []
+        kept_from = 0
+        for start, _, _, end in _paired_elements(html, _SKIPPED_ELEMENT_NAMES):
+            body_parts.extend((html[kept_from:start], " "))
+            kept_from = end
+        body_parts.append(html[kept_from:])
+        body = "".join(body_parts)
 
-        block_matches = re.findall(
-            r"<(h[1-6]|p|li|blockquote)[^>]*>(.*?)</\1>",
-            body,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
+        block_matches = [
+            (None, body[content_start:content_end])
+            for _, content_start, content_end, _ in _paired_elements(body, _TEXT_BLOCK_NAMES)
+        ]
 
         lines: list[str] = []
         seen: set[str] = set()
