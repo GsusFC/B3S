@@ -43,7 +43,7 @@ from web.report_store import (
     domain_key,
     evidence_claim_tile_ledger_for_domain,
     evidence_scoring_memory_preview_for_domain,
-    list_report_payloads_for_index,
+    list_recent_brand_reports_for_index,
     list_reports_for_domain,
     list_vault_brands_for_index,
     load_report,
@@ -1173,19 +1173,9 @@ def _report_rows_for_index() -> list[dict[str, Any]]:
 
     if os.environ.get("BRAND3_ENVIRONMENT", "").strip().lower() == "vault":
         return _vault_report_rows_for_index()
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    domain_order: list[str] = []
-    for row in list_report_payloads_for_index():
-        domain = domain_key(str(row.get("url") or ""))
-        if not domain:
-            continue
-        if domain not in grouped:
-            domain_order.append(domain)
-            grouped[domain] = []
-        grouped[domain].append(row)
     rows: list[dict[str, Any]] = []
-    for domain in domain_order:
-        selected, classified, _state = selected_report_for_brand(domain, grouped[domain])
+    for domain, reports in list_recent_brand_reports_for_index():
+        selected, classified, _state = selected_report_for_brand(domain, reports)
         source = selected or (classified[0] if classified else None)
         if source is None:
             continue

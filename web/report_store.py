@@ -83,12 +83,13 @@ from web.brand_catalog import (
 
 _LOG = logging.getLogger(__name__)
 _POSTGRES_PAGE_SIZE = 200
-_POSTGRES_INDEX_PAYLOAD_LIMIT = 1000
 
-# Home needs complete payloads to make the canonical selection, and reading
-# them all is slow. As in Vault, save_report invalidates the snapshot, the TTL
-# bounds how long a change made by another process stays unseen, and the lock
-# lets concurrent requests share one read instead of each running it.
+# The Core home lists only the most recently scanned brands; older brands stay
+# reachable by their own page. Each listed brand still loads its full history,
+# which its canonical selection needs. As in Vault, save_report invalidates the
+# snapshot, the TTL bounds how long a change made by another process stays
+# unseen, and the lock lets concurrent requests share one read.
+_INDEX_BRAND_LIMIT = 30
 _INDEX_PAYLOAD_CACHE_TTL_SECONDS = 60.0
 _INDEX_PAYLOAD_LOCK = Lock()
 
@@ -283,7 +284,7 @@ def save_report(report: dict[str, Any]) -> None:
         record_report(report)
     except Exception:
         pass
-    _cached_report_payloads_for_index.cache_clear()
+    _cached_recent_brand_reports_for_index.cache_clear()
     _cached_vault_brands_for_index.cache_clear()
 
 
@@ -346,93 +347,43 @@ def _index_payload_cache_key(
     )
 
 
-@lru_cache(maxsize=1)
-def _cached_report_payloads_for_index(
-    _cache_key: tuple[str, str, tuple[tuple[str, int, int], ...], int],
-) -> tuple[dict[str, Any], ...]:
-    return tuple(_read_report_payloads_for_index())
-
-
-def list_report_payloads_for_index() -> list[dict[str, Any]]:
-    """Return every validated report payload for one home-page request."""
+def list_recent_brand_reports_for_index() -> list[tuple[str, list[dict[str, Any]]]]:
+    """Return the most recently scanned brands with their full reports, newest first."""
 
     with _INDEX_PAYLOAD_LOCK:
-        return list(_cached_report_payloads_for_index(_index_payload_cache_key()))
+        return list(_cached_recent_brand_reports_for_index(_index_payload_cache_key()))
 
 
-def _read_report_payloads_for_index() -> list[dict[str, Any]]:
-    """Read and validate the full archive for a process-cache miss."""
+@lru_cache(maxsize=1)
+def _cached_recent_brand_reports_for_index(
+    _cache_key: tuple[str, str, tuple[tuple[str, int, int], ...], int],
+) -> tuple[tuple[str, list[dict[str, Any]]], ...]:
+    return tuple(_read_recent_brand_reports_for_index())
 
-    reports_by_id: dict[str, dict[str, Any]] = {}
-    repository = _postgres_repository()
-    if repository is not None:
-        postgres_reports_by_id: dict[str, dict[str, Any]] = {}
+
+def _read_recent_brand_reports_for_index() -> list[tuple[str, list[dict[str, Any]]]]:
+    """Group summaries by brand and hydrate only the newest brands' reports."""
+
+    report_ids: dict[str, list[str]] = {}
+    for row in _report_summaries_for_index():
+        domain = domain_key(str(row.get("url") or ""))
+        if not domain or (domain not in report_ids and len(report_ids) >= _INDEX_BRAND_LIMIT):
+            continue
+        report_ids.setdefault(domain, []).append(str(row.get("id") or ""))
+    brands: list[tuple[str, list[dict[str, Any]]]] = []
+    for domain, ids in report_ids.items():
         try:
-            bulk_reader = getattr(repository, "list_report_payloads", None)
-            summary_ids: list[str] = []
-            bulk_count: int | None = None
-            if callable(bulk_reader):
-                bulk_rows = list(bulk_reader(limit=_POSTGRES_INDEX_PAYLOAD_LIMIT))
-                bulk_count = len(bulk_rows)
-                for report in bulk_rows:
-                    if not isinstance(report, dict):
-                        raise ScannerReportAssessmentError("postgres_report_payload_invalid")
-                    report_id = str(report.get("id") or "")
-                    if not report_id:
-                        continue
-                    if _is_report_summary(report):
-                        summary_ids.append(report_id)
-                        continue
-                    assessment_projection_from_report(report)
-                    postgres_reports_by_id[report_id] = report
-
-            summary_reader = getattr(repository, "list_report_summaries", None)
-            if callable(summary_reader):
-                summaries = _all_postgres_pages(summary_reader)
-                summary_ids.extend(str(row.get("id") or "") for row in summaries if str(row.get("id") or ""))
-            elif bulk_count is not None and bulk_count >= _POSTGRES_INDEX_PAYLOAD_LIMIT:
-                raise ScannerReportAssessmentError("postgres_report_payloads_incomplete")
-
-            for report_id in dict.fromkeys(summary_ids):
-                if report_id in postgres_reports_by_id:
-                    continue
-                payload = _postgres_report_payload_for_identity(
-                    repository,
-                    report_id,
-                )
-                if payload is None:
-                    raise ScannerReportAssessmentError("postgres_report_payload_missing")
-                postgres_reports_by_id[report_id] = payload
-            reports_by_id.update(postgres_reports_by_id)
+            reports = [report for report in map(load_report, ids) if report is not None]
         except (ReportConflictError, ScannerReportAssessmentError):
             raise
         except Exception:
-            _LOG.exception("failed to list report payloads for index from postgres")
-
-    directory = reports_dir()
-    if directory.is_dir():
-        for path in directory.glob("*.json"):
-            report = _read_report_file(path, expected_id=path.stem)
-            report_id = str(report.get("id") or path.stem)
-            existing = reports_by_id.get(report_id)
-            if existing is not None:
-                _assert_duplicate_report_identity(
-                    existing,
-                    report,
-                    report_id=report_id,
-                )
-                continue
-            reports_by_id[report_id] = report
-
-    reports = list(reports_by_id.values())
-    reports.sort(
-        key=lambda report: (
-            str(report.get("created_at") or ""),
-            str(report.get("id") or ""),
-        ),
-        reverse=True,
-    )
-    return reports
+            # A partial history could select a different report; leave the
+            # brand out rather than show it.
+            _LOG.exception("failed to load brand reports for index", extra={"domain": domain})
+            continue
+        if reports:
+            brands.append((domain, reports))
+    return brands
 
 
 def list_vault_brands_for_index() -> list[tuple[str, dict[str, Any], dict[str, Any] | None]]:
