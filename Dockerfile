@@ -15,7 +15,10 @@ WORKDIR /app
 
 COPY . .
 
-RUN pip install --no-cache-dir . \
+# The release command and the app run as b3s; COPY keeps the build host's
+# file modes, so a restrictive umask there would leave the source unreadable.
+RUN chmod -R a+rX /app \
+    && pip install --no-cache-dir . \
     && python -m playwright install --with-deps chromium \
     && apt-get update \
     && apt-get install -y --no-install-recommends gosu \
