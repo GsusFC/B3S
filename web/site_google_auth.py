@@ -60,6 +60,22 @@ def google_oidc_enabled(environment: Mapping[str, str]) -> bool | None:
     return None
 
 
+def google_oidc_scope(environment: Mapping[str, str]) -> str | None:
+    """Which browser requests need a Google session: ``site`` (default) or ``spending``.
+
+    ``spending`` leaves the read-only surface public, reports included, and
+    protects only the requests that start or steer a scan or spend provider
+    credits. Any other value is invalid and fails closed.
+    """
+
+    raw = str(environment.get("B3S_GOOGLE_OIDC_SCOPE") or "").strip().casefold()
+    if raw in {"", "site"}:
+        return "site"
+    if raw == "spending":
+        return "spending"
+    return None
+
+
 def _effective_isolated_tokens(
     environment: Mapping[str, str],
 ) -> tuple[str, str] | None:
@@ -111,6 +127,7 @@ def google_oidc_config(environment: Mapping[str, str]) -> GoogleOidcConfig | Non
     )
     if (
         google_oidc_enabled(environment) is not True
+        or google_oidc_scope(environment) is None
         or _CLIENT_ID_RE.fullmatch(client_id) is None
         or not valid_secret(client_secret, 20)
         or not valid_secret(session_secret, 43)

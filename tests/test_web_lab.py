@@ -2901,7 +2901,7 @@ def test_api_health_page_renders_config_without_secrets(monkeypatch):
     assert response.status_code == 200
     assert "Estado de APIs" in response.text
     assert "Firecrawl scrape" in response.text
-    assert "••••507d" in response.text
+    assert "507d" not in response.text
     assert "run checks" in response.text
 
 
@@ -2920,6 +2920,7 @@ def test_api_health_json_can_run_checks(monkeypatch):
         },
     )
 
+    monkeypatch.setenv("B3S_ANONYMOUS_SPENDING_ENABLED", "true")
     response = TestClient(app).get("/api/health/apis?run=1")
 
     assert response.status_code == 200
@@ -2954,6 +2955,7 @@ def test_scan_submission_redirects_to_scan_view(monkeypatch):
         return "scan123"
 
     monkeypatch.setattr("web.app.start_scan", fake_start_scan)
+    monkeypatch.setenv("B3S_ANONYMOUS_SPENDING_ENABLED", "true")
 
     response = TestClient(app).post(
         "/scan",
@@ -2976,6 +2978,7 @@ def test_scan_submission_can_preapprove_degraded_fallback(monkeypatch):
         return "scan123"
 
     monkeypatch.setattr("web.app.start_scan", fake_start_scan)
+    monkeypatch.setenv("B3S_ANONYMOUS_SPENDING_ENABLED", "true")
 
     response = TestClient(app).post(
         "/scan",
@@ -3100,6 +3103,7 @@ def test_scan_control_endpoints_delegate_to_runner(monkeypatch):
         "web.app.cancel_scan",
         lambda scan_id: {"state": "cancelled", "cancelled": True, "id": scan_id},
     )
+    monkeypatch.setenv("B3S_ANONYMOUS_SPENDING_ENABLED", "true")
     client = TestClient(app)
 
     assert client.post("/api/scan/scan123/continue").json()["approved"] is True
