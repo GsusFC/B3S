@@ -211,6 +211,61 @@ def test_spending_scope_keeps_reads_public_and_gates_spending(monkeypatch) -> No
     assert valid.headers["location"] == "/scan/scan123"
 
 
+SPENDING_HEALTH_RUNS = ["/health/apis?run=true", "/api/health/apis?run=true"]
+
+
+@pytest.mark.parametrize("scope", ["spending", "site"])
+@pytest.mark.parametrize("path", SPENDING_HEALTH_RUNS)
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Sec-Fetch-Site": "cross-site"},
+        {"Sec-Fetch-Site": "same-site"},
+        {"Sec-Fetch-Site": "none"},
+        {"Sec-Fetch-Site": "cross-site", "Referer": f"{BASE_URL}/health/apis"},
+        {"Origin": "https://attacker.example"},
+        {"Referer": "https://attacker.example/page"},
+        {},
+    ],
+)
+def test_signed_in_spending_gets_from_elsewhere_are_refused(monkeypatch, scope, path, headers) -> None:
+    config = _enable_site_access(monkeypatch)
+    monkeypatch.setenv("B3S_GOOGLE_OIDC_SCOPE", scope)
+    calls = []
+    monkeypatch.setattr("web.app._api_health", lambda run_checks=False: calls.append(run_checks) or {})
+    client = TestClient(app, base_url=BASE_URL)
+    client.cookies.update(_session_cookie(config))
+
+    response = client.get(path, headers=headers, follow_redirects=False)
+
+    assert response.status_code == 403
+    assert calls == []
+
+
+@pytest.mark.parametrize("scope", ["spending", "site"])
+@pytest.mark.parametrize("path", SPENDING_HEALTH_RUNS)
+@pytest.mark.parametrize(
+    "headers",
+    [{"Sec-Fetch-Site": "same-origin"}, {"Referer": f"{BASE_URL}/health/apis"}, {"Origin": BASE_URL}],
+)
+def test_signed_in_spending_gets_from_this_site_run(monkeypatch, scope, path, headers) -> None:
+    config = _enable_site_access(monkeypatch)
+    monkeypatch.setenv("B3S_GOOGLE_OIDC_SCOPE", scope)
+    calls = []
+    monkeypatch.setattr(
+        "web.app._api_health",
+        lambda run_checks=False: calls.append(run_checks)
+        or {"status": "ok", "run_checks": run_checks, "checked_at": "", "services": []},
+    )
+    client = TestClient(app, base_url=BASE_URL)
+    client.cookies.update(_session_cookie(config))
+
+    response = client.get(path, headers=headers, follow_redirects=False)
+
+    assert response.status_code == 200
+    assert calls == [True]
+
+
 def test_invalid_google_scope_fails_closed(monkeypatch) -> None:
     _enable_site_access(monkeypatch)
     monkeypatch.setenv("B3S_GOOGLE_OIDC_SCOPE", "reports")

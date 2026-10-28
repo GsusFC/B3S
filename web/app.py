@@ -247,6 +247,20 @@ def _is_spending_request(request: Request) -> bool:
     return False
 
 
+def _spending_navigation_is_same_origin(request: Request) -> bool:
+    """A spending GET must come from this site, not from a link elsewhere.
+
+    The session cookie is SameSite=Lax, so it travels on a top-level
+    navigation from another site. Browsers say where a request comes from in
+    Sec-Fetch-Site; without it, fall back to Origin or Referer.
+    """
+
+    fetch_sites = request.headers.getlist("sec-fetch-site")
+    if fetch_sites:
+        return len(fetch_sites) == 1 and fetch_sites[0].strip().lower() == "same-origin"
+    return _same_origin_request_is_valid(request, allow_referer_fallback=True)
+
+
 def _anonymous_spending_enabled() -> bool:
     """Explicit opt-in for local runs: never set in a deployed app."""
 
@@ -331,10 +345,10 @@ async def require_google_site_access(request: Request, call_next):
             headers={"Cache-Control": "no-store"},
         )
 
-    if (
-        request.method.upper() not in _SITE_ACCESS_SAFE_METHODS
-        and not _same_origin_request_is_valid(request)
-    ):
+    if request.method.upper() not in _SITE_ACCESS_SAFE_METHODS:
+        if not _same_origin_request_is_valid(request):
+            return _site_access_forbidden()
+    elif spending and not _spending_navigation_is_same_origin(request):
         return _site_access_forbidden()
     request.state.google_site_user = session
     response = await call_next(request)
