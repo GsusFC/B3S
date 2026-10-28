@@ -303,6 +303,12 @@ def test_container_persists_immutable_build_identity():
     assert 'org.opencontainers.image.revision="${B3S_BUILD_SHA}"' in dockerfile
 
 
+def test_container_source_is_readable_regardless_of_build_host_umask():
+    dockerfile = _read("Dockerfile")
+
+    assert dockerfile.index("COPY . .") < dockerfile.index("RUN chmod -R a+rX /app")
+
+
 def test_production_stays_select_only_and_vault_release_is_target_attested(tmp_path: Path):
     production, vault = (tomllib.loads(_read(path)) for path in ("fly.toml", "fly.vault.toml"))
     assert production["deploy"]["release_command"] == RELEASE_COMMAND
