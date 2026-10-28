@@ -72,6 +72,7 @@ from web.site_google_auth import (
     google_login_path,
     google_oidc_config,
     google_oidc_enabled,
+    google_oidc_scope,
     google_session_cookie_name,
     read_google_site_session,
     safe_site_destination,
@@ -161,6 +162,9 @@ async def _lifespan(_app: FastAPI):
 app = FastAPI(title="B3S — Brand Evidence Lab", lifespan=_lifespan)
 
 _SITE_ACCESS_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_SPENDING_SCAN_CONTROL_PATH = re.compile(r"/api/scan/[^/]+/(?:continue|cancel)")
+# FastAPI reads ``run`` as a bool; anything it would not read as false spends.
+_FALSE_QUERY_VALUES = frozenset({"", "0", "false", "f", "off", "no", "n"})
 
 
 def _normalized_http_origin(value: str, *, origin_header: bool = False) -> str | None:
@@ -227,6 +231,28 @@ def _same_origin_request_is_valid(
     return _normalized_http_origin(referer_values[0]) == configured_origin
 
 
+def _is_spending_request(request: Request) -> bool:
+    """Browser requests that start or steer a scan, or spend provider credits."""
+
+    path = request.url.path
+    if request.method.upper() == "POST" and (
+        path == "/scan" or _SPENDING_SCAN_CONTROL_PATH.fullmatch(path)
+    ):
+        return True
+    if path in {"/health/apis", "/api/health/apis"}:
+        return any(
+            value.strip().casefold() not in _FALSE_QUERY_VALUES
+            for value in request.query_params.getlist("run")
+        )
+    return False
+
+
+def _anonymous_spending_enabled() -> bool:
+    """Explicit opt-in for local runs: never set in a deployed app."""
+
+    return os.environ.get("B3S_ANONYMOUS_SPENDING_ENABLED", "").strip().casefold() == "true"
+
+
 def _site_access_forbidden() -> PlainTextResponse:
     return PlainTextResponse(
         "Forbidden\n",
@@ -261,8 +287,13 @@ async def require_google_site_access(request: Request, call_next):
             return _site_access_forbidden()
         return await call_next(request)
 
+    spending = _is_spending_request(request)
     oidc_enabled = google_oidc_enabled(os.environ)
     if oidc_enabled is False:
+        # Without Google sign-in nobody can be identified, so spending requests
+        # fail closed: scans come through the bearer-protected /api/v1.
+        if spending and not _anonymous_spending_enabled():
+            return _site_access_forbidden()
         return await call_next(request)
     config = google_oidc_config(os.environ)
     if oidc_enabled is not True or config is None:
@@ -284,6 +315,11 @@ async def require_google_site_access(request: Request, call_next):
         config,
         request.cookies.get(google_session_cookie_name()),
     )
+    if google_oidc_scope(os.environ) == "spending" and not spending:
+        # Public read-only surface: a session is optional, but kept when present.
+        if session is not None:
+            request.state.google_site_user = session
+        return await call_next(request)
     if session is None:
         if request.method.upper() not in {"GET", "HEAD"}:
             return _site_access_forbidden()
@@ -1746,7 +1782,6 @@ def _api_health(*, run_checks: bool = False) -> dict[str, Any]:
             "status": "configured" if config.BRAND3_GITHUB_PROOF_ENABLED else "disabled",
             "detail": "uses public repository metadata when owned links expose GitHub URLs",
             "elapsed_ms": None,
-            "secret_suffix": "",
         },
     ]
     return {
@@ -1779,7 +1814,6 @@ def _service_row(
         "status": status,
         "detail": detail,
         "elapsed_ms": None,
-        "secret_suffix": secret[-4:] if secret else "",
     }
     if not run_checks or check_fn is None:
         return row

@@ -48,7 +48,6 @@
         <th>Estado</th>
         <th>Env</th>
         <th>Enabled</th>
-        <th>Key</th>
         <th>Latency</th>
         <th>Detalle</th>
       </tr>
@@ -61,7 +60,6 @@
         <td><span class="chip {{ chip }}">{{ service.status }}</span></td>
         <td class="mono muted">{{ service.env_var }}</td>
         <td class="mono">{{ "yes" if service.enabled else "no" }}</td>
-        <td class="mono muted">{% if service.secret_suffix %}••••{{ service.secret_suffix }}{% else %}—{% endif %}</td>
         <td class="mono muted">{% if service.elapsed_ms is not none %}{{ service.elapsed_ms }}ms{% else %}—{% endif %}</td>
         <td class="muted health-detail">{{ service.detail or "—" }}</td>
       </tr>
